@@ -18,7 +18,7 @@ use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
 use zeroize::Zeroizing;
 
 use crate::api_keys::{self, ApiKey, KeyKind, Rejection};
-use crate::audit::Actor;
+use crate::audit::{Actor, RequestRef};
 use crate::db::Account;
 use crate::tenancy::{self, Permission, Principal, Scope};
 
@@ -58,12 +58,14 @@ pub(crate) struct Merchant {
     pub(crate) scope: Scope,
     /// The key the request authenticated with.
     pub(crate) key: ApiKey,
+    /// The request, recorded on the events it causes.
+    pub(crate) request: Option<RequestRef>,
 }
 
 impl Merchant {
-    /// The audit actor of the merchant's requests: the key.
+    /// The audit actor of the merchant's requests: the key, acting through this request.
     pub(crate) fn actor(&self) -> Actor {
-        self.key.actor()
+        self.key.actor().with_request(self.request.clone())
     }
 
     /// Fails with `403 permission_denied` unless the authorization table grants `permission` to
@@ -116,10 +118,12 @@ pub async fn authenticate_merchant(
     if !state.rate_limits.allow(scope) {
         return ApiError::too_many_requests().into_response();
     }
+    let request_ref = request.extensions().get::<RequestRef>().cloned();
     request.extensions_mut().insert(Merchant {
         account: authenticated.account,
         scope,
         key: authenticated.key,
+        request: request_ref,
     });
     next.run(request).await
 }
@@ -185,6 +189,24 @@ pub async fn authenticate_admin(
         return error.into_response();
     }
     next.run(request).await
+}
+
+/// The operator acting through an admin request: the admin key, with the request recorded on the
+/// events it causes.
+pub(crate) struct AdminActor(pub(crate) Actor);
+
+impl axum::extract::FromRequestParts<AppState> for AdminActor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            Actor::admin(state.admin_key.kid.clone())
+                .with_request(parts.extensions.get::<RequestRef>().cloned()),
+        ))
+    }
 }
 
 /// A verified request signature ready for single-use persistence.

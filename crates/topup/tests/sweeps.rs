@@ -298,6 +298,7 @@ async fn a_forwarder_mismatch_freezes_crediting_on_the_chain() -> Result<()> {
             let step = || Box::new(CountingStep(Arc::clone(&calls))) as Box<dyn Step>;
             let pump = Pump::new(
                 chain.pool().clone(),
+                Arc::default(),
                 Arc::new(StepSet::new(step(), step(), step())),
                 PumpConfig::default(),
             )?;

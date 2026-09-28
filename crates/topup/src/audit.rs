@@ -27,6 +27,17 @@ impl ActorType {
     }
 }
 
+/// The API request behind an action, Stripe's event `request`
+/// (<https://docs.stripe.com/api/events/object>): its `Request-Id` and the `Idempotency-Key` it
+/// sent, if any.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct RequestRef {
+    /// The request's `Request-Id`, `req_…`.
+    pub id: String,
+    /// The request's `Idempotency-Key`.
+    pub idempotency_key: Option<String>,
+}
+
 /// The actor of an audited action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Actor {
@@ -35,6 +46,9 @@ pub struct Actor {
     /// The actor's id within its kind: an API key id (`key_…`), the admin key id, or a component
     /// name.
     pub id: String,
+    /// The API request the actor made, recorded on the events it causes; `None` for the
+    /// service's own components.
+    pub request: Option<RequestRef>,
 }
 
 impl Actor {
@@ -44,6 +58,7 @@ impl Actor {
         Self {
             actor_type: ActorType::ApiKey,
             id: key_id.into(),
+            request: None,
         }
     }
 
@@ -53,6 +68,7 @@ impl Actor {
         Self {
             actor_type: ActorType::Admin,
             id: key_id.into(),
+            request: None,
         }
     }
 
@@ -62,7 +78,15 @@ impl Actor {
         Self {
             actor_type: ActorType::System,
             id: component.into(),
+            request: None,
         }
+    }
+
+    /// The actor acting through `request`.
+    #[must_use]
+    pub fn with_request(mut self, request: Option<RequestRef>) -> Self {
+        self.request = request;
+        self
     }
 }
 

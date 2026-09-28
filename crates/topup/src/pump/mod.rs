@@ -26,6 +26,7 @@ use crate::db::{
     self, ApplyTransitionError, ApplyTransitionResult, Deposit, OutboxEvent, TransitionUpdate,
 };
 use crate::jitter::{JitterSource, OsJitter};
+use crate::routes::RouteSet;
 
 pub use age::{AgeAlertConfig, AgeAlertConfigError, AgeAlerter};
 
@@ -205,30 +206,35 @@ pub enum RunOnceResult {
 #[derive(Clone)]
 pub struct Pump {
     pool: PgPool,
+    routes: Arc<RouteSet>,
     steps: Arc<StepSet>,
     config: PumpConfig,
     jitter: Arc<dyn JitterSource>,
 }
 
 impl Pump {
-    /// Creates a pump with operating-system retry jitter.
+    /// Creates a pump with operating-system retry jitter. `routes` render the objects of the
+    /// events its steps write.
     pub fn new(
         pool: PgPool,
+        routes: Arc<RouteSet>,
         steps: Arc<StepSet>,
         config: PumpConfig,
     ) -> Result<Self, PumpConfigError> {
-        Self::with_jitter(pool, steps, config, Arc::new(OsJitter))
+        Self::with_jitter(pool, routes, steps, config, Arc::new(OsJitter))
     }
 
     /// Creates a pump with an explicit jitter source.
     pub fn with_jitter(
         pool: PgPool,
+        routes: Arc<RouteSet>,
         steps: Arc<StepSet>,
         config: PumpConfig,
         jitter: Arc<dyn JitterSource>,
     ) -> Result<Self, PumpConfigError> {
         Ok(Self {
             pool,
+            routes,
             steps,
             config: config.validate()?,
             jitter,
@@ -352,6 +358,7 @@ impl Pump {
         let mut transaction = self.pool.begin().await?;
         let applied = db::apply_transition(
             &mut transaction,
+            &self.routes,
             deposit.id,
             deposit.state,
             lease_token,

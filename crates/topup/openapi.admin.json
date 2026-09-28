@@ -1,0 +1,2783 @@
+{
+  "components": {
+    "schemas": {
+      "AccountPauseRequest": {
+        "additionalProperties": false,
+        "description": "Administrative pause or resume of a whole account, in both modes.",
+        "example": {
+          "reason": "treasury on a sanctions list; review OPS-91",
+          "scopes": [
+            "quotes",
+            "settlement"
+          ]
+        },
+        "properties": {
+          "reason": {
+            "description": "Why, for the audit log.",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "Pause scopes to add or remove: `quotes`, `settlement`, `refunds`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "scopes",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "AccountResponse": {
+        "description": "An account as the operator sees it.",
+        "example": {
+          "api_keys": [
+            {
+              "created": 1790467200,
+              "expires_at": null,
+              "id": "key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1",
+              "last_used": 1790553600,
+              "livemode": false,
+              "name": "fulfillment worker",
+              "object": "api_key",
+              "redacted": "ppay_sk_test_…Yz4x",
+              "secret": "ppay_sk_test_51Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv2Wx4Yz",
+              "status": "active",
+              "type": "secret"
+            }
+          ],
+          "charges_enabled": false,
+          "contact": {
+            "email": "payments@example.com",
+            "name": "Ada Lovelace"
+          },
+          "created": 1787961600,
+          "due_diligence": {
+            "reference": "DD-2026-017",
+            "reviewed_at": "2026-09-20",
+            "reviewed_by": "operator@phala.network"
+          },
+          "id": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "name": "Example Cloud",
+          "object": "account",
+          "paused_scopes": [],
+          "restricted": false
+        },
+        "properties": {
+          "api_keys": {
+            "description": "The secret keys this request issued, each with its `secret` shown only here: at creation\na test key and, with `charges_enabled`, a live key; on an update that enables live mode,\nthe first live key. Send them to the contact; the merchant rolls them on receipt.",
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyObject"
+            },
+            "type": "array"
+          },
+          "charges_enabled": {
+            "description": "Whether the account may use live mode.",
+            "type": "boolean"
+          },
+          "contact": {
+            "$ref": "#/components/schemas/Contact",
+            "description": "The merchant's contact."
+          },
+          "created": {
+            "description": "Creation time, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "due_diligence": {
+            "$ref": "#/components/schemas/DueDiligence",
+            "description": "The due diligence record."
+          },
+          "id": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Always `account`.",
+            "enum": [
+              "account"
+            ],
+            "type": "string"
+          },
+          "paused_scopes": {
+            "description": "Active account-level pause scopes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "restricted": {
+            "description": "Whether the account is restricted for review.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "name",
+          "contact",
+          "due_diligence",
+          "charges_enabled",
+          "restricted",
+          "paused_scopes",
+          "created",
+          "api_keys"
+        ],
+        "type": "object"
+      },
+      "AdminReasonRequest": {
+        "description": "Administrative action body; `reason` is recorded in the action's audit row.",
+        "example": {
+          "reason": "providers agree again; verified OPS-93"
+        },
+        "properties": {
+          "reason": {
+            "description": "Why the action is taken, 1 to 1024 bytes: the incident or sign-off it rests on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
+      "ApiKeyObject": {
+        "description": "An API key (design D7). `secret` is present only in the response that created it.",
+        "example": {
+          "created": 1790467200,
+          "expires_at": null,
+          "id": "key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1",
+          "last_used": 1790553600,
+          "livemode": false,
+          "name": "fulfillment worker",
+          "object": "api_key",
+          "redacted": "ppay_sk_test_…Yz4x",
+          "secret": null,
+          "status": "active",
+          "type": "secret"
+        },
+        "properties": {
+          "created": {
+            "description": "Creation time, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "description": "When a rolled key stops working, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Key id, `key_…`.",
+            "type": "string"
+          },
+          "last_used": {
+            "description": "Last use, Unix seconds, to the minute.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "livemode": {
+            "description": "The key's mode.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The key's label.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Always `api_key`.",
+            "enum": [
+              "api_key"
+            ],
+            "type": "string"
+          },
+          "redacted": {
+            "description": "The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.",
+            "type": "string"
+          },
+          "secret": {
+            "description": "The whole key, `ppay_sk_…`, shown once. Store it in a secret manager.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`active`; `expiring` for a rolled key that still works until `expires_at`; `expired`;\n`revoked`.",
+            "type": "string"
+          },
+          "type": {
+            "description": "`secret`; `restricted` keys come later.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "type",
+          "name",
+          "redacted",
+          "status",
+          "created"
+        ],
+        "type": "object"
+      },
+      "Contact": {
+        "additionalProperties": false,
+        "description": "The merchant's contact recorded at onboarding (design D8): the operator's channel for the key\nhand-over, recovery, incidents, and restores, and the only personal data kept.",
+        "properties": {
+          "email": {
+            "description": "The security contact's email address.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The contact's name, 1 to 200 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "email"
+        ],
+        "type": "object"
+      },
+      "CreateAccountRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/accounts` body. Accounts are created only by the operator (design D8).",
+        "example": {
+          "charges_enabled": false,
+          "contact": {
+            "email": "payments@example.com",
+            "name": "Ada Lovelace"
+          },
+          "due_diligence": {
+            "reference": "DD-2026-017",
+            "reviewed_at": "2026-09-20",
+            "reviewed_by": "operator@phala.network"
+          },
+          "name": "Example Cloud",
+          "reason": "onboarding after due diligence DD-2026-017"
+        },
+        "properties": {
+          "charges_enabled": {
+            "description": "Whether the account may use live mode (design D12). Default `false`.",
+            "type": "boolean"
+          },
+          "contact": {
+            "$ref": "#/components/schemas/Contact",
+            "description": "The merchant's contact."
+          },
+          "due_diligence": {
+            "$ref": "#/components/schemas/DueDiligence",
+            "description": "The due diligence the decision rests on."
+          },
+          "name": {
+            "description": "Display name, 1 to 200 characters.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the account is created, 1 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "contact",
+          "due_diligence",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "CustomerPauseRequest": {
+        "description": "Administrative pause or resume of one customer of an account.",
+        "example": {
+          "livemode": true,
+          "scopes": [
+            "settlement"
+          ]
+        },
+        "properties": {
+          "livemode": {
+            "description": "The mode of the customer: customers of test and live mode are separate.",
+            "type": "boolean"
+          },
+          "scopes": {
+            "description": "Pause scopes to add or remove.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "scopes",
+          "livemode"
+        ],
+        "type": "object"
+      },
+      "DailyReportResponse": {
+        "description": "Daily finance report produced by C12.",
+        "example": {
+          "exposure_minor": "12500",
+          "failing_for_hours": 24,
+          "failing_webhook_endpoints": [
+            {
+              "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+              "id": "we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1",
+              "last_attempt_at": "2026-09-28T11:41:07Z",
+              "last_attempt_status": 503,
+              "livemode": true,
+              "oldest_pending_at": "2026-09-26T08:14:00Z",
+              "pending_deliveries": 37,
+              "url": "https://example.com/phala-pay/webhooks"
+            }
+          ],
+          "generated_at": "2026-09-28T12:00:00Z",
+          "reconciliation": null,
+          "reconciliation_blocks": [],
+          "routes": [
+            {
+              "age_in_state_max_seconds": {
+                "credited": 3600
+              },
+              "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+              "chain_id": 1,
+              "credited_undelivered": 0,
+              "credited_undelivered_max_age_seconds": 0,
+              "deposits_by_state": {
+                "credited": 41,
+                "rejected": 2,
+                "swept": 1204
+              },
+              "open_rate_lock_exposure_atomic": "101255000000000000000",
+              "refunds_by_status": {
+                "succeeded": 3
+              },
+              "rejected_holds_atomic": "0",
+              "route": "phala-cloud-ethereum-pha-usd",
+              "unflushed_balance_atomic": "8303010000000000000000"
+            }
+          ]
+        },
+        "properties": {
+          "exposure_minor": {
+            "description": "Open rate-lock credit across all accounts in destination minor units: the sum the global\nexposure cap is enforced against. This service always sends it; it is optional in the\nschema so clients also parse reports from servers that predate it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failing_for_hours": {
+            "description": "The threshold of `failing_webhook_endpoints`, in hours.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failing_webhook_endpoints": {
+            "description": "Enabled webhook endpoints of any account whose oldest undelivered event is older than\n`failing_for_hours`, oldest first. Deliveries are retried until delivered and never given\nup on, so each has failed that long; contact the account (docs/integration.md,\n\"Delivery health\").",
+            "items": {
+              "$ref": "#/components/schemas/FailingWebhookEndpoint"
+            },
+            "type": "array"
+          },
+          "generated_at": {
+            "description": "Report snapshot time.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reconciliation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReconciliationRoundReport",
+                "description": "Latest reconciliation round of the serving process; absent until the first round after a\nrestart."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reconciliation_blocks": {
+            "description": "Active reconciliation blocks in `block_key` order.",
+            "items": {
+              "$ref": "#/components/schemas/ReconciliationBlockReport"
+            },
+            "type": "array"
+          },
+          "routes": {
+            "description": "SQL-computed metrics for each configured route.",
+            "items": {
+              "$ref": "#/components/schemas/RouteDailyReport"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "routes",
+          "reconciliation_blocks",
+          "failing_for_hours",
+          "failing_webhook_endpoints"
+        ],
+        "type": "object"
+      },
+      "Deposit": {
+        "description": "A transfer to a quote's address or a deposit address at the route's confirmation: valued,\nscreened, and credited, or rejected; `reversed` if its transaction left the chain before\nfinality.",
+        "example": {
+          "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
+          "amount": 2500,
+          "amount_atomic": "202510000000000000000",
+          "amount_refunded_atomic": "0",
+          "asset": "PHA",
+          "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+          "block_number": 21000000,
+          "chain_id": 1,
+          "client_reference_id": "team-42",
+          "created": 1790553624,
+          "currency": "usd",
+          "deposit_address": null,
+          "exchange_rate": "0.12345679",
+          "final": true,
+          "from_address": "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a",
+          "id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+          "livemode": false,
+          "log_index": 212,
+          "metadata": {
+            "order_id": "ord_1001"
+          },
+          "object": "deposit",
+          "price_source": "quote",
+          "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+          "refunded": false,
+          "rejection_reason": null,
+          "status": "credited",
+          "swept": false,
+          "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
+          "valued_at": 1790553630
+        },
+        "properties": {
+          "address": {
+            "description": "Receiving forwarder address.",
+            "type": "string"
+          },
+          "admin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DepositAdmin",
+                "description": "The operator's view of the deposit's internals; only in `GET /v1/admin/deposits/{id}`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "amount": {
+            "description": "Credit in the currency's minor unit (cents), once valued.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "amount_atomic": {
+            "description": "Token amount in base units, as a decimal string.",
+            "type": "string"
+          },
+          "amount_refunded_atomic": {
+            "description": "Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.",
+            "type": "string"
+          },
+          "asset": {
+            "description": "Asset code; `null` for a token without a route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "asset_contract": {
+            "description": "Token contract address.",
+            "type": "string"
+          },
+          "block_number": {
+            "description": "Number of the block the transfer is in; it changes if the transaction is re-included.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "client_reference_id": {
+            "description": "Your identifier of the customer the deposit is credited to.",
+            "type": "string"
+          },
+          "created": {
+            "description": "Detection time, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "description": "`usd`.",
+            "type": "string"
+          },
+          "deposit_address": {
+            "description": "The deposit address that received the transfer, `da_…`, on `chain_id` at `address`; `null`\nfor a quote's address. Payments to a deposit address, active or retired, are credited at\nspot.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exchange_rate": {
+            "description": "USD per token, a decimal string with 8 places, once valued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "final": {
+            "description": "Whether the deposit's block is final on both providers: a final deposit can no longer be\nreversed, and only a final deposit can be refunded. A deposit is credited at the route's\nconfirmation, before it is final (`GET /v1/config` `typical_finality_seconds`).",
+            "type": "boolean"
+          },
+          "from_address": {
+            "description": "Sender of the transfer.",
+            "type": "string"
+          },
+          "id": {
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "Whether the deposit is on a live-mode route.",
+            "type": "boolean"
+          },
+          "log_index": {
+            "description": "Block-wide log index of the transfer; it changes if the transaction is re-included.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the\nquote's or the deposit address's when the deposit is recorded, independent of it\nafterwards; `{}` when none.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "object": {
+            "description": "Always `deposit`.",
+            "enum": [
+              "deposit"
+            ],
+            "type": "string"
+          },
+          "price_source": {
+            "description": "`quote` (the quoted price) or `spot`, once valued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quote": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpandableQuote",
+                "description": "The quote whose address received the transfer; `null` for a deposit address."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refunded": {
+            "description": "Whether the deposit is fully refunded.",
+            "type": "boolean"
+          },
+          "rejection_reason": {
+            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a\ncredit as for `deposit.refunded`). New values may be added.",
+            "type": "string"
+          },
+          "swept": {
+            "description": "Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of\nits token to the treasury (`GET /v1/sweeps`), whoever sent the flush.",
+            "type": "boolean"
+          },
+          "tx_hash": {
+            "description": "Transaction hash.",
+            "type": "string"
+          },
+          "valued_at": {
+            "description": "Valuation time, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "client_reference_id",
+          "status",
+          "final",
+          "swept",
+          "chain_id",
+          "asset_contract",
+          "amount_atomic",
+          "currency",
+          "address",
+          "from_address",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "amount_refunded_atomic",
+          "refunded",
+          "created",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "DepositAdmin": {
+        "description": "The operator's view of a deposit's internals (`GET /v1/admin/deposits/{id}`), returned as the\n`admin` field of the deposit; never present in a merchant response or an event.",
+        "properties": {
+          "account": {
+            "description": "The merchant account the deposit belongs to, `acct_…`.",
+            "type": "string"
+          },
+          "block_time": {
+            "description": "Including block time.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "events": {
+            "description": "Events about the deposit in ascending creation order, with their delivery.",
+            "items": {
+              "$ref": "#/components/schemas/DepositEventDelivery"
+            },
+            "type": "array"
+          },
+          "final_at": {
+            "description": "When both providers showed the transfer at or below `finalized`.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price_scaled": {
+            "description": "Eight-decimal scaled price as a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receipt_log_index": {
+            "description": "Position of the transfer log in its transaction's receipt; with the chain and transaction,\nthe deposit's identity.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route": {
+            "description": "Selected route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_version": {
+            "description": "Selected route version.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "The processing state: `detected`, `confirmed`, `credited`, `swept`, `rejected`, or\n`reversed` (`status` is its merchant view).",
+            "type": "string"
+          },
+          "transitions": {
+            "description": "Transitions in ascending creation order.",
+            "items": {
+              "$ref": "#/components/schemas/DepositTransition"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "description": "Last processing update time.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "state",
+          "receipt_log_index",
+          "block_time",
+          "updated_at",
+          "transitions",
+          "events"
+        ],
+        "type": "object"
+      },
+      "DepositEventDelivery": {
+        "description": "An event about a deposit and its delivery state.",
+        "properties": {
+          "created_at": {
+            "description": "Event creation time.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "delivered_at": {
+            "description": "When the last of the account's webhook endpoints accepted the event, or `null` while one\nhas not or the account has none.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Event id, `evt_…`.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Event type, such as `deposit.credited`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "DepositTransition": {
+        "description": "One immutable state transition of a deposit.",
+        "properties": {
+          "attempt": {
+            "description": "Retry attempt recorded for this transition.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "Transition creation time.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "evidence": {
+            "description": "Durable transition evidence."
+          },
+          "from_state": {
+            "description": "State before the transition attempt.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Timeline row identifier.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "to_state": {
+            "description": "State after the transition attempt.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "from_state",
+          "to_state",
+          "attempt",
+          "evidence",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "DueDiligence": {
+        "additionalProperties": false,
+        "description": "The record of the operator's offline due diligence (design D8): a reference to it, when, and\nby whom.",
+        "properties": {
+          "reference": {
+            "description": "Reference to the review in Phala's records, 1 to 200 characters.",
+            "type": "string"
+          },
+          "reviewed_at": {
+            "description": "Date of the review, `YYYY-MM-DD`.",
+            "format": "date",
+            "type": "string"
+          },
+          "reviewed_by": {
+            "description": "Who reviewed, 1 to 200 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "reviewed_at",
+          "reviewed_by"
+        ],
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "description": "Stable error fields safe to expose to callers.",
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable code.",
+            "type": "string"
+          },
+          "doc_url": {
+            "description": "The documentation of `code` in the API reference.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable summary without internal details; it may change.",
+            "type": "string"
+          },
+          "param": {
+            "description": "The request parameter the error is about, when there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "$ref": "#/components/schemas/ErrorType",
+            "description": "Error category: `invalid_request_error` for any 4xx except an idempotency conflict,\n`idempotency_error` for an `Idempotency-Key` reused with another request or still in use,\n`api_error` for 5xx."
+          }
+        },
+        "required": [
+          "type",
+          "code",
+          "message",
+          "doc_url"
+        ],
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "Machine-readable error envelope returned by every API failure, Stripe's error object\n(<https://docs.stripe.com/api/errors>).",
+        "example": {
+          "error": {
+            "code": "deposit_not_final",
+            "doc_url": "https://phala-network.github.io/phala-pay/#section/Errors/deposit_not_final",
+            "message": "the deposit is not final yet; request the refund once it is (about 15 minutes after its block on Ethereum)",
+            "type": "invalid_request_error"
+          }
+        },
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail",
+            "description": "Error details."
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ErrorType": {
+        "description": "Error category of [`ErrorDetail`].",
+        "enum": [
+          "invalid_request_error",
+          "idempotency_error",
+          "api_error"
+        ],
+        "type": "string"
+      },
+      "ExpandableQuote": {
+        "description": "A quote id, or the quote with `expand[]`.",
+        "oneOf": [
+          {
+            "description": "`qt_` id.",
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/Quote",
+            "description": "The expanded quote."
+          }
+        ]
+      },
+      "FailedCheckReport": {
+        "description": "One reconciliation check that could not complete.",
+        "properties": {
+          "check": {
+            "description": "Check code, such as `custody_balance`.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Error that stopped the check, without provider URLs.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check",
+          "error"
+        ],
+        "type": "object"
+      },
+      "FailingWebhookEndpoint": {
+        "description": "A webhook endpoint failing for longer than the daily report's threshold.",
+        "properties": {
+          "account": {
+            "description": "The endpoint's account, `acct_…`.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Endpoint id, `we_…`.",
+            "type": "string"
+          },
+          "last_attempt_at": {
+            "description": "Its latest delivery attempt.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_attempt_status": {
+            "description": "That attempt's HTTP status; `null` when no response arrived.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "livemode": {
+            "description": "The endpoint's mode.",
+            "type": "boolean"
+          },
+          "oldest_pending_at": {
+            "description": "Creation time of its oldest undelivered event.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "pending_deliveries": {
+            "description": "Deliveries to it not delivered yet.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "url": {
+            "description": "Where it listens.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "account",
+          "livemode",
+          "url",
+          "pending_deliveries",
+          "oldest_pending_at"
+        ],
+        "type": "object"
+      },
+      "IssueApiKeyRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/accounts/{account}/api_keys` body: a recovery key (design D7).",
+        "example": {
+          "livemode": true,
+          "name": "recovery",
+          "reason": "contact verified by phone after a lost key, ticket OPS-88",
+          "revoke_existing": true
+        },
+        "properties": {
+          "livemode": {
+            "description": "The key's mode; `true` needs `charges_enabled`.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The key's label, at most 200 characters.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes: how the request was verified with the recorded contact.",
+            "type": "string"
+          },
+          "revoke_existing": {
+            "description": "Revokes every key of the mode first, for a leak the merchant cannot win by rolling.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "livemode",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "NudgeResponse": {
+        "description": "Administrative deposit nudge result.",
+        "example": {
+          "deposit_id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+          "next_attempt_at": "2026-09-28T12:00:00Z"
+        },
+        "properties": {
+          "deposit_id": {
+            "description": "Nudged deposit id, `dep_…`.",
+            "type": "string"
+          },
+          "next_attempt_at": {
+            "description": "Newly due processing time.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deposit_id",
+          "next_attempt_at"
+        ],
+        "type": "object"
+      },
+      "PauseRequest": {
+        "description": "Pause or resume request.",
+        "example": {
+          "scopes": [
+            "quotes"
+          ]
+        },
+        "properties": {
+          "scopes": {
+            "description": "Pause scopes to add or remove.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "scopes"
+        ],
+        "type": "object"
+      },
+      "PauseResponse": {
+        "description": "Current scopes after a pause mutation.",
+        "example": {
+          "paused_scopes": [
+            "quotes",
+            "settlement"
+          ]
+        },
+        "properties": {
+          "paused_scopes": {
+            "description": "Current pause scopes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "paused_scopes"
+        ],
+        "type": "object"
+      },
+      "ReconciliationBlockLiftResponse": {
+        "description": "A lifted reconciliation block.",
+        "example": {
+          "block_key": "chain:1",
+          "lifted_at": "2026-09-28T12:00:00Z"
+        },
+        "properties": {
+          "block_key": {
+            "description": "Lifted block, `chain:{chain_id}` or `address:{address_id}`.",
+            "type": "string"
+          },
+          "lifted_at": {
+            "description": "When the block was lifted; a repeated lift returns the original time.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_key",
+          "lifted_at"
+        ],
+        "type": "object"
+      },
+      "ReconciliationBlockReport": {
+        "description": "A persistent reconciliation block (architecture §13).",
+        "properties": {
+          "address_id": {
+            "description": "Blocked address for an `address` block.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "block_key": {
+            "description": "Block identifier, `chain:{chain_id}`.",
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "check": {
+            "description": "Check that wrote the block, such as `address_derivation`.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the block was written.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the check blocked.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "`chain`: the chain is frozen. No check writes the `address` scope any more; it excluded an\naddress from the removed operator flusher.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_key",
+          "scope",
+          "chain_id",
+          "check",
+          "reason",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ReconciliationRoundReport": {
+        "description": "Latest reconciliation round of the serving process.",
+        "properties": {
+          "at": {
+            "description": "When the round finished.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "failed_checks": {
+            "description": "Checks that could not complete; empty after a complete round.",
+            "items": {
+              "$ref": "#/components/schemas/FailedCheckReport"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "at",
+          "failed_checks"
+        ],
+        "type": "object"
+      },
+      "RouteDailyReport": {
+        "description": "Per-route daily finance report produced by C12.",
+        "properties": {
+          "age_in_state_max_seconds": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Maximum age in seconds keyed by current deposit state.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "asset_contract": {
+            "description": "Route asset contract.",
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "credited_undelivered": {
+            "description": "Credited deposits whose `deposit.credited` webhook an endpoint has not acknowledged yet.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "credited_undelivered_max_age_seconds": {
+            "description": "Age in seconds of the oldest of those events; zero when every one was delivered.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deposits_by_state": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Deposit counts keyed by state.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "open_rate_lock_exposure_atomic": {
+            "description": "Sum of unconsumed rate-lock token amounts.",
+            "type": "string"
+          },
+          "refunds_by_status": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Refund counts keyed by status.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "rejected_holds_atomic": {
+            "description": "Rejected token amount still held after succeeded refunds.",
+            "type": "string"
+          },
+          "route": {
+            "description": "Stable route name.",
+            "type": "string"
+          },
+          "unflushed_balance_atomic": {
+            "description": "Deposits not reversed minus finalized `Flushed` amounts: what the route's forwarders\nstill hold for their merchants to sweep.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route",
+          "chain_id",
+          "asset_contract",
+          "unflushed_balance_atomic",
+          "open_rate_lock_exposure_atomic",
+          "rejected_holds_atomic",
+          "deposits_by_state",
+          "credited_undelivered",
+          "credited_undelivered_max_age_seconds",
+          "refunds_by_status",
+          "age_in_state_max_seconds"
+        ],
+        "type": "object"
+      },
+      "RoutePauseResponse": {
+        "description": "Administrative route pause response.",
+        "example": {
+          "paused_scopes": [
+            "quotes"
+          ],
+          "route": "phala-cloud-ethereum-pha-usd"
+        },
+        "properties": {
+          "paused_scopes": {
+            "description": "Current route-level pause scopes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "route": {
+            "description": "Route name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route",
+          "paused_scopes"
+        ],
+        "type": "object"
+      },
+      "UpdateAccountRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/accounts/{account}` body; absent fields stay as they are.",
+        "example": {
+          "charges_enabled": true,
+          "reason": "live mode approved after legal sign-off"
+        },
+        "properties": {
+          "charges_enabled": {
+            "description": "Enables or disables live mode. Enabling it for an account without a live key returns the\naccount's first live key.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "contact": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Contact",
+                "description": "Replaces the merchant's contact."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          },
+          "restricted": {
+            "description": "Marks the account restricted for review.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "http_message_signature": {
+        "description": "An RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign the public URL you call; `Host` and `X-Forwarded-*` headers are ignored.",
+        "in": "header",
+        "name": "Signature",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "The operator's API (design D8): accounts, recovery keys, pauses, and platform health. Every request is signed with the operator's RFC 9421 key; merchants never call it. The merchant API is `openapi.json`.",
+    "license": {
+      "identifier": "Apache-2.0",
+      "name": "Apache-2.0"
+    },
+    "title": "Phala Pay admin API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/admin/accounts": {
+      "post": {
+        "operationId": "create_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            },
+            "description": "OK: created, with its first secret keys",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Creates a merchant account after the operator's offline due diligence (design D8): records the\ncontact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the\nfirst secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown\nonly in this response; send it to the contact, who rolls it on receipt. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}": {
+      "post": {
+        "operationId": "update_account",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            },
+            "description": "OK: updated, or already holding these values",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no account has this id",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nor the contact. Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/api_keys": {
+      "post": {
+        "operationId": "issue_api_key",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueApiKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            },
+            "description": "OK: the key with its `secret`, shown once",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`testmode_charges_only`: a live key for an account without live mode",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no account has this id",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Issues a recovery key (design D7) after the operator verified the request with the recorded\ncontact, optionally revoking every key of the mode first. Audited, and announced as\n`api_key.*` events with actor `admin`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/customers/{client_reference_id}/pause": {
+      "post": {
+        "operationId": "pause_customer",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's identifier of its customer",
+            "in": "path",
+            "name": "client_reference_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/customers/{client_reference_id}/resume": {
+      "post": {
+        "operationId": "resume_customer",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The account's identifier of its customer",
+            "in": "path",
+            "name": "client_reference_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Resumes scopes of one customer of an account.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/pause": {
+      "post": {
+        "operationId": "pause_account",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Pauses scopes of a whole account in both modes, for example `quotes` and `settlement` for an\nabusive account or a sanctioned treasury. Audited, and announced as `account.updated`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/resume": {
+      "post": {
+        "operationId": "resume_account",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and\nreviewed. Audited, and announced as `account.updated`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/deposits/{id}": {
+      "get": {
+        "operationId": "admin_get_deposit",
+        "parameters": [
+          {
+            "description": "Deposit id, `dep_…` or the UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deposit"
+                }
+              }
+            },
+            "description": "OK: the deposit as its account sees it, with `admin`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "One deposit of any account, as its account sees it, with its internals, transitions, and\nevents in `admin`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/deposits/{id}/nudge": {
+      "post": {
+        "operationId": "nudge_deposit",
+        "parameters": [
+          {
+            "description": "Deposit id, `dep_…` or the UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NudgeResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK: the process's counters in the Prometheus text format, such as `topup_rpc_calls_total{provider, chain_id, method}`; they restart at zero with the process",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/reconciliation_blocks/{block_key}/lift": {
+      "post": {
+        "operationId": "lift_reconciliation_block",
+        "parameters": [
+          {
+            "description": "`chain:{chain_id}` or `address:{address_id}`, as listed in the daily report",
+            "in": "path",
+            "name": "block_key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationBlockLiftResponse"
+                }
+              }
+            },
+            "description": "OK: lifted, or already lifted",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no active or lifted block has this key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/reports/daily": {
+      "get": {
+        "operationId": "daily_report",
+        "parameters": [
+          {
+            "description": "List webhook endpoints whose oldest undelivered event is older than this many hours, 1 to 720; default 24",
+            "in": "query",
+            "name": "failing_for_hours",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DailyReportResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Platform health: per-route deposit, refund, and exposure metrics, reconciliation, and the\nwebhook endpoints failing for longer than `failing_for_hours`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/routes/{route}/pause": {
+      "post": {
+        "operationId": "pause_route",
+        "parameters": [
+          {
+            "description": "Route name, as in the route file",
+            "in": "path",
+            "name": "route",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutePauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/routes/{route}/resume": {
+      "post": {
+        "operationId": "resume_route",
+        "parameters": [
+          {
+            "description": "Route name, as in the route file",
+            "in": "path",
+            "name": "route",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutePauseResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "tags": [
+          "admin"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Production: Ethereum Mainnet, live and test mode",
+      "url": "https://pay-api.phala.com"
+    },
+    {
+      "description": "Staging: Sepolia, for integration tests",
+      "url": "https://pay-api-staging.phala.com"
+    }
+  ],
+  "tags": [
+    {
+      "description": "The operator's actions and reports.",
+      "name": "admin"
+    }
+  ]
+}

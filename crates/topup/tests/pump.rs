@@ -18,6 +18,7 @@ use topup::jitter::JitterSource;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
 };
+use topup::routes::RouteSet;
 use topup::steps::confirm::ConfirmStep;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, FinalizedHead, ReceiptLookup, TransferLog,
@@ -169,6 +170,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
+                    request: None,
                 }],
                 effects: TransitionEffects {
                     mark_final: false,
@@ -436,7 +438,7 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             .bind(Utc::now())
             .execute(&context.app_pool)
             .await?;
-            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
+            ensure!(topup::locks::expire_once(&context.app_pool, &RouteSet::default()).await? == 0);
             let deposit = db::get_deposit(&context.app_pool, deposit_id)
                 .await?
                 .context("expiry-race deposit")?;
@@ -464,7 +466,7 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             .fetch_one(&context.app_pool)
             .await?;
             ensure!(lock_status == "consumed" && !reserved);
-            ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
+            ensure!(topup::locks::expire_once(&context.app_pool, &RouteSet::default()).await? == 0);
             let expired_events: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM events WHERE type = 'quote.expired'",
             )
@@ -828,6 +830,7 @@ fn blocking_steps(control: Arc<StepControl>, outcome: StepOutcome) -> StepSet {
 fn test_pump(pool: &PgPool, steps: StepSet, config: PumpConfig, jitter: u64) -> Result<Pump> {
     Pump::with_jitter(
         pool.clone(),
+        Arc::default(),
         Arc::new(steps),
         config,
         Arc::new(FixedJitter(jitter)),

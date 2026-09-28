@@ -86,6 +86,15 @@ generated UUID of each event's identity that is the sweep's API id; and the `for
 permission of `GET /v1/forwarders`. Its down migration folds a merchant's own
 pause into `paused_scopes`.
 
+`20261015000000_api_conformance` (the design's "API conformance" amendment) makes events
+snapshots written once: `events.request_id` and `idempotency_key` record the API request behind an
+event (`NULL` for the service's workers), a `NOT VALID` check requires `data.object` on every new
+row, and `topup_app` loses `UPDATE` and `DELETE` on `events`. It renames the treasury events
+`account.treasury.pending|updated|canceled` to `treasury.created|updated|canceled`, in stored
+events and in endpoints' `enabled_events`, adds `webhook_endpoints.last_attempt_at` and
+`last_attempt_status` (the endpoint's delivery health), and indexes undelivered deliveries by event
+for `GET /v1/events?delivery_success=false`. Its down migration restores the grants and names.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -104,7 +113,7 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 
 | Tables | `topup_app` |
 |---|---|
-| `transitions`, `audit`, `reconciliation_findings`, `heartbeat` | `SELECT`, `INSERT` (append-only) |
+| `transitions`, `audit`, `reconciliation_findings`, `heartbeat`, `events` | `SELECT`, `INSERT` (append-only) |
 | `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
 | `reconciliation_blocks`, `deposit_address_client_secrets` | `SELECT`, `INSERT`, `DELETE` |
 | `reconciliation_deposit_cursors` | `SELECT`, `INSERT`, `UPDATE` |
@@ -149,9 +158,10 @@ service can only read it.
   cursor instead.
 - `deposits.confirmations_at` is when the transfer reached the required confirmation and was
   recorded; `final_at` when both providers showed it at `finalized`.
-- `events.data` is `{}` until the first delivery attempt or `GET /v1/events` read renders the
-  object; it is never re-rendered, so every endpoint, retry, and resend sends the same body.
-  Webhook endpoint events are stored rendered, a snapshot of the endpoint when they happened.
+- `events.data` is rendered in the transaction that changes its object, a snapshot of the object
+  when the event happened, with `previous_attributes` on `*.updated` events; it is never
+  re-rendered, so every endpoint, retry, resend, and read gets the same body. Rows written before
+  `20261015000000_api_conformance` may hold `{}`.
 - `pending_transfers` is display-only, written by the head scan and cleared by the finalized
   scanner's cursor advance. Nothing that affects money reads it.
 - `quotes.metadata`, `deposits.metadata`, and `refunds.metadata` (`20261006080000_metadata`) are
@@ -162,8 +172,8 @@ service can only read it.
 - The heartbeat RPO target is the code constant `topup::heartbeat::RPO_SECONDS`, not a column.
 - A `chain` reconciliation block written by the address-derivation or the per-forwarder custody
   check freezes that chain at runtime: pumps leave its deposits waiting, its scanner pauses, and
-  quote creation answers `409 chain_frozen`; the service keeps serving other chains. No check
+  quote creation answers `400 chain_frozen`; the service keeps serving other chains. No check
   writes the `address` scope since the flusher is gone. An operator lifts a block with the
   admin-signed
-  `POST /v1/admin/reconciliation-blocks/{block_key}/lift` and a `reason`: it deletes the row and
+  `POST /v1/admin/reconciliation_blocks/{block_key}/lift` and a `reason`: it deletes the row and
   writes an `audit` row carrying the removed block in one transaction.

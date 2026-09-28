@@ -8,10 +8,10 @@ import { ForwarderFactory } from "../src/ForwarderFactory.sol";
 /// Writes `test-vectors/create2.json`: forwarder addresses computed by the factory itself, which
 /// the Rust core and the Python SDK must reproduce.
 contract GenerateCreate2Vectors is Script {
-    struct LockVector {
-        string productSlug;
-        string externalId;
-        string lockRef;
+    struct QuoteVector {
+        string account;
+        string clientReferenceId;
+        string quoteId;
         address treasury;
         bytes32 salt;
         address predictedAddress;
@@ -53,10 +53,10 @@ contract GenerateCreate2Vectors is Script {
             }
         }
 
-        LockVector[3] memory locks = _lockVectors(factory);
-        string[] memory lockJson = new string[](locks.length);
-        for (uint256 i; i < locks.length; ++i) {
-            lockJson[i] = _lockEntryJson(locks[i], i);
+        QuoteVector[3] memory quotes = _quoteVectors(factory);
+        string[] memory quoteJson = new string[](quotes.length);
+        for (uint256 i; i < quotes.length; ++i) {
+            quoteJson[i] = _quoteEntryJson(quotes[i], i);
         }
 
         DepositAddressVector[4] memory depositAddresses = _depositAddressVectors(factory);
@@ -72,8 +72,8 @@ contract GenerateCreate2Vectors is Script {
             vm.toString(address(factory.implementation())),
             "\",\"forwarders\":",
             _array(forwarders),
-            ",\"lock\":",
-            _array(lockJson),
+            ",\"quote\":",
+            _array(quoteJson),
             ",\"deposit_address\":",
             _array(depositAddressJson),
             "}"
@@ -81,54 +81,65 @@ contract GenerateCreate2Vectors is Script {
         vm.writeJson(json, string.concat(vm.projectRoot(), "/test-vectors/create2.json"));
     }
 
-    function _lockVectors(ForwarderFactory factory)
+    function _quoteVectors(ForwarderFactory factory)
         private
         view
-        returns (LockVector[3] memory vectors)
+        returns (QuoteVector[3] memory vectors)
     {
-        vectors[0] = _lock(factory, TREASURY, "phala-cloud", "invoice-2026-0001", "checkout-0001");
-        vectors[1] =
-            _lock(factory, OTHER_TREASURY, "builder", "quote-0042", "rate-lock:builder:0042");
-        vectors[2] = _lock(
+        vectors[0] = _quote(
             factory,
             TREASURY,
-            "enterprise",
-            "invoice-long-reference",
+            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+            "team-42",
+            "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10"
+        );
+        vectors[1] = _quote(
+            factory,
+            OTHER_TREASURY,
+            "acct_9a8b7c6d5e4f40312a1b2c3d4e5f6071",
+            "invoice-2026-0001",
+            "qt_0f1e2d3c4b5a49687766554433221100"
+        );
+        vectors[2] = _quote(
+            factory,
+            TREASURY,
+            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
             string.concat(
-                "lock-ref-0000000000000000000000000000000000000000000000000000000000000000-",
+                "customer-0000000000000000000000000000000000000000000000000000000000000000-",
                 "1111111111111111111111111111111111111111111111111111111111111111-",
                 "2222222222222222222222222222222222222222222222222222222222222222-",
                 "3333333333333333333333333333333333333333333333333333333333333333"
-            )
+            ),
+            "qt_ffffffffffffffffffffffffffffffff"
         );
     }
 
-    function _lock(
+    function _quote(
         ForwarderFactory factory,
         address treasury,
-        string memory productSlug,
-        string memory externalId,
-        string memory lockRef
-    ) private view returns (LockVector memory vector) {
-        bytes32 salt = keccak256(abi.encode(productSlug, externalId, "lock", lockRef));
-        vector = LockVector({
-            productSlug: productSlug,
-            externalId: externalId,
-            lockRef: lockRef,
+        string memory account,
+        string memory clientReferenceId,
+        string memory quoteId
+    ) private view returns (QuoteVector memory vector) {
+        bytes32 salt = keccak256(abi.encode(account, clientReferenceId, "quote", quoteId));
+        vector = QuoteVector({
+            account: account,
+            clientReferenceId: clientReferenceId,
+            quoteId: quoteId,
             treasury: treasury,
             salt: salt,
             predictedAddress: factory.addressOf(treasury, salt)
         });
     }
 
-    function _lockEntryJson(LockVector memory vector, uint256 index)
+    function _quoteEntryJson(QuoteVector memory vector, uint256 index)
         private
         returns (string memory)
     {
-        string memory key = string.concat("lock-", vm.toString(index));
-        vm.serializeString(key, "product_slug", vector.productSlug);
-        vm.serializeString(key, "external_id", vector.externalId);
-        vm.serializeString(key, "lock_ref", vector.lockRef);
+        string memory key = string.concat("quote-", vm.toString(index));
+        vm.serializeString(key, "account", vector.account);
+        vm.serializeString(key, "client_reference_id", vector.clientReferenceId);
+        vm.serializeString(key, "quote_id", vector.quoteId);
         vm.serializeAddress(key, "treasury", vector.treasury);
         vm.serializeBytes32(key, "salt", vector.salt);
         return vm.serializeAddress(key, "predicted_address", vector.predictedAddress);

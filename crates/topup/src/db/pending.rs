@@ -288,8 +288,8 @@ const PENDING_SELECT: &str = r#"
 "#;
 
 /// Pending transfers to one address, oldest first.
-pub async fn list_address_pending(
-    pool: &PgPool,
+pub async fn list_address_pending<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
     address_id: Uuid,
 ) -> Result<Vec<PendingTransfer>, sqlx::Error> {
     let query = format!(
@@ -298,7 +298,7 @@ pub async fn list_address_pending(
     );
     let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
         .bind(address_id)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await?;
     records.into_iter().map(TryInto::try_into).collect()
 }

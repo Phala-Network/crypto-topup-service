@@ -43,13 +43,8 @@ const MAX_DESCRIPTION_CHARS: usize = 5000;
     request_body = CreateWebhookEndpointRequest,
     responses(
         (status = 200, description = "OK", body = WebhookEndpointObject),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 400, description = "Bad Request, or `webhook_endpoint_cap_exceeded`: the mode already has 16 endpoints", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (
-            status = 409,
-            description = "`webhook_endpoint_cap_exceeded`: the mode already has 16 endpoints",
-            body = ErrorResponse
-        )
     ),
     security(("api_key" = [])),
     tag = "webhook_endpoints"
@@ -84,7 +79,7 @@ pub(crate) async fn create_webhook_endpoint(
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(endpoint.object()))
+    rendered(&state, &endpoint).await
 }
 
 #[utoipa::path(
@@ -97,7 +92,7 @@ pub(crate) async fn create_webhook_endpoint(
     ),
     responses(
         (status = 200, description = "OK", body = WebhookEndpointList),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 400, description = "Bad Request, or `webhook_endpoint_cap_exceeded`: the mode already has 16 endpoints", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("api_key" = [])),
@@ -126,11 +121,16 @@ pub(crate) async fn list_webhook_endpoints(
             ),
             error => map_error(error),
         })?;
+    let ids: Vec<_> = endpoints.iter().map(|endpoint| endpoint.id).collect();
+    let mut backlogs = webhook_endpoints::backlogs(&state.pool, &ids).await?;
     Ok(Json(WebhookEndpointList {
         object: "list".to_owned(),
         url: "/v1/webhook_endpoints".to_owned(),
         has_more,
-        data: endpoints.iter().map(|endpoint| endpoint.object()).collect(),
+        data: endpoints
+            .iter()
+            .map(|endpoint| endpoint.object(backlogs.remove(&endpoint.id).unwrap_or_default()))
+            .collect(),
     }))
 }
 
@@ -159,7 +159,18 @@ pub(crate) async fn get_webhook_endpoint(
     let endpoint = webhook_endpoints::get(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(endpoint.object()))
+    rendered(&state, &endpoint).await
+}
+
+/// The endpoint's API representation with its delivery health.
+async fn rendered(
+    state: &AppState,
+    endpoint: &webhook_endpoints::WebhookEndpoint,
+) -> ApiResult<Json<WebhookEndpointObject>> {
+    let mut connection = state.pool.acquire().await?;
+    Ok(Json(
+        webhook_endpoints::render(&mut connection, endpoint).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -177,7 +188,7 @@ pub(crate) async fn get_webhook_endpoint(
     request_body = UpdateWebhookEndpointRequest,
     responses(
         (status = 200, description = "OK", body = WebhookEndpointObject),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 400, description = "Bad Request, or `webhook_endpoint_cap_exceeded`: the mode already has 16 endpoints", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -232,7 +243,7 @@ pub(crate) async fn update_webhook_endpoint(
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(endpoint.object()))
+    rendered(&state, &endpoint).await
 }
 
 #[utoipa::path(

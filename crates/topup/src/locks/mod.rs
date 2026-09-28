@@ -18,7 +18,7 @@ use sqlx::types::Json;
 use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_core::address::{forwarder_address, lock_salt};
+use topup_core::address::{forwarder_address, quote_salt};
 use topup_core::money::{
     AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, lock_price, round_up_to_decimals,
     tokens_for_credit,
@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::audit::{self, Actor};
 use crate::db::{Account, Customer};
+use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use pricing::{PricingRuntime, ValidatedQuote};
 
@@ -201,9 +202,13 @@ pub enum RateLockError {
     /// The account has no treasury on the route's chain.
     #[error("no treasury is set on the chain")]
     TreasuryNotSet,
-    /// The per-customer rolling creation limit was reached.
+    /// The per-customer rolling creation limit was reached; a creation is admitted again after
+    /// `retry_after` seconds.
     #[error("rate-lock creation limit exceeded")]
-    RateLimited,
+    RateLimited {
+        /// Seconds until the customer's oldest counted creation leaves the minute.
+        retry_after: u64,
+    },
     /// An open exposure cap would be exceeded.
     #[error("the {scope} cap on open quotes leaves {remaining} cents")]
     ExposureCap {
@@ -238,7 +243,9 @@ pub enum RateLockError {
     Database(#[from] sqlx::Error),
 }
 
-/// Creates a lock for `credit` on `route` for `customer` of `account`.
+/// Creates a lock for `credit` on `route` for `customer` of `account`, and returns it with its
+/// `client_secret`, issued in the same transaction: a quote never exists without the secret its
+/// creation returned, so a failed creation leaves nothing a retry would duplicate.
 ///
 /// The quote is scoped to the customer's account and mode, and `route` must be a route of that
 /// mode. Repeated requests are answered by the API's `Idempotency-Key` layer before they reach
@@ -251,7 +258,7 @@ pub async fn create(
     route: &RouteFile,
     credit_minor: MinorAmount,
     metadata: &BTreeMap<String, String>,
-) -> Result<RateLock, RateLockError> {
+) -> Result<(RateLock, String), RateLockError> {
     if customer.account_id != account.id {
         return Err(RateLockError::NotFound);
     }
@@ -263,7 +270,7 @@ pub async fn create(
     let scope = Scope::new(account.id, customer.livemode);
     // Cheap pre-checks so a rate-limited caller, or one without a treasury, never triggers an
     // external price fetch; the authoritative checks repeat in the transaction below.
-    check_creation_rate(pool, customer.id, route).await?;
+    check_creation_rate(&mut *pool.acquire().await?, customer.id, route).await?;
     treasury(&mut *pool.acquire().await?, scope, route.chain.chain_id).await?;
 
     let quote = quotes
@@ -285,7 +292,7 @@ pub async fn create(
 
     let mut transaction = pool.begin().await?;
     lock_customer(&mut transaction, customer).await?;
-    check_creation_rate(&mut *transaction, customer.id, route).await?;
+    check_creation_rate(&mut transaction, customer.id, route).await?;
     check_exposure(&mut transaction, account, customer, credit_minor, route).await?;
     // The account's current treasury of the chain; the shared lock, held to commit, keeps a
     // treasury change from applying meanwhile. The address keeps it for good, as the forwarder
@@ -294,7 +301,8 @@ pub async fn create(
     let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
-    let salt = lock_salt(
+    let client_secret = new_client_secret(id)?;
+    let salt = quote_salt(
         &account.public_id,
         &customer.client_reference_id,
         &quote_id(id),
@@ -309,10 +317,11 @@ pub async fn create(
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-            credit_minor, expires_at, status, exposure_reserved, created_at, metadata
+            credit_minor, expires_at, status, exposure_reserved, created_at, metadata,
+            client_secret_hash
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', true, $10, $11)
+                $9, 'open', true, $10, $11, $12)
         "#,
     )
     .bind(id)
@@ -326,6 +335,7 @@ pub async fn create(
     .bind(expires_at)
     .bind(now)
     .bind(Json(metadata))
+    .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
     .execute(&mut *transaction)
     .await?;
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only
@@ -352,7 +362,7 @@ pub async fn create(
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    Ok(RateLock {
+    let lock = RateLock {
         id,
         livemode: scope.livemode(),
         address_id,
@@ -369,7 +379,8 @@ pub async fn create(
         created_at: now,
         consumed_by: None,
         metadata: metadata.clone(),
-    })
+    };
+    Ok((lock, client_secret))
 }
 
 /// The scope's current treasury of `chain_id`, or `TreasuryNotSet`.
@@ -389,25 +400,15 @@ async fn treasury(
 /// Random bytes after `_secret_` in a client secret.
 const CLIENT_SECRET_BYTES: usize = 24;
 
-/// Issues the quote's `client_secret`, `qt_…_secret_` followed by 48 random hex digits, and stores
-/// only its SHA-256, replacing any earlier secret so that one stops working.
-pub async fn issue_client_secret(pool: &PgPool, id: Uuid) -> Result<String, RateLockError> {
+/// A new `client_secret` of quote `id`: `qt_…_secret_` followed by 48 random hex digits. Only its
+/// SHA-256 is stored.
+fn new_client_secret(id: Uuid) -> Result<String, RateLockError> {
     let mut random = [0_u8; CLIENT_SECRET_BYTES];
     SysRng.try_fill_bytes(&mut random).map_err(|error| {
         tracing::error!(%error, "OS RNG failed; no client secret issued");
         RateLockError::EntropyUnavailable
     })?;
-    let secret = format!("{}_secret_{}", quote_id(id), hex::encode(random));
-    let updated = sqlx::query("UPDATE quotes SET client_secret_hash = $2 WHERE id = $1")
-        .bind(id)
-        .bind(Sha256::digest(secret.as_bytes()).as_slice())
-        .execute(pool)
-        .await?
-        .rows_affected();
-    if updated != 1 {
-        return Err(RateLockError::NotFound);
-    }
-    Ok(secret)
+    Ok(format!("{}_secret_{}", quote_id(id), hex::encode(random)))
 }
 
 /// Loads the quote a client secret belongs to; any secret that does not match a stored one, in
@@ -434,7 +435,11 @@ pub async fn get_by_client_secret(
 }
 
 /// Loads one lock when it belongs to `scope`.
-pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<RateLock>, RateLockError> {
+pub async fn get<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    scope: Scope,
+    id: Uuid,
+) -> Result<Option<RateLock>, RateLockError> {
     let row = sqlx::query_as::<_, RateLockRow>(concat!(
         select_lock!(),
         " WHERE quote.account_id = $1 AND quote.livemode = $2 AND quote.id = $3"
@@ -442,7 +447,7 @@ pub async fn get(pool: &PgPool, scope: Scope, id: Uuid) -> Result<Option<RateLoc
     .bind(scope.account_id())
     .bind(scope.livemode())
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(TryInto::try_into).transpose()
 }
@@ -527,6 +532,7 @@ pub async fn list(
 /// lock stays open until it is consumed or expires.
 pub async fn cancel(
     pool: &PgPool,
+    routes: &RouteSet,
     scope: Scope,
     actor: &Actor,
     id: Uuid,
@@ -584,6 +590,13 @@ pub async fn cancel(
         },
     )
     .await?;
+    let event = crate::db::NewOutboxEvent::new(
+        "quote.canceled",
+        scope,
+        crate::db::EventObject::Quote(row.id),
+        actor,
+    );
+    crate::db::enqueue_in(&mut transaction, routes, &event, None).await?;
     transaction.commit().await?;
     Ok(RateLock {
         status: RateLockStatus::Cancelled,
@@ -640,7 +653,7 @@ pub(crate) async fn consume(
 /// through a finalized block whose time is past `expires_at`, so every payment mined inside the
 /// window is already recorded, and only while no such payment still awaits the confirm step that
 /// may consume the lock. A stalled scanner therefore holds locks and their exposure open.
-pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
+pub async fn expire_once(pool: &PgPool, routes: &RouteSet) -> Result<u64, RateLockError> {
     let mut transaction = pool.begin().await?;
     let rows = sqlx::query_as::<_, ExpiringRow>(
         r#"
@@ -687,19 +700,13 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
     }
 
     for row in &rows {
-        crate::db::enqueue_in(
-            &mut transaction,
-            &crate::db::NewOutboxEvent {
-                id: topup_core::identity::event_id("quote.expired", row.id),
-                event_type: "quote.expired".to_owned(),
-                account_id: row.account_id,
-                livemode: row.livemode,
-                object: crate::db::EventObject::Quote(row.id),
-                next_attempt_at: Utc::now(),
-                actor: crate::db::SYSTEM_ACTOR.to_owned(),
-            },
-        )
-        .await?;
+        let event = crate::db::NewOutboxEvent::system(
+            topup_core::identity::event_id("quote.expired", row.id),
+            "quote.expired",
+            Scope::new(row.account_id, row.livemode),
+            crate::db::EventObject::Quote(row.id),
+        );
+        crate::db::enqueue_in(&mut transaction, routes, &event, None).await?;
     }
     transaction.commit().await?;
     Ok(count)
@@ -708,15 +715,17 @@ pub async fn expire_once(pool: &PgPool) -> Result<u64, RateLockError> {
 /// Periodically closes overdue locks and emits expiry events.
 pub struct ExpiryWorker {
     pool: PgPool,
+    routes: Arc<RouteSet>,
     scan_interval: Duration,
 }
 
 impl ExpiryWorker {
-    /// Creates an expiry worker.
+    /// Creates an expiry worker; `routes` render the expired quotes in their events.
     #[must_use]
-    pub const fn new(pool: PgPool, scan_interval: Duration) -> Self {
+    pub const fn new(pool: PgPool, routes: Arc<RouteSet>, scan_interval: Duration) -> Self {
         Self {
             pool,
+            routes,
             scan_interval,
         }
     }
@@ -730,7 +739,7 @@ impl ExpiryWorker {
             tokio::select! {
                 () = cancellation.cancelled() => return,
                 _ = ticker.tick() => {
-                    match expire_once(&self.pool).await {
+                    match expire_once(&self.pool, &self.routes).await {
                         Ok(_) => monitor.check_in(true),
                         Err(error) => {
                             tracing::error!(
@@ -803,14 +812,11 @@ fn validate_bounds(
     Ok(())
 }
 
-async fn check_creation_rate<'e, E>(
-    executor: E,
+async fn check_creation_rate(
+    connection: &mut sqlx::PgConnection,
     customer_id: Uuid,
     route: &RouteFile,
-) -> Result<(), RateLockError>
-where
-    E: sqlx::PgExecutor<'e>,
-{
+) -> Result<(), RateLockError> {
     let recent: i64 = sqlx::query_scalar(
         r#"
         SELECT count(*)
@@ -820,13 +826,34 @@ where
         "#,
     )
     .bind(customer_id)
-    .fetch_one(executor)
+    .fetch_one(&mut *connection)
     .await?;
     let recent = u64::try_from(recent).map_err(|_| RateLockError::DatabaseInvariant)?;
-    if recent >= route.rate_lock.max_creations_per_minute {
-        return Err(RateLockError::RateLimited);
+    if recent < route.rate_lock.max_creations_per_minute {
+        return Ok(());
     }
-    Ok(())
+    // The limit admits a creation again once the newest `max` creations shrink below `max`: when
+    // the `max`-th newest leaves the minute.
+    let offset = i64::try_from(route.rate_lock.max_creations_per_minute.saturating_sub(1))
+        .map_err(|_| RateLockError::DatabaseInvariant)?;
+    let seconds: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT GREATEST(1, ceil(extract(epoch FROM created_at + interval '1 minute' - now())))::bigint
+        FROM quotes
+        WHERE customer_id = $1 AND created_at >= now() - interval '1 minute'
+        ORDER BY created_at DESC
+        OFFSET $2 LIMIT 1
+        "#,
+    )
+    .bind(customer_id)
+    .bind(offset)
+    .fetch_optional(&mut *connection)
+    .await?;
+    Err(RateLockError::RateLimited {
+        retry_after: seconds
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .unwrap_or(60),
+    })
 }
 
 async fn lock_customer(

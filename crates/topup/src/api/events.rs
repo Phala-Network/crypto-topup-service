@@ -9,7 +9,6 @@ use serde_json::Value;
 use sqlx::{FromRow, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use crate::db::EventObject;
 use crate::ids;
 use crate::outbox::webhook_id;
 use crate::tenancy::{Permission, Scope};
@@ -19,7 +18,7 @@ use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
-use super::models::{EventList, EventObjectResponse, ResendEventRequest};
+use super::models::{EventData, EventList, EventObjectResponse, EventRequest, ResendEventRequest};
 
 type ApiResult<T> = Result<T, ApiError>;
 
@@ -34,6 +33,17 @@ const MAX_LIMIT: i64 = 100;
             "type" = Option<String>, Query,
             description = "Only events of this type, such as `deposit.credited`, or of a group, \
                            such as `deposit.*`"
+        ),
+        (
+            "types[]" = Option<Vec<String>>, Query,
+            description = "Only events of these types, up to 20, each a type or a group; not with \
+                           `type` (<https://docs.stripe.com/api/events/list>)"
+        ),
+        (
+            "delivery_success" = Option<bool>, Query,
+            description = "`false`: only events with a delivery to a webhook endpoint that has \
+                           not succeeded, pending or stopped; `true`: only events whose every \
+                           delivery succeeded"
         ),
         ("created[gt]" = Option<i64>, Query, description = "Created after, Unix seconds"),
         ("created[gte]" = Option<i64>, Query, description = "Created at or after, Unix seconds"),
@@ -64,16 +74,32 @@ pub(crate) async fn list_events(
         .await?;
     let filter = parse_filter(&query_pairs(query.as_deref()))?;
     let mut builder = select(merchant.scope);
-    if let Some(event_type) = &filter.event_type {
-        match event_type.strip_suffix('*') {
-            Some(prefix) => builder
-                .push(" AND starts_with(event.type, ")
-                .push_bind(prefix.to_owned())
-                .push(")"),
-            None => builder
-                .push(" AND event.type = ")
-                .push_bind(event_type.clone()),
-        };
+    if !filter.types.is_empty() {
+        builder.push(" AND (");
+        for (index, event_type) in filter.types.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            match event_type.strip_suffix('*') {
+                Some(prefix) => builder
+                    .push("starts_with(event.type, ")
+                    .push_bind(prefix.to_owned())
+                    .push(")"),
+                None => builder.push("event.type = ").push_bind(event_type.clone()),
+            };
+        }
+        builder.push(")");
+    }
+    if let Some(success) = filter.delivery_success {
+        builder.push(if success {
+            " AND NOT EXISTS ("
+        } else {
+            " AND EXISTS ("
+        });
+        builder.push(
+            "SELECT 1 FROM webhook_deliveries AS delivery \
+             WHERE delivery.event_id = event.id AND delivery.delivered_at IS NULL)",
+        );
     }
     for (operator, bound) in &filter.created {
         builder
@@ -126,10 +152,10 @@ pub(crate) async fn list_events(
     if filter.before {
         rows.reverse();
     }
-    let mut data = Vec::with_capacity(rows.len());
-    for row in rows {
-        data.push(event_object(&state, merchant.scope, row).await?);
-    }
+    let data = rows
+        .into_iter()
+        .map(event_object)
+        .collect::<ApiResult<Vec<_>>>()?;
     Ok(Json(EventList {
         object: "list".to_owned(),
         url: "/v1/events".to_owned(),
@@ -181,14 +207,13 @@ pub(crate) async fn get_event(
     request_body = ResendEventRequest,
     responses(
         (status = 200, description = "OK: queued for delivery", body = EventObjectResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no such event or endpoint", body = ErrorResponse),
         (
-            status = 409,
-            description = "`webhook_endpoint_disabled`: enable the endpoint first",
+            status = 400,
+            description = "Bad Request, or `webhook_endpoint_disabled`: enable the endpoint first",
             body = ErrorResponse
-        )
+        ),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no such event or endpoint", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "events"
@@ -240,10 +265,7 @@ pub(crate) async fn find_event(
         .build_query_as::<EventRow>()
         .fetch_optional(&state.pool)
         .await?;
-    match row {
-        Some(row) => Ok(Some(event_object(state, scope, row).await?)),
-        None => Ok(None),
-    }
+    row.map(event_object).transpose()
 }
 
 #[derive(FromRow)]
@@ -253,9 +275,9 @@ struct EventRow {
     livemode: bool,
     #[sqlx(rename = "type")]
     event_type: String,
-    object_type: String,
-    object_id: Uuid,
     actor: String,
+    request_id: Option<String>,
+    idempotency_key: Option<String>,
     data: Value,
     created: DateTime<Utc>,
     pending_webhooks: i64,
@@ -264,8 +286,8 @@ struct EventRow {
 fn select(scope: Scope) -> QueryBuilder<Postgres> {
     let mut builder = QueryBuilder::new(
         r#"
-        SELECT event.id, account.public_id, event.livemode, event.type, event.object_type,
-               event.object_id, event.actor, event.data, event.created,
+        SELECT event.id, account.public_id, event.livemode, event.type, event.actor,
+               event.request_id, event.idempotency_key, event.data, event.created,
                (SELECT count(*) FROM webhook_deliveries AS delivery
                 WHERE delivery.event_id = event.id
                   AND delivery.delivered_at IS NULL AND delivery.failed_at IS NULL)
@@ -281,30 +303,12 @@ fn select(scope: Scope) -> QueryBuilder<Postgres> {
     builder
 }
 
-/// The row as the API shows it; `data` is rendered and stored now if no delivery has yet, so a
-/// read and every delivery show the same object.
-async fn event_object(
-    state: &AppState,
-    scope: Scope,
-    row: EventRow,
-) -> ApiResult<EventObjectResponse> {
-    let object = EventObject::from_parts(&row.object_type, row.object_id);
-    let data = match crate::outbox::event_data(
-        &state.pool,
-        &state.routes,
-        scope,
-        row.id,
-        object,
-        &row.data,
-    )
-    .await?
-    {
-        Ok(data) => data,
-        Err(code) => {
-            tracing::warn!(event_id = %row.id, code, "event data could not be rendered");
-            row.data
-        }
-    };
+/// The row as the API shows it: its `data` as recorded with the change.
+fn event_object(row: EventRow) -> ApiResult<EventObjectResponse> {
+    let data = serde_json::from_value::<EventData>(row.data).map_err(|error| {
+        tracing::error!(event_id = %row.id, %error, "a stored event has no object");
+        ApiError::internal()
+    })?;
     Ok(EventObjectResponse {
         id: webhook_id(row.id),
         object: "event".to_owned(),
@@ -313,14 +317,22 @@ async fn event_object(
         event_type: row.event_type,
         created: row.created.timestamp(),
         actor: row.actor,
+        request: row.request_id.map(|id| EventRequest {
+            id,
+            idempotency_key: row.idempotency_key,
+        }),
         data,
         pending_webhooks: row.pending_webhooks,
     })
 }
 
+/// At most this many `types[]`, Stripe's limit.
+const MAX_TYPES: usize = 20;
+
 #[derive(Default)]
 struct Filter {
-    event_type: Option<String>,
+    types: Vec<String>,
+    delivery_success: Option<bool>,
     created: Vec<(&'static str, DateTime<Utc>)>,
     limit: i64,
     cursor: Option<Uuid>,
@@ -334,36 +346,36 @@ fn parse_filter(pairs: &[(String, String)]) -> ApiResult<Filter> {
     };
     let mut starting_after = None;
     let mut ending_before = None;
+    let mut single_type = false;
     for (name, value) in pairs {
         match name.as_str() {
-            "type" => {
+            "type" | "types[]" => {
                 if !valid_type_filter(value) {
                     return Err(ApiError::invalid_param(
-                        "type",
-                        "type must be an event type, such as deposit.credited, or a group, \
-                         such as deposit.*",
+                        name.clone(),
+                        "each type must be an event type, such as deposit.credited, or a \
+                         group, such as deposit.*",
                     ));
                 }
-                filter.event_type = Some(value.clone());
+                single_type |= name == "type";
+                filter.types.push(value.clone());
+            }
+            "delivery_success" => {
+                filter.delivery_success = Some(match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(ApiError::invalid_param(
+                            "delivery_success",
+                            "delivery_success must be true or false",
+                        ));
+                    }
+                });
             }
             "created[gt]" | "created[gte]" | "created[lt]" | "created[lte]" => {
-                let operator = match name.as_str() {
-                    "created[gt]" => ">",
-                    "created[gte]" => ">=",
-                    "created[lt]" => "<",
-                    _ => "<=",
-                };
-                let bound = value
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
-                    .ok_or_else(|| {
-                        ApiError::invalid_param(
-                            name.clone(),
-                            format!("{name} must be Unix seconds"),
-                        )
-                    })?;
-                filter.created.push((operator, bound));
+                filter
+                    .created
+                    .extend(super::pagination::created_bound(name, value)?);
             }
             "limit" => {
                 filter.limit = value
@@ -387,6 +399,18 @@ fn parse_filter(pairs: &[(String, String)]) -> ApiResult<Filter> {
                 );
             }
         }
+    }
+    if single_type && filter.types.len() > 1 {
+        return Err(ApiError::invalid_param(
+            "types[]",
+            "send one type, or several as types[], not both",
+        ));
+    }
+    if filter.types.len() > MAX_TYPES {
+        return Err(ApiError::invalid_param(
+            "types[]",
+            format!("types[] takes at most {MAX_TYPES} types"),
+        ));
     }
     match (starting_after, ending_before) {
         (Some(_), Some(_)) => {
@@ -423,12 +447,7 @@ mod tests {
 
     #[test]
     fn type_filters_are_a_type_or_a_group() {
-        for value in [
-            "deposit.credited",
-            "deposit.*",
-            "account.treasury.*",
-            "account",
-        ] {
+        for value in ["deposit.credited", "deposit.*", "treasury.*", "account"] {
             assert!(valid_type_filter(value), "{value}");
         }
         for value in [

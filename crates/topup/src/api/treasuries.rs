@@ -22,11 +22,10 @@ use super::models::{
     CreateTreasuryChallengeRequest, CreateTreasuryRequest, Treasury, TreasuryChallenge,
     TreasuryList,
 };
+use super::pagination::Page;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-const DEFAULT_LIMIT: i64 = 10;
-const MAX_LIMIT: i64 = 100;
 /// Longest accepted message; a challenge is about 400 characters.
 const MAX_MESSAGE_CHARS: usize = 2_048;
 /// Longest accepted signature in bytes; a Safe's is 65 per owner.
@@ -118,17 +117,12 @@ pub(crate) async fn create_treasury_challenge(
             description = "`treasury_proof_invalid`, `treasury_challenge_expired`, \
                            `treasury_challenge_used`, `treasury_not_deployed` (no contract at \
                            the address at the chain's finalized block; ERC-6492 signatures are \
-                           refused), or `treasury_sanctioned`",
+                           refused), `treasury_sanctioned`, `treasury_change_pending`, or \
+                           `treasury_unchanged`",
             body = ErrorResponse
         ),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden", body = ErrorResponse),
-        (
-            status = 409,
-            description = "`treasury_change_pending`, `treasury_unchanged`, or \
-                           `idempotency_key_in_use`",
-            body = ErrorResponse
-        ),
         (status = 503, description = "The chain or sanctions screening could not be read; retry", body = ErrorResponse)
     ),
     security(("api_key" = [])),
@@ -140,10 +134,11 @@ pub(crate) async fn create_treasury_challenge(
 /// block on both of the service's RPC providers. The address is screened against sanctions lists.
 ///
 /// The chain's first treasury, and any test-mode change, applies at once. A later live change is
-/// `pending` for 48 hours (`account.treasury.pending`), then applies
-/// (`account.treasury.updated`) unless canceled first: new quotes and deposit address networks
-/// then pay it, while addresses issued before keep paying the former treasury and are still
-/// credited. Treasury events go to every enabled webhook endpoint of the mode.
+/// `pending` for 48 hours, then applies (`treasury.updated`) unless canceled first: new quotes and
+/// deposit address networks then pay it, while addresses issued before keep paying the former
+/// treasury, which becomes `replaced` (`treasury.updated`), and are still credited. Every new
+/// treasury is announced as `treasury.created`; treasury events go to every enabled webhook
+/// endpoint of the mode.
 pub(crate) async fn create_treasury(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -202,7 +197,9 @@ pub(crate) async fn create_treasury(
     params(
         ("chain_id" = Option<u64>, Query, description = "Only this chain's treasuries"),
         ("status" = Option<String>, Query, description = "`pending`, `active`, `replaced`, or `canceled`"),
-        ("limit" = Option<i64>, Query, description = "1 to 100, default 10")
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`trs_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`trs_` id: the page before it")
     ),
     responses(
         (status = 200, description = "OK", body = TreasuryList),
@@ -212,8 +209,8 @@ pub(crate) async fn create_treasury(
     security(("api_key" = [])),
     tag = "treasuries"
 )]
-/// The account's treasuries in the key's mode, newest first: each chain's `active` one, and any
-/// `pending` change.
+/// The account's treasuries in the key's mode, newest first, with Stripe's cursor pagination: each
+/// chain's `active` one, any `pending` change, and the `replaced` and `canceled` ones.
 pub(crate) async fn list_treasuries(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -223,8 +220,11 @@ pub(crate) async fn list_treasuries(
         .require(&state.pool, Permission::TreasuryRead)
         .await?;
     let mut filter = ListFilter::default();
-    let mut limit = DEFAULT_LIMIT;
+    let mut page = Page::default();
     for (name, value) in query_pairs(query.as_deref()) {
+        if page.accept(&name, &value, crate::ids::TREASURY)? {
+            continue;
+        }
         match name.as_str() {
             "chain_id" => {
                 filter.chain_id = Some(
@@ -239,13 +239,6 @@ pub(crate) async fn list_treasuries(
                         .ok_or_else(|| ApiError::invalid_param("status", "unknown status"))?,
                 );
             }
-            "limit" => {
-                limit = value
-                    .parse::<i64>()
-                    .ok()
-                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
-                    .ok_or_else(|| ApiError::invalid_param("limit", "limit must be 1 to 100"))?;
-            }
             other => {
                 return Err(
                     ApiError::unknown_param(format!("unknown parameter {other}")).with_param(other),
@@ -253,9 +246,14 @@ pub(crate) async fn list_treasuries(
             }
         }
     }
-    let (data, has_more) = treasuries::list(&state.pool, merchant.scope, filter, limit)
-        .await
-        .map_err(map_error)?;
+    let cursor = page.cursor.map(|id| (id, page.before));
+    let (data, has_more) =
+        treasuries::list(&state.pool, merchant.scope, filter, page.limit, cursor)
+            .await
+            .map_err(|error| match error {
+                TreasuryError::NotFound => page.unknown_cursor("treasury"),
+                error => map_error(error),
+            })?;
     Ok(Json(TreasuryList {
         object: "list".to_owned(),
         url: "/v1/treasuries".to_owned(),
@@ -309,12 +307,12 @@ pub(crate) async fn get_treasury(
         (status = 200, description = "OK: `canceled`", body = Treasury),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 409, description = "`treasury_unexpected_state`: not pending", body = ErrorResponse)
+        (status = 400, description = "`treasury_unexpected_state`: not pending", body = ErrorResponse)
     ),
     security(("api_key" = [])),
     tag = "treasuries"
 )]
-/// Cancels a pending treasury change before it applies (`account.treasury.canceled`); the
+/// Cancels a pending treasury change before it applies (`treasury.canceled`); the
 /// chain's current treasury stays. If you did not request the change, also roll your keys.
 pub(crate) async fn cancel_treasury(
     State(state): State<AppState>,

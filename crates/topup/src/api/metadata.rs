@@ -137,14 +137,28 @@ macro_rules! statements {
     };
 }
 
+impl Object {
+    /// The `*.updated` event a change of the object is announced as, for the objects that have
+    /// one.
+    const fn updated_event(self, id: Uuid) -> Option<(&'static str, crate::db::EventObject)> {
+        match self {
+            Self::Refund => Some(("refund.updated", crate::db::EventObject::Refund(id))),
+            Self::Quote | Self::Deposit | Self::DepositAddress => None,
+        }
+    }
+}
+
 /// Applies a `POST /v1/{object}/{id}` update's `metadata` to the scope's object `id`, and returns
-/// whether the object exists in the scope. Without `metadata` nothing changes.
+/// whether the object exists in the scope. Without `metadata` nothing changes. A change of an
+/// object with a `*.updated` event (a refund) is announced by it, caused by `actor`.
 pub async fn update(
     pool: &PgPool,
+    routes: &crate::routes::RouteSet,
     object: Object,
     scope: Scope,
     id: Uuid,
     metadata: Option<&Value>,
+    actor: &crate::audit::Actor,
 ) -> Result<bool, ApiError> {
     let update = metadata.map(MetadataUpdate::parse).transpose()?;
     let (select, write) = match object {
@@ -166,11 +180,23 @@ pub async fn update(
     if let Some(update) = update {
         let merged = update.apply(current.clone())?;
         if merged != current {
+            let announced = match object.updated_event(id) {
+                Some((event_type, event_object)) => {
+                    let before =
+                        crate::db::render(&mut transaction, routes, scope, event_object).await?;
+                    Some((event_type, event_object, before))
+                }
+                None => None,
+            };
             sqlx::query(write)
                 .bind(id)
                 .bind(Json(&merged))
                 .execute(&mut *transaction)
                 .await?;
+            if let Some((event_type, event_object, before)) = announced {
+                let event = crate::db::NewOutboxEvent::new(event_type, scope, event_object, actor);
+                crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
+            }
         }
     }
     transaction.commit().await?;

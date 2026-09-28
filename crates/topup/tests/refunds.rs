@@ -168,7 +168,7 @@ async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Resul
                 mark_paid_body(OTHER_TX)?,
             )
             .await?;
-        ensure!(status == StatusCode::CONFLICT);
+        ensure!(status == StatusCode::BAD_REQUEST);
         ensure!(
             error["error"]["code"] == "refund_unexpected_state",
             "{error}"
@@ -239,7 +239,7 @@ async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Resul
         let (status, error) = merchant
             .post(&format!("/v1/refunds/{id}/cancel"), Vec::new())
             .await?;
-        ensure!(status == StatusCode::CONFLICT);
+        ensure!(status == StatusCode::BAD_REQUEST);
         ensure!(
             error["error"]["code"] == "refund_unexpected_state",
             "{error}"
@@ -336,13 +336,23 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
             merchant.refund(deposit, "100").await?;
         }
 
-        // Each failure sends one `refund.failed` about its refund, and nothing else is sent.
+        // Each failure sends one `refund.failed` about its refund, and a `refund.updated` with
+        // the status it left.
         let events: Vec<(Uuid, String, String, Uuid)> = sqlx::query_as(
-            "SELECT id, type, object_type, object_id FROM events ORDER BY created, id",
+            "SELECT id, type, object_type, object_id FROM events WHERE type = 'refund.failed' \
+             ORDER BY created, id",
         )
         .fetch_all(pool)
         .await?;
         ensure!(events.len() == failed.len(), "{events:?}");
+        let updated: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE type = 'refund.updated' \
+             AND data -> 'previous_attributes' ->> 'status' = 'pending' \
+             AND data -> 'object' ->> 'status' = 'failed'",
+        )
+        .fetch_one(pool)
+        .await?;
+        ensure!(usize::try_from(updated)? == failed.len());
         for (id, _) in &failed {
             let refund_id = topup::ids::parse(topup::ids::REFUND, id).context("re_ id")?;
             ensure!(
@@ -356,7 +366,11 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
             );
         }
         // Delivered through the outbox, `data.object` is the failed refund with its reason.
-        let bodies = deliver_events(pool, merchant.account.id).await?;
+        let bodies: Vec<Value> = deliver_events(pool, merchant.account.id)
+            .await?
+            .into_iter()
+            .filter(|body| body["type"] == "refund.failed")
+            .collect();
         ensure!(bodies.len() == failed.len(), "{bodies:?}");
         for (id, reason) in &failed {
             let body = bodies
@@ -523,7 +537,7 @@ async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
                 serde_json::to_vec(&json!({"transaction_hash": REFUND_TX, "log_index": 7}))?,
             )
             .await?;
-        ensure!(status == StatusCode::CONFLICT, "{error}");
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
         ensure!(error["error"]["code"] == "transfer_already_used", "{error}");
         // Without a log the transaction is accepted, and verification finds its only log taken.
         let (status, _) = merchant
@@ -611,7 +625,7 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
                 mark_paid_body(REFUND_TX)?,
             )
             .await?;
-        ensure!(status == StatusCode::CONFLICT);
+        ensure!(status == StatusCode::BAD_REQUEST);
         ensure!(
             error["error"]["code"] == "refund_unexpected_state",
             "{error}"
@@ -687,14 +701,14 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
         ensure!(
             actions
                 .iter()
-                .filter(|action| *action == "refund_canceled")
+                .filter(|action| *action == "refund.cancel")
                 .count()
                 == 2
         );
         ensure!(
             actions
                 .iter()
-                .filter(|action| *action == "refund_marked_paid")
+                .filter(|action| *action == "refund.mark_paid")
                 .count()
                 == 1
         );
@@ -771,7 +785,7 @@ async fn only_a_refundable_deposit_to_a_screened_destination_is_refunded() -> Re
                     refund_body(deposit, REFUND_DESTINATION, "100")?,
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT, "{error}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{error}");
             ensure!(
                 error["error"]["code"] == "deposit_not_refundable",
                 "{error}"
@@ -819,7 +833,7 @@ async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> 
                 &product_key,
             ))
             .await?;
-        ensure!(response.status() == StatusCode::CONFLICT);
+        ensure!(response.status() == StatusCode::BAD_REQUEST);
         ensure!(response_json(response).await?["error"]["code"] == "deposit_not_final");
 
         sqlx::query("UPDATE deposits SET final_at = now() WHERE id = $1")
@@ -1035,6 +1049,7 @@ async fn worker_shutdown_cancels_a_hung_read() -> Result<()> {
         let started = Arc::new(Notify::new());
         let worker = RefundVerificationWorker::new(
             pool.clone(),
+            Arc::default(),
             HangingReader {
                 started: Arc::clone(&started),
             },
@@ -1102,9 +1117,9 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             r#"
             WITH event AS (
                 INSERT INTO events (id, account_id, livemode, type, object_type, object_id,
-                                    created, actor)
+                                    created, actor, data)
                 VALUES ($1, $2, true, 'deposit.credited', 'deposit', $3, now() - interval '1 hour',
-                        'system')
+                        'system', '{"object": {}}')
                 RETURNING id, account_id
             )
             INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at)
@@ -1181,7 +1196,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         let response = app
             .oneshot(signed_request(
                 Method::GET,
-                "/v1/admin/report/daily",
+                "/v1/admin/reports/daily",
                 Vec::new(),
                 ADMIN_KID,
                 &admin_key,
@@ -1395,7 +1410,7 @@ impl Merchant {
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
             )
             .await?;
-        ensure!(status == StatusCode::CONFLICT, "{error}");
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
         ensure!(error["error"]["code"] == "paused", "{error}");
         Ok(())
     }
@@ -1479,6 +1494,7 @@ fn test_worker(
 ) -> RefundVerificationWorker<ScriptedReader, ScriptedReader> {
     RefundVerificationWorker::new(
         pool.clone(),
+        Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).expect("route fixture loads")),
         ScriptedReader(Mutex::new(primary.into())),
         ScriptedReader(Mutex::new(secondary.into())),
         RefundVerificationConfig {
@@ -1561,7 +1577,6 @@ async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Val
         .await?;
     let worker = DeliveryWorker::new(
         pool.clone(),
-        Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).map_err(anyhow::Error::msg)?),
         Arc::new(WebhookSigner(SigningKey::from_bytes(&[11; 32]))),
         true,
         DeliveryConfig {

@@ -377,7 +377,6 @@ fn mode_worker(
 ) -> Result<DeliveryWorker<TestSigner>> {
     DeliveryWorker::new(
         pool.clone(),
-        Arc::new(RouteSet::new(Vec::new()).map_err(anyhow::Error::msg)?),
         signer,
         livemode,
         DeliveryConfig {
@@ -410,14 +409,7 @@ fn configured_worker(
     signer: Arc<TestSigner>,
     config: DeliveryConfig,
 ) -> Result<DeliveryWorker<TestSigner>> {
-    DeliveryWorker::new(
-        pool.clone(),
-        Arc::new(RouteSet::new(Vec::new()).map_err(anyhow::Error::msg)?),
-        signer,
-        true,
-        config,
-    )
-    .map_err(Into::into)
+    DeliveryWorker::new(pool.clone(), signer, true, config).map_err(Into::into)
 }
 
 /// Seeds the live account `id` whose one webhook endpoint is `webhook_url`; returns its id.
@@ -518,6 +510,7 @@ async fn seed_mode_event(
     let mut connection = pool.acquire().await?;
     db::enqueue_in(
         &mut connection,
+        &RouteSet::default(),
         &NewOutboxEvent {
             id: event_id,
             event_type: "deposit.credited".to_owned(),
@@ -526,7 +519,9 @@ async fn seed_mode_event(
             object: EventObject::Deposit(deposit_id),
             next_attempt_at: Utc::now() - Duration::seconds(1),
             actor: topup::db::SYSTEM_ACTOR.to_owned(),
+            request: None,
         },
+        None,
     )
     .await?;
     Ok(deposit_id)
@@ -1001,8 +996,14 @@ async fn a_rolled_key_signs_beside_the_new_one_until_its_overlap_ends() -> Resul
     let scope = topup::tenancy::Scope::new(account, true);
     let actor =
         topup::audit::Actor::api_key(topup::ids::format(topup::ids::API_KEY, Uuid::new_v4()));
-    let keys =
-        topup::webhook_keys::roll(&context.app_pool, scope, Duration::hours(1), &actor).await?;
+    let keys = topup::webhook_keys::roll(
+        &context.app_pool,
+        &RouteSet::default(),
+        scope,
+        Duration::hours(1),
+        &actor,
+    )
+    .await?;
     ensure!(
         keys.versions
             .iter()
@@ -1362,6 +1363,16 @@ async fn a_failing_endpoint_is_retried_forever_and_never_disabled() -> Result<()
     seed_account_event(pool, account_id, event_id).await?;
     let delivery = configured_worker(pool, signer, test_config())?;
     ensure!(delivery.run_once().await? == 2);
+    // Each endpoint's latest attempt is its delivery health.
+    for (url, status) in [(&failing.url, 503), (&healthy.url, 200)] {
+        let (at, last): (Option<chrono::DateTime<Utc>>, Option<i32>) = sqlx::query_as(
+            "SELECT last_attempt_at, last_attempt_status FROM webhook_endpoints WHERE url = $1",
+        )
+        .bind(url)
+        .fetch_one(pool)
+        .await?;
+        ensure!(at.is_some() && last == Some(status), "{url}: {last:?}");
+    }
 
     // Weeks of failures later, the delivery is still retried within the hour.
     sqlx::query(
@@ -1371,9 +1382,10 @@ async fn a_failing_endpoint_is_retried_forever_and_never_disabled() -> Result<()
     .bind(failing_id)
     .execute(pool)
     .await?;
+    // Events are append-only for the service; only the owner can age one.
     sqlx::query("UPDATE events SET created = now() - interval '30 days' WHERE id = $1")
         .bind(event_id)
-        .execute(pool)
+        .execute(&context.owner_pool)
         .await?;
     let before = Utc::now();
     ensure!(delivery.run_once().await? == 1);

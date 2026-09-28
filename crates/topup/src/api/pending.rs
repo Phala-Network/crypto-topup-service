@@ -15,7 +15,7 @@ use crate::locks::{RateLock, RateLockStatus};
 
 use super::error::ApiError;
 use super::models::Payment;
-use sqlx::PgPool;
+use sqlx::PgConnection;
 
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s (12.8 to 19 minutes).
@@ -28,18 +28,18 @@ const ESTIMATED_FINALITY_DELAY: TimeDelta = TimeDelta::minutes(15);
 /// transfer at all. A reversed deposit is no payment. On a canceled quote no payment matches,
 /// because every payment is valued at spot.
 pub(super) async fn quote_payment(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     route: &RouteFile,
     lock: &RateLock,
 ) -> Result<Option<Payment>, ApiError> {
-    let deposits = address_deposits(pool, lock.address_id).await?;
+    let deposits = address_deposits(&mut *connection, lock.address_id).await?;
     if let Some(consumed) = deposits
         .iter()
         .find(|deposit| Some(deposit.deposit_id) == lock.consumed_by)
     {
         return Ok(Some(payment(route, lock, consumed)));
     }
-    let pending = db::list_address_pending(pool, lock.address_id)
+    let pending = db::list_address_pending(&mut *connection, lock.address_id)
         .await?
         .into_iter()
         .filter(|transfer| {
@@ -137,7 +137,10 @@ fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Payment {
 
 type DepositRow = (Uuid, i64, String, String, DateTime<Utc>, String, String);
 
-async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observed>, ApiError> {
+async fn address_deposits(
+    connection: &mut PgConnection,
+    address_id: Uuid,
+) -> Result<Vec<Observed>, ApiError> {
     let rows = sqlx::query_as::<_, DepositRow>(
         r#"
         SELECT id, chain_id, tx_hash, state, block_time, asset_contract, amount_atomic::text
@@ -147,7 +150,7 @@ async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observe
         "#,
     )
     .bind(address_id)
-    .fetch_all(pool)
+    .fetch_all(connection)
     .await?;
     rows.into_iter()
         .map(

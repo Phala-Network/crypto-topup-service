@@ -691,6 +691,7 @@ async fn run_confirm_scenario(
     );
     let pump = Pump::new(
         database.app_pool.clone(),
+        Arc::default(),
         Arc::new(wait_steps().with_detected(Box::new(confirm))),
         PumpConfig::default(),
     )?;

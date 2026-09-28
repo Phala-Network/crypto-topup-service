@@ -470,6 +470,7 @@ pub async fn claim_deposit(
 /// Applies a lease-token CAS and writes its timeline plus outbox events in the same transaction.
 pub async fn apply_transition(
     transaction: &mut Transaction<'_, Postgres>,
+    routes: &crate::routes::RouteSet,
     deposit_id: Uuid,
     expected_state: DepositState,
     lease_token: Uuid,
@@ -620,13 +621,15 @@ pub async fn apply_transition(
     .execute(&mut **transaction)
     .await?;
 
-    for event in writes.outbox_events {
-        super::outbox::enqueue_in(transaction, event).await?;
-    }
-
     // A deposit that is final when it is credited, or credited when it becomes final, is swept
     // at once by a finalized `Flushed` event already indexed after it.
     super::mark_swept(transaction, Some(deposit_id), &[]).await?;
+
+    // Rendered after every write, so each event's object shows the deposit as this transition
+    // leaves it.
+    for event in writes.outbox_events {
+        super::outbox::enqueue_in(transaction, routes, event, None).await?;
+    }
 
     Ok(ApplyTransitionResult::Applied)
 }

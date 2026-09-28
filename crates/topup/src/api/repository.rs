@@ -20,13 +20,15 @@ use uuid::Uuid;
 use crate::api_keys::{self, IssuedKey};
 use crate::audit::{self, Actor};
 use crate::db::Customer;
+use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
-    DailyReportResponse, DepositAdmin, DepositEventDelivery, DepositTransition, NudgeResponse,
-    ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
+    DailyReportResponse, DepositAdmin, DepositEventDelivery, DepositTransition,
+    FailingWebhookEndpoint, NudgeResponse, ReconciliationBlockLiftResponse,
+    ReconciliationBlockReport, RouteDailyReport,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -187,6 +189,7 @@ pub struct AccountChanges {
 /// without a live key issues its first live key.
 pub async fn update_account(
     pool: &PgPool,
+    routes: &RouteSet,
     account_id: Uuid,
     changes: &AccountChanges,
     actor: &Actor,
@@ -202,6 +205,12 @@ pub async fn update_account(
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(ApiError::not_found)?;
+    let object = crate::db::EventObject::Account(account_id);
+    let mut previous = Vec::with_capacity(2);
+    for livemode in [false, true] {
+        let scope = Scope::new(account_id, livemode);
+        previous.push(crate::db::render(&mut transaction, routes, scope, object).await?);
+    }
     let after = sqlx::query_as::<_, AdminAccount>(concat!(
         "UPDATE accounts SET charges_enabled = COALESCE($2, charges_enabled), \
          restricted = COALESCE($3, restricted), contact = COALESCE($4, contact) \
@@ -272,19 +281,10 @@ pub async fn update_account(
     )
     .await?;
     for &livemode in modes {
-        crate::db::enqueue_in(
-            &mut transaction,
-            &crate::db::NewOutboxEvent {
-                id: Uuid::new_v4(),
-                event_type: "account.updated".to_owned(),
-                account_id,
-                livemode,
-                object: crate::db::EventObject::Account(account_id),
-                next_attempt_at: Utc::now(),
-                actor: api_keys::event_actor(actor),
-            },
-        )
-        .await?;
+        let scope = Scope::new(account_id, livemode);
+        let event = crate::db::NewOutboxEvent::new("account.updated", scope, object, actor);
+        let before = &previous[usize::from(livemode)];
+        crate::db::enqueue_in(&mut transaction, routes, &event, Some(before)).await?;
     }
     transaction.commit().await?;
     Ok(IssuedAccount {
@@ -358,8 +358,13 @@ pub struct NewRefund<'a> {
 
 /// Creates a `pending` refund after every policy check and returns its id: the deposit is final
 /// and refundable, nothing pauses refunds, and the amount fits the deposit's remainder after its
-/// pending and succeeded refunds, which it then reserves.
-pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uuid, ApiError> {
+/// pending and succeeded refunds, which it then reserves. Audited, and announced as
+/// `refund.created`.
+pub async fn request_refund(
+    pool: &PgPool,
+    routes: &RouteSet,
+    refund: &NewRefund<'_>,
+) -> Result<Uuid, ApiError> {
     let mut transaction = pool.begin().await?;
     let row = sqlx::query(
         r#"
@@ -453,19 +458,35 @@ pub async fn request_refund(pool: &PgPool, refund: &NewRefund<'_>) -> Result<Uui
         &mut transaction,
         Some(refund.scope.account_id()),
         refund.actor,
-        "refund_requested",
-        &format!("refund:{refund_id}"),
+        "refund.create",
+        &refund_subject(refund_id),
     )
     .await?;
+    let event = crate::db::NewOutboxEvent::new(
+        "refund.created",
+        refund.scope,
+        crate::db::EventObject::Refund(refund_id),
+        refund.actor,
+    );
+    crate::db::enqueue_in(&mut transaction, routes, &event, None).await?;
     transaction.commit().await?;
     Ok(refund_id)
 }
 
+fn refund_subject(refund_id: Uuid) -> String {
+    format!(
+        "refund:{}",
+        crate::ids::format(crate::ids::REFUND, refund_id)
+    )
+}
+
 /// Attaches the merchant's refund transaction to a pending refund; the verification worker checks
-/// it at finality. Repeating the same transaction is a no-op; another one is `409`, since only the
-/// verification outcome or a cancel ends a pending refund.
+/// it at finality. Repeating the same transaction is a no-op; another one is
+/// `refund_unexpected_state`, since only the verification outcome or a cancel ends a pending
+/// refund. Audited, and announced as `refund.updated`.
 pub async fn mark_refund_paid(
     pool: &PgPool,
+    routes: &RouteSet,
     scope: Scope,
     refund_id: Uuid,
     tx_hash: B256,
@@ -497,6 +518,8 @@ pub async fn mark_refund_paid(
     if status != "pending" {
         return Err(ApiError::refund_unexpected_state(status));
     }
+    let object = crate::db::EventObject::Refund(refund_id);
+    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let updated = sqlx::query(
         r#"
         UPDATE refunds
@@ -522,18 +545,22 @@ pub async fn mark_refund_paid(
         &mut transaction,
         Some(scope.account_id()),
         actor,
-        "refund_marked_paid",
-        &format!("refund:{refund_id}"),
+        "refund.mark_paid",
+        &refund_subject(refund_id),
         &tx_hash,
     )
     .await?;
+    let event = crate::db::NewOutboxEvent::new("refund.updated", scope, object, actor);
+    crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     transaction.commit().await?;
     Ok(())
 }
 
 /// Cancels a pending refund, releasing its reservation; canceling a canceled refund is a no-op.
+/// Audited, and announced as `refund.updated`.
 pub async fn cancel_refund(
     pool: &PgPool,
+    routes: &RouteSet,
     scope: Scope,
     refund_id: Uuid,
     actor: &Actor,
@@ -547,6 +574,8 @@ pub async fn cancel_refund(
         "pending" => {}
         _ => return Err(ApiError::refund_unexpected_state(status)),
     }
+    let object = crate::db::EventObject::Refund(refund_id);
+    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     sqlx::query("UPDATE refunds SET status = 'canceled', updated_at = now() WHERE id = $1")
         .bind(refund_id)
         .execute(&mut *transaction)
@@ -555,10 +584,12 @@ pub async fn cancel_refund(
         &mut transaction,
         Some(scope.account_id()),
         actor,
-        "refund_canceled",
-        &format!("refund:{refund_id}"),
+        "refund.cancel",
+        &refund_subject(refund_id),
     )
     .await?;
+    let event = crate::db::NewOutboxEvent::new("refund.updated", scope, object, actor);
+    crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -942,6 +973,7 @@ pub async fn daily_report(
     pool: &PgPool,
     routes: &[RouteFile],
     generated_at: DateTime<Utc>,
+    failing_for_hours: u32,
 ) -> Result<DailyReportResponse, ApiError> {
     let mut reports = BTreeMap::<String, RouteDailyReport>::new();
     for route in routes {
@@ -1168,13 +1200,77 @@ pub async fn daily_report(
     .map(TryInto::try_into)
     .collect::<Result<_, _>>()?;
 
+    let failing_webhook_endpoints =
+        failing_webhook_endpoints(pool, generated_at, failing_for_hours).await?;
+
     Ok(DailyReportResponse {
         generated_at,
         exposure_minor: Some(exposure_minor),
         routes: reports.into_values().collect(),
         reconciliation: None,
         reconciliation_blocks,
+        failing_for_hours,
+        failing_webhook_endpoints,
     })
+}
+
+/// Enabled webhook endpoints of every account whose oldest undelivered event is older than
+/// `hours` at `at`, oldest first: deliveries are retried until delivered and never given up on, so
+/// such an endpoint has failed for that long and its merchant has not fixed it (platform health).
+async fn failing_webhook_endpoints(
+    pool: &PgPool,
+    at: DateTime<Utc>,
+    hours: u32,
+) -> Result<Vec<FailingWebhookEndpoint>, ApiError> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            bool,
+            String,
+            i64,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Option<i32>,
+        ),
+    >(
+        r#"
+        SELECT endpoint.id, account.public_id, endpoint.livemode, endpoint.url,
+               count(*)::bigint, min(event.created), endpoint.last_attempt_at,
+               endpoint.last_attempt_status
+        FROM webhook_deliveries AS delivery
+        JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
+        JOIN events AS event ON event.id = delivery.event_id
+        JOIN accounts AS account ON account.id = endpoint.account_id
+        WHERE delivery.delivered_at IS NULL AND delivery.failed_at IS NULL
+          AND endpoint.status = 'enabled' AND endpoint.deleted_at IS NULL
+        GROUP BY endpoint.id, account.public_id
+        HAVING min(event.created) < $1 - make_interval(hours => $2)
+        ORDER BY min(event.created), endpoint.id
+        "#,
+    )
+    .bind(at)
+    .bind(i32::try_from(hours).map_err(|_| ApiError::internal())?)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, account, livemode, url, pending, oldest, last_attempt_at, status)| {
+                FailingWebhookEndpoint {
+                    id: crate::ids::format(crate::ids::WEBHOOK_ENDPOINT, id),
+                    account,
+                    livemode,
+                    url,
+                    pending_deliveries: pending,
+                    oldest_pending_at: oldest,
+                    last_attempt_at,
+                    last_attempt_status: status.and_then(|status| u16::try_from(status).ok()),
+                }
+            },
+        )
+        .collect())
 }
 
 fn empty_route_report(route: &RouteFile) -> RouteDailyReport {

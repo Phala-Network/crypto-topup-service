@@ -214,7 +214,7 @@ async fn rotate_retires_the_address_and_issues_the_next_version_on_every_chain()
                     Value::Null,
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "deposit_address_retired");
             let audited: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM audit WHERE action = 'deposit_address.rotate' \
@@ -341,7 +341,7 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
                     json!({"client_reference_id": "team-3"}),
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "deposit_address_cap_exceeded");
             // At the cap, existing addresses are still returned and rotated: rotation keeps the
             // count of active addresses.
@@ -363,7 +363,7 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
                 )
                 .await?;
             ensure!(status == StatusCode::TOO_MANY_REQUESTS, "{body}");
-            ensure!(body["error"]["code"] == "rate_limit");
+            ensure!(body["error"]["code"] == "customer_rate_limit");
             // Another customer's rotations are not limited by this one's.
             let second = fixture.create(&fixture.live_key, "team-2").await?;
             fixture.rotate(&fixture.live_key, &second).await?;
@@ -379,7 +379,7 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
                     json!({"client_reference_id": "team-1"}),
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT && body["error"]["code"] == "paused");
+            ensure!(status == StatusCode::BAD_REQUEST && body["error"]["code"] == "paused");
             let (status, _) = fixture
                 .request(
                     Method::GET,
@@ -420,7 +420,7 @@ async fn a_frozen_chain_gets_no_new_network() -> Result<()> {
                     json!({"client_reference_id": "team-3"}),
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
             ensure!(body["error"]["code"] == "chain_frozen");
             ensure!(fixture.create(&fixture.live_key, "team-2").await? == new);
             Ok(())

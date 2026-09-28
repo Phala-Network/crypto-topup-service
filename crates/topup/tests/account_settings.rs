@@ -128,7 +128,7 @@ async fn a_merchant_pauses_its_own_quotes_and_never_lifts_the_operators_pause() 
                     json!({"client_reference_id": "team-42"}),
                 )
                 .await?;
-            ensure!(status == StatusCode::CONFLICT && body["error"]["code"] == "paused");
+            ensure!(status == StatusCode::BAD_REQUEST && body["error"]["code"] == "paused");
 
             // The operator pauses too; the merchant's resume lifts only its own pause.
             seed::set_account_paused_scopes(pool, fixture.account.id, &["quotes".to_owned()])

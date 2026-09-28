@@ -4,8 +4,12 @@
 //! `Idempotent-Replayed: true`; a repeat with another request is `400 idempotency_error`; a repeat
 //! while the first request still runs is `409 idempotency_key_in_use`.
 //!
-//! A response that says nothing about the request (`429` and `5xx`) is not stored, so a retry
-//! runs the request again. An API key's `secret` is never stored: a replayed key creation or roll
+//! As Stripe's, the result is saved once the handler starts executing, whatever it is, including
+//! a `500`: a retry after a failure whose effects are unknown replays it rather than running the
+//! request twice (<https://docs.stripe.com/api/idempotent_requests>). A request that did not
+//! execute is not saved, so a retry with the same key runs it: one that failed validation
+//! (`parameter_*`), was rate limited (`429`), or met a temporary unavailability (`503`), marked
+//! [`NotExecuted`]. An API key's `secret` is never stored: a replayed key creation or roll
 //! returns the key without it. A quote's `client_secret` is stored with its response; it reads
 //! only the quote's public view, which anyone holding the database can read anyway. A key held by
 //! a request that never finished (the process stopped) is released to a repeat of the same request
@@ -22,7 +26,7 @@ use sqlx::PgPool;
 
 use super::AppState;
 use super::auth::Merchant;
-use super::error::ApiError;
+use super::error::{ApiError, NotExecuted};
 use super::extract::idempotency_key;
 use crate::tenancy::Scope;
 
@@ -78,7 +82,7 @@ pub(crate) async fn idempotent_post(
 
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
     let status = response.status();
-    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+    if response.extensions().get::<NotExecuted>().is_some() {
         release(&state.pool, scope, &key).await;
         return response;
     }

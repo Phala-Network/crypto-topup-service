@@ -674,7 +674,8 @@ impl FastChain {
         route.screening.min_credit_minor = 1;
         route.screening.min_deposit_atomic = AtomicAmount::new(U256::ZERO);
         route.validate()?;
-        let routes = chain_routes(&RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?)
+        let route_set = Arc::new(RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?);
+        let routes = chain_routes(&route_set)
             .into_iter()
             .next()
             .context("one chain route")?;
@@ -708,6 +709,7 @@ impl FastChain {
         )?;
         let pump = Pump::new(
             pool.clone(),
+            Arc::clone(&route_set),
             Arc::new(StepSet::new(
                 Box::new(confirm),
                 Box::new(screen),
@@ -717,6 +719,7 @@ impl FastChain {
         )?;
         let watch = FinalityWatch::single(
             pool.clone(),
+            route_set,
             CHAIN_ID,
             reader(&anvil.rpc_url)?,
             secondary(&anvil.rpc_url)?,

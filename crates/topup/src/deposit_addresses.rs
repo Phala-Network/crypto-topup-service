@@ -183,9 +183,13 @@ pub enum DepositAddressError {
     /// The account's cap on active deposit addresses in this mode is reached.
     #[error("the account has {0} active deposit addresses, its cap")]
     CapReached(i64),
-    /// The customer rotated too often in the last hour.
+    /// The customer rotated too often in the last hour; a rotation is admitted again after
+    /// `retry_after` seconds.
     #[error("deposit address rotation limit exceeded")]
-    RateLimited,
+    RateLimited {
+        /// Seconds until the oldest counted rotation leaves the hour.
+        retry_after: u64,
+    },
     /// No chain accepts new networks (every chain of the mode is frozen or paused), so no address
     /// can be issued.
     #[error("no chain accepts new deposit addresses")]
@@ -346,7 +350,26 @@ pub async fn rotate(
     .fetch_one(&mut *transaction)
     .await?;
     if recent >= MAX_ROTATIONS_PER_HOUR {
-        return Err(DepositAddressError::RateLimited);
+        // Admitted again when the `MAX_ROTATIONS_PER_HOUR`-th newest rotation leaves the hour.
+        let seconds: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT GREATEST(1, ceil(extract(epoch FROM retired_at + interval '1 hour' - now())))::bigint
+            FROM deposit_addresses
+            WHERE customer_id = $1 AND status = 'retired'
+              AND retired_at >= now() - interval '1 hour'
+            ORDER BY retired_at DESC
+            OFFSET $2 LIMIT 1
+            "#,
+        )
+        .bind(customer.id)
+        .bind(MAX_ROTATIONS_PER_HOUR - 1)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        return Err(DepositAddressError::RateLimited {
+            retry_after: seconds
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .unwrap_or(3600),
+        });
     }
     require_chains(issuable, &chains)?;
     retire(&mut transaction, id).await?;
