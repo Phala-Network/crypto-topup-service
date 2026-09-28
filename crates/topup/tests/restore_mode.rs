@@ -652,6 +652,19 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
                 "reason": "the merchant's export",
             });
             let path = "/v1/admin/restore/deposit_addresses";
+            // A version that disagrees with the address is refused before anything is issued.
+            let mut disagreeing = request.clone();
+            disagreeing["version"] = json!(2);
+            let refused = harness.admin(Method::POST, path, &disagreeing).await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{}",
+                refused.body
+            );
+            let versions: i64 = sqlx::query_scalar("SELECT max(version) FROM deposit_addresses")
+                .fetch_one(&harness.pool)
+                .await?;
+            ensure!(versions == 1);
             let reissued = harness.admin(Method::POST, path, &request).await?;
             ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
             ensure!(reissued.body["reissued"] == true);

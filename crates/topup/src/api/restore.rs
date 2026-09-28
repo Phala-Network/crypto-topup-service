@@ -374,14 +374,9 @@ pub(crate) async fn reissue_deposit_address(
                 .map_err(|_| ApiError::invalid_param("address", "address must be an address"))
         })
         .transpose()?;
-    let target = match (request.version, address) {
-        (Some(version), _) => ReissueTarget::Version(version),
-        (None, Some(address)) => ReissueTarget::Address(address),
-        (None, None) => {
-            return Err(ApiError::bad_request(
-                "send the address, its version, or both",
-            ));
-        }
+    let target = ReissueTarget {
+        version: request.version,
+        address,
     };
     let id = request
         .id
@@ -417,17 +412,6 @@ pub(crate) async fn reissue_deposit_address(
     )
     .await
     .map_err(super::deposit_addresses::map_error)?;
-    if let (Some(version), Some(address)) = (request.version, address) {
-        let holds = reissued
-            .networks
-            .iter()
-            .any(|network| network.address == address);
-        if reissued.version != version || !holds {
-            return Err(ApiError::bad_request(
-                "the address is not the customer's address of this version",
-            ));
-        }
-    }
     Ok(Json(RestoreDepositAddressResponse {
         reissued: issued,
         deposit_address: super::deposit_addresses::deposit_address_object(

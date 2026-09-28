@@ -32,6 +32,7 @@ writer_pid=
 samples_file=
 routes_dir=
 admin_dir=
+switch_lsn=
 seed_container="$project-seed"
 # The source runs the service variant of the rendered compose; the replacement boots the
 # restore-check variant (deploy/RESTORE.md).
@@ -260,6 +261,7 @@ delivered_event=$(jq -cn --arg address "$consistency_address_v2" '{
         amount: 25, currency: "usd"}}}')
 kept_key=
 lost_key=
+public_origin=
 
 # A well-formed test-mode secret key (crates/topup/src/api_keys.rs): 43 random base62 characters
 # and the base62 CRC-32 of everything before the checksum.
@@ -357,13 +359,14 @@ print(response.read().decode())
 }
 
 # An admin-signed request with the drill's admin key (deploy/runbooks/sign-admin-request.sh), for
-# the replacement's public origin. A signature is single-use, so each is made in its own second.
+# the replacement's TOPUP_PUBLIC_ORIGIN. A signature is single-use, so each is made in its own
+# second.
 admin_call() {
     sleep 1
     printf '%s' "${3:-}" >"$admin_dir/body"
     local headers
     mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" "$1" \
-        "https://topup.localhost$2" "$admin_dir/body" "$admin_dir/admin.pem" local-admin/v1)
+        "$public_origin$2" "$admin_dir/body" "$admin_dir/admin.pem" local-admin/v1)
     topup_call "$1" "$2" 'content-type: application/json' "${headers[@]}" <"$admin_dir/body"
 }
 
@@ -386,6 +389,7 @@ expect_call() {
 # and deposit address, and keeps the delivered event as delivered (deploy/runbooks/restore.md).
 check_consistency_after_restore() {
     local answer
+    public_origin=$(dc config --format json | jq -er '.services.topup.environment.TOPUP_PUBLIC_ORIGIN')
     answer=$(admin_call GET /v1/admin/restore)
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg id "$(jq -r .restore_id <<<"$restore_report")" \
@@ -645,7 +649,8 @@ read -r first_marker timed_wal <<<"$first"
 test -n "$first_marker" && test -n "$timed_wal"
 if [ "$mode" = controlled ]; then
     last_marker=$(record_sample)
-    psql_value 'SELECT pg_switch_wal()' >/dev/null
+    # The end of the switched segment: everything up to it is archived, so it is restored.
+    switch_lsn=$(psql_value 'SELECT pg_switch_wal()')
     wait_for_fast "forced WAL close" wal_closed "$timed_wal"
 else
     samples_file=$(mktemp)
@@ -685,7 +690,11 @@ done
 
 expected_heartbeat_at=$(psql_value \
     "SELECT to_char(max(recorded_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM heartbeat")
-expected_lsn=$(psql_value 'SELECT pg_current_wal_lsn()')
+if [ "$mode" = controlled ]; then
+    expected_lsn=$switch_lsn
+else
+    expected_lsn=$(psql_value 'SELECT pg_current_wal_lsn()')
+fi
 expected_marker=$(psql_value 'SELECT max(id) FROM restore_drill_marker')
 last_archived_wal=$(psql_value 'SELECT last_archived_wal FROM pg_stat_archiver')
 test -n "$last_archived_wal"
@@ -698,11 +707,10 @@ if [ "$mode" = controlled ]; then
 fi
 rto_started=$(date +%s)
 dc stop backup >/dev/null
-if [ "$mode" = crash ]; then
-    docker kill "${project}-postgres-1" >/dev/null
-else
-    dc stop postgres >/dev/null
-fi
+# The controlled source is killed too, once its consistency writes are made: a clean shutdown
+# switches and archives the last segment (PostgreSQL's ShutdownXLOG with archiving on), which would
+# keep them.
+docker kill "${project}-postgres-1" >/dev/null
 dc rm -f backup postgres heartbeat migrate restore-check >/dev/null 2>&1 || true
 remove_pgdata_volume
 # The key tmpfs volumes die with the source CVM; the replacement derives the backup key and

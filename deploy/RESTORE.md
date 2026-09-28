@@ -288,7 +288,8 @@ wrong key fails the restore command (`126`), then boot the whole restore-check v
 volume with read-only credentials and require promotion with archiving off, an `ok` report with a
 complete reconciliation, `503` on writes, the RPO and an RTO of at most 3600 seconds, and an
 unchanged object listing. `controlled` also runs the business-consistency scenario: after the last
-archived WAL, the source revokes an API key, rotates a customer's deposit address, and records a
+archived WAL, and before PostgreSQL is killed (a clean shutdown would archive them), the source
+revokes an API key, rotates a customer's deposit address, and records a
 delivered `deposit.credited`, and those writes are lost with the source. The drill requires that
 the replacement is frozen (merchant writes `503 service_restoring`, `GET /v1/admin/restore`
 `frozen`), that the lost key works until the operator revokes it again by prefix and then answers

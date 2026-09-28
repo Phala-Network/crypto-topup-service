@@ -405,13 +405,15 @@ pub async fn rotate(
 /// How far past a customer's latest restored version [`reissue`] derives addresses to find one.
 pub const REISSUE_SEARCH_VERSIONS: u64 = 32;
 
-/// The version of a customer's deposit address [`reissue`] brings back.
+/// The version of a customer's deposit address [`reissue`] brings back: `version`, or the version
+/// whose address over the account's current treasury of some chain is `address`; with both, they
+/// must agree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReissueTarget {
-    /// This version.
-    Version(u64),
-    /// The version whose address, over the account's current treasury of some chain, is this one.
-    Address(EvmAddress),
+pub struct ReissueTarget {
+    /// The version.
+    pub version: Option<u64>,
+    /// An address of the version.
+    pub address: Option<EvmAddress>,
 }
 
 /// Re-issues after a restore the customer's deposit address that was given out after the restore
@@ -460,14 +462,9 @@ pub async fn reissue(
             version,
         )
     };
-    let version = match target {
-        ReissueTarget::Version(0) => {
-            return Err(DepositAddressError::InvalidInput(
-                "version must be at least 1",
-            ));
-        }
-        ReissueTarget::Version(version) => version,
-        ReissueTarget::Address(address) => {
+    let found = match target.address {
+        None => None,
+        Some(address) => {
             let recorded: Option<i64> = sqlx::query_scalar(
                 r#"
                 SELECT deposit_address.version
@@ -482,7 +479,7 @@ pub async fn reissue(
             .bind(format!("{address:#x}"))
             .fetch_optional(&mut *transaction)
             .await?;
-            match recorded {
+            Some(match recorded {
                 Some(version) => {
                     u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?
                 }
@@ -502,7 +499,25 @@ pub async fn reissue(
                         "the address is not one of the customer's deposit addresses over the \
                          account's current treasuries",
                     ))?,
-            }
+            })
+        }
+    };
+    let version = match (target.version, found) {
+        (Some(0), _) => {
+            return Err(DepositAddressError::InvalidInput(
+                "version must be at least 1",
+            ));
+        }
+        (Some(version), Some(found)) if version != found => {
+            return Err(DepositAddressError::InvalidInput(
+                "the address is not the customer's address of this version",
+            ));
+        }
+        (Some(version), _) | (None, Some(version)) => version,
+        (None, None) => {
+            return Err(DepositAddressError::InvalidInput(
+                "send the address, its version, or both",
+            ));
         }
     };
     if version <= latest {
