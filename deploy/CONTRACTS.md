@@ -165,7 +165,7 @@ implementation, every sample forwarder, and runtime code hashes must be identica
 
 ## Route and compose update
 
-Copy the verified `factory` and `implementation`, and the verified treasury Safe, into the chain configuration,
+Copy the verified `factory` and `implementation` into the chain configuration,
 the route configuration, and the matching configuration embedded in `deploy/docker-compose.yml`.
 Create a new route version; never mutate the contract tuple of an enabled version. Then run:
 
@@ -186,5 +186,8 @@ record.
 
 There is no contract rollback, upgrade, or setter. A failed or superseded deployment remains on
 chain; correct the code and deploy a new factory under a new salt and route version, leaving
-historical versions available for existing deposits. A treasury change needs no new factory: new
-forwarders are derived for the new treasury, and existing forwarders keep paying theirs.
+historical versions available for existing deposits. A treasury change needs no new factory and
+no route change: treasuries are the accounts', set through the API
+([Treasury change](runbooks/treasury-change.md)); new forwarders are derived for the new treasury,
+and existing forwarders keep paying theirs. Phala's finance Safe is Phala Cloud's account's
+treasury, verified here and proven through the API like any merchant's.

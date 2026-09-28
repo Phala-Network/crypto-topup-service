@@ -90,7 +90,7 @@ gas from a public faucet.
 2. Render and validate the integrator's route (one route per product; the slug names the route):
 
    ```sh
-   FORWARDER_FACTORY=0x... TREASURY=0x... TEST_TOKEN=0x... \
+   FORWARDER_FACTORY=0x... TEST_TOKEN=0x... \
      SANCTIONS_ORACLE=0x... PRODUCT_SLUG=acme \
      deploy/sandbox/render-route.sh > sandbox-acme.yaml
    docker run --rm -v "$PWD/sandbox-acme.yaml:/route.yaml:ro" "$TOPUP_IMAGE" \
@@ -149,6 +149,12 @@ Write a configuration file; the fields are those of `ProductConfig` in
 }
 ```
 
+- `treasury` is your account's test-mode treasury on Sepolia, which quotes need. Set it once
+  through the API with an EIP-4361 proof (design D10): from a test EOA key,
+  `deploy/sandbox/set-treasury.sh --api https://sandbox.topup.example --key-file
+  ~/acme-sandbox.key --chain-id 11155111 --private-key 0x…` requests the challenge, signs it,
+  and submits it; a Safe signs the challenge as a Safe message instead. Test-mode treasuries
+  apply at once.
 - `listen_host` and `listen_port` are where the reference endpoint listens; `public_url` is the
   HTTPS URL registered with the operator, forwarded to it by your tunnel or reverse proxy. The
   endpoint verifies signatures against `public_url`, never the incoming `Host` header.

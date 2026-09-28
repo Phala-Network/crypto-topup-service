@@ -58,7 +58,8 @@ impl Harness {
             rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
             rate_limits: Arc::new(topup::api::ApiRateLimiter::new(limits)),
-            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
         Ok(Self {
             app: topup::api::router(state).0,

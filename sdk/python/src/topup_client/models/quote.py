@@ -55,6 +55,10 @@ class Quote:
             Always sent; optional in the schema so clients also parse objects from servers, and
             events rendered, before metadata.
         payment (None | QuotePayment | Unset):
+        treasury (str | Unset): The treasury the address pays: your treasury of the chain when the quote was created.
+            The
+            address is the factory's `CREATE2` over it and the salt. Always sent; optional in the
+            schema so clients also parse quotes, and events rendered, before it existed.
     """
 
     account_id: str
@@ -76,6 +80,7 @@ class Quote:
     livemode: bool | Unset = UNSET
     metadata: QuoteMetadata | Unset = UNSET
     payment: None | QuotePayment | Unset = UNSET
+    treasury: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -139,6 +144,8 @@ class Quote:
         else:
             payment = self.payment
 
+        treasury = self.treasury
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -169,6 +176,8 @@ class Quote:
             field_dict["metadata"] = metadata
         if payment is not UNSET:
             field_dict["payment"] = payment
+        if treasury is not UNSET:
+            field_dict["treasury"] = treasury
 
         return field_dict
 
@@ -259,6 +268,8 @@ class Quote:
 
         payment = _parse_payment(d.pop("payment", UNSET))
 
+        treasury = d.pop("treasury", UNSET)
+
         quote = cls(
             account_id=account_id,
             address=address,
@@ -279,6 +290,7 @@ class Quote:
             livemode=livemode,
             metadata=metadata,
             payment=payment,
+            treasury=treasury,
         )
 
         quote.additional_properties = d

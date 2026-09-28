@@ -328,7 +328,7 @@ pub(crate) async fn create_refund(
     let metadata = metadata::on_create(request.metadata.as_ref())?;
     let route = state.refund_route(merchant.scope, deposit_id).await?;
     let actor = merchant.actor();
-    match state.refund_screening.screen(route, destination).await {
+    match state.screening.screen(route, destination).await {
         DestinationScreening::Clear => {}
         DestinationScreening::Sanctioned => return Err(ApiError::destination_sanctioned()),
         DestinationScreening::Unavailable => {

@@ -12,8 +12,9 @@ refundable customer case, or a custody mismatch.
 
 ## First steps
 
-1. Read the route's `rejected_holds_atomic` and `treasury_balance_atomic` in the daily report
-   (`admin GET /v1/admin/report/daily`).
+1. Read the route's `rejected_holds_atomic` in the daily report
+   (`admin GET /v1/admin/report/daily`); `$TREASURY` below is the treasury the deposit's address
+   pays (the support lookup's address row), which may differ from the account's current one.
 2. Find the deposits with a support lookup by address or `tx_hash`: state, reason, and timeline.
 3. Check the chain:
 

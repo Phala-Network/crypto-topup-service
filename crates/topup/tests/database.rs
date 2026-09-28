@@ -601,6 +601,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("account_limits", OPERATIONAL),
     ("api_keys", OPERATIONAL),
     ("treasuries", OPERATIONAL),
+    ("treasury_challenges", OPERATIONAL),
     ("route_pauses", OPERATIONAL),
     ("seen_signatures", OPERATIONAL),
     ("customers", OPERATIONAL),

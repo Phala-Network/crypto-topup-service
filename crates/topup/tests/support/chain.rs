@@ -205,6 +205,17 @@ pub fn contracts_dir() -> PathBuf {
 
 /// Deploys `contract` (a `path:Name` under `contracts/`) with the Anvil deployer key.
 pub fn forge_create(rpc_url: &str, contract: &str, constructor_args: &[&str]) -> Result<Address> {
+    forge_create_in_profile(rpc_url, "default", contract, constructor_args)
+}
+
+/// Deploys `contract` built with the Foundry `profile` of `contracts/foundry.toml`, such as `safe`
+/// for the vendored Safe v1.4.1 built as Safe released it.
+pub fn forge_create_in_profile(
+    rpc_url: &str,
+    profile: &str,
+    contract: &str,
+    constructor_args: &[&str],
+) -> Result<Address> {
     let mut arguments = vec![
         "create",
         "--rpc-url",
@@ -223,7 +234,12 @@ pub fn forge_create(rpc_url: &str, contract: &str, constructor_args: &[&str]) ->
         let _guard = FORGE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        run_checked("forge", &arguments, Some(&contracts_dir()))?
+        run_checked_with_env(
+            "forge",
+            &arguments,
+            Some(&contracts_dir()),
+            &[("FOUNDRY_PROFILE", profile)],
+        )?
     };
     let result: Value = serde_json::from_slice(&output.stdout)?;
     let address = result
@@ -243,8 +259,18 @@ pub fn command_available(command: &str) -> bool {
 }
 
 pub fn run_checked(command: &str, arguments: &[&str], directory: Option<&Path>) -> Result<Output> {
+    run_checked_with_env(command, arguments, directory, &[])
+}
+
+pub fn run_checked_with_env(
+    command: &str,
+    arguments: &[&str],
+    directory: Option<&Path>,
+    environment: &[(&str, &str)],
+) -> Result<Output> {
     let mut invocation = Command::new(command);
     invocation.args(arguments);
+    invocation.envs(environment.iter().copied());
     if let Some(directory) = directory {
         invocation.current_dir(directory);
     }

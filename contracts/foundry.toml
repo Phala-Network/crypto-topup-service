@@ -16,6 +16,22 @@ bytecode_hash = "none"
 cbor_metadata = false
 fs_permissions = [{ access = "read-write", path = "./test-vectors" }]
 
+# Safe v1.4.1 (lib/safe-smart-account, a test-only dependency) built as Safe released it, with solc
+# 0.7.6 (its hardhat.config.ts default), for the service's end-to-end EIP-1271 treasury tests:
+# FOUNDRY_PROFILE=safe forge create lib/safe-smart-account/contracts/Safe.sol:Safe …
+[profile.safe]
+src = "lib/safe-smart-account/contracts"
+test = "lib/safe-smart-account/contracts/test"
+script = "lib/safe-smart-account/contracts/examples"
+out = "out-safe"
+cache_path = "cache-safe"
+remappings = []
+solc_version = "0.7.6"
+evm_version = "istanbul"
+optimizer = false
+bytecode_hash = "ipfs"
+cbor_metadata = true
+
 [fmt]
 ignore = ["lib/**"]
 line_length = 100

@@ -200,14 +200,14 @@ enum OutboxCommand {
 #[derive(Subcommand)]
 enum RouteCommand {
     Validate {
-        /// Permit zero factory and treasury placeholders in deployment templates.
+        /// Permit zero factory and implementation placeholders in deployment templates.
         #[arg(long)]
         template: bool,
         file: PathBuf,
     },
     /// Print the resolved route as JSON (also a valid route file): every code default written out.
     Show {
-        /// Permit zero factory and treasury placeholders in deployment templates.
+        /// Permit zero factory and implementation placeholders in deployment templates.
         #[arg(long)]
         template: bool,
         file: PathBuf,
@@ -590,12 +590,13 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             rate_lock_quotes,
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
-            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
         return serve_read_only(args.bind, state).await;
     }
     // Architecture §4: before the database is touched, every provider must show the route's
-    // factory, implementation, and treasury, so nothing issues addresses otherwise.
+    // factory and implementation, so nothing issues addresses otherwise.
     topup::contracts::verify_routes(&routes)
         .await
         .map_err(anyhow::Error::msg)
@@ -681,9 +682,14 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         rate_lock_quotes,
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening: Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
+        screening: Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
             &routes,
         ))),
+        contract_signatures: Arc::new(
+            topup::treasuries::EvmContractSignatures::from_routes(&routes)
+                .map_err(anyhow::Error::msg)
+                .context("failed to configure treasury proof checks")?,
+        ),
     };
     let (application, _) = topup::api::router(state);
     tasks.spawn("API server", |cancellation| {
@@ -738,6 +744,17 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let expiry_worker = topup::locks::ExpiryWorker::new(pool.clone(), Duration::from_secs(5));
     tasks.spawn("rate-lock expiry worker", |cancellation| async move {
         expiry_worker.run(cancellation).await;
+    });
+    let treasury_worker = topup::treasuries::TreasuryWorker::new(
+        pool.clone(),
+        Arc::clone(&routes),
+        Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
+            &routes,
+        ))),
+        Duration::from_secs(30),
+    );
+    tasks.spawn("treasury time-lock worker", |cancellation| async move {
+        treasury_worker.run(cancellation).await;
     });
     tasks.spawn("test webhook delivery worker", |cancellation| async move {
         test_delivery.run(cancellation).await;

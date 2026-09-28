@@ -10,7 +10,6 @@ livemode: true                     # a mainnet; test routes (testnets) are false
 chain:
   chain_id: 1                      # default sanctions oracle: Chainalysis 0x40C5…aC8fb
   forwarder_factory: "0x0000000000000000000000000000000000000000" # set to the deployed factory; the implementation is its first CREATE
-  treasury:          "0x0000000000000000000000000000000000000000" # set to the finance Safe at deployment
 
 asset:
   symbol: pha                      # the API's asset code

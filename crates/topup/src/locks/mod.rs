@@ -37,7 +37,7 @@ macro_rules! select_lock {
         r#"
     SELECT quote.id, quote.livemode, address.id AS address_id, customer.client_reference_id,
            quote.route,
-           address.chain_id, address.address,
+           address.chain_id, address.address, address.treasury,
            quote.amount_atomic::text AS amount_atomic,
            quote.price_scaled::text AS price_scaled,
            quote.credit_minor::text AS credit_minor,
@@ -103,6 +103,8 @@ pub struct RateLock {
     pub chain_id: u64,
     /// Single-use forwarder address.
     pub address: EvmAddress,
+    /// The treasury the address pays: the account's treasury of the chain when it was issued.
+    pub treasury: EvmAddress,
     /// Exact requested token amount.
     pub amount_atomic: AtomicAmount,
     /// Frozen eight-decimal price.
@@ -196,6 +198,9 @@ pub enum RateLockError {
     /// Current validated pricing is unavailable.
     #[error("validated pricing is unavailable")]
     PricingUnavailable,
+    /// The account has no treasury on the route's chain.
+    #[error("no treasury is set on the chain")]
+    TreasuryNotSet,
     /// The per-customer rolling creation limit was reached.
     #[error("rate-lock creation limit exceeded")]
     RateLimited,
@@ -256,9 +261,10 @@ pub async fn create(
         ));
     }
     let scope = Scope::new(account.id, customer.livemode);
-    // Cheap pre-check so a rate-limited caller never triggers an external price fetch; the
-    // authoritative check repeats under the customer row lock below.
+    // Cheap pre-checks so a rate-limited caller, or one without a treasury, never triggers an
+    // external price fetch; the authoritative checks repeat in the transaction below.
     check_creation_rate(pool, customer.id, route).await?;
+    treasury(&mut *pool.acquire().await?, scope, route.chain.chain_id).await?;
 
     let quote = quotes
         .quote(route)
@@ -281,6 +287,11 @@ pub async fn create(
     lock_customer(&mut transaction, customer).await?;
     check_creation_rate(&mut *transaction, customer.id, route).await?;
     check_exposure(&mut transaction, account, customer, credit_minor, route).await?;
+    // The account's current treasury of the chain; the shared lock, held to commit, keeps a
+    // treasury change from applying meanwhile. The address keeps it for good, as the forwarder
+    // does.
+    crate::treasuries::lock(&mut transaction, scope, false).await?;
+    let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
     let salt = lock_salt(
@@ -288,9 +299,6 @@ pub async fn create(
         &customer.client_reference_id,
         &quote_id(id),
     );
-    // The route's treasury until accounts set their own (design PR 7); the address keeps it for
-    // good, as the forwarder does.
-    let treasury = route.chain.contracts.treasury;
     let address = forwarder_address(
         route.chain.contracts.forwarder_factory,
         route.chain.contracts.implementation,
@@ -352,6 +360,7 @@ pub async fn create(
         route: route.route.clone(),
         chain_id: route.chain.chain_id,
         address,
+        treasury,
         amount_atomic,
         price: locked_price,
         credit_minor,
@@ -361,6 +370,20 @@ pub async fn create(
         consumed_by: None,
         metadata: metadata.clone(),
     })
+}
+
+/// The scope's current treasury of `chain_id`, or `TreasuryNotSet`.
+async fn treasury(
+    connection: &mut sqlx::PgConnection,
+    scope: Scope,
+    chain_id: u64,
+) -> Result<EvmAddress, RateLockError> {
+    match crate::treasuries::current_on(connection, scope, chain_id).await {
+        Ok(Some(treasury)) => Ok(treasury),
+        Ok(None) => Err(RateLockError::TreasuryNotSet),
+        Err(crate::treasuries::TreasuryError::Database(error)) => Err(error.into()),
+        Err(_) => Err(RateLockError::DatabaseInvariant),
+    }
 }
 
 /// Random bytes after `_secret_` in a client secret.
@@ -839,6 +862,7 @@ struct RateLockRow {
     route: String,
     chain_id: i64,
     address: String,
+    treasury: String,
     amount_atomic: String,
     price_scaled: String,
     credit_minor: String,
@@ -861,6 +885,8 @@ impl TryFrom<RateLockRow> for RateLock {
             route: row.route,
             chain_id: u64::try_from(row.chain_id).map_err(|_| RateLockError::DatabaseInvariant)?,
             address: EvmAddress::from_str(&row.address)
+                .map_err(|_| RateLockError::DatabaseInvariant)?,
+            treasury: EvmAddress::from_str(&row.treasury)
                 .map_err(|_| RateLockError::DatabaseInvariant)?,
             amount_atomic: AtomicAmount::new(
                 U256::from_str(&row.amount_atomic).map_err(|_| RateLockError::DatabaseInvariant)?,

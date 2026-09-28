@@ -9,13 +9,12 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 export FORWARDER_FACTORY=0x1111111111111111111111111111111111111111
-export TREASURY=0x3333333333333333333333333333333333333333
 export TEST_TOKEN=0x4444444444444444444444444444444444444444
 export SANCTIONS_ORACLE=0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa
 export PRODUCT_SLUG=ci-check
 
 "$render" >"$tmp/route.yaml"
-grep -F "$TREASURY" "$tmp/route.yaml" >/dev/null
+grep -F "$FORWARDER_FACTORY" "$tmp/route.yaml" >/dev/null
 grep -F "$SANCTIONS_ORACLE" "$tmp/route.yaml" >/dev/null
 
 # expect_rejection NAME=VALUE EXPECTED_ERROR: rendering with that override must fail with the error.
@@ -31,11 +30,11 @@ expect_rejection() {
 }
 
 address_error="must be a 0x-prefixed 20-byte hex address"
-expect_rejection TREASURY=0x123 "TREASURY $address_error"
+expect_rejection TEST_TOKEN=0x123 "TEST_TOKEN $address_error"
 expect_rejection FORWARDER_FACTORY=1111111111111111111111111111111111111111 "FORWARDER_FACTORY $address_error"
 expect_rejection TEST_TOKEN=0x444444444444444444444444444444444444444g "TEST_TOKEN $address_error"
 expect_rejection 'SANCTIONS_ORACLE=0x1111111111111111111111111111111111111111 ' "SANCTIONS_ORACLE $address_error"
-expect_rejection TREASURY= "TREASURY is required"
+expect_rejection FORWARDER_FACTORY= "FORWARDER_FACTORY is required"
 expect_rejection PRODUCT_SLUG=Bad_Slug "PRODUCT_SLUG must be lowercase"
 
 echo "sandbox route renderer test passed"

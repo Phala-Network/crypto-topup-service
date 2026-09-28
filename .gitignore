@@ -5,6 +5,8 @@
 # Foundry
 /contracts/cache/
 /contracts/out/
+/contracts/out-safe/
+/contracts/cache-safe/
 /contracts/broadcast/
 
 # Local environment

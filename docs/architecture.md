@@ -146,14 +146,16 @@ contract ForwarderFactory {                            // no roles, no admin, no
   it recomputes an address before showing it.
 - One factory per chain, deployed by anyone through the deterministic deployment proxy with the
   fixed salt `keccak256("phala-pay.ForwarderFactory.v2")`: no constructor arguments, so the same
-  factory and implementation addresses on every chain. Each route records `forwarder_factory`,
-  its `implementation`, and (until addresses carry their own) the `treasury` its quotes use.
+  factory and implementation addresses on every chain. Each route records `forwarder_factory` and
+  its `implementation`; the treasury is the account's, set through the API per chain and mode
+  (§9, "Treasuries"), and every address row stores the treasury it was issued over.
 - Plain ERC-20s with verified behaviour (PHA), including tokens whose `transfer` returns nothing.
   Fee-on-transfer and rebasing tokens are unsupported and must not be enabled in a route.
 - Startup verifies on chain, on every provider: the canonical Multicall3 code hash (balance and
   `addressOf` reads go through it, §14; `topup run` refuses a chain without it), the factory and
   implementation runtime code against the recorded build, `implementation()`, the
-  implementation's `factory()`, and `addressOf(treasury, sample salt)` against local derivation.
+  implementation's `factory()`, and `addressOf(sample treasury, sample salt)` against local
+  derivation.
 - The contracts are two files built from audited OpenZeppelin components (Clones, SafeERC20,
   ReentrancyGuardTransient); unit, fuzz, and invariant tests cover them. The independent review
   before mainnet (`docs/plan.md`) covers them.
@@ -528,13 +530,50 @@ its chain's treasury effective at issue; every transfer of a supported token to 
 retired, is a deposit valued at spot and runs the same states, events, sweeps, refunds, and
 reconciliation as a quote payment, with `quote: null` and `deposit_address` set; an unsupported
 token is rejected. Creation adds a network on a chain supported since and supersedes a network
-whose treasury is no longer the effective one; a treasury change (design PR 7) does the same for
-the chain's network of every address of the account. Superseded networks and retired versions
-stay watched and keep paying their old treasury. Active addresses are capped per account and mode
+whose treasury is no longer the current one; a treasury change that applies on a chain does the
+same, in the same transaction, for that chain's network of every address of the account and mode,
+active or retired (below). Superseded networks and retired versions stay watched, are still
+credited, and keep paying their old treasury, which the forwarder's clone argument fixes for good;
+a refund of their deposits is paid from that old treasury. A network is issued only on a chain
+where the account has a treasury (`409 treasury_not_set` when no issuable chain has one). Active addresses are capped per account and mode
 (`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000 test;
 `409 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
 (`429 rate_limit`), none is issued while `quotes` is paused, and a frozen chain gets no new
 network.
+
+**Treasuries** ([design D10](design/multi-tenant.md#d10-treasury-proof-and-changes)). Each
+account sets one treasury per chain and mode through the API; quotes and new deposit address
+networks pay the chain's current one (`409 treasury_not_set` without one), and each `addresses`
+row keeps the treasury it was issued over, so a quote created before a change keeps its address.
+`POST /v1/treasuries/challenge {chain_id, address}` issues an EIP-4361 message: `domain` is the
+authority of `TOPUP_PUBLIC_ORIGIN` and `URI` the origin, the statement names the account and mode,
+`Chain ID` is the chain, the nonce is single-use and bound to the account, mode, chain, and
+address, and the message expires after 10 minutes, or 24 hours when the address holds code at
+provider A's latest block (a Safe's owners collect signatures, or approve on chain and wait for
+`finalized`). `POST /v1/treasuries {chain_id, message,
+signature}` requires the message exactly as issued and proves the address when the signature is an
+EOA's EIP-191 `personal_sign` signature recovering to it (checked with Alloy), or when a contract
+is deployed at it at the chain's `finalized` block and `isValidSignature(eip191_hash(message),
+signature)` returns `0x1626ba7e` there on both providers (EIP-1271). On a Safe the
+CompatibilityFallbackHandler wraps that hash in the EIP-712 `SafeMessage(bytes message)` of the
+Safe's domain and checks the owners' signatures of it, or a `SignMessageLib` approval with `0x`:
+the Safe{Core} SDK's `signMessage` of the message text produces exactly those signatures, which
+the integration tests check against Safe v1.4.1 built from its tagged source (integration guide
+§1.6). An ERC-6492 wrapper (magic suffix
+`0x6492…6492`) and a contract not deployed at `finalized` are refused (`treasury_proof_invalid`,
+`treasury_not_deployed`); the providers disagreeing is `503`. The address is screened with the
+route's sanctions oracle (`400 treasury_sanctioned`), again by the time-lock worker when a pending
+change is due (a listed one is canceled, `cancellation_reason: sanctioned`, instead of applied),
+and daily while current: a listed current treasury pauses the account's `quotes` and `settlement`
+(audited, `account.updated`, alert `TopupTreasurySanctioned`) until the operator resumes them with
+`POST /v1/admin/accounts/{acct}/resume` after review. The chain's first treasury and every
+test-mode change apply at once; a later live change is `pending` for 48 hours
+(`account.treasury.pending`), cancellable with `POST /v1/treasuries/{id}/cancel`
+(`account.treasury.canceled`), and then applied by the time-lock worker
+(`account.treasury.updated`), which replaces the chain's deposit address networks as above; one
+change waits per chain (`409 treasury_change_pending`). The treasury events are account security
+events: delivered to every enabled endpoint of the mode whatever its `enabled_events`, signed with
+the account's key of that mode like every event.
 
 ## 10. Signing and sweeping
 
@@ -683,6 +722,9 @@ its actor.
 ```text
 GET    /v1/account                                                the key's account, in its mode
 GET|POST /v1/api_keys, GET|DELETE /v1/api_keys/{id}, POST /v1/api_keys/{id}/roll {expires_in}
+POST   /v1/treasuries/challenge {chain_id, address}               EIP-4361 message to sign (§9)
+GET|POST /v1/treasuries {chain_id, message, signature}, GET /v1/treasuries/{id}   ?chain_id&status&limit
+POST   /v1/treasuries/{id}/cancel                                 a pending live change
 GET    /v1/config                                                 assets, limits, quote terms
 POST   /v1/quotes {account_id, amount, currency, chain_id, asset, metadata?} single-use address + locked price; Idempotency-Key
 GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
@@ -713,7 +755,7 @@ POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
-GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
+GET    /v1/admin/report/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
 ```
 
@@ -828,7 +870,9 @@ signature verifies with a pinned key and `account` and `livemode` are the receiv
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
 refund) carry the deposit, `refund.failed` (the attached transaction is final but does not pay the
-refund; one per refund) the refund with its `failure_reason`, and `quote.expired` the quote. `data.object` is the object as the API returns it, rendered on the first
+refund; one per refund) the refund with its `failure_reason`, `quote.expired` the quote, and
+`account.treasury.pending`, `.updated`, and `.canceled` the treasury (§9; random event ids, like
+`api_key.*`). `data.object` is the object as the API returns it, rendered on the first
 delivery attempt and stored, so every retry and replay sends the same body. Every event id is
 `uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded` and
 `refund.failed`, so a
@@ -968,10 +1012,10 @@ flowchart LR
 One route file per chain and asset pair, with its chain settings inline, in the compose, hence
 attested. The file names only what differs per route or environment: route name and version,
 `livemode` (false on a test network such as Sepolia or Anvil, true on a mainnet; startup checks it
-against a built-in list of test networks), chain id, forwarder factory, treasury, asset symbol,
+against a built-in list of test networks), chain id, forwarder factory, asset symbol,
 contract, and decimals, price sources, and the policy limits (minimum credit, maximum deposit,
-refund floor, exposure caps). A route names no product: every account quotes on the routes of its
-key's mode.
+refund floor, exposure caps). A route names no product and no treasury: every account quotes on the routes of its
+key's mode, paying its own treasury of the chain (§9).
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints
 the resolved route, every value explicit (JSON, itself a valid route file); preflight reads the

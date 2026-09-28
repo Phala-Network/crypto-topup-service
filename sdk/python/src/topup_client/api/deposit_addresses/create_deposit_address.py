@@ -84,9 +84,10 @@ def sync_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[DepositAddress | ErrorResponse]:
     """Returns the customer's active deposit address, one address for every supported token on every
-    supported network of the key's mode, issuing it if the customer has none: the same request
-    always returns the same address until it is rotated. It also adds the address's network on a
-    chain supported since it was issued, and replaces a chain's network whose treasury changed.
+    supported network of the key's mode where you have a treasury, issuing it if the customer has
+    none: the same request always returns the same address until it is rotated. It also adds the
+    address's network on a chain supported, or given a treasury, since it was issued, and replaces
+    a chain's network whose treasury changed.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -119,9 +120,10 @@ def sync(
     idempotency_key: None | str | Unset = UNSET,
 ) -> DepositAddress | ErrorResponse | None:
     """Returns the customer's active deposit address, one address for every supported token on every
-    supported network of the key's mode, issuing it if the customer has none: the same request
-    always returns the same address until it is rotated. It also adds the address's network on a
-    chain supported since it was issued, and replaces a chain's network whose treasury changed.
+    supported network of the key's mode where you have a treasury, issuing it if the customer has
+    none: the same request always returns the same address until it is rotated. It also adds the
+    address's network on a chain supported, or given a treasury, since it was issued, and replaces
+    a chain's network whose treasury changed.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -149,9 +151,10 @@ async def asyncio_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[DepositAddress | ErrorResponse]:
     """Returns the customer's active deposit address, one address for every supported token on every
-    supported network of the key's mode, issuing it if the customer has none: the same request
-    always returns the same address until it is rotated. It also adds the address's network on a
-    chain supported since it was issued, and replaces a chain's network whose treasury changed.
+    supported network of the key's mode where you have a treasury, issuing it if the customer has
+    none: the same request always returns the same address until it is rotated. It also adds the
+    address's network on a chain supported, or given a treasury, since it was issued, and replaces
+    a chain's network whose treasury changed.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -182,9 +185,10 @@ async def asyncio(
     idempotency_key: None | str | Unset = UNSET,
 ) -> DepositAddress | ErrorResponse | None:
     """Returns the customer's active deposit address, one address for every supported token on every
-    supported network of the key's mode, issuing it if the customer has none: the same request
-    always returns the same address until it is rotated. It also adds the address's network on a
-    chain supported since it was issued, and replaces a chain's network whose treasury changed.
+    supported network of the key's mode where you have a treasury, issuing it if the customer has
+    none: the same request always returns the same address until it is rotated. It also adds the
+    address's network on a chain supported, or given a treasury, since it was issued, and replaces
+    a chain's network whose treasury changed.
 
     Args:
         idempotency_key (None | str | Unset):

@@ -54,6 +54,17 @@ and `refund_payment_claims`. Existing rows map `confirmed` to `succeeded` and ev
 `expires_at`, and `accounts.webhook_key_version` is checked to hold a positive integer per mode.
 No secret is stored: every key is derived from dstack at `settlement/{acct}/{live|test}/v{n}`.
 
+`20261012000000_treasuries` (design PR 7) puts the `treasuries` table of `20261004000000` to use
+(design D10): it adds `livemode`, `kind` (`eoa` or `contract`), and the lifecycle `applied_at` and
+`replaced_at` (with `canceled_at` and its `cancellation_reason`, `requested` or `sanctioned`: pending,
+current, replaced, canceled), indexes current treasuries by `screened_at` for the daily
+re-screening, makes the proof and
+`created_by` columns required, and allows one pending change and one current treasury per account,
+mode, and chain. `treasury_challenges` holds the single-use EIP-4361 nonces, bound to the account,
+mode, chain, and address, with the message issued. It indexes deposit address networks by account,
+mode, and chain for the replacement a treasury change makes, and allows `treasury` event objects.
+It refuses to run, and so does its down migration, while any treasury exists.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -104,14 +115,14 @@ service can only read it.
 
 ## Kept until a later design PR
 
-- Tables for treasuries, confirmation policies, and account limits are created now and used by
-  later design PRs (7 and 10).
+- Tables for confirmation policies and account limits are created now and used by a later design
+  PR (10).
 
 ## Points the schema does not show on its own
 
 - `accounts.public_id` is generated from `id`: `acct_` and its 32 hex digits.
-- `addresses.treasury` is the forwarder's clone argument, the only address it can pay. Until
-  treasuries are set per account (design PR 7) quotes take it from the route.
+- `addresses.treasury` is the forwarder's clone argument, the only address it can pay: the
+  account's current treasury of the chain when the address was issued, kept for good.
 - `addresses.created_block` defaults to zero, which makes the first scanner pass check the full
   chain history before setting `backfilled`. Quote creation sets it from the chain's committed
   cursor instead.

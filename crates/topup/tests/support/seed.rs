@@ -7,7 +7,7 @@ use topup::api_keys::{self, KeyKind};
 use topup::db::{self, Account, Address, Customer};
 use uuid::Uuid;
 
-/// The treasury of the route fixture, which seeded addresses pay.
+/// The treasury tests set for their accounts ([`set_treasury`]), which seeded addresses pay.
 pub const FIXTURE_TREASURY: EvmAddress = address!("0x0000000000000000000000000000000000007EA5");
 
 /// Values used to create a merchant account enabled for live mode and, when `webhook_url` is not
@@ -224,4 +224,79 @@ pub async fn set_account_paused_scopes(
 
 fn encode_error(error: &std::num::TryFromIntError) -> sqlx::Error {
     sqlx::Error::Encode(format!("value is outside PostgreSQL bigint: {error}").into())
+}
+
+/// Makes `treasury` the account's current treasury of `chain_id` in `livemode`, as a proven and
+/// applied treasury would be, replacing the former one. Production sets it with a signed proof
+/// through `POST /v1/treasuries`.
+pub async fn set_treasury(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    chain_id: u64,
+    treasury: EvmAddress,
+) -> Result<(), sqlx::Error> {
+    let chain_id = i64::try_from(chain_id).map_err(|error| encode_error(&error))?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "UPDATE treasuries SET replaced_at = now() \
+         WHERE account_id = $1 AND livemode = $2 AND chain_id = $3 \
+           AND applied_at IS NOT NULL AND replaced_at IS NULL",
+    )
+    .bind(account_id)
+    .bind(livemode)
+    .bind(chain_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO treasuries (
+            id, account_id, livemode, chain_id, address, kind, proof_message, proof_signature,
+            verified_at, effective_at, screened_at, applied_at, created_by
+        )
+        VALUES ($1, $2, $3, $4, $5, 'eoa', 'seeded', '0x', now(), now(), now(), now(),
+                'key_00000000000000000000000000000000')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(livemode)
+    .bind(chain_id)
+    .bind(format!("{treasury:#x}"))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+/// Records a proven change of the account's treasury of `chain_id` to `treasury`, pending until
+/// `effective_at`, as `POST /v1/treasuries` records a later live change; `topup::treasuries::
+/// apply_due` applies it.
+pub async fn schedule_treasury(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    chain_id: u64,
+    treasury: EvmAddress,
+    effective_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO treasuries (
+            id, account_id, livemode, chain_id, address, kind, proof_message, proof_signature,
+            verified_at, effective_at, screened_at, created_by
+        )
+        VALUES ($1, $2, $3, $4, $5, 'eoa', 'seeded', '0x', now(), $6, now(),
+                'key_00000000000000000000000000000000')
+        "#,
+    )
+    .bind(id)
+    .bind(account_id)
+    .bind(livemode)
+    .bind(i64::try_from(chain_id).map_err(|error| encode_error(&error))?)
+    .bind(format!("{treasury:#x}"))
+    .bind(effective_at)
+    .execute(pool)
+    .await?;
+    Ok(id)
 }

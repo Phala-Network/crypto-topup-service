@@ -6,7 +6,6 @@
 
 mod support;
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
@@ -153,7 +152,7 @@ async fn the_address_is_the_one_the_merchant_recomputes() -> Result<()> {
                 let address = forwarder_address(
                     contracts.forwarder_factory,
                     contracts.implementation,
-                    contracts.treasury,
+                    fixture.account_treasury(),
                     salt,
                 );
                 ensure!(object["address"] == format!("{address:#x}"));
@@ -286,6 +285,7 @@ async fn other_accounts_and_modes_see_no_deposit_address() -> Result<()> {
             let id = created["id"].as_str().context("id")?;
             let stranger = seed::create_account(pool, &NewAccount::named("stranger")).await?;
             let stranger_key = seed::create_api_key(pool, stranger.id, true).await?;
+            seed::set_treasury(pool, stranger.id, true, 1, seed::FIXTURE_TREASURY).await?;
             for key in [&stranger_key, &fixture.test_key] {
                 for (method, path) in [
                     (Method::GET, format!("/v1/deposit_addresses/{id}")),
@@ -512,16 +512,11 @@ async fn a_changed_treasury_on_one_chain_changes_only_that_chains_address() -> R
                 .as_str()
                 .context("shared address")?
                 .to_owned();
+            // A treasury change that applied without replacing the networks (as if its
+            // replacement had been missed) is repaired by the next creation.
             let new_treasury = Address::repeat_byte(0x7e);
-            let mut other = fixture.other_route.clone();
-            other.chain.contracts.treasury = new_treasury;
-            let changed = fixture.with_routes(vec![
-                fixture.live_route.clone(),
-                fixture.usdc_route.clone(),
-                other,
-                fixture.test_route.clone(),
-            ])?;
-            let new = changed.create(&changed.live_key, "team-42").await?;
+            seed::set_treasury(pool, fixture.account.id, true, OTHER_CHAIN, new_treasury).await?;
+            let new = fixture.create(&fixture.live_key, "team-42").await?;
             // The same deposit address and version; only chain 10's network changed.
             ensure!(new["id"] == old["id"] && new["version"] == 1);
             ensure!(new["address"].is_null(), "{new}");
@@ -554,6 +549,14 @@ async fn a_changed_treasury_on_one_chain_changes_only_that_chains_address() -> R
             let watched = db::list_scan_addresses(pool, OTHER_CHAIN).await?;
             ensure!(watched.len() == 2, "{watched:?}");
             // Changing the treasury back makes the first forwarder current again.
+            seed::set_treasury(
+                pool,
+                fixture.account.id,
+                true,
+                OTHER_CHAIN,
+                fixture.account_treasury(),
+            )
+            .await?;
             let back = fixture.create(&fixture.live_key, "team-42").await?;
             ensure!(back == old, "{back} != {old}");
             Ok(())
@@ -719,6 +722,10 @@ impl Fixture {
         let account = seed::create_account(pool, &NewAccount::named("merchant")).await?;
         let live_key = seed::create_api_key(pool, account.id, true).await?;
         let test_key = seed::create_api_key(pool, account.id, false).await?;
+        for (livemode, chain_id) in [(true, 1), (true, OTHER_CHAIN), (false, TEST_CHAIN)] {
+            seed::set_treasury(pool, account.id, livemode, chain_id, seed::FIXTURE_TREASURY)
+                .await?;
+        }
         let live_route: RouteFile =
             serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
         let test_route: RouteFile = serde_saphyr::from_str(
@@ -784,7 +791,7 @@ impl Fixture {
     }
 
     fn account_treasury(&self) -> Address {
-        Address::from_str("0x0000000000000000000000000000000000007EA5").expect("treasury")
+        seed::FIXTURE_TREASURY
     }
 
     async fn request(
@@ -852,7 +859,8 @@ fn app(pool: &sqlx::PgPool, routes: Vec<RouteFile>) -> Result<Router> {
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+        screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+        contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
     })
     .0)
 }

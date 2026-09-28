@@ -40,7 +40,11 @@ const BLOCK_TIME_CACHE_CAPACITY: usize = 1_024;
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 amount);
+    function isValidSignature(bytes32 hash, bytes signature) external view returns (bytes4);
 }
+
+/// The value EIP-1271's `isValidSignature` returns for a valid signature, its own selector.
+pub const EIP1271_MAGIC_VALUE: [u8; 4] = [0x16, 0x26, 0xba, 0x7e];
 
 /// One ERC-20 transfer to a tracked address.
 ///
@@ -537,6 +541,49 @@ impl EvmClient {
     pub async fn code_at(&self, address: Address) -> Result<Bytes, ChainError> {
         self.bounded("eth_getCode", self.provider.get_code_at(address))
             .await
+    }
+
+    /// Reads the runtime code at `address` as of block `block`.
+    pub async fn code_at_block(&self, address: Address, block: u64) -> Result<Bytes, ChainError> {
+        self.bounded(
+            "eth_getCode",
+            self.provider
+                .get_code_at(address)
+                .block_id(BlockId::number(block)),
+        )
+        .await
+    }
+
+    /// Asks the contract at `account`, as of block `block`, whether `signature` is its signature
+    /// of `hash` (EIP-1271): `true` only when `isValidSignature(hash, signature)` returns the
+    /// magic value `0x1626ba7e`. A revert or any other return value is `false`; a transport
+    /// failure is an error.
+    pub async fn is_valid_signature(
+        &self,
+        account: Address,
+        hash: B256,
+        signature: Bytes,
+        block: u64,
+    ) -> Result<bool, ChainError> {
+        let operation = "isValidSignature call";
+        let input = isValidSignatureCall { hash, signature }.abi_encode();
+        let tx = TransactionRequest::default()
+            .to(account)
+            .input(TransactionInput::new(input.into()));
+        let output = match self
+            .within(
+                operation,
+                self.provider.call(tx).block(BlockId::number(block)),
+            )
+            .await?
+        {
+            Ok(output) => output,
+            // The node executed the call and it reverted: the contract refuses the signature.
+            Err(TransportError::ErrorResp(_)) => return Ok(false),
+            Err(error) => return Err(self.transport(operation, &error)),
+        };
+        Ok(isValidSignatureCall::abi_decode_returns_validate(&output)
+            .is_ok_and(|value| value.0 == EIP1271_MAGIC_VALUE))
     }
 
     /// Runs one `eth_call`, at `block` when given and otherwise at the node's default block.

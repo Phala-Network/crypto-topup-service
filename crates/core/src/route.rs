@@ -45,7 +45,8 @@ impl RouteFile {
         self.validate_with_template_addresses(false)
     }
 
-    /// Validates a deployment template while allowing zero factory and treasury placeholders.
+    /// Validates a deployment template while allowing zero factory and implementation
+    /// placeholders.
     ///
     /// Asset and sanctions-oracle addresses remain subject to normal non-zero validation.
     pub fn validate_template(&self) -> Result<(), RouteError> {
@@ -62,7 +63,6 @@ impl RouteFile {
                 self.chain.contracts.forwarder_factory,
             )?;
             validate_address("chain.implementation", self.chain.contracts.implementation)?;
-            validate_address("chain.treasury", self.chain.contracts.treasury)?;
         }
         validate_address("asset.contract", self.asset.contract)?;
         validate_address("chain.sanctions_oracle", self.screening.sanctions_oracle)?;
@@ -310,15 +310,14 @@ impl From<Confirmations> for ConfirmationsRepr {
     }
 }
 
-/// Contract addresses required for deterministic deposits.
+/// Contract addresses required for deterministic deposits. The treasury a forwarder pays is not
+/// the route's: it is the account's treasury of the chain, set through the API (design D10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainContracts {
     /// Forwarder factory address.
     pub forwarder_factory: Address,
     /// Immutable EIP-1167 forwarder implementation address.
     pub implementation: Address,
-    /// Immutable treasury address.
-    pub treasury: Address,
 }
 
 /// Deposited asset configuration.
@@ -512,8 +511,6 @@ pub struct ChainSpec {
     pub chain_id: u64,
     /// Forwarder factory address.
     pub forwarder_factory: Address,
-    /// Treasury address, immutable in the factory's implementation.
-    pub treasury: Address,
     /// Confirmation required before crediting; default [`ChainFamily::default_confirmations`], or
     /// `finalized` for a chain outside every family.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -788,7 +785,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                         .chain
                         .implementation
                         .unwrap_or_else(|| factory_implementation(spec.chain.forwarder_factory)),
-                    treasury: spec.chain.treasury,
                 },
             },
             route: spec.route,
@@ -862,7 +858,6 @@ impl From<RouteFile> for RouteSpec {
             chain: ChainSpec {
                 chain_id: route.chain.chain_id,
                 forwarder_factory: route.chain.contracts.forwarder_factory,
-                treasury: route.chain.contracts.treasury,
                 confirmations: Some(route.chain.confirmations),
                 implementation: Some(route.chain.contracts.implementation),
                 sanctions_oracle: Some(route.screening.sanctions_oracle),

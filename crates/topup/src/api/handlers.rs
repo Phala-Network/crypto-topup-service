@@ -2,7 +2,6 @@
 
 use std::str::FromStr;
 
-use alloy_eips::BlockNumberOrTag;
 use axum::Json;
 use axum::extract::State;
 use axum::http::header;
@@ -12,17 +11,17 @@ use uuid::Uuid;
 
 use crate::audit::Actor;
 use crate::db::Customer;
-use crate::routes::{ProviderError, RouteSet};
 use crate::tenancy::Scope;
 
 use super::AppState;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountResponse, AdminReasonRequest, ApiKeyObject, Contact, CreateAccountRequest,
-    CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest, NudgeResponse,
-    OutboxReplayResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
-    RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
+    AccountPauseRequest, AccountResponse, AdminReasonRequest, ApiKeyObject, Contact,
+    CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
+    NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
+    ReconciliationBlockLiftResponse, RoutePauseResponse, SupportDepositResponse,
+    UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -182,6 +181,44 @@ pub(crate) async fn admin_get_deposit(
         .await?
         .map(Json)
         .ok_or_else(ApiError::not_found)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/pause",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = AccountPauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Pauses scopes of a whole account in both modes, for example `quotes` and `settlement` for an
+/// abusive account or a sanctioned treasury. Audited, and announced as `account.updated`.
+pub(crate) async fn pause_account(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<AccountPauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &account, request, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/resume",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = AccountPauseRequest,
+    responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and
+/// reviewed. Audited, and announced as `account.updated`.
+pub(crate) async fn resume_account(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<AccountPauseRequest>,
+) -> ApiResult<Json<PauseResponse>> {
+    mutate_account_scopes(&state, &account, request, false).await
 }
 
 #[utoipa::path(
@@ -385,71 +422,8 @@ pub(crate) async fn daily_report(
 ) -> ApiResult<Json<DailyReportResponse>> {
     let mut report =
         repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
-    populate_treasury_balances(&state.routes, &mut report).await;
     report.reconciliation = crate::observability::reconciliation().map(Into::into);
     Ok(Json(report))
-}
-
-async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportResponse) {
-    for route_report in &mut report.routes {
-        let Some(route) = routes
-            .routes()
-            .iter()
-            .filter(|route| route.route == route_report.route)
-            .max_by_key(|route| route.version)
-        else {
-            continue;
-        };
-        let chain_id = route.chain.chain_id;
-        let client = match routes.provider(chain_id, 0) {
-            Ok(client) => client,
-            Err(ProviderError::MissingUrl { environment, .. }) => {
-                route_report.treasury_balance_note =
-                    format!("treasury balance unavailable: {environment} is not configured");
-                continue;
-            }
-            Err(ProviderError::Unconfigured { .. }) => {
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: route has no RPC provider".to_owned();
-                continue;
-            }
-            Err(ProviderError::InvalidKey { environment, .. }) => {
-                route_report.treasury_balance_note =
-                    format!("treasury balance unavailable: {environment} does not fit its URL");
-                continue;
-            }
-            Err(ProviderError::InvalidUrl { .. }) => {
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: RPC client configuration is invalid".to_owned();
-                continue;
-            }
-        };
-        match client
-            .token_balances(
-                route.asset.contract,
-                &[route.chain.contracts.treasury],
-                BlockNumberOrTag::Latest,
-            )
-            .await
-        {
-            Ok(balances) => match balances.into_iter().next() {
-                Some(balance) => {
-                    route_report.treasury_balance_atomic = Some(balance.to_string());
-                    route_report.treasury_balance_note =
-                        "latest on-chain ERC-20 treasury balance".to_owned();
-                }
-                None => {
-                    route_report.treasury_balance_note =
-                        "treasury balance unavailable: RPC returned no balance".to_owned();
-                }
-            },
-            Err(error) => {
-                tracing::warn!(route = %route.route, %error, "daily report treasury balance read failed");
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: RPC read failed".to_owned();
-            }
-        }
-    }
 }
 
 /// Finds or creates the scope's customer, so creating a quote is one call.
@@ -460,6 +434,35 @@ pub(super) async fn ensure_customer(
 ) -> ApiResult<Customer> {
     validate_external_id(client_reference_id)?;
     repository::ensure_customer(&state.pool, scope, client_reference_id).await
+}
+
+async fn mutate_account_scopes(
+    state: &AppState,
+    account: &str,
+    request: AccountPauseRequest,
+    pause: bool,
+) -> ApiResult<Json<PauseResponse>> {
+    let scopes = validate_scopes(request.scopes)?;
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::invalid_param("reason", "reason is required"));
+    }
+    let account_id = parse_account_id(account)?;
+    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let mut transaction = state.pool.begin().await?;
+    let updated = crate::pause::mutate_account_scopes_in(
+        &mut transaction,
+        account_id,
+        &scopes,
+        pause,
+        &admin_actor(state),
+        &request.reason,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    transaction.commit().await?;
+    Ok(Json(PauseResponse {
+        paused_scopes: updated,
+    }))
 }
 
 async fn mutate_customer_scopes(

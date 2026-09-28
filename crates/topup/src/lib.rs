@@ -36,4 +36,5 @@ mod rpc_provider;
 pub mod scanner;
 pub mod steps;
 pub mod tenancy;
+pub mod treasuries;
 pub mod webhook_keys;

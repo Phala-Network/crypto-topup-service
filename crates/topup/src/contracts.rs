@@ -40,6 +40,13 @@ pub fn sample_salt() -> B256 {
     keccak256("crypto-topup-service.startup-check")
 }
 
+/// Treasury used to compare the factory's `addressOf` with local address derivation. Treasuries
+/// are the accounts' (design D10), so any fixed address serves.
+#[must_use]
+pub fn sample_treasury() -> Address {
+    Address::from_word(keccak256("crypto-topup-service.startup-check.treasury"))
+}
+
 /// Checks every route's contracts on every configured RPC provider before the service starts.
 pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
     let mut checked = BTreeSet::new();
@@ -51,7 +58,6 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
                 provider.as_str(),
                 contracts.forwarder_factory,
                 contracts.implementation,
-                contracts.treasury,
             );
             if !checked.insert(key) {
                 continue;
@@ -71,8 +77,8 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
 /// Compares one provider's view of the contracts with the route. The getters come first so a
 /// mismatch names the differing address; the code hashes then prove the immutables are the only
 /// difference from the audited build. The treasury is not in any contract: it is each clone's
-/// argument, so the sample `addressOf(treasury, salt)` proves the factory derives the route
-/// treasury's addresses as the service does.
+/// argument, so a sample `addressOf(treasury, salt)` proves the factory derives addresses as the
+/// service does for any treasury.
 async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> {
     let contracts = &route.chain.contracts;
     let factory = contracts.forwarder_factory;
@@ -132,10 +138,10 @@ async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> 
         format!("implementation {implementation:#x} {error} of the Forwarder build")
     })?;
     let sample = client
-        .factory_addresses(factory, contracts.treasury, &[sample_salt()])
+        .factory_addresses(factory, sample_treasury(), &[sample_salt()])
         .await
         .map_err(read)?;
-    let expected = forwarder_address(factory, implementation, contracts.treasury, sample_salt());
+    let expected = forwarder_address(factory, implementation, sample_treasury(), sample_salt());
     if sample.as_slice() != [expected] {
         return Err(format!(
             "factory addressOf(treasury, sample) is {sample:?}, local derivation gives \

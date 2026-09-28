@@ -332,12 +332,12 @@ exchange and cannot hit an exact amount or window.
 
 **Treasury.** Each network is bound to the treasury of its chain effective when it is issued, like
 every forwarder (D2). When a treasury change takes effect on a chain (D10, design PR 7), **that
-chain's network of the address changes**: PR 7 must supersede the chain's network of every
+chain's network of the address changes**: PR 7 supersedes the chain's network of every
 deposit address of the account in the same transaction, with a forwarder over the new treasury and
 the same salt; the address on the other chains is unchanged, and the object's top-level `address`
 becomes `null` while the chains differ. Creation already supersedes an active address's network
 whose treasury is no longer the effective one, so a missed update is repaired on the next call
-(`Chain::of` and `sync_networks` in `crates/topup/src/deposit_addresses.rs` are the PR 7 hook; a
+(`replace_networks` and `sync_networks` in `crates/topup/src/deposit_addresses.rs`; a
 treasury changed back to an earlier one makes that network current again). **A superseded network
 is kept as retired for that chain: it keeps being watched and credited, and its funds reach the old
 treasury**, which the forwarder's clone argument fixes for good, and a refund of its deposit is
@@ -505,7 +505,8 @@ flowchart TD
 - **Proof, through the API.** `POST /v1/treasuries/challenge {chain_id, address}` returns an
   EIP-4361 message ([EIP-4361](https://eips.ethereum.org/EIPS/eip-4361)): `domain` and `uri` the
   API's, `address` the treasury, `chain-id` the route's, a single-use `nonce` bound to `(account,
-  livemode, chain, address)`, 10-minute expiry, statement "Set as treasury of acct_… on Phala
+  livemode, chain, address)`, 10-minute expiry (24 hours for an address that holds code, PR 7: a
+  Safe's owners need longer to sign, and an on-chain approval must reach `finalized`), statement "Set as treasury of acct_… on Phala
   Pay". The merchant signs it and sends `POST /v1/treasuries {chain_id, message, signature}`
   (the SDK wraps both). EOAs: `ecrecover` of a `personal_sign`.
   Contracts: EIP-1271 `isValidSignature(hash, signature)` must return `0x1626ba7e`, where `hash`

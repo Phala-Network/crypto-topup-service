@@ -231,6 +231,11 @@ pub struct Quote {
     pub exchange_rate: String,
     /// Single-use forwarder address to pay.
     pub address: String,
+    /// The treasury the address pays: your treasury of the chain when the quote was created. The
+    /// address is the factory's `CREATE2` over it and the salt. Always sent; optional in the
+    /// schema so clients also parse quotes, and events rendered, before it existed.
+    #[schema(required = false)]
+    pub treasury: String,
     /// EIP-681 URI carrying the token, chain, address, and amount.
     pub payment_uri: String,
     /// `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
@@ -799,6 +804,16 @@ pub struct AccountObject {
     pub created: i64,
 }
 
+/// Administrative pause or resume of a whole account, in both modes.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountPauseRequest {
+    /// Pause scopes to add or remove: `quotes`, `settlement`, `refunds`.
+    pub scopes: Vec<String>,
+    /// Why, for the audit log.
+    pub reason: String,
+}
+
 /// Administrative pause or resume of one customer of an account.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct CustomerPauseRequest {
@@ -870,6 +885,101 @@ pub struct RollApiKeyRequest {
     pub expires_in: u32,
 }
 
+/// `POST /v1/treasuries/challenge` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTreasuryChallengeRequest {
+    /// The chain of the treasury: a chain of the key's mode (`GET /v1/config`).
+    pub chain_id: u64,
+    /// The treasury address to prove: an EOA, or a contract deployed on the chain such as a Safe.
+    pub address: String,
+}
+
+/// An EIP-4361 (Sign-In with Ethereum) message proving a treasury, usable once: valid for 10
+/// minutes for an EOA, 24 hours for an address that holds code (a Safe).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct TreasuryChallenge {
+    /// Always `treasury_challenge`.
+    pub object: String,
+    /// The key's mode.
+    pub livemode: bool,
+    /// The treasury's chain.
+    pub chain_id: u64,
+    /// The treasury address, as sent.
+    pub address: String,
+    /// The message's single-use nonce.
+    pub nonce: String,
+    /// The EIP-4361 message to sign, exactly as given: `domain` and `URI` are the API's origin,
+    /// the statement names your account and mode, and `Chain ID` is `chain_id`. An EOA signs it
+    /// with `personal_sign` (EIP-191); a Safe's owners sign it as a Safe message (EIP-1271).
+    pub message: String,
+    /// When the message stops being accepted, Unix seconds.
+    pub expires_at: i64,
+}
+
+/// `POST /v1/treasuries` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTreasuryRequest {
+    /// The treasury's chain, the challenge's.
+    pub chain_id: u64,
+    /// The challenge's `message`, unchanged.
+    pub message: String,
+    /// Hex signature of the message: an EOA's 65-byte `personal_sign` signature, or what a
+    /// deployed contract's `isValidSignature` accepts (for a Safe, the owners' signatures of the
+    /// Safe message, or `0x` after `SignMessageLib` approved it). ERC-6492 signatures are refused.
+    pub signature: String,
+}
+
+/// An account's treasury of one chain and mode (design D10): the only address the forwarders
+/// issued over it can pay.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Treasury {
+    /// Treasury id, `trs_…`.
+    pub id: String,
+    /// Always `treasury`.
+    pub object: String,
+    /// The mode.
+    pub livemode: bool,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The treasury address.
+    pub address: String,
+    /// `eoa` (an EIP-191 signature recovered to the address) or `contract` (a deployed
+    /// contract's EIP-1271 approval).
+    pub kind: String,
+    /// `pending` (a live change waiting for `effective_at`; cancel it with
+    /// `POST /v1/treasuries/{id}/cancel`), `active` (the chain's current treasury: new quotes and
+    /// deposit address networks pay it), `replaced` (a former treasury; addresses issued over it
+    /// still pay it), or `canceled`.
+    pub status: String,
+    /// When the treasury applies or applied, Unix seconds: at once for a chain's first treasury
+    /// and in test mode, 48 hours after the proof for a later live change.
+    pub effective_at: i64,
+    /// When it was proven, Unix seconds.
+    pub created: i64,
+    /// When a later treasury replaced it, Unix seconds.
+    pub replaced_at: Option<i64>,
+    /// When it was canceled, Unix seconds.
+    pub canceled_at: Option<i64>,
+    /// Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named
+    /// the address when the change was due to apply, so it never applied).
+    pub cancellation_reason: Option<String>,
+}
+
+/// `GET /v1/treasuries` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct TreasuryList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/treasuries`.
+    pub url: String,
+    /// Whether more treasuries match than `limit`.
+    pub has_more: bool,
+    /// The mode's treasuries, newest first.
+    pub data: Vec<Treasury>,
+}
+
 /// Administrative deposit nudge result.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct NudgeResponse {
@@ -916,10 +1026,6 @@ pub struct RouteDailyReport {
     pub chain_id: u64,
     /// Route asset contract.
     pub asset_contract: String,
-    /// Latest treasury token balance in atomic units, when the chain read succeeds.
-    pub treasury_balance_atomic: Option<String>,
-    /// Balance source or explicit reason the treasury balance is unavailable.
-    pub treasury_balance_note: String,
     /// Deposits not reversed minus finalized `Flushed` amounts: what the route's forwarders
     /// still hold for their merchants to sweep.
     pub unflushed_balance_atomic: String,

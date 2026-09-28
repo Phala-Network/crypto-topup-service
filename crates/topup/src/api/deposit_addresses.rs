@@ -9,7 +9,7 @@ use axum::extract::{Extension, RawQuery, State};
 use topup_core::route::RouteFile;
 
 use crate::db::{Account, Customer};
-use crate::deposit_addresses::{self, Chain, DepositAddressError, ListFilter, Status};
+use crate::deposit_addresses::{self, ChainContracts, DepositAddressError, ListFilter, Status};
 use crate::ids;
 use crate::routes::RouteSet;
 use crate::tenancy::Permission;
@@ -49,7 +49,8 @@ const MAX_LIMIT: i64 = 100;
         (
             status = 409,
             description = "`deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new \
-                           address and every chain is frozen or paused), or \
+                           address and every chain is frozen or paused), `treasury_not_set` \
+                           (no treasury on any chain that takes one), or \
                            `idempotency_key_in_use`",
             body = ErrorResponse
         )
@@ -58,9 +59,10 @@ const MAX_LIMIT: i64 = 100;
     tag = "deposit_addresses"
 )]
 /// Returns the customer's active deposit address, one address for every supported token on every
-/// supported network of the key's mode, issuing it if the customer has none: the same request
-/// always returns the same address until it is rotated. It also adds the address's network on a
-/// chain supported since it was issued, and replaces a chain's network whose treasury changed.
+/// supported network of the key's mode where you have a treasury, issuing it if the customer has
+/// none: the same request always returns the same address until it is rotated. It also adds the
+/// address's network on a chain supported, or given a treasury, since it was issued, and replaces
+/// a chain's network whose treasury changed.
 pub(crate) async fn create_deposit_address(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -245,8 +247,8 @@ pub(crate) async fn update_deposit_address(
         (
             status = 409,
             description = "`deposit_address_retired`: already rotated; `paused`, \
-                           `chain_frozen` (every chain is frozen or paused), or \
-                           `idempotency_key_in_use`",
+                           `chain_frozen` (every chain is frozen or paused), \
+                           `treasury_not_set`, or `idempotency_key_in_use`",
             body = ErrorResponse
         ),
         (status = 429, description = "Too Many Requests: the customer's rotation limit", body = ErrorResponse)
@@ -289,7 +291,7 @@ pub(crate) async fn rotate_deposit_address(
 
 /// The chains a customer's deposit address gets new networks on, and why a chain was left out.
 struct Issuable {
-    chains: Vec<Chain>,
+    chains: Vec<ChainContracts>,
     frozen: bool,
 }
 
@@ -307,7 +309,7 @@ impl Issuable {
 /// New addresses and networks are issued only while `quotes` is not paused for the account or the
 /// customer (design §12: no new addresses while paused), and only on the chains of the customer's
 /// mode that are not frozen and have a current route not paused for `quotes`. A network pays the
-/// treasury of its chain's first such route.
+/// account's current treasury of its chain; a chain without one gets no network.
 async fn issuable_chains(
     state: &AppState,
     account: &Account,
@@ -342,7 +344,7 @@ async fn issuable_chains(
             }
         }
         if let Some(route) = open {
-            issuable.chains.push(Chain::of(route));
+            issuable.chains.push(ChainContracts::of(route));
         }
     }
     Ok(issuable)
@@ -477,6 +479,7 @@ fn map_error(error: DepositAddressError) -> ApiError {
         }
         DepositAddressError::RateLimited => ApiError::rotation_rate_limited(),
         DepositAddressError::NoChain => ApiError::paused("new addresses are paused"),
+        DepositAddressError::NoTreasury => ApiError::treasury_not_set(),
         DepositAddressError::InvalidInput(message) => ApiError::bad_request(message),
         DepositAddressError::Metadata(error) => error,
         DepositAddressError::DatabaseInvariant => ApiError::internal(),

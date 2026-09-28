@@ -349,6 +349,100 @@ impl ApiError {
         )
     }
 
+    /// Returns a quote or deposit address requested where the account has no treasury (design
+    /// D10).
+    #[must_use]
+    pub fn treasury_not_set() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "treasury_not_set",
+            "set a treasury on the chain first: POST /v1/treasuries/challenge, then POST \
+             /v1/treasuries",
+        )
+    }
+
+    /// Returns a treasury proof that does not prove the address (design D10).
+    #[must_use]
+    pub fn treasury_proof_invalid(param: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "treasury_proof_invalid", message).with_param(param)
+    }
+
+    /// Returns a treasury proof whose challenge expired.
+    #[must_use]
+    pub fn treasury_challenge_expired() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "treasury_challenge_expired",
+            "the challenge has expired; request a new one",
+        )
+        .with_param("message")
+    }
+
+    /// Returns a treasury proof whose challenge was already used.
+    #[must_use]
+    pub fn treasury_challenge_used() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "treasury_challenge_used",
+            "the challenge was already used; request a new one",
+        )
+        .with_param("message")
+    }
+
+    /// Returns a treasury proof by a contract that is not deployed on the chain.
+    #[must_use]
+    pub fn treasury_not_deployed() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "treasury_not_deployed",
+            "the signature does not recover to the address, and no contract is deployed at it at \
+             the chain's finalized block; deploy the Safe on this chain first (ERC-6492 \
+             signatures are not accepted)",
+        )
+        .with_param("signature")
+    }
+
+    /// Returns a treasury a sanctions list names (design §8).
+    #[must_use]
+    pub fn treasury_sanctioned() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "treasury_sanctioned",
+            "the treasury address is on a sanctions list",
+        )
+        .with_param("address")
+    }
+
+    /// Returns a treasury change while another one of the chain is pending.
+    #[must_use]
+    pub fn treasury_change_pending() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "treasury_change_pending",
+            "a treasury change is already pending on this chain; cancel it first",
+        )
+    }
+
+    /// Returns a treasury change to the chain's current treasury.
+    #[must_use]
+    pub fn treasury_unchanged() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "treasury_unchanged",
+            "the address is already the chain's treasury",
+        )
+    }
+
+    /// Returns a cancellation of a treasury that is not pending.
+    #[must_use]
+    pub fn treasury_unexpected_state(status: &str) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "treasury_unexpected_state",
+            format!("the treasury is {status}"),
+        )
+    }
+
     /// Returns a replayed request signature.
     #[must_use]
     pub fn signature_replayed() -> Self {

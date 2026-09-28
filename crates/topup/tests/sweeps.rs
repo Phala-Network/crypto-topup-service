@@ -376,7 +376,6 @@ impl<'a> Chain<'a> {
         route.livemode = false;
         route.chain.contracts.forwarder_factory = factory;
         route.chain.contracts.implementation = implementation;
-        route.chain.contracts.treasury = FIXTURE_TREASURY;
         route.asset.contract = token;
         let routes = chain_routes(&RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?)
             .into_iter()

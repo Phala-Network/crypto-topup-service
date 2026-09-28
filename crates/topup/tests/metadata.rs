@@ -140,6 +140,7 @@ async fn metadata_is_set_merged_unset_and_copied_from_quote_to_deposit() -> Resu
             },
         )
         .await?;
+        seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
         let route = test_route();
         let merchant = Merchant {
             app: router(pool, &route)?,
@@ -474,7 +475,8 @@ fn router(pool: &sqlx::PgPool, route: &RouteFile) -> Result<axum::Router> {
         rate_lock_quotes: Arc::new(FixedQuote),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening: Arc::new(support::ClearScreener),
+        screening: Arc::new(support::ClearScreener),
+        contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
     })
     .0)
 }

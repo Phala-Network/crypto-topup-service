@@ -75,6 +75,10 @@ pub enum Permission {
     ApiKeysRead,
     /// Create, roll, and revoke the API keys of the account and mode.
     ApiKeysWrite,
+    /// Read the treasuries of the account and mode.
+    TreasuryRead,
+    /// Prove, change, and cancel changes of the treasuries of the account and mode.
+    TreasuryWrite,
 }
 
 impl Permission {
@@ -94,6 +98,8 @@ impl Permission {
             Self::RefundsWrite => "refunds.write",
             Self::ApiKeysRead => "api_keys.read",
             Self::ApiKeysWrite => "api_keys.write",
+            Self::TreasuryRead => "treasury.read",
+            Self::TreasuryWrite => "treasury.write",
         }
     }
 }

@@ -9,6 +9,32 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- Treasuries through the API (docs/design/multi-tenant.md D10, §16 PR 7).
+  `POST /v1/treasuries/challenge {chain_id, address}` returns an EIP-4361 `treasury_challenge`
+  (`message`, `nonce`, `expires_at`; single-use, 10 minutes, or 24 hours for an address that holds
+  code); `POST /v1/treasuries {chain_id,
+  message, signature}` sets the chain's treasury in the key's mode when the signature is the
+  address's EIP-191 signature, or a contract deployed at the address returns `0x1626ba7e` from
+  EIP-1271 `isValidSignature` at `finalized` on both providers (ERC-6492 and undeployed contracts
+  are refused; the address is screened for sanctions). `GET /v1/treasuries`,
+  `GET /v1/treasuries/{id}`, and `POST /v1/treasuries/{id}/cancel`. A `treasury` (`trs_…`) has
+  `chain_id`, `address`, `kind` (`eoa` or `contract`), `status` (`pending`, `active`, `replaced`,
+  `canceled`), `effective_at`, `replaced_at`, `canceled_at`, and `cancellation_reason`
+  (`requested`, or `sanctioned` when a sanctions list named it at its effective time). Current
+  treasuries are screened again daily; a listed one pauses the account's `quotes` and
+  `settlement`. Safe owners sign the challenge as a Safe message (EIP-712 `SafeMessage`, the
+  Safe{Core} SDK's `signMessage`), or approve it with `SignMessageLib`. A chain's first treasury and
+  test-mode changes apply at once; a later live change applies after 48 hours unless canceled.
+  New events `account.treasury.pending`, `account.treasury.updated`, and
+  `account.treasury.canceled` go to every enabled endpoint of the mode whatever its
+  `enabled_events`. When a change applies, the chain's network of every deposit address moves to
+  a forwarder over the new treasury; the old address stays credited and pays the old treasury.
+  New errors: `treasury_proof_invalid`, `treasury_challenge_expired`, `treasury_challenge_used`,
+  `treasury_not_deployed`, `treasury_sanctioned`, `treasury_change_pending`,
+  `treasury_unchanged`, `treasury_unexpected_state`, and `treasury_not_set`.
+- Quotes carry `treasury`, the treasury their address pays.
+- Admin `POST /v1/admin/accounts/{account}/pause` and `/resume` `{scopes, reason}`: pause or resume
+  scopes of a whole account in both modes, audited and announced as `account.updated`.
 - Deposit addresses (docs/design/multi-tenant.md "Deposit addresses"), restored per the owner's
   2026-09-21 requirement, with one address per customer for every supported token on every chain
   (the owner's 2026-09-28 decision, exchange practice). `POST /v1/deposit_addresses
@@ -45,6 +71,12 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking**: quotes and deposit address networks pay the account's treasury of the chain, set
+  through the API, instead of the route's: `POST /v1/quotes` is `409 treasury_not_set` on a chain
+  without one, and `POST /v1/deposit_addresses` issues networks only on chains with one (`409
+  treasury_not_set` when none has). Route files no longer have `chain.treasury` (a route file that
+  still names it is refused), and the admin daily report drops `treasury_balance_atomic` and
+  `treasury_balance_note`.
 - **Breaking**: webhooks are signed with a key per account and mode (docs/design/multi-tenant.md
   D11, §16 PR 6), derived in the attested CVM at `settlement/{acct}/{live|test}/v{n}`, instead of
   the one shared `settlement/v1` key: an event signed for one account never verifies at another.

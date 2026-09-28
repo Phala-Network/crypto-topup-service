@@ -494,6 +494,140 @@
         ]
       }
     },
+    "/v1/admin/accounts/{account}/pause": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Pauses scopes of a whole account in both modes, for example `quotes` and `settlement` for an\nabusive account or a sanctioned treasury. Audited, and announced as `account.updated`.",
+        "operationId": "pause_account",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/resume": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and\nreviewed. Audited, and announced as `account.updated`.",
+        "operationId": "resume_account",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/deposits/{id}": {
       "get": {
         "tags": [
@@ -1444,7 +1578,7 @@
         "tags": [
           "deposit_addresses"
         ],
-        "summary": "Returns the customer's active deposit address, one address for every supported token on every\nsupported network of the key's mode, issuing it if the customer has none: the same request\nalways returns the same address until it is rotated. It also adds the address's network on a\nchain supported since it was issued, and replaces a chain's network whose treasury changed.",
+        "summary": "Returns the customer's active deposit address, one address for every supported token on every\nsupported network of the key's mode where you have a treasury, issuing it if the customer has\nnone: the same request always returns the same address until it is rotated. It also adds the\naddress's network on a chain supported, or given a treasury, since it was issued, and replaces\na chain's network whose treasury changed.",
         "operationId": "create_deposit_address",
         "parameters": [
           {
@@ -1502,7 +1636,7 @@
             }
           },
           "409": {
-            "description": "`deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new address and every chain is frozen or paused), or `idempotency_key_in_use`",
+            "description": "`deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new address and every chain is frozen or paused), `treasury_not_set` (no treasury on any chain that takes one), or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1725,7 +1859,7 @@
             }
           },
           "409": {
-            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen` (every chain is frozen or paused), or `idempotency_key_in_use`",
+            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen` (every chain is frozen or paused), `treasury_not_set`, or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2124,7 +2258,7 @@
             }
           },
           "409": {
-            "description": "`exposure_cap_exceeded`, `paused`, `chain_frozen`, or `idempotency_key_in_use`",
+            "description": "`exposure_cap_exceeded`, `paused`, `chain_frozen`, `treasury_not_set`, or `idempotency_key_in_use`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2839,6 +2973,399 @@
           }
         ]
       }
+    },
+    "/v1/treasuries": {
+      "get": {
+        "tags": [
+          "treasuries"
+        ],
+        "summary": "The account's treasuries in the key's mode, newest first: each chain's `active` one, and any\n`pending` change.",
+        "operationId": "list_treasuries",
+        "parameters": [
+          {
+            "name": "chain_id",
+            "in": "query",
+            "description": "Only this chain's treasuries",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`pending`, `active`, `replaced`, or `canceled`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TreasuryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "treasuries"
+        ],
+        "summary": "Sets the chain's treasury with a signed challenge. An EOA's `personal_sign` signature must\nrecover to the address; otherwise a contract deployed at the address must return `0x1626ba7e`\nfrom EIP-1271 `isValidSignature` for the message's EIP-191 hash at the chain's `finalized`\nblock on both of the service's RPC providers. The address is screened against sanctions lists.",
+        "description": "The chain's first treasury, and any test-mode change, applies at once. A later live change is\n`pending` for 48 hours (`account.treasury.pending`), then applies\n(`account.treasury.updated`) unless canceled first: new quotes and deposit address networks\nthen pay it, while addresses issued before keep paying the former treasury and are still\ncredited. Treasury events go to every enabled webhook endpoint of the mode.",
+        "operationId": "create_treasury",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTreasuryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: `active`, or `pending` for a later live change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Treasury"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`treasury_proof_invalid`, `treasury_challenge_expired`, `treasury_challenge_used`, `treasury_not_deployed` (no contract at the address at the chain's finalized block; ERC-6492 signatures are refused), or `treasury_sanctioned`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`treasury_change_pending`, `treasury_unchanged`, or `idempotency_key_in_use`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The chain or sanctions screening could not be read; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/treasuries/challenge": {
+      "post": {
+        "tags": [
+          "treasuries"
+        ],
+        "summary": "Issues the EIP-4361 message that proves `address` as your treasury on `chain_id` in the key's\nmode. Sign it and send it to `POST /v1/treasuries` before `expires_at`: 10 minutes for an EOA,\n24 hours for an address that holds code (a Safe, whose owners sign it as a Safe message); it\ncan be used once.",
+        "operationId": "create_treasury_challenge",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTreasuryChallengeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TreasuryChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/treasuries/{id}": {
+      "get": {
+        "tags": [
+          "treasuries"
+        ],
+        "summary": "One treasury.",
+        "operationId": "get_treasury",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Treasury id, `trs_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Treasury"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/treasuries/{id}/cancel": {
+      "post": {
+        "tags": [
+          "treasuries"
+        ],
+        "summary": "Cancels a pending treasury change before it applies (`account.treasury.canceled`); the\nchain's current treasury stays. If you did not request the change, also roll your keys.",
+        "operationId": "cancel_treasury",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Treasury id, `trs_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK: `canceled`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Treasury"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`treasury_unexpected_state`: not pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -2896,6 +3423,28 @@
             "description": "The keys that sign this mode's webhooks: the current one first, then any previous one\nstill signing during a rotation. Their public keys come from `GET /v1/attestation`. Always\nsent; optional in the schema so clients also parse objects from servers before it."
           }
         }
+      },
+      "AccountPauseRequest": {
+        "type": "object",
+        "description": "Administrative pause or resume of a whole account, in both modes.",
+        "required": [
+          "scopes",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why, for the audit log."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Pause scopes to add or remove: `quotes`, `settlement`, `refunds`."
+          }
+        },
+        "additionalProperties": false
       },
       "AccountResponse": {
         "type": "object",
@@ -3493,6 +4042,53 @@
           "metadata": {
             "$ref": "#/components/schemas/MetadataParam",
             "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nA key set to `\"\"` is omitted.\nPhala Pay never reads it. Do not store sensitive information in it, such as personal or\npayment details."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateTreasuryChallengeRequest": {
+        "type": "object",
+        "description": "`POST /v1/treasuries/challenge` body.",
+        "required": [
+          "chain_id",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The treasury address to prove: an EOA, or a contract deployed on the chain such as a Safe."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The chain of the treasury: a chain of the key's mode (`GET /v1/config`).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateTreasuryRequest": {
+        "type": "object",
+        "description": "`POST /v1/treasuries` body.",
+        "required": [
+          "chain_id",
+          "message",
+          "signature"
+        ],
+        "properties": {
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The treasury's chain, the challenge's.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "The challenge's `message`, unchanged."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Hex signature of the message: an EOA's 65-byte `personal_sign` signature, or what a\ndeployed contract's `isValidSignature` accepts (for a Safe, the owners' signatures of the\nSafe message, or `0x` after `SignMessageLib` approved it). ERC-6492 signatures are refused."
           }
         },
         "additionalProperties": false
@@ -4584,6 +5180,10 @@
           "status": {
             "type": "string",
             "description": "`open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays\n`open` after `expires_at` until the finalized chain passes it, so a payment mined in time\nis never reported as expired; hide the address once `expires_at` has passed."
+          },
+          "treasury": {
+            "type": "string",
+            "description": "The treasury the address pays: your treasury of the chain when the quote was created. The\naddress is the factory's `CREATE2` over it and the salt. Always sent; optional in the\nschema so clients also parse quotes, and events rendered, before it existed."
           }
         }
       },
@@ -4859,7 +5459,6 @@
           "route",
           "chain_id",
           "asset_contract",
-          "treasury_balance_note",
           "unflushed_balance_atomic",
           "open_rate_lock_exposure_atomic",
           "rejected_holds_atomic",
@@ -4940,17 +5539,6 @@
             "type": "string",
             "description": "Stable route name."
           },
-          "treasury_balance_atomic": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Latest treasury token balance in atomic units, when the chain read succeeds."
-          },
-          "treasury_balance_note": {
-            "type": "string",
-            "description": "Balance source or explicit reason the treasury balance is unavailable."
-          },
           "unflushed_balance_atomic": {
             "type": "string",
             "description": "Deposits not reversed minus finalized `Flushed` amounts: what the route's forwarders\nstill hold for their merchants to sweep."
@@ -5008,6 +5596,163 @@
           }
         ],
         "description": "Deposit facts with the full immutable transition timeline."
+      },
+      "Treasury": {
+        "type": "object",
+        "description": "An account's treasury of one chain and mode (design D10): the only address the forwarders\nissued over it can pay.",
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "chain_id",
+          "address",
+          "kind",
+          "status",
+          "effective_at",
+          "created"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The treasury address."
+          },
+          "canceled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it was canceled, Unix seconds."
+          },
+          "cancellation_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named\nthe address when the change was due to apply, so it never applied)."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "EVM chain identifier.",
+            "minimum": 0
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was proven, Unix seconds."
+          },
+          "effective_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the treasury applies or applied, Unix seconds: at once for a chain's first treasury\nand in test mode, 48 hours after the proof for a later live change."
+          },
+          "id": {
+            "type": "string",
+            "description": "Treasury id, `trs_…`."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`eoa` (an EIP-191 signature recovered to the address) or `contract` (a deployed\ncontract's EIP-1271 approval)."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `treasury`."
+          },
+          "replaced_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a later treasury replaced it, Unix seconds."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` (a live change waiting for `effective_at`; cancel it with\n`POST /v1/treasuries/{id}/cancel`), `active` (the chain's current treasury: new quotes and\ndeposit address networks pay it), `replaced` (a former treasury; addresses issued over it\nstill pay it), or `canceled`."
+          }
+        }
+      },
+      "TreasuryChallenge": {
+        "type": "object",
+        "description": "An EIP-4361 (Sign-In with Ethereum) message proving a treasury, usable once: valid for 10\nminutes for an EOA, 24 hours for an address that holds code (a Safe).",
+        "required": [
+          "object",
+          "livemode",
+          "chain_id",
+          "address",
+          "nonce",
+          "message",
+          "expires_at"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The treasury address, as sent."
+          },
+          "chain_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The treasury's chain.",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the message stops being accepted, Unix seconds."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The key's mode."
+          },
+          "message": {
+            "type": "string",
+            "description": "The EIP-4361 message to sign, exactly as given: `domain` and `URI` are the API's origin,\nthe statement names your account and mode, and `Chain ID` is `chain_id`. An EOA signs it\nwith `personal_sign` (EIP-191); a Safe's owners sign it as a Safe message (EIP-1271)."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "The message's single-use nonce."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `treasury_challenge`."
+          }
+        }
+      },
+      "TreasuryList": {
+        "type": "object",
+        "description": "`GET /v1/treasuries` response.",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Treasury"
+            },
+            "description": "The mode's treasuries, newest first."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more treasuries match than `limit`."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/treasuries`."
+          }
+        }
       },
       "UpdateAccountRequest": {
         "type": "object",

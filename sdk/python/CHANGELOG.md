@@ -8,6 +8,12 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Added
 
+- The generated client covers treasuries (design D10): `topup_client.api.treasuries`
+  (`create_treasury_challenge`, `create_treasury`, `list_treasuries`, `get_treasury`,
+  `cancel_treasury`) and the `Treasury`, `TreasuryChallenge`, and `TreasuryList` models; `Quote`
+  gains the optional `treasury`; `Treasury` carries `cancellation_reason`, and the admin client
+  gains `pause_account` and `resume_account`. Challenge and submit helpers for EOAs and Safes come with the SDK
+  work of design PR 10. The generated `RouteDailyReport` drops the treasury balance fields.
 - `metadata`: `pay.quotes.create(…, metadata=)` and `pay.refunds.create(…, metadata=)`, and
   `pay.quotes.update(id, metadata=)`, `pay.deposits.update(id, metadata=)`, and
   `pay.refunds.update(id, metadata=)`, which merge (a key set to `""` is unset, `metadata=""`

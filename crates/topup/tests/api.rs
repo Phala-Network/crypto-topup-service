@@ -1400,7 +1400,8 @@ fn app_state_with_attestor(
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening: Arc::new(support::ClearScreener),
+        screening: Arc::new(support::ClearScreener),
+        contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
     }
 }
 
@@ -1508,6 +1509,7 @@ async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, Strin
     )
     .await?;
     let key = seed::create_api_key(pool, account.id, true).await?;
+    seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
     Ok((account, key))
 }
 
