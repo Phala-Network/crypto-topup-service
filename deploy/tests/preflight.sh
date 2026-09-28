@@ -20,7 +20,7 @@ export SENTRY_ENVIRONMENT=staging
 export TOPUP_DOMAIN=pay-api-staging.phala.com TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network
 export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
 # A source compose whose inline route still has zero-address placeholders, as before the route PR.
-sed -E 's/((forwarder_factory|implementation|treasury|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
+sed -E 's/((forwarder_factory|implementation|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
     "$root/deploy/docker-compose.yml" >"$tmp/zero-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/zero-source.yml" >"$tmp/zero-route.yml"
 # The committed compose carries the deployed route addresses.

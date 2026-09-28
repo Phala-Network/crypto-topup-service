@@ -226,7 +226,15 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                 "team-da",
             )
             .await?;
-            let chains = [deposit_addresses::Chain::of(&chain.route)];
+            seed::set_treasury(
+                &chain.pool,
+                account.id,
+                false,
+                chain.route.chain.chain_id,
+                seed::FIXTURE_TREASURY,
+            )
+            .await?;
+            let chains = [deposit_addresses::ChainContracts::of(&chain.route)];
             let (retired, created) =
                 deposit_addresses::create(&chain.pool, &account, &customer, &chains, None).await?;
             ensure!(created);
@@ -269,6 +277,86 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                         .await?
                         .contains(&credited_event_id(deposit.id))
                 );
+            }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_treasury_change_moves_the_chains_address_and_the_old_address_still_credits() -> Result<()>
+{
+    run(&[], |chain| {
+        Box::pin(async move {
+            let (account, customer) = seed::create_account_and_customer(
+                &chain.pool,
+                &NewAccount {
+                    livemode: false,
+                    ..NewAccount::named("treasury-change-merchant")
+                },
+                "team-tc",
+            )
+            .await?;
+            let chain_id = chain.route.chain.chain_id;
+            seed::set_treasury(
+                &chain.pool,
+                account.id,
+                false,
+                chain_id,
+                seed::FIXTURE_TREASURY,
+            )
+            .await?;
+            let chains = [deposit_addresses::ChainContracts::of(&chain.route)];
+            let (before, _) =
+                deposit_addresses::create(&chain.pool, &account, &customer, &chains, None).await?;
+            let [old_network] = before.networks.as_slice() else {
+                bail!("one network: {:?}", before.networks);
+            };
+
+            // The change applies through the time-lock worker's path: the chain's network of
+            // every deposit address moves to a forwarder over the new treasury.
+            let new_treasury = Address::repeat_byte(0x7e);
+            seed::schedule_treasury(
+                &chain.pool,
+                account.id,
+                false,
+                chain_id,
+                new_treasury,
+                Utc::now(),
+            )
+            .await?;
+            let routes = RouteSet::new(vec![chain.route.clone()]).map_err(anyhow::Error::msg)?;
+            ensure!(topup::treasuries::apply_due(&chain.pool, &routes, Utc::now()).await? == 1);
+            let after =
+                deposit_addresses::get(&chain.pool, Scope::new(account.id, false), before.id)
+                    .await?
+                    .context("deposit address")?;
+            let [new_network] = after.networks.as_slice() else {
+                bail!("one network: {:?}", after.networks);
+            };
+            ensure!(new_network.treasury == new_treasury);
+            ensure!(new_network.address != old_network.address);
+
+            // Both are watched: a payment to the superseded address is still credited, and its
+            // funds reach the old treasury, its forwarder's clone argument.
+            let to_old = chain.pay_to(old_network.address, AMOUNT)?;
+            let to_new = chain.pay_to(new_network.address, AMOUNT)?;
+            chain.anvil.mine(1)?;
+            ensure!(chain.scan().await? == 2);
+            chain.settle().await?;
+            for (tx, network) in [(to_old, old_network), (to_new, new_network)] {
+                let deposit = chain.deposit(tx).await?;
+                ensure!(
+                    deposit.state == DepositState::Credited,
+                    "{:?}",
+                    deposit.state
+                );
+                ensure!(deposit.address_id == network.address_id);
+                let address = db::get_address(&chain.pool, network.address_id)
+                    .await?
+                    .context("address row")?;
+                ensure!(address.treasury == network.treasury);
             }
             Ok(())
         })

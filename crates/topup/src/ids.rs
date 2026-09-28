@@ -17,6 +17,8 @@ pub const DEPOSIT_ADDRESS: &str = "da_";
 pub const DEPOSIT: &str = "dep_";
 /// Refund ids.
 pub const REFUND: &str = "re_";
+/// Treasury ids.
+pub const TREASURY: &str = "trs_";
 /// Event ids; the UUID is the event's derived id (architecture §11).
 pub const EVENT: &str = "evt_";
 

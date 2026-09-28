@@ -2,7 +2,6 @@
 
 use std::str::FromStr;
 
-use alloy_eips::BlockNumberOrTag;
 use axum::Json;
 use axum::extract::State;
 use axum::http::header;
@@ -12,7 +11,6 @@ use uuid::Uuid;
 
 use crate::audit::Actor;
 use crate::db::Customer;
-use crate::routes::{ProviderError, RouteSet};
 use crate::tenancy::Scope;
 
 use super::AppState;
@@ -385,71 +383,8 @@ pub(crate) async fn daily_report(
 ) -> ApiResult<Json<DailyReportResponse>> {
     let mut report =
         repository::daily_report(&state.pool, state.routes.routes(), chrono::Utc::now()).await?;
-    populate_treasury_balances(&state.routes, &mut report).await;
     report.reconciliation = crate::observability::reconciliation().map(Into::into);
     Ok(Json(report))
-}
-
-async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportResponse) {
-    for route_report in &mut report.routes {
-        let Some(route) = routes
-            .routes()
-            .iter()
-            .filter(|route| route.route == route_report.route)
-            .max_by_key(|route| route.version)
-        else {
-            continue;
-        };
-        let chain_id = route.chain.chain_id;
-        let client = match routes.provider(chain_id, 0) {
-            Ok(client) => client,
-            Err(ProviderError::MissingUrl { environment, .. }) => {
-                route_report.treasury_balance_note =
-                    format!("treasury balance unavailable: {environment} is not configured");
-                continue;
-            }
-            Err(ProviderError::Unconfigured { .. }) => {
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: route has no RPC provider".to_owned();
-                continue;
-            }
-            Err(ProviderError::InvalidKey { environment, .. }) => {
-                route_report.treasury_balance_note =
-                    format!("treasury balance unavailable: {environment} does not fit its URL");
-                continue;
-            }
-            Err(ProviderError::InvalidUrl { .. }) => {
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: RPC client configuration is invalid".to_owned();
-                continue;
-            }
-        };
-        match client
-            .token_balances(
-                route.asset.contract,
-                &[route.chain.contracts.treasury],
-                BlockNumberOrTag::Latest,
-            )
-            .await
-        {
-            Ok(balances) => match balances.into_iter().next() {
-                Some(balance) => {
-                    route_report.treasury_balance_atomic = Some(balance.to_string());
-                    route_report.treasury_balance_note =
-                        "latest on-chain ERC-20 treasury balance".to_owned();
-                }
-                None => {
-                    route_report.treasury_balance_note =
-                        "treasury balance unavailable: RPC returned no balance".to_owned();
-                }
-            },
-            Err(error) => {
-                tracing::warn!(route = %route.route, %error, "daily report treasury balance read failed");
-                route_report.treasury_balance_note =
-                    "treasury balance unavailable: RPC read failed".to_owned();
-            }
-        }
-    }
 }
 
 /// Finds or creates the scope's customer, so creating a quote is one call.

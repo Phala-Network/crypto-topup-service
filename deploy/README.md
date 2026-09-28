@@ -463,7 +463,8 @@ runs an image with the multi-tenant schema, the staging owner, in order:
 4. Re-creates each account ([Account credentials](#account-credentials)) and sends each merchant's
    contact its `acct_…` id and first key. For the staging reference product, set `product_slug`
    to the new `acct_…` id in [product/docker-compose.yml](product/docker-compose.yml), seal its
-   test key as `PRODUCT_API_KEY`, then Deploy (`product`, `upgrade`).
+   test key as `PRODUCT_API_KEY`, then Deploy (`product`, `upgrade`). Each merchant, the staging
+   product's account included, sets its treasuries again through the API: route files carry none.
 5. Runs one deposit ([Staging reference product](#staging-reference-product), step 4).
 
 ## Staging reference product
@@ -513,7 +514,11 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
 
 2. Create the product's account in topup ([Account credentials](#account-credentials)) with
    `<product URL>/webhooks`, set the product's `product_slug` to the new `acct_…` id, and keep
-   its test key (`api_keys[0].secret`) for the next step.
+   its test key (`api_keys[0].secret`) for the next step. **HUMAN-ONLY, treasury Safe owners:**
+   set the account's Sepolia treasury through the API (the product's `treasury`, the finance
+   Safe): request `POST /v1/treasuries/challenge`, sign the message as a Safe message, and submit
+   it to `POST /v1/treasuries` ([Treasury change](runbooks/treasury-change.md)). Quotes need it
+   (`409 treasury_not_set` before); in test mode it applies at once.
 3. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
    `.env.product` holding `PRODUCT_API_KEY=<ppay_sk_test_…>` with the two commands the summary
    prints. Until then the account API answers 503.
@@ -521,7 +526,8 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the locked amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),
    `product_slug`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`,
-   `treasury`, `token`, `token_symbol`, and `public_url` (the product URL), with the route's values.
+   `treasury` (the account's Sepolia treasury), `token`, `token_symbol`, and `public_url` (the
+   product URL), with the route's values.
 
    ```sh
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer ETH_PASSWORD=~/staging/payer.password

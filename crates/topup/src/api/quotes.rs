@@ -112,8 +112,8 @@ pub(crate) async fn get_config(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
             status = 409,
-            description = "`exposure_cap_exceeded`, `paused`, `chain_frozen`, or \
-                           `idempotency_key_in_use`",
+            description = "`exposure_cap_exceeded`, `paused`, `chain_frozen`, \
+                           `treasury_not_set`, or `idempotency_key_in_use`",
             body = ErrorResponse
         ),
         (status = 429, description = "Too Many Requests", body = ErrorResponse),
@@ -492,6 +492,7 @@ pub(crate) async fn quote_object(
         amount_atomic: lock.amount_atomic.value().to_string(),
         exchange_rate: decimal(lock.price.value()),
         address: format!("{:#x}", lock.address),
+        treasury: format!("{:#x}", lock.treasury),
         payment_uri,
         status: status(lock.status).to_owned(),
         expires_at: lock.expires_at.timestamp(),
@@ -536,6 +537,7 @@ fn map_error(error: RateLockError) -> ApiError {
             ApiError::service_unavailable("validated pricing is unavailable")
         }
         RateLockError::RateLimited => ApiError::rate_limited(),
+        RateLockError::TreasuryNotSet => ApiError::treasury_not_set(),
         error @ RateLockError::ExposureCap { .. } => ApiError::exposure_cap(error.to_string()),
         RateLockError::NotFound => ApiError::not_found(),
         RateLockError::NotOpen(current) => ApiError::quote_unexpected_state(status(current)),

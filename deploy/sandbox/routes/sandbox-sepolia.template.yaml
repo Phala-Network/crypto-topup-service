@@ -10,7 +10,6 @@ livemode: false
 chain:
   chain_id: 11155111
   forwarder_factory: "${FORWARDER_FACTORY}"
-  treasury: "${TREASURY}"
   # The sandbox deploys MockSanctionsOracle; there is no Chainalysis oracle on Sepolia.
   sanctions_oracle: "${SANCTIONS_ORACLE}"
 

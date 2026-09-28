@@ -18,6 +18,7 @@ mod pending;
 mod quotes;
 mod rate_limit;
 mod repository;
+mod treasuries;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use crate::locks::QuoteProvider;
 use crate::refunds::DestinationScreener;
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
+use crate::treasuries::ContractSignatures;
 use axum::extract::{Extension, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -66,8 +68,10 @@ pub struct AppState {
     pub client_reads: Arc<ClientReadLimiter>,
     /// Per-account and platform rate limits of authenticated merchant requests.
     pub rate_limits: Arc<ApiRateLimiter>,
-    /// Sanctions screening of refund destinations.
-    pub refund_screening: Arc<dyn DestinationScreener>,
+    /// Sanctions screening of refund destinations and treasuries.
+    pub screening: Arc<dyn DestinationScreener>,
+    /// EIP-1271 checks of contract treasuries' proofs.
+    pub contract_signatures: Arc<dyn ContractSignatures>,
 }
 
 impl AppState {
@@ -103,7 +107,7 @@ impl AppState {
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
 /// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`,
-/// `GET /v1/api_keys/{id}`, or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// `GET /v1/api_keys/{id}`, `GET /v1/treasuries/{id}`, or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
 /// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
@@ -125,6 +129,13 @@ pub(crate) async fn event_data(
             .await
             .map(|key| key.map(|key| serde_json::to_value(keys::api_key_object(&key, None))))
             .map_err(error::ApiError::from),
+        crate::db::EventObject::Treasury(id) => crate::treasuries::get(pool, scope, id)
+            .await
+            .map(|treasury| {
+                treasury
+                    .map(|treasury| serde_json::to_value(treasuries::treasury_object(&treasury)))
+            })
+            .map_err(|_| error::ApiError::internal()),
         crate::db::EventObject::Account(id) if id == scope.account_id() => {
             account::find_account(pool, scope)
                 .await
@@ -175,6 +186,13 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(keys::list_api_keys, keys::create_api_key))
         .routes(routes!(keys::get_api_key, keys::revoke_api_key))
         .routes(routes!(keys::roll_api_key))
+        .routes(routes!(treasuries::create_treasury_challenge))
+        .routes(routes!(
+            treasuries::list_treasuries,
+            treasuries::create_treasury
+        ))
+        .routes(routes!(treasuries::get_treasury))
+        .routes(routes!(treasuries::cancel_treasury))
         // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -374,7 +392,8 @@ mod tests {
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
-            refund_screening: Arc::new(crate::refunds::UnavailableDestinationScreener),
+            screening: Arc::new(crate::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(crate::treasuries::UnavailableContractSignatures),
         };
         let response = super::router(state)
             .0

@@ -351,7 +351,6 @@ configs:
       chain:
         chain_id: 11155111
         forwarder_factory: "0x2407bE5Be2b632F5b166872A49E4946a70CCa531"
-        treasury: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"
         sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
 
       asset:

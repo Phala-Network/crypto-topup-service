@@ -8,7 +8,6 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
@@ -40,12 +39,9 @@ class RouteDailyReport:
         refunds_by_status (RouteDailyReportRefundsByStatus): Refund counts keyed by status.
         rejected_holds_atomic (str): Rejected token amount still held after succeeded refunds.
         route (str): Stable route name.
-        treasury_balance_note (str): Balance source or explicit reason the treasury balance is unavailable.
         unflushed_balance_atomic (str): Deposits not reversed minus finalized `Flushed` amounts: what the route's
             forwarders
             still hold for their merchants to sweep.
-        treasury_balance_atomic (None | str | Unset): Latest treasury token balance in atomic units, when the chain read
-            succeeds.
     """
 
     age_in_state_max_seconds: RouteDailyReportAgeInStateMaxSeconds
@@ -58,9 +54,7 @@ class RouteDailyReport:
     refunds_by_status: RouteDailyReportRefundsByStatus
     rejected_holds_atomic: str
     route: str
-    treasury_balance_note: str
     unflushed_balance_atomic: str
-    treasury_balance_atomic: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,15 +84,7 @@ class RouteDailyReport:
 
         route = self.route
 
-        treasury_balance_note = self.treasury_balance_note
-
         unflushed_balance_atomic = self.unflushed_balance_atomic
-
-        treasury_balance_atomic: None | str | Unset
-        if isinstance(self.treasury_balance_atomic, Unset):
-            treasury_balance_atomic = UNSET
-        else:
-            treasury_balance_atomic = self.treasury_balance_atomic
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -114,12 +100,9 @@ class RouteDailyReport:
                 "refunds_by_status": refunds_by_status,
                 "rejected_holds_atomic": rejected_holds_atomic,
                 "route": route,
-                "treasury_balance_note": treasury_balance_note,
                 "unflushed_balance_atomic": unflushed_balance_atomic,
             }
         )
-        if treasury_balance_atomic is not UNSET:
-            field_dict["treasury_balance_atomic"] = treasury_balance_atomic
 
         return field_dict
 
@@ -154,20 +137,7 @@ class RouteDailyReport:
 
         route = d.pop("route")
 
-        treasury_balance_note = d.pop("treasury_balance_note")
-
         unflushed_balance_atomic = d.pop("unflushed_balance_atomic")
-
-        def _parse_treasury_balance_atomic(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        treasury_balance_atomic = _parse_treasury_balance_atomic(
-            d.pop("treasury_balance_atomic", UNSET)
-        )
 
         route_daily_report = cls(
             age_in_state_max_seconds=age_in_state_max_seconds,
@@ -180,9 +150,7 @@ class RouteDailyReport:
             refunds_by_status=refunds_by_status,
             rejected_holds_atomic=rejected_holds_atomic,
             route=route,
-            treasury_balance_note=treasury_balance_note,
             unflushed_balance_atomic=unflushed_balance_atomic,
-            treasury_balance_atomic=treasury_balance_atomic,
         )
 
         route_daily_report.additional_properties = d

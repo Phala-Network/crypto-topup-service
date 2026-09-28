@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{Account, NewDeposit};
-use topup::deposit_addresses::{self, Chain};
+use topup::deposit_addresses::{self, ChainContracts};
 use topup::outbox::{DeliveryConfig, DeliveryWorker};
 use topup::refunds::{
     DestinationScreener, DestinationScreening, EvmRefundChainReader, RefundChainReader,
@@ -264,19 +264,7 @@ async fn transfers_that_do_not_pay_the_refund_fail_it_and_release_the_reservatio
         // The account has since moved to another treasury; its older addresses still pay the
         // treasury they were issued for, and refunds of their deposits come from that one.
         let current_treasury = Address::repeat_byte(0x7c);
-        sqlx::query(
-            r#"
-            INSERT INTO treasuries
-                (id, account_id, chain_id, address, proof_message, proof_signature,
-                 verified_at, effective_at)
-            VALUES ($1, $2, 1, $3, 'proof', 'signature', now(), now())
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(merchant.account.id)
-        .bind(format!("{current_treasury:#x}"))
-        .execute(pool)
-        .await?;
+        seed::set_treasury(pool, merchant.account.id, true, 1, current_treasury).await?;
 
         let cases = [
             (
@@ -405,16 +393,13 @@ async fn a_deposit_address_refund_is_paid_from_that_networks_own_treasury() -> R
         // The customer's deposit address on chain 1 over the fixture treasury; the account then
         // moves chain 1 to another treasury, which supersedes that network with a forwarder over
         // the new one. Both are still credited.
-        let old = Chain::of(&route_fixture());
+        let chains = [ChainContracts::of(&route_fixture())];
         let current_treasury = Address::repeat_byte(0x7c);
-        let current = Chain {
-            treasury: current_treasury,
-            ..old
-        };
         let (issued, _) =
-            deposit_addresses::create(pool, &merchant.account, &customer, &[old], None).await?;
+            deposit_addresses::create(pool, &merchant.account, &customer, &chains, None).await?;
+        seed::set_treasury(pool, merchant.account.id, true, 1, current_treasury).await?;
         let (moved, _) =
-            deposit_addresses::create(pool, &merchant.account, &customer, &[current], None).await?;
+            deposit_addresses::create(pool, &merchant.account, &customer, &chains, None).await?;
         ensure!(moved.id == issued.id);
         let [old_network] = issued.networks.as_slice() else {
             anyhow::bail!("one network: {issued:?}");
@@ -425,19 +410,6 @@ async fn a_deposit_address_refund_is_paid_from_that_networks_own_treasury() -> R
         ensure!(old_network.treasury == FIXTURE_TREASURY);
         ensure!(current_network.treasury == current_treasury);
         ensure!(old_network.address != current_network.address);
-        sqlx::query(
-            r#"
-            INSERT INTO treasuries
-                (id, account_id, chain_id, address, proof_message, proof_signature,
-                 verified_at, effective_at)
-            VALUES ($1, $2, 1, $3, 'proof', 'signature', now(), now())
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(merchant.account.id)
-        .bind(format!("{current_treasury:#x}"))
-        .execute(pool)
-        .await?;
 
         // A deposit to the superseded network is refunded from that network's treasury: a
         // payment from the account's current treasury fails it, and one from the old treasury
@@ -1182,11 +1154,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .find(|route| route["route"] == "phala-cloud-ethereum-pha-usd")
             .context("configured route report")?;
         ensure!(route["route"] == "phala-cloud-ethereum-pha-usd");
-        ensure!(route["treasury_balance_atomic"].is_null());
-        ensure!(route["treasury_balance_note"]
-            .as_str()
-            .context("treasury note")?
-            .contains("not configured"));
         // Forwarders hold deposits that are not reversed minus what finalized sweeps moved.
         ensure!(route["unflushed_balance_atomic"] == "180");
         ensure!(route["open_rate_lock_exposure_atomic"] == "50");
@@ -1506,7 +1473,7 @@ fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> Router {
 fn test_router_with(
     pool: &sqlx::PgPool,
     admin_key: &SigningKey,
-    refund_screening: Arc<dyn DestinationScreener>,
+    screening: Arc<dyn DestinationScreener>,
 ) -> Router {
     let state = AppState {
         pool: pool.clone(),
@@ -1521,7 +1488,8 @@ fn test_router_with(
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening,
+        screening,
+        contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
     };
     topup::api::router(state).0
 }
@@ -1637,6 +1605,7 @@ async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, Strin
     )
     .await?;
     let key = seed::create_api_key(pool, account.id, true).await?;
+    seed::set_treasury(pool, account.id, true, 1, FIXTURE_TREASURY).await?;
     Ok((account, key))
 }
 

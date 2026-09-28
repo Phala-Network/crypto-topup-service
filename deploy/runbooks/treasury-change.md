@@ -1,39 +1,40 @@
 # Treasury change
 
-**Trigger:** an approved treasury migration, or a treasury Safe that is no longer acceptable. There
-is no runtime treasury setter.
+**Trigger:** a merchant, Phala Cloud's Finance included, moves a chain's treasury to another
+address; or an unexpected `account.treasury.pending` event, a change the merchant did not request.
 
-**Impact:** every forwarder's address commits to its treasury (the clone's only immutable
-argument), so a new treasury is a new route version; addresses already issued keep paying the old
-treasury, and the old version stays loaded for their deposits.
+**Impact:** treasuries are the accounts' own, set through the API per chain and mode with an
+EIP-4361 proof (docs/architecture.md §9, "Treasuries"; design D10); the operator never sets one.
+Every forwarder's address commits to its treasury (the clone's only immutable argument), so a
+change affects only what is issued after it applies: new quotes, and the chain's network of every
+deposit address of the account, which moves to a forwarder over the new treasury. Addresses issued
+before keep paying the old treasury and are still watched and credited, and their deposits are
+refunded from it: the merchant must keep control of an old treasury while customers may still pay
+an old address. A live change applies 48 hours after it is proven; a test-mode change and a
+chain's first treasury apply at once.
 
-## First steps
+## Planned change (the merchant)
 
-For an emergency migration, pause every scope on the route. The service holds no key that can
-move funds, and anyone can flush a forwarder, but only to the treasury its address commits to:
+1. Request a challenge for the new address and sign it: an EOA with `personal_sign`, a Safe's
+   owners as a Safe message (Safe{Core} SDK: Protocol Kit `createMessage` and `signMessage`, API
+   Kit `addMessage`), or on chain with `SignMessageLib` and the signature `0x`. The Safe must be
+   deployed on that chain; ERC-6492 signatures are refused.
+2. Submit it within 10 minutes with `POST /v1/treasuries`. A live change answers `pending` with its
+   `effective_at` and sends `account.treasury.pending` to every enabled endpoint of the mode.
+3. At `effective_at` the time-lock worker applies it and sends `account.treasury.updated`; list
+   the chain's treasuries with `GET /v1/treasuries?chain_id=…` (`active`, then `replaced`).
 
-```sh
-admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","settlement","refunds"]}'
-cast call "$FACTORY" 'addressOf(address,bytes32)(address)' "$TREASURY" "$SALT" --rpc-url "$RPC_PROVIDER_A_URL"
-```
+## Unrequested change (the merchant, then the operator)
 
-## Decide
-
-- Current Safe secure: plan a migration window.
-- Current Safe compromised: keep every scope paused and invoke the Safe incident procedure.
-- Any Safe or deployment verification fails: stop.
-
-## Fix
-
-**HUMAN-ONLY, Safe owner:** update `treasury` in `deploy/contracts/safe-expectations.json` by
-reviewed PR and verify the new Safe as [CONTRACTS.md](../CONTRACTS.md) describes (both providers).
-The permissionless factory is shared, so no contract is deployed. Then add a new route version with
-the new treasury, keep the old version, and Deploy `upgrade`
-([CONTRACTS.md, "Route and compose update"](../CONTRACTS.md#route-and-compose-update)).
+The merchant cancels the pending change before it applies,
+`POST /v1/treasuries/{id}/cancel` (`account.treasury.canceled`), and rolls its keys
+([API key compromise](api-key-compromise.md)). If the key holder races it (proves the change again,
+rolls the keys), the merchant asks the operator, who verifies the request with the recorded
+contact and revokes the mode's keys with a recovery key; a pending change then stays cancellable
+with the new key.
 
 ## Done when
 
-Both providers return a sample `addressOf(new treasury, salt)` equal to the service's; the attested
-compose carries the new route version; one small Sepolia deposit is credited and flushed to the new
-treasury; the paused scopes are resumed. New-version addresses cannot be rebound: rollback is a
-Deploy `upgrade` to the prior compose, with both versions kept.
+`GET /v1/treasuries` shows the intended treasury `active` on the chain and no unintended change
+`pending`; a new quote on the chain carries it as `treasury`; the deposit addresses' network on the
+chain pays it.

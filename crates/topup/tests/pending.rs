@@ -90,7 +90,8 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         rate_lock_quotes: Arc::new(FixedQuote),
         client_reads: Arc::default(),
         rate_limits: Arc::default(),
-        refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+        screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+        contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
     })
     .0;
     let api = Api {
@@ -531,6 +532,7 @@ async fn seed_account(pool: &sqlx::PgPool) -> Result<String> {
         "ws-pending",
     )
     .await?;
+    seed::set_treasury(pool, account.id, false, CHAIN_ID, seed::FIXTURE_TREASURY).await?;
     Ok(seed::create_api_key(pool, account.id, false).await?)
 }
 

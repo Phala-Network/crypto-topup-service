@@ -83,7 +83,7 @@ implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rp
 jq . "$tmp/contracts.json"
 
 echo "== rendering the sandbox route"
-FORWARDER_FACTORY="$factory" TREASURY="$owner" \
+FORWARDER_FACTORY="$factory" \
     TEST_TOKEN=$(jq -er .test_token "$tmp/contracts.json") \
     SANCTIONS_ORACLE=$(jq -er .sanctions_oracle "$tmp/contracts.json") \
     PRODUCT_SLUG="$slug" \
@@ -112,6 +112,10 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 account=$(jq -er .id "$tmp/account.json")
 (umask 077 && jq -jer '.api_keys[0].secret' "$tmp/account.json" >"$tmp/product.key")
 echo "created $account"
+# The owner key is the account's test-mode treasury on the chain; quotes need one.
+"$root/deploy/sandbox/set-treasury.sh" --api "$service_url" --key-file "$tmp/product.key" \
+    --chain-id 11155111 --private-key "$ANVIL_PRIVATE_KEY" >"$tmp/treasury.json"
+echo "treasury $(jq -er .address "$tmp/treasury.json") is $(jq -er .status "$tmp/treasury.json")"
 
 # Addresses as seen from the product container on the compose network.
 jq -n \

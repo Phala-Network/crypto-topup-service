@@ -249,10 +249,10 @@ if [[ -s "$tmp/route.yaml" ]]; then
     # The file names only what differs per route; the implementation (the factory's first CREATE)
     # and, on chains with a Chainalysis oracle, the sanctions oracle are code defaults that the
     # online checks read from `topup route show`.
-    for key in chain_id forwarder_factory treasury contract sanctions_oracle decimals; do
+    for key in chain_id forwarder_factory contract sanctions_oracle decimals; do
         route[$key]=$(route_value "$key")
     done
-    for key in forwarder_factory treasury contract sanctions_oracle; do
+    for key in forwarder_factory contract sanctions_oracle; do
         address=${route[$key]}
         if [[ "$key" == sanctions_oracle && -z "$address" ]]; then
             continue

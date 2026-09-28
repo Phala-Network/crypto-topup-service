@@ -16,6 +16,8 @@ pub enum EventObject {
     Account(Uuid),
     /// A refund, by its UUID.
     Refund(Uuid),
+    /// A treasury, by its id.
+    Treasury(Uuid),
 }
 
 impl EventObject {
@@ -28,6 +30,7 @@ impl EventObject {
             Self::ApiKey(_) => "api_key",
             Self::Account(_) => "account",
             Self::Refund(_) => "refund",
+            Self::Treasury(_) => "treasury",
         }
     }
 
@@ -40,6 +43,7 @@ impl EventObject {
             "api_key" => Some(Self::ApiKey(id)),
             "account" => Some(Self::Account(id)),
             "refund" => Some(Self::Refund(id)),
+            "treasury" => Some(Self::Treasury(id)),
             _ => None,
         }
     }
@@ -52,7 +56,8 @@ impl EventObject {
             | Self::Quote(id)
             | Self::ApiKey(id)
             | Self::Account(id)
-            | Self::Refund(id) => id,
+            | Self::Refund(id)
+            | Self::Treasury(id) => id,
         }
     }
 }
@@ -81,7 +86,9 @@ pub const SYSTEM_ACTOR: &str = "system";
 
 /// Records an event and one delivery to each enabled webhook endpoint of its account and mode
 /// that subscribes to its type, for at-least-once delivery (the outbox, architecture §11). An
-/// event already recorded is kept unchanged, and so are its deliveries.
+/// account security event (a treasury change, design D10) goes to every enabled endpoint of the
+/// mode, whatever its `enabled_events`. An event already recorded is kept unchanged, and so are
+/// its deliveries.
 pub async fn enqueue_in(
     connection: &mut PgConnection,
     event: &NewOutboxEvent,
@@ -114,7 +121,7 @@ pub async fn enqueue_in(
         WHERE endpoint.account_id = $2
           AND endpoint.livemode = $3
           AND endpoint.status = 'enabled'
-          AND ('*' = ANY(endpoint.enabled_events) OR $4 = ANY(endpoint.enabled_events))
+          AND ($6 OR '*' = ANY(endpoint.enabled_events) OR $4 = ANY(endpoint.enabled_events))
         "#,
     )
     .bind(event.id)
@@ -122,6 +129,7 @@ pub async fn enqueue_in(
     .bind(event.livemode)
     .bind(&event.event_type)
     .bind(event.next_attempt_at)
+    .bind(crate::treasuries::EVENT_TYPES.contains(&event.event_type.as_str()))
     .execute(&mut *connection)
     .await?;
     Ok(())

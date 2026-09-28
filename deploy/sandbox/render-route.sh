@@ -7,10 +7,10 @@ export LC_ALL=C
 template="$(dirname -- "$0")/routes/sandbox-sepolia.template.yaml"
 : "${RATE_LOCK_WINDOW_S:=120}"
 export RATE_LOCK_WINDOW_S
-for name in FORWARDER_FACTORY TREASURY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG; do
+for name in FORWARDER_FACTORY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG; do
     [[ -n "${!name:-}" ]] || { echo "render-route.sh: $name is required" >&2; exit 1; }
 done
-for name in FORWARDER_FACTORY TREASURY TEST_TOKEN SANCTIONS_ORACLE; do
+for name in FORWARDER_FACTORY TEST_TOKEN SANCTIONS_ORACLE; do
     [[ "${!name}" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
         echo "render-route.sh: $name must be a 0x-prefixed 20-byte hex address" >&2
         exit 1
@@ -24,7 +24,7 @@ done
 # Single pass over the template: only allow-listed `${NAME}` placeholders are replaced, and
 # substituted values are never rescanned. Unlike envsubst, bare `$NAME` is not supported; any
 # `$NAME` or `${...}` left in the output (from the template or a value) is rejected below.
-allowed=" FORWARDER_FACTORY TREASURY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG RATE_LOCK_WINDOW_S "
+allowed=" FORWARDER_FACTORY TEST_TOKEN SANCTIONS_ORACLE PRODUCT_SLUG RATE_LOCK_WINDOW_S "
 rest="$(<"$template")"
 rendered=""
 while [[ "$rest" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; do

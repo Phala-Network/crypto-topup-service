@@ -86,7 +86,8 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             rate_lock_quotes: Arc::new(FixedQuote),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
-            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         })
         .0;
         let now = Utc::now().timestamp();
@@ -127,7 +128,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let expected = topup_core::address::forwarder_address(
             route.chain.contracts.forwarder_factory,
             route.chain.contracts.implementation,
-            route.chain.contracts.treasury,
+            seed::FIXTURE_TREASURY,
             salt,
         );
         ensure!(created["address"] == format!("{expected:#x}"));
@@ -544,7 +545,8 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
             rate_lock_quotes: Arc::new(CentsPriceQuote),
             client_reads: Arc::default(),
             rate_limits: Arc::default(),
-            refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         })
         .0;
         let body = serde_json::to_vec(&json!({
@@ -1493,7 +1495,7 @@ fn test_route() -> RouteFile {
     route
 }
 
-/// A live account and its live secret key.
+/// A live account with a treasury on chain 1, and its live secret key.
 async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, String)> {
     let account = seed::create_account(
         pool,
@@ -1504,6 +1506,7 @@ async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, Strin
     )
     .await?;
     let key = seed::create_api_key(pool, account.id, true).await?;
+    seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
     Ok((account, key))
 }
 

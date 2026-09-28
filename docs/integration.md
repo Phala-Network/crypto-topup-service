@@ -41,7 +41,8 @@ example) and fail to find the package; install it with `uv` or `pip` directly, a
 
 **Configure.** The operator creates your account and sends your contact its first secret key,
 `ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin your
-account's webhook key for the mode from its attestation (§5.3).
+account's webhook key for the mode from its attestation (§5.3). Set your treasury on each chain
+you accept (§1.6): payments go only there, and quotes answer `409 treasury_not_set` until it is.
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
 `client_secret`; repeating the call with the same `idempotency_key` within 24 hours returns the
@@ -409,7 +410,7 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   changes, that network's address changes (the others do not); payments to the old address on
   that network are still credited and still reach the old treasury, and a refund of such a deposit
   is paid from the old treasury, so keep control of it (you are told through `account.treasury.*`
-  events).
+  events, §1.6). A network is issued only on a chain where you have a treasury.
 - Limits: 100 000 active addresses per account in live mode and 1 000 in test mode
   (`409 deposit_address_cap_exceeded`; ask the operator to raise it); no new address is issued
   while `quotes` is paused (`409 paused`), and a network frozen by reconciliation gets no new
@@ -422,6 +423,43 @@ and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any a
 at the market rate when it arrives, usually in about 30 seconds. You can reuse this address."
 `<DepositAddress depositAddress={…}>` from `@phala/pay/react` renders exactly that from `address`
 and `networks`; pass only those to the browser.
+
+### 1.6 Treasuries
+
+Your treasury is the only address your forwarders can pay: one per chain and mode, an EOA or a
+Safe deployed on that chain. You set it through the API with a signed EIP-4361 (Sign-In with
+Ethereum) message, which proves you control it and that it exists on the chain; the operator never
+sets it.
+
+```sh
+# 1. The message to sign, valid 10 minutes and usable once.
+curl -sS https://api.phala-pay.example/v1/treasuries/challenge -H "Authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{"chain_id": 11155111, "address": "0x…"}'
+# 2. Sign `message` exactly as returned, then submit it.
+curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $KEY" \
+  -H 'content-type: application/json' -d '{"chain_id": 11155111, "message": "…", "signature": "0x…"}'
+```
+
+- **EOA:** sign with `personal_sign` (EIP-191), for example `cast wallet sign "$MESSAGE"`;
+  `deploy/sandbox/set-treasury.sh` does both steps from a test key.
+- **Safe:** the owners sign the message as a Safe message (Safe{Core} SDK: Protocol Kit
+  `createMessage` and `signMessage`, API Kit `addMessage` and `addMessageSignature`) and you submit
+  the combined signature; or a Safe transaction through `SignMessageLib` approves it on chain and
+  you submit `"0x"`. The service calls the Safe's EIP-1271 `isValidSignature` for the message's
+  EIP-191 hash at the chain's `finalized` block on two RPC providers, so submit once the Safe (and
+  a `SignMessageLib` approval) is about 15 minutes old on Ethereum. A Safe not deployed on the
+  chain is refused (`treasury_not_deployed`), as are ERC-6492 signatures of a counterfactual one.
+- The address is screened for sanctions (`400 treasury_sanctioned`).
+- **When it applies.** A chain's first treasury, and any test-mode change, apply at once. A later
+  live change is `pending` for 48 hours, then applies; `account.treasury.pending` tells every
+  enabled webhook endpoint of the mode at once, whatever events it subscribes to, so a leaked key
+  cannot redirect payments unseen: cancel an unrequested change with
+  `POST /v1/treasuries/{id}/cancel` and roll your keys (§5.4). One change waits per chain
+  (`409 treasury_change_pending`).
+- **What changes.** New quotes, and the chain's network of each of your deposit addresses (§1.5),
+  pay the new treasury; each quote shows the `treasury` its address pays. Everything issued before
+  keeps paying the old treasury for good (the address commits to it): those payments are still
+  credited, and their refunds are paid from the old treasury (§3), so keep control of it.
 
 ## 2. Webhooks and fulfillment
 
@@ -576,6 +614,9 @@ the service's public key.
 | `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
 | `refund.failed` | The transaction attached with `mark_paid` is final but does not pay the refund (§3); one event per refund. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
+| `account.treasury.pending` | A live treasury change was proven and applies at `effective_at` (§1.6); sent to every enabled endpoint of the mode. Cancel it if you did not request it. | The treasury, `status: "pending"` |
+| `account.treasury.updated` | A treasury took effect (§1.6); sent to every enabled endpoint of the mode. | The treasury, `status: "active"` |
+| `account.treasury.canceled` | A pending change was canceled; sent to every enabled endpoint of the mode. | The treasury, `status: "canceled"` |
 
 Every object names its `account_id`. Before the route's confirmation nothing is sent: a checkout
 page shows the payment from the quote's `payment` (or the payer's `payment_status` read by
@@ -726,6 +767,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       secret store, never in code or logs; webhook URL agreed.
 - [ ] Your account's live webhook key pinned from verified attestation of production (§5.3),
       and the receiver checking your `acct_…` id and `livemode: true`.
+- [ ] Your live treasury proven on every chain you accept (§1.6), and your receiver alerting you on
+      `account.treasury.pending`.
 - [ ] Every address recomputed before display; the `client_secret` handed only to the paying
       customer's page and never logged.
 - [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
@@ -928,6 +971,10 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until its transaction is final, then `succeeded` or `failed`, or `canceled`; `expand[]=deposit`. | `get_refund` |
 | `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
 | `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
+| `POST /v1/treasuries/challenge` `{chain_id, address}` | The EIP-4361 message proving `address` as your treasury on `chain_id` (§1.6). | — |
+| `POST /v1/treasuries` `{chain_id, message, signature}` | Set the chain's treasury with the signed message: `active`, or `pending` for 48 hours for a later live change (§1.6). | — |
+| `GET /v1/treasuries`, `GET /v1/treasuries/{id}` | Your treasuries in the key's mode, newest first; filters `chain_id`, `status`. | — |
+| `POST /v1/treasuries/{id}/cancel` | Cancel a pending change. | — |
 | `GET /v1/attestation?nonce=` | Your account's webhook keys in the key's mode, with evidence (§5.3). | `attestation` |
 | `POST /v1/account/webhook_keys/roll` `{expires_in?}` | Roll the mode's webhook key (§5.3). | `roll_webhook_key` |
 

@@ -5,7 +5,7 @@
 #    rendered by deploy/render-compose.sh with immutable repository@sha256 references.
 # 2. Starts Anvil with Sepolia's chain id, installs the canonical Multicall3 that Sepolia carries
 #    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
-#    (deploy/contracts: canonical proxy, mock Safe as the route treasury, deploy-factory.sh,
+#    (deploy/contracts: canonical proxy, mock Safe checked by verify-safe.sh, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 # 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
 #    committed route lives, and renders the compose with the rehearsal's settings and the staging
@@ -193,12 +193,12 @@ export FOUNDRY_BROADCAST="$tmp/broadcast"
 "$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$rpc_url" --local-fund --broadcast >/dev/null
 nonce=$(cast nonce "$owner" --rpc-url "$rpc_url")
 safe_singleton=$(cast compute-address "$owner" --nonce "$nonce" | awk '{print $NF}')
-treasury=$(cast compute-address "$owner" --nonce $((nonce + 1)) | awk '{print $NF}')
+safe=$(cast compute-address "$owner" --nonce $((nonce + 1)) | awk '{print $NF}')
 (cd "$CONTRACTS_DIR" && SAFE_OWNER="$owner" forge script test/DeployMockSafe.s.sol:DeployMockSafe \
     --rpc-url "$rpc_url" --broadcast --private-key "$ANVIL_PRIVATE_KEY" -q) >/dev/null
-[[ "$(cast code "$treasury" --rpc-url "$rpc_url")" != 0x ]] || die "mock Safe was not deployed"
-jq -n --arg safe "$treasury" --arg owner "$owner" \
-    --arg code_hash "$(code_hash "$rpc_url" "$treasury")" --arg singleton "$safe_singleton" \
+[[ "$(cast code "$safe" --rpc-url "$rpc_url")" != 0x ]] || die "mock Safe was not deployed"
+jq -n --arg safe "$safe" --arg owner "$owner" \
+    --arg code_hash "$(code_hash "$rpc_url" "$safe")" --arg singleton "$safe_singleton" \
     --arg singleton_code_hash "$(code_hash "$rpc_url" "$safe_singleton")" --arg zero "$ZERO_ADDRESS" \
     '{configured: true, networks: {sepolia: {chain_id: 11155111}}, treasury: $safe,
       safes: [{address: $safe, owners: [$owner], threshold: 1, proxy_code_hashes: [$code_hash],
@@ -218,13 +218,12 @@ implementation=$(jq -er '.chains[0].implementation' "$tmp/verification.json")
     >"$tmp/test-contracts.json"
 token=$(jq -er .test_token "$tmp/test-contracts.json")
 oracle=$(jq -er .sanctions_oracle "$tmp/test-contracts.json")
-printf 'factory=%s implementation=%s treasury=%s token=%s sanctions_oracle=%s\n' \
-    "$factory" "$implementation" "$treasury" "$token" "$oracle"
+printf 'factory=%s implementation=%s safe=%s token=%s sanctions_oracle=%s\n' \
+    "$factory" "$implementation" "$safe" "$token" "$oracle"
 
 echo "== writing the route and rendering the staging compose"
 # The committed staging route with real addresses; the reference product is its product.
 sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
-    -e "s|^\(  treasury: \).*|\1\"$treasury\"|" \
     -e "s|^\(  contract: \).*|\1\"$token\"|" \
     -e "s|^\(  sanctions_oracle: \).*|\1\"$oracle\"|" \
     "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" >"$tmp/route.yaml"
@@ -398,6 +397,31 @@ print(account["id"])
 PY
 ) || die "POST /v1/admin/accounts did not create the account"
 echo "ok: POST /v1/admin/accounts created $account with its first test key"
+
+# The account proves its test-mode treasury through the API (design D10), here the owner EOA: the
+# mock Safe above implements no EIP-1271. The challenge is signed on this host with `cast`.
+treasury=$owner
+message=$(product_python - "$treasury" <<'PY'
+import sys, httpx
+with open("/opt/product.key", encoding="ascii") as key:
+    headers = {"Authorization": f"Bearer {key.read().strip()}"}
+response = httpx.post("http://topup:8080/v1/treasuries/challenge", headers=headers, timeout=30,
+                      json={"chain_id": 11155111, "address": sys.argv[1]})
+assert response.status_code == 200, (response.status_code, response.text)
+print(response.json()["message"], end="")
+PY
+) || die "POST /v1/treasuries/challenge failed"
+signature=$(cast wallet sign --private-key "$ANVIL_PRIVATE_KEY" "$message")
+product_python - "$message" "$signature" <<'PY' || die "POST /v1/treasuries did not set the treasury"
+import sys, httpx
+with open("/opt/product.key", encoding="ascii") as key:
+    headers = {"Authorization": f"Bearer {key.read().strip()}"}
+response = httpx.post("http://topup:8080/v1/treasuries", headers=headers, timeout=30,
+                      json={"chain_id": 11155111, "message": sys.argv[1], "signature": sys.argv[2]})
+assert response.status_code == 200, (response.status_code, response.text)
+assert response.json()["status"] == "active", response.text
+PY
+echo "ok: POST /v1/treasuries set the account's treasury $treasury with a signed challenge"
 
 # The merchant learns its webhook key only from /v1/attestation, with its API key: production has
 # no logs or SSH.

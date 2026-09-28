@@ -35,6 +35,7 @@ serde-saphyr.workspace = true
 serde_json.workspace = true
 sfv.workspace = true
 sha2.workspace = true
+siwe.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 topup-adapters = { path = "../adapters" }
@@ -50,6 +51,8 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
 sentry = { workspace = true, features = ["test"] }
 tower.workspace = true
 tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }
