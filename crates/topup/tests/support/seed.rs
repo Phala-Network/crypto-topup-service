@@ -3,32 +3,31 @@
 
 use alloy_primitives::{Address as EvmAddress, B256, address};
 use sqlx::PgPool;
+use topup::api_keys::{self, KeyKind};
 use topup::db::{self, Account, Address, Customer};
 use uuid::Uuid;
 
 /// The treasury of the route fixture, which seeded addresses pay.
 pub const FIXTURE_TREASURY: EvmAddress = address!("0x0000000000000000000000000000000000007EA5");
 
-/// Values used to create a merchant account with its request signing key and, when
-/// `webhook_url` is not empty, one webhook endpoint in the key's mode.
+/// Values used to create a merchant account enabled for live mode and, when `webhook_url` is not
+/// empty, one webhook endpoint in `livemode`. [`create_api_key`] gives it a key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewAccount {
     pub id: Uuid,
     pub name: String,
     pub livemode: bool,
-    pub public_key: String,
     pub webhook_url: String,
     pub paused_scopes: Vec<String>,
 }
 
 impl NewAccount {
-    /// A live account with no key material a test signs with and no webhook endpoint.
+    /// A live account without API keys or a webhook endpoint.
     pub fn named(name: &str) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.to_owned(),
             livemode: true,
-            public_key: "test-key".to_owned(),
             webhook_url: String::new(),
             paused_scopes: Vec::new(),
         }
@@ -57,25 +56,41 @@ pub struct NewAddress {
     pub address: EvmAddress,
 }
 
-/// The key id an account signs its requests with, `{acct_…}/v1`.
-pub fn key_id(account: &Account) -> String {
-    format!("{}/v1", account.public_id)
+/// Inserts a secret key of the account in the given mode and returns the key.
+pub async fn create_api_key(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+) -> Result<String, sqlx::Error> {
+    let key = api_keys::generate(KeyKind::Secret, livemode)
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    sqlx::query(
+        r#"
+        INSERT INTO api_keys (id, account_id, livemode, kind, prefix, last4, key_hash, created_by)
+        VALUES ($1, $2, $3, 'secret', $4, $5, $6, 'admin')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(livemode)
+    .bind(api_keys::prefix(KeyKind::Secret, livemode))
+    .bind(&key[key.len() - 4..])
+    .bind(api_keys::hash(&key).as_slice())
+    .execute(pool)
+    .await?;
+    Ok(key.as_str().to_owned())
 }
 
+/// Creates the account; see [`NewAccount`].
 pub async fn create_account(pool: &PgPool, account: &NewAccount) -> Result<Account, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("INSERT INTO accounts (id, name, paused_scopes) VALUES ($1, $2, $3)")
-        .bind(account.id)
-        .bind(&account.name)
-        .bind(&account.paused_scopes)
-        .execute(&mut *transaction)
-        .await?;
     sqlx::query(
-        "INSERT INTO request_signing_keys (account_id, livemode, public_key) VALUES ($1, $2, $3)",
+        "INSERT INTO accounts (id, name, paused_scopes, charges_enabled) \
+         VALUES ($1, $2, $3, true)",
     )
     .bind(account.id)
-    .bind(account.livemode)
-    .bind(&account.public_key)
+    .bind(&account.name)
+    .bind(&account.paused_scopes)
     .execute(&mut *transaction)
     .await?;
     if !account.webhook_url.is_empty() {

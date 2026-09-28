@@ -7,7 +7,7 @@
 #
 # Usage: deploy/write-staging-env.sh [--product] OUTPUT
 #
-# --product writes the reference product's env file instead: its only name, PRODUCT_SEED
+# --product writes the reference product's env file instead: its only name, PRODUCT_API_KEY
 # (deploy/product/staging.env.example).
 #
 # OUTPUT must already exist (create it with mktemp, mode 0600); it is overwritten.

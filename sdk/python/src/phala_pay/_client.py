@@ -1,33 +1,31 @@
-"""`PhalaPay`: the Phala Pay product API as Stripe-style resources over the signed `TopupClient`."""
+"""`PhalaPay`: the Phala Pay merchant API as Stripe-style resources over `TopupClient`."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
 
 import httpx
 
 from topup_client.models import Config, Deposit, Quote, Refund
-from topup_sdk import RequestSigner, TopupClient
+from topup_sdk import TopupClient
 
 from ._webhook import Webhook
 
 
 class PhalaPay:
-    """A client for one product, signed with its key.
+    """A client for one account and mode, authenticated with its secret key.
 
-        pay = PhalaPay(api_base="https://pay.example.com", key_id="acme/v1",
-                       key_file="product.seed")
+        pay = PhalaPay(api_base="https://pay.example.com", api_key=os.environ["PHALA_PAY_KEY"])
         quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111,
                                   asset="pha")
         return {"client_secret": quote.client_secret}
 
-    `key_id` is `{product}/v1`; the key is the product's ed25519 seed, from `key_file` (64 hex
-    characters, as `topup-sdk keygen` writes it) or `seed` (32 bytes, or 64 hex characters).
-    `forwarder`, the `(factory, implementation, treasury)` triple pinned from the attested
-    deployment and the product's treasury, makes `quotes.create` and `quotes.retrieve` recompute
-    every open quote's address and raise `AddressMismatchError` rather than return one the
-    product did not derive.
+    `api_key` is a secret key, `ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account
+    and the mode. `forwarder`, the `(factory, implementation, treasury)` triple pinned from the
+    attested deployment and the merchant's treasury, makes `quotes.create` and `quotes.retrieve`
+    recompute every open quote's address and raise `AddressMismatchError` rather than return one
+    the merchant did not derive; `account` (`acct_…`) saves the one `GET /v1/account` that check
+    otherwise makes.
 
     Requests that fail with a transport error, `429`, or `5xx` are retried with backoff; `POST`s
     reuse one `Idempotency-Key` across retries, so a retry never creates a second object.
@@ -36,26 +34,18 @@ class PhalaPay:
     def __init__(
         self,
         api_base: str,
-        key_id: str,
+        api_key: str,
         *,
-        key_file: str | Path | None = None,
-        seed: bytes | str | None = None,
+        account: str | None = None,
         forwarder: tuple[str, str, str] | None = None,
         timeout: float = 15.0,
         max_attempts: int = 4,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        if (key_file is None) == (seed is None):
-            raise ValueError("pass exactly one of key_file or seed")
-        if key_file is not None:
-            signer = RequestSigner.from_seed_file(key_id, key_file)
-        elif isinstance(seed, str):
-            signer = RequestSigner.from_seed(key_id, bytes.fromhex(seed.strip().removeprefix("0x")))
-        elif seed is not None:
-            signer = RequestSigner.from_seed(key_id, seed)
         self._client = TopupClient(
             api_base,
-            signer,
+            api_key,
+            account=account,
             forwarder=forwarder,
             timeout=timeout,
             max_attempts=max_attempts,

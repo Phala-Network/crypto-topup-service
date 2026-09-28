@@ -6,6 +6,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::B256;
 use axum::Json;
 use axum::extract::State;
+use axum::response::Response;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
@@ -16,14 +17,14 @@ use crate::tenancy::Scope;
 
 use super::AppState;
 use super::attestation::AttestationError;
-use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, ApiQuery};
 use super::models::{
-    AccountResponse, AdminReasonRequest, AdminRefundResponse, AttestationQuery,
-    AttestationResponse, CreateAccountRequest, DailyReportResponse, NudgeResponse,
-    OutboxReplayResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
-    RecordRefundRequest, RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
+    AccountResponse, AdminReasonRequest, AdminRefundResponse, ApiKeyObject, AttestationQuery,
+    AttestationResponse, Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse,
+    IssueApiKeyRequest, NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
+    ReconciliationBlockLiftResponse, RecordRefundRequest, RoutePauseResponse,
+    SupportDepositResponse, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -58,72 +59,131 @@ pub(crate) async fn get_attestation(
     path = "/v1/admin/accounts",
     request_body = CreateAccountRequest,
     responses(
-        (status = 200, description = "OK: issued", body = AccountResponse),
+        (status = 200, description = "OK: created, with its first secret keys", body = AccountResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
-/// Each call issues a new account. Until self-serve signup and API keys replace it.
+/// Creates a merchant account after the operator's offline due diligence (design D8): records the
+/// contact and the due diligence, decides live mode (`charges_enabled`, D12), and returns the
+/// first secret key of test mode and, with live mode, of live mode. Each key's `secret` is shown
+/// only in this response; send it to the contact, who rolls it on receipt. Audited.
 pub(crate) async fn create_account(
     State(state): State<AppState>,
     ApiJson(request): ApiJson<CreateAccountRequest>,
 ) -> ApiResult<Json<AccountResponse>> {
     let name = request.name.trim();
-    if name.is_empty() || name.chars().count() > 200 {
-        return Err(ApiError::invalid_param(
-            "name",
-            "name must contain 1 to 200 characters",
-        ));
+    validate_label("name", name)?;
+    validate_contact(&request.contact)?;
+    validate_label("due_diligence.reference", &request.due_diligence.reference)?;
+    validate_label(
+        "due_diligence.reviewed_by",
+        &request.due_diligence.reviewed_by,
+    )?;
+    validate_reason(&request.reason)?;
+    if let Some(url) = &request.webhook_url {
+        validate_webhook_url(url, local_stack(&state))?;
     }
-    validate_credentials(&state, &request.public_key, &request.webhook_url)?;
     let account = repository::create_account(
         &state.pool,
-        name,
-        request.livemode,
-        &request.public_key,
-        &request.webhook_url,
+        &repository::NewAccount {
+            name,
+            contact: to_json(&request.contact)?,
+            due_diligence: to_json(&request.due_diligence)?,
+            charges_enabled: request.charges_enabled,
+            webhook_url: request.webhook_url.as_deref(),
+        },
         &admin_actor(&state),
+        &request.reason,
     )
     .await?;
-    Ok(Json(account_response(account)))
+    Ok(Json(account_response(account)?))
 }
 
 #[utoipa::path(
-    put,
+    post,
     path = "/v1/admin/accounts/{account}",
     params(("account" = String, Path, description = "Account id, `acct_…`")),
     request_body = UpdateAccountRequest,
     responses(
-        (status = 200, description = "OK: replaced, or already holding these values", body = AccountResponse),
+        (status = 200, description = "OK: updated, or already holding these values", body = AccountResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no account is issued with this id", body = ErrorResponse)
+        (status = 404, description = "Not Found: no account has this id", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// Replaces an account's request signing key and webhook URL; the key id and mode stay.
+/// Updates an account: live mode (enabling it returns the first live key), the restricted flag,
+/// the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
 pub(crate) async fn update_account(
     State(state): State<AppState>,
     ApiPath(account): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateAccountRequest>,
 ) -> ApiResult<Json<AccountResponse>> {
     let account_id = parse_account_id(&account)?;
-    validate_credentials(&state, &request.public_key, &request.webhook_url)?;
+    if let Some(contact) = &request.contact {
+        validate_contact(contact)?;
+    }
+    if let Some(url) = &request.webhook_url {
+        validate_webhook_url(url, local_stack(&state))?;
+    }
     validate_reason(&request.reason)?;
     let account = repository::update_account(
         &state.pool,
         account_id,
-        &request.public_key,
-        &request.webhook_url,
+        &repository::AccountChanges {
+            charges_enabled: request.charges_enabled,
+            restricted: request.restricted,
+            contact: request.contact.as_ref().map(to_json).transpose()?,
+            webhook_url: request.webhook_url.as_deref(),
+        },
         &admin_actor(&state),
         &request.reason,
     )
     .await?;
-    Ok(Json(account_response(account)))
+    Ok(Json(account_response(account)?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/api_keys",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = IssueApiKeyRequest,
+    responses(
+        (status = 200, description = "OK: the key with its `secret`, shown once", body = ApiKeyObject),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "`testmode_charges_only`: a live key for an account without live mode", body = ErrorResponse),
+        (status = 404, description = "Not Found: no account has this id", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Issues a recovery key (design D7) after the operator verified the request with the recorded
+/// contact, optionally revoking every key of the mode first. Audited, and announced as
+/// `api_key.*` events with actor `admin`.
+pub(crate) async fn issue_api_key(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<IssueApiKeyRequest>,
+) -> ApiResult<Response> {
+    let account_id = parse_account_id(&account)?;
+    validate_reason(&request.reason)?;
+    super::keys::validate_name(&request.name)?;
+    let issued = crate::api_keys::recover(
+        &state.pool,
+        Scope::new(account_id, request.livemode),
+        &request.name,
+        request.revoke_existing,
+        &admin_actor(&state),
+        &request.reason,
+    )
+    .await
+    .map_err(super::keys::map_error)?;
+    Ok(super::keys::issued_response(&issued))
 }
 
 #[utoipa::path(
@@ -157,7 +217,7 @@ pub(crate) async fn admin_get_deposit(
         ("account" = String, Path, description = "Account id, `acct_…`"),
         ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
     ),
-    request_body = PauseRequest,
+    request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -166,7 +226,7 @@ pub(crate) async fn admin_get_deposit(
 pub(crate) async fn pause_customer(
     State(state): State<AppState>,
     ApiPath((account, customer)): ApiPath<(String, String)>,
-    ApiJson(request): ApiJson<PauseRequest>,
+    ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
     mutate_customer_scopes(&state, &account, &customer, request, true).await
 }
@@ -178,7 +238,7 @@ pub(crate) async fn pause_customer(
         ("account" = String, Path, description = "Account id, `acct_…`"),
         ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
     ),
-    request_body = PauseRequest,
+    request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -187,7 +247,7 @@ pub(crate) async fn pause_customer(
 pub(crate) async fn resume_customer(
     State(state): State<AppState>,
     ApiPath((account, customer)): ApiPath<(String, String)>,
-    ApiJson(request): ApiJson<PauseRequest>,
+    ApiJson(request): ApiJson<CustomerPauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
     mutate_customer_scopes(&state, &account, &customer, request, false).await
 }
@@ -463,19 +523,14 @@ async fn mutate_customer_scopes(
     state: &AppState,
     account: &str,
     client_reference_id: &str,
-    request: PauseRequest,
+    request: CustomerPauseRequest,
     pause: bool,
 ) -> ApiResult<Json<PauseResponse>> {
     let scopes = validate_scopes(request.scopes)?;
     let account_id = parse_account_id(account)?;
-    let livemode = repository::find_signing_key(&state.pool, account_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?
-        .livemode;
-    // The operator names the customer in the mode of the account's signing key.
     let customer = repository::find_customer(
         &state.pool,
-        Scope::new(account_id, livemode),
+        Scope::new(account_id, request.livemode),
         client_reference_id,
     )
     .await?
@@ -536,13 +591,9 @@ fn validate_reason(reason: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Validates an account's credentials: an ed25519 public key and a webhook URL.
-fn validate_credentials(state: &AppState, public_key: &str, webhook_url: &str) -> ApiResult<()> {
-    VerificationKey::from_base64(String::new(), public_key).map_err(|_| {
-        ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
-    })?;
-    let local_stack = state.public_origin.to_string().starts_with("http://");
-    validate_webhook_url(webhook_url, local_stack)
+/// Whether the service's own public origin is `http`, which only local stacks use.
+fn local_stack(state: &AppState) -> bool {
+    state.public_origin.to_string().starts_with("http://")
 }
 
 /// Requires an absolute `https` URL without credentials or fragment. `http` is accepted only
@@ -591,16 +642,67 @@ fn decode_nonce(value: &str) -> ApiResult<Vec<u8>> {
     hex::decode(value).map_err(|_| ApiError::bad_request("nonce must be valid hexadecimal"))
 }
 
-fn account_response(issued: IssuedAccount) -> AccountResponse {
-    AccountResponse {
-        key_id: format!("{}/v1", issued.account.public_id),
-        id: issued.account.public_id,
-        name: issued.account.name,
-        livemode: issued.livemode,
-        public_key: issued.public_key,
-        webhook_url: issued.webhook_url,
-        paused_scopes: issued.account.paused_scopes,
+fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {
+    let account = issued.account;
+    Ok(AccountResponse {
+        id: account.public_id,
+        object: "account".to_owned(),
+        name: account.name,
+        contact: from_json(account.contact)?,
+        due_diligence: from_json(account.due_diligence)?,
+        charges_enabled: account.charges_enabled,
+        restricted: account.restricted,
+        paused_scopes: account.paused_scopes,
+        created: account.created_at.timestamp(),
+        api_keys: issued
+            .api_keys
+            .iter()
+            .map(|key| super::keys::api_key_object(&key.key, Some(key.secret.as_str().to_owned())))
+            .collect(),
+    })
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> ApiResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|error| {
+        tracing::error!(%error, "admin record serialization failed");
+        ApiError::internal()
+    })
+}
+
+fn from_json<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> ApiResult<T> {
+    serde_json::from_value(value).map_err(|error| {
+        tracing::error!(%error, "stored admin record is malformed");
+        ApiError::internal()
+    })
+}
+
+/// A label of 1 to 200 characters.
+fn validate_label(param: &str, value: &str) -> ApiResult<()> {
+    if value.trim().is_empty() || value.chars().count() > 200 {
+        return Err(ApiError::invalid_param(
+            param,
+            format!("{param} must contain 1 to 200 characters"),
+        ));
     }
+    Ok(())
+}
+
+/// A contact's name and a plausible email address; the operator verifies it offline.
+fn validate_contact(contact: &Contact) -> ApiResult<()> {
+    validate_label("contact.name", &contact.name)?;
+    let email = contact.email.as_str();
+    let plausible = email.len() <= 320
+        && email
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'))
+        && !email.chars().any(char::is_whitespace);
+    if !plausible {
+        return Err(ApiError::invalid_param(
+            "contact.email",
+            "contact.email must be an email address",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_account_id(id: &str) -> ApiResult<Uuid> {

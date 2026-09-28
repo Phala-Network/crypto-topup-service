@@ -29,8 +29,7 @@ SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([3] * 32))
 CONFIG = ProductConfig(
     service_url="http://service.test",
     product_slug="acme",
-    product_keyid="acme/v1",
-    product_seed_file="unused",
+    api_key_file="unused",
     route="sandbox-acme-tpha-usd",
     chain_id=11155111,
     rpc_url="http://rpc.test",
@@ -203,7 +202,7 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ACME_SEED", raising=False)
-    config = replace(CONFIG, product_seed_file=None, product_seed_env="ACME_SEED")
+    config = replace(CONFIG, api_key_file=None, api_key_env="ACME_SEED")
     api = AccountApi(config, ProductLedger(), load_public_key(DRIVER.public_key_base64()))
     register = json.dumps({"account_id": TEAM}).encode()
     other = RequestSigner.from_seed(DRIVER_KEYID, bytes([8] * 32))

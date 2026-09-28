@@ -6,7 +6,6 @@ import pytest
 from topup_client.models import AttestationResponse
 from topup_sdk import (
     AttestationError,
-    RequestSigner,
     TopupClient,
     attestation_report_data,
     verify_attestation_binding,
@@ -55,9 +54,9 @@ def test_client_attestation_verifies_the_binding() -> None:
         assert request.url.params["nonce"] == NONCE.hex()
         return httpx.Response(200, json=bodies.pop(0))
 
-    signer = RequestSigner.from_seed("acme/v1", bytes([5] * 32))
+    api_key = "ppay_sk_test_" + "C" * 43 + "000000"
     with TopupClient(
-        "http://service.test:8080", signer, transport=httpx.MockTransport(respond)
+        "http://service.test:8080", api_key, transport=httpx.MockTransport(respond)
     ) as client:
         evidence = client.attestation(NONCE)
         assert evidence.settlement_pubkey == SETTLEMENT.hex()

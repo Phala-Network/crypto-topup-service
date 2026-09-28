@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import time
-from pathlib import Path
 
 import httpx
 import pytest
@@ -11,15 +10,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from phala_pay import Deposit, PhalaPay, Quote, SignatureVerificationError, Webhook
-from topup_sdk import load_public_key, sign_webhook, verify_request
-from topup_sdk.signing import target_uri
+from topup_sdk import load_public_key, sign_webhook
 
-SEED = bytes([7] * 32)
-SEED_PUBLIC_KEY = base64.b64encode(
-    Ed25519PrivateKey.from_private_bytes(SEED)
-    .public_key()
-    .public_bytes(Encoding.Raw, PublicFormat.Raw)
-).decode()
+API_KEY = "ppay_sk_test_" + "B" * 43 + "000000"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([9] * 32))
 SERVICE_PUBLIC_KEY = base64.b64encode(
     SERVICE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -83,23 +76,15 @@ def _deposit(index: int = 1) -> dict[str, object]:
 
 
 def _client(handler: httpx.MockTransport) -> PhalaPay:
-    return PhalaPay("http://service.test", "acme/v1", seed=SEED, transport=handler)
+    return PhalaPay("http://service.test", API_KEY, transport=handler)
 
 
-def test_quotes_create_returns_the_client_secret_from_a_signed_request() -> None:
-    public_key = load_public_key(SEED_PUBLIC_KEY)
+def test_quotes_create_returns_the_client_secret_to_a_request_with_the_key() -> None:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        verify_request(
-            method=request.method,
-            target_uri=target_uri(request),
-            headers=dict(request.headers),
-            body=request.content,
-            public_key=public_key,
-            keyid="acme/v1",
-            require_idempotency_key=True,
-        )
+        assert request.headers["authorization"] == f"Bearer {API_KEY}"
+        assert request.headers["idempotency-key"]
         seen.append(request)
         return httpx.Response(200, json=_quote(client_secret=f"{QUOTE_ID}_secret_{'ab' * 24}"))
 
@@ -128,39 +113,9 @@ def test_deposits_list_follows_every_page() -> None:
     assert [d.log_index for d in deposits] == [3, 2, 1]
 
 
-@pytest.mark.parametrize("key", ["file", "hex"])
-def test_the_key_loads_from_a_seed_file_or_hex(tmp_path: Path, key: str) -> None:
-    seed_file = tmp_path / "product.seed"
-    seed_file.write_text(SEED.hex() + "\n", encoding="ascii")
-    signed: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        signed.append(request)
-        return httpx.Response(200, json=_quote())
-
-    transport = httpx.MockTransport(handler)
-    client = (
-        PhalaPay("http://service.test", "acme/v1", key_file=seed_file, transport=transport)
-        if key == "file"
-        else PhalaPay("http://service.test", "acme/v1", seed=SEED.hex(), transport=transport)
-    )
-    client.quotes.retrieve(QUOTE_ID)
-    verify_request(
-        method="GET",
-        target_uri=target_uri(signed[0]),
-        headers=dict(signed[0].headers),
-        body=b"",
-        public_key=load_public_key(SEED_PUBLIC_KEY),
-        keyid="acme/v1",
-        require_idempotency_key=False,
-    )
-
-
-def test_exactly_one_key_source_is_required() -> None:
-    with pytest.raises(ValueError, match="exactly one"):
+def test_the_key_must_be_a_secret_key() -> None:
+    with pytest.raises(ValueError, match="secret key"):
         PhalaPay("http://service.test", "acme/v1")
-    with pytest.raises(ValueError, match="exactly one"):
-        PhalaPay("http://service.test", "acme/v1", seed=SEED, key_file="product.seed")
 
 
 # Webhooks ----------------------------------------------------------------------------------------

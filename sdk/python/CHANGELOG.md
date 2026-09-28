@@ -14,6 +14,16 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   takes no operators. The admin daily report drops `flush_planning` (`FlushPlanningReport`), and
   its `unflushed_balance_atomic` is what forwarders still hold: deposits not reversed minus
   finalized `Flushed` amounts, whoever flushed.
+- **Breaking**: merchant requests carry a secret key, `Authorization: Bearer ppay_sk_…`, instead
+  of an RFC 9421 signature (design D7, PR 5). `TopupClient(base_url, api_key, *, account=None,
+  forwarder=None, …)` and `PhalaPay(api_base, api_key, *, account=None, forwarder=None, …)`
+  replace the signer and key file arguments; the address check reads the account id once from
+  `GET /v1/account` unless `account=` is given. `TopupClient.get_account()` and `account_id()`
+  are new. The client retries `409 idempotency_key_in_use` instead of `signature_replayed`.
+  `RequestSigner` stays for the operator's admin requests.
+- The regenerated client adds `/v1/account`, `/v1/api_keys` (create, list, retrieve, roll,
+  revoke), and the admin `create_account` (contact, due diligence, `charges_enabled`, first keys),
+  `update_account` (now `POST`), and `issue_api_key`; customer pauses take `livemode`.
 
 - **Breaking**: products are gone; the service's tenant is an account, `acct_…`. Sign with the key
   id the operator issued with your account, `{acct_…}/v1`: the client takes the account id from

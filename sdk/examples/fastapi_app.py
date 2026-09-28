@@ -10,7 +10,7 @@ fulfillment.
 Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
     PHALA_PAY_API_BASE=https://pay.example.com \\
-    PHALA_PAY_KEY_ID=acme/v1 PHALA_PAY_KEY_FILE=product.seed \\
+    PHALA_PAY_SECRET_KEY=ppay_sk_test_... \\
     PHALA_PAY_WEBHOOK_KEY=<settlement public key, pinned from attestation> \\
     uvicorn --factory fastapi_app:app_from_env
 """
@@ -140,8 +140,7 @@ def create_app(
 def app_from_env() -> FastAPI:
     pay = PhalaPay(
         os.environ["PHALA_PAY_API_BASE"],
-        os.environ["PHALA_PAY_KEY_ID"],
-        key_file=os.environ["PHALA_PAY_KEY_FILE"],
+        os.environ["PHALA_PAY_SECRET_KEY"],
     )
     return create_app(
         pay,

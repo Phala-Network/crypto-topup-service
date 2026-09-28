@@ -4,13 +4,14 @@
 # phala-cloud product on the Sepolia staging route. Deploy (target `product`) renders this file with
 # deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and the public settings
 # (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they
-# are attested and a change is a compose upgrade. The only env value is PRODUCT_SEED, the product's
-# signing seed (64 hex), sealed by the owner (deploy/product/staging.env.example).
+# are attested and a change is a compose upgrade. The only env value is PRODUCT_API_KEY, the
+# product's Phala Pay secret key (ppay_sk_test_…), sealed by the owner
+# (deploy/product/staging.env.example).
 services:
   product:
     image: ${PRODUCT_IMAGE:-ghcr.io/phala-network/phala-pay-reference-product@sha256:0000000000000000000000000000000000000000000000000000000000000000}
     environment:
-      PRODUCT_SEED: ${PRODUCT_SEED:-}
+      PRODUCT_API_KEY: ${PRODUCT_API_KEY:-}
     # Compose recreates a container only when its service definition changes, not when an inline
     # config's content does, and a restart keeps the old config file. The renderer sets this label
     # to the digest of the rendered file, so every rendered change recreates the product.
@@ -43,8 +44,7 @@ configs:
       {
         "service_url": "${TOPUP_ORIGIN:-}",
         "product_slug": "phala-cloud",
-        "product_keyid": "phala-cloud/v1",
-        "product_seed_env": "PRODUCT_SEED",
+        "api_key_env": "PRODUCT_API_KEY",
         "route": "phala-cloud-sepolia-pha-usd",
         "chain_id": 11155111,
         "rpc_url": "${PRODUCT_RPC_URL:-}",

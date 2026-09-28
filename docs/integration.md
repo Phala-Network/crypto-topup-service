@@ -39,22 +39,19 @@ Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to 
 example) and fail to find the package; install it with `uv` or `pip` directly, and switch to
 `phala-pay` from PyPI once it is released.
 
-**Configure.** Create the product key and send the printed public key to the operator (§5.1),
-and pin the service's settlement key from its attestation (§5.3):
-
-```sh
-uvx --from phala-pay topup-sdk keygen --keyid pending/v1 --seed-out product.seed
-```
+**Configure.** The operator creates your account and sends your contact its first secret key,
+`ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin the
+service's settlement key from its attestation (§5.3).
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
-`client_secret`; repeating the call with the same `idempotency_key` returns the same quote with a
-new secret (the old one stops working), which is how a reloaded page resumes.
+`client_secret`; repeating the call with the same `idempotency_key` within 24 hours returns the
+same response, secret included, which is how a reloaded page resumes.
 
 ```python
 from phala_pay import PhalaPay
 
-# PHALA_PAY_KEY_ID is the key id the operator issued with your account, "acct_…/v1".
-pay = PhalaPay(api_base=PHALA_PAY_API_BASE, key_id=PHALA_PAY_KEY_ID, key_file="product.seed")
+# PHALA_PAY_SECRET_KEY is your secret key, "ppay_sk_test_…" or "ppay_sk_live_…".
+pay = PhalaPay(api_base=PHALA_PAY_API_BASE, api_key=PHALA_PAY_SECRET_KEY)
 
 @app.post("/topups")
 def create_topup(body: TopupRequest, team: Team = Depends(current_team)) -> dict[str, str]:
@@ -136,7 +133,7 @@ sequenceDiagram
     participant ETH as Ethereum
     Payer->>UI: top up $25
     UI->>BE: create top-up
-    BE->>PP: POST /v1/quotes (signed, Idempotency-Key)
+    BE->>PP: POST /v1/quotes (Bearer key, Idempotency-Key)
     PP-->>BE: quote with client_secret
     BE-->>UI: client_secret
     UI->>PP: GET /v1/quotes/{id}?client_secret=… (polls)
@@ -233,18 +230,18 @@ records of your own to credit: `deposit.credited` carries the deposit, which nam
 (`account_id`) and the quote (`quote`), also for a late or wrong-amount payment.
 
 **The payer's page.** Hand the quote's `client_secret` to the paying customer's page only, and
-do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without a signature, from any
+do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without an API key, from any
 origin, as Stripe.js reads a PaymentIntent: `{id, object, status, amount, currency, asset,
 decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
 confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the route's
 confirmation, being valued and screened), `credited`, or `rejected` (contact support). It carries no account, price, deposit id,
 or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
-repeat with the same `Idempotency-Key` returns the same quote with a new secret, and the earlier
-one stops working. `@phala/pay`'s `<Checkout>` is this page.
+repeat with the same `Idempotency-Key` within 24 hours returns the same response, secret included.
+`@phala/pay`'s `<Checkout>` is this page.
 
 **Resume a checkout.** Keep the quote's `client_secret` in the browser (for example
 `localStorage`, keyed by the signed-in account) until the checkout reaches `credited`, `expired`,
-or `canceled`, or reports `error` (the secret was replaced by a repeat create). A payer who closes
+or `canceled`, or reports `error`. A payer who closes
 the tab after paying then reopens the page on the same quote's progress instead of an empty form,
 and does not pay twice.
 
@@ -480,7 +477,7 @@ for a credit you did not apply or reverse, such as a held credit (§2.4;
 [architecture §15](architecture.md#15-operating-policies)).
 
 Refunds are operator actions, as in Stripe's Dashboard: your support or finance staff start one
-from your own internal admin, whose backend holds the product signing key. Never offer a refund
+from your own internal admin, whose backend holds your secret key. Never offer a refund
 as a self-service action to the paying user: a crypto refund is irreversible, and a credited
 balance may already be spent. Request it by deposit id, not through the user's account, so that a
 payment to an account that no longer exists (a deleted workspace, a mistyped id) is refundable
@@ -507,7 +504,7 @@ Idempotency-Key: "…"
 - An ineligible deposit is `409 deposit_not_refundable`; a deposit that is not final yet (about
   15 minutes after its block on Ethereum) is `409 deposit_not_final`, so nothing is paid back for
   a payment that could still be reversed: retry after finality. A paused `refunds` scope is
-  `409 paused`. The same `Idempotency-Key` with the same parameters returns the same refund.
+  `409 paused`. The same `Idempotency-Key` with the same request returns the same response.
 - When `deposit.refunded` arrives, reverse the credit you applied for that deposit (a held
   credit was never applied), once per event id.
 
@@ -520,14 +517,13 @@ Idempotency-Key: "…"
 | Production | `https://pay-api.phala.com` | Ethereum Mainnet (1) | Not deployed yet |
 | Staging | `https://pay-api-staging.phala.com` | Sepolia (11155111) | Live |
 
-The origin is exact: it is the service's `TOPUP_PUBLIC_ORIGIN`, and every request signature
-covers it (§5.5). Staging's route, with its forwarder factory, implementation, and test PHA token
+Staging's route, with its forwarder factory, implementation, and test PHA token
 (a `MockERC20` whose `mint(address,uint256)` is public), is
 [deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml).
-Staging's `phala-cloud` product is currently the reference product; switching staging to Phala
-Cloud's staging backend is an operator change: the admin replaces the product's key and webhook
-URL (§5.4), and the route stays as it is. There is no `livemode` flag: each environment is its own
-origin, product key, and settlement key.
+Staging's `phala-cloud` account is currently the reference product; switching staging to Phala
+Cloud's staging backend is an operator change of the account's webhook URL, and the route stays
+as it is. Your key selects the mode: `ppay_sk_test_` keys act on test routes (Sepolia), and
+`ppay_sk_live_` keys, issued once the operator enables live mode, on live routes.
 
 ### 4.2 Testing your receiver
 
@@ -560,8 +556,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       one credit.
 - [ ] Fulfillment keyed by the deposit id (`dep_…`) under a unique index, committed before `2xx`;
       refusals recorded as holds, never answered `5xx`.
-- [ ] Production product key generated for production only; seed in the secret store; public key
-      and key id sent to the operator; webhook URL agreed.
+- [ ] Live mode enabled by the operator; the first live key rolled on receipt and kept in the
+      secret store, never in code or logs; webhook URL agreed.
 - [ ] Settlement key pinned from verified attestation of production (§5.3), with the keyid.
 - [ ] Every address recomputed before display; the `client_secret` handed only to the paying
       customer's page and never logged.
@@ -586,36 +582,32 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
 
 ## 5. Reference
 
-### 5.1 Create the product key
+### 5.1 Your account and first keys (done by the operator)
 
-On a machine you control, one key per environment:
+There is no signup: the operator creates your account after due diligence done offline
+(design D8). Send the operator your company's details, a security contact (name and email), and
+your webhook URL (public `https`). The operator then:
 
-```sh
-cd sdk/python
-uv run --locked topup-sdk keygen --keyid pending/v1 --seed-out ~/phala-cloud-staging.seed
-```
+1. creates the account with the admin-signed `POST /v1/admin/accounts`
+   ([deploy/README.md](../deploy/README.md#account-credentials)), which returns its id, `acct_…`,
+   and its first secret key of test mode, `ppay_sk_test_…`;
+2. sends the key to your contact through an encrypted channel. **Roll it on receipt** (§5.4), so
+   no one at Phala holds a working key.
 
-It writes the 32-byte seed as hex to a new mode-0600 file and prints
-`{"keyid": "pending/v1", "public_key": "<base64>"}`; your key id is your account's, known once the
-operator issues it (§5.2), and the key itself does not depend on it. Keep the seed in your secret
-store;
-never send it. Use a distinct key per environment: each deployment records used signatures in its
-own database, so a shared key would let a request be replayed against another deployment within
-the five-minute window.
+Live mode is the operator's decision (`charges_enabled`); enabling it returns your first live key,
+`ppay_sk_live_…`, handed over and rolled the same way. Until then a live key answers
+`403 testmode_charges_only`.
 
-### 5.2 Registration (done by the operator)
+### 5.2 Keys and modes
 
-Send the operator the printed `keyid` and `public_key` and your webhook URL (public `https`). The
-operator then:
+A secret key is `ppay_sk_{test|live}_`, 43 random base62 characters, and a 6-character CRC32
+checksum (GitHub's token format), so a mistyped key is refused without a lookup and secret scanners
+recognise a leaked one. The service stores only its SHA-256 and shows the key once.
 
-1. issues your account with the admin-signed `POST /v1/admin/accounts {name, livemode,
-   public_key, webhook_url}` ([deploy/README.md](../deploy/README.md#account-credentials));
-2. sends you its id, `acct_…`, and your key id, `{acct_…}/v1`: sign every request with that key
-   id (`topup-sdk keygen` printed a placeholder key id; the key itself is unchanged).
-
-Your key is either live or test (`livemode`); it quotes on every attested route of its mode, and
-reads only the objects created in that mode. Changing the key or webhook URL is a replacement
-(§5.4).
+The key selects your account and the mode: a test key quotes on test routes (Sepolia) and reads
+only test objects, a live key only live ones; another account's or the other mode's objects
+answer `404`, as a missing one does. Keep keys in your secret store, never in code, logs, or a
+browser.
 
 ### 5.3 Pin the service's settlement key
 
@@ -655,46 +647,41 @@ print(response.settlement_pubkey)  # hex; pin it together with the keyid
 `TopupClient.attestation(nonce)` fetches and runs the same binding check. The binding alone is
 worthless without the verifier step: it proves only that the response is self-consistent.
 
-### 5.4 Rotate the product key
+### 5.4 Manage and roll keys
 
-The key id, `{acct_…}/v1`, stays the same; a rotation replaces only the public key the service
-stores for your account:
+With a secret key you manage the keys of its account and mode (design D7), as Stripe keys:
 
-1. Generate a new key under the same key id (§5.1) and send the operator its `public_key`.
-2. The operator stores it with the admin-signed `PUT /v1/admin/accounts/{acct} {public_key,
-   webhook_url, reason}` ([deploy/README.md](../deploy/README.md#account-credentials)); the same
-   call changes your webhook URL.
-3. Switch your signer to the new seed.
+| Method and path | Purpose |
+|---|---|
+| `GET /v1/api_keys`, `GET /v1/api_keys/{id}` | The mode's keys (`key_…`), with `redacted` (prefix and last four), `status` (`active`, `expiring`, `expired`, `revoked`), `expires_at`, and `last_used` (to the minute); never the secret. |
+| `POST /v1/api_keys` `{name?}` | A new secret key; its `secret` is in this response only. |
+| `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once. |
+| `DELETE /v1/api_keys/{id}` | Revoke at once. The mode's last key that is neither revoked nor expiring cannot be revoked (`409 last_api_key`), so you always keep one. |
 
-The cut is immediate: from step 2 the old key gets `401`, and the new key gets `401` before it.
-There is no overlap window, because the service verifies an account against one stored key under
-its one key id. Agree a time for step 2 and switch right after it; `TopupClient` does
-not retry `401`. For a leaked seed, tell the operator at once: they follow the
-[product key compromise runbook](../deploy/runbooks/product-key-compromise.md).
+A planned rotation: roll with an overlap (`{"expires_in": 86400}`), deploy the new key, and let
+the old one expire. A leak: roll with `{"expires_in": 0}` at once. If you lost every key of a
+mode, or cannot win against an attacker who rolls too, ask the operator from your recorded
+contact: they verify the request, may revoke the mode's keys, and issue a recovery key
+([runbook](../deploy/runbooks/api-key-compromise.md)). Every key change is an `api_key.created`,
+`api_key.updated`, or `api_key.revoked` event to your webhook endpoints, with the `actor` (a key
+id, or `admin`) that made it; an operator change of your account is `account.updated`.
 
-### 5.5 Request signing
+### 5.5 Authentication
 
-Every product request carries an RFC 9421 HTTP Message Signature with your ed25519 key:
+Every request carries your secret key as a Bearer token:
 
-- covered components, in order: `"@method"`, `"@target-uri"`, `"content-digest"`, plus
-  `"idempotency-key"` when that header is sent (quote and refund creation);
-- `Content-Digest: sha-256=:<base64>:` over the exact body bytes, also for an empty body;
-- parameters `created` (Unix seconds) and `keyid` (`{acct_…}/v1`), optionally
-  `alg="ed25519"` and `nonce`, serialized as RFC 8941 structured fields;
-- `@target-uri` is `scheme://host[:port]/path?query` of the public origin in §4.1, exactly as sent.
-  The service rebuilds it from its configured origin and ignores `Host` and `X-Forwarded-*`, so a
-  correctly signed request to any other URL gets `401`.
+```http
+Authorization: Bearer ppay_sk_test_…
+```
 
-`created` must be within five minutes of the service clock. Each signature is accepted once; a
-reused one gets `409 signature_replayed`. ed25519 is deterministic, so the SDK adds a random
-128-bit `nonce` to every signature. Test vectors:
-[rfc9421-python-signer.json](../crates/topup/tests/fixtures/rfc9421-python-signer.json) (verified
-by the Rust tests; the Python signer reproduces them byte for byte).
+Only `Bearer` is accepted (no HTTP Basic). A missing key is `401 api_key_missing`, a malformed,
+unknown, or revoked one `401 api_key_invalid`, and a rolled key past its expiry
+`401 api_key_expired`. Requests are limited per account and mode, 100 per second live and 25 test
+(Stripe's numbers), with a platform-wide test-mode ceiling: `429 rate_limit`, retry with backoff.
 
 ```python
-from topup_sdk import RequestSigner, TopupClient
+from topup_sdk import TopupClient
 
-signer = RequestSigner.from_seed_file(PHALA_PAY_KEY_ID, "/secrets/phala-cloud-staging.seed")
 # The forwarder factory and implementation, pinned from the attested deployment like the settlement
 # key (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
 forwarder = (
@@ -703,46 +690,50 @@ forwarder = (
     "0x936c1991f8dA9a919fa11b557a3514719f5A4504",  # treasury
 )
 with TopupClient(
-    "https://pay-api-staging.phala.com", signer, forwarder=forwarder
+    "https://pay-api-staging.phala.com", PHALA_PAY_SECRET_KEY, forwarder=forwarder
 ) as client:
     config = client.get_config()
     quote = client.create_quote("team-42", 2500, chain_id=11155111, asset="pha")
 ```
 
-The key id names the account: `{acct_…}/v1` is account `acct_…`, whose id is also the first input
-of every quote's address salt.
+Your account id, `acct_…` (`GET /v1/account`), is the first input of every quote's address salt;
+the client reads it once for the address check, or takes it as `account=`.
 
 ### 5.6 Idempotency and retries
 
-Every product operation is idempotent, so a retry with a fresh signature is always safe:
-
-| Operation | Idempotent on |
-|---|---|
-| create a quote | the `Idempotency-Key` header, covered by the signature: an RFC 8941 string (`"8e03…"`, as in the IETF Idempotency-Key draft) or a bare token (Stripe's form), up to 255 characters. The same key with the same parameters returns the same quote; with other parameters it is `409 idempotency_error`. Without a key every request creates a quote. |
-| cancel a quote | the quote: canceling a canceled quote returns it |
-| request a refund | the `Idempotency-Key` header, as for quotes |
+Every `POST` accepts an `Idempotency-Key` header (design §13, Stripe's idempotent requests): an
+RFC 8941 string (`"8e03…"`, as in the IETF Idempotency-Key draft) or a bare token (Stripe's form),
+up to 255 characters, kept per account and mode for 24 hours. A repeat of the same request (method,
+path, and body) returns the first response again with `Idempotent-Replayed: true`, errors
+included; the same key with another request is `400 idempotency_key_reused`
+(`type: idempotency_error`); a repeat while the first request still runs is
+`409 idempotency_key_in_use`, retry. A `429` or `5xx` is not kept, so a retry runs the request
+again. Without a key every `POST` runs. A replayed key creation or roll returns the key without
+its `secret`, which is never stored: roll again if the first response was lost. Canceling a
+canceled quote and revoking a revoked key return it unchanged.
 
 `TopupClient.create_quote` and `create_refund` send a fresh key unless you pass one, and reuse it
 on every retry.
 
 `TopupClient` retries transport errors, `429`, `500`, `502`, `503`, `504`, and
-`409 signature_replayed`, re-signing each attempt, up to 4 attempts with exponential backoff from
-0.5 s.
+`409 idempotency_key_in_use`, up to 4 attempts with exponential backoff from 0.5 s.
 
 ### 5.7 Endpoints
 
-Every path is a top-level resource; the key id names your account and its key's mode, and another
+Every path is a top-level resource; your key names your account and its mode, and another
 account's or the other mode's objects answer `404`, as a missing one does. `account_id` is your workspace id (1 to 200 characters).
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
+| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes`, and the key's `livemode`. | `get_account` |
 | `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
-| `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` returns a new one. | `create_quote` |
-| `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Unsigned with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
+| `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
+| `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
 | `POST /v1/quotes/{id}/cancel` | Cancel an unpaid quote; later payments to its address credit at spot. | `cancel_quote` |
 | `GET /v1/deposits` | Deposits at the route's confirmation, newest first, as a Stripe list `{object: "list", url, has_more, data}`: filters `account_id`, `quote`, `status`, `tx_hash`, `created[gte]`, `created[lte]`; `limit` (1 to 100, default 10) with `starting_after` or `ending_before` (a `dep_` id); `expand[]=data.quote`. | `list_deposits` (follows every page) |
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?}` | Refund request for finance (§3); `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
+| `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until the transfer is final, then `succeeded`; `expand[]=deposit`. | `get_refund` |
 | `GET /v1/attestation?nonce=` | Settlement key evidence (§5.3); unauthenticated. | `attestation` |
 
@@ -757,17 +748,20 @@ parameter when there is one. Codes are stable; messages are not.
 |---|---|---|
 | 400 | `parameter_missing`, `parameter_unknown`, `parameter_invalid` | Malformed input, with `param`. Do not retry unchanged. |
 | 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`), or above a refund's remainder (`param: "amount_atomic"`). |
-| 401 | `signature_invalid` | Signature failed: wrong origin, clock outside five minutes, wrong key, or body changed after signing. |
+| 400 | `idempotency_key_reused` (`type: idempotency_error`) | The same `Idempotency-Key` with another request. |
+| 401 | `api_key_missing`, `api_key_invalid`, `api_key_expired` | No Bearer key; a malformed, unknown, or revoked key; a rolled key past its expiry (§5.5). |
+| 403 | `testmode_charges_only` | A live key of an account the operator has not enabled for live mode. |
+| 403 | `permission_denied` | The key's kind does not hold the permission. |
 | 404 | `resource_missing` | Unknown or foreign resource. |
-| 409 | `signature_replayed` | Re-sign and retry. |
-| 409 | `idempotency_key_reused` (`type: idempotency_error`) | The same `Idempotency-Key` with other parameters. |
+| 409 | `idempotency_key_in_use` (`type: idempotency_error`) | A request with this key still runs; retry. |
+| 409 | `api_key_inactive`, `last_api_key` | Roll of a revoked or already rolled key; revoke of the mode's last active key (§5.4). |
 | 409 | `exposure_cap_exceeded` | Open quote exposure cap (account, product, or global); the message states what is left. |
 | 409 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
 | 409 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
 | 409 | `deposit_not_refundable` | The deposit is not eligible for a refund (§3). |
 | 409 | `deposit_not_final` | The deposit could still be reversed; request the refund once it is final (§3). |
 | 409 | `conflict` | Other state conflicts. |
-| 429 | `rate_limit` | Quote creation limit per account, or unsigned reads of one quote by its `client_secret`. |
+| 429 | `rate_limit` | Requests per account and mode (§5.5), quote creation per customer, or reads of one quote by its `client_secret`. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
 | 500 | `internal_error` | Retry with backoff. |
 

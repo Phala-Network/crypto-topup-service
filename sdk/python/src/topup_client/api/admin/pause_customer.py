@@ -8,8 +8,8 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
+from ...models.customer_pause_request import CustomerPauseRequest
 from ...models.error_response import ErrorResponse
-from ...models.pause_request import PauseRequest
 from ...models.pause_response import PauseResponse
 from typing import cast
 
@@ -18,7 +18,7 @@ def _get_kwargs(
     account: str,
     customer: str,
     *,
-    body: PauseRequest,
+    body: CustomerPauseRequest,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
@@ -78,14 +78,14 @@ def sync_detailed(
     customer: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
+    body: CustomerPauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
     """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 
     Args:
         account (str):
         customer (str):
-        body (PauseRequest): Pause or resume request.
+        body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -113,14 +113,14 @@ def sync(
     customer: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
+    body: CustomerPauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
     """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 
     Args:
         account (str):
         customer (str):
-        body (PauseRequest): Pause or resume request.
+        body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -143,14 +143,14 @@ async def asyncio_detailed(
     customer: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
+    body: CustomerPauseRequest,
 ) -> Response[ErrorResponse | PauseResponse]:
     """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 
     Args:
         account (str):
         customer (str):
-        body (PauseRequest): Pause or resume request.
+        body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -176,14 +176,14 @@ async def asyncio(
     customer: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
+    body: CustomerPauseRequest,
 ) -> ErrorResponse | PauseResponse | None:
     """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
 
     Args:
         account (str):
         customer (str):
-        body (PauseRequest): Pause or resume request.
+        body (CustomerPauseRequest): Administrative pause or resume of one customer of an account.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

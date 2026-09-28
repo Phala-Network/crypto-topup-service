@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed seed,
+# Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed key,
 # a stale render, a malformed rendered setting, and an RPC URL with an API key are refused; an
 # unsealed env file is accepted only with --unsealed.
 set -euo pipefail
@@ -20,8 +20,8 @@ sed 's|https://rpc.example/sepolia|https://rpc.example/other|' "$tmp/compose.yml
 PRODUCT_RPC_URL=http://rpc.example/sepolia "$root/deploy/product/render-compose.sh" >"$tmp/http-rpc.yml"
 PRODUCT_RPC_URL=https://sepolia.infura.io/v3/0123456789abcdef0123456789abcdef \
     "$root/deploy/product/render-compose.sh" >"$tmp/keyed-rpc.yml"
-printf 'PRODUCT_SEED=\n' >"$tmp/unsealed.env"
-sed 's/^PRODUCT_SEED=$/PRODUCT_SEED=nothex/' "$tmp/unsealed.env" >"$tmp/bad-seed.env"
+printf 'PRODUCT_API_KEY=\n' >"$tmp/unsealed.env"
+sed 's/^PRODUCT_API_KEY=$/PRODUCT_API_KEY=sk_test_123/' "$tmp/unsealed.env" >"$tmp/bad-key.env"
 
 expect_failure() {
     local name=$1 message=$2
@@ -37,11 +37,11 @@ expect_failure() {
     }
 }
 
-expect_failure example "PRODUCT_SEED still contains replace-me" \
+expect_failure example "PRODUCT_API_KEY still contains replace-me" \
     --env "$root/deploy/product/staging.env.example" --compose "$tmp/compose.yml"
-expect_failure sealed-empty "PRODUCT_SEED is empty" --env "$tmp/unsealed.env" --compose "$tmp/compose.yml"
-expect_failure bad-seed "PRODUCT_SEED must be 64 lowercase hex" --unsealed \
-    --env "$tmp/bad-seed.env" --compose "$tmp/compose.yml"
+expect_failure sealed-empty "PRODUCT_API_KEY is empty" --env "$tmp/unsealed.env" --compose "$tmp/compose.yml"
+expect_failure bad-key "PRODUCT_API_KEY must be a Phala Pay secret key" --unsealed \
+    --env "$tmp/bad-key.env" --compose "$tmp/compose.yml"
 expect_failure stale "differs from a fresh render" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/stale.yml"
 expect_failure http-rpc "PRODUCT_RPC_URL must use https" --unsealed \

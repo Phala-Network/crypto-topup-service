@@ -35,24 +35,22 @@ use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 use support::{
-    SignatureOptions, SignatureParameter, TEST_ORIGIN, TestDatabase, public_key_base64,
-    signed_request, signed_request_with_options,
+    SignatureOptions, SignatureParameter, TEST_ORIGIN, TestDatabase, merchant_request,
+    public_key_base64, signed_request, signed_request_with_options,
 };
 
 const ADMIN_KID: &str = "admin/v1";
 
+/// The admin API keeps RFC 9421 request signatures (design D7).
 #[tokio::test]
-async fn signature_verification_vectors() -> Result<()> {
+async fn admin_signature_verification_vectors() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
         let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/config".to_owned();
+        let path = "/v1/admin/report/daily".to_owned();
         let body = serde_json::to_vec(&json!({"external_id": "signed-account"}))?;
         let now = Utc::now().timestamp();
 
@@ -62,8 +60,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     parameters: vec![SignatureParameter::Created, SignatureParameter::KeyId],
@@ -79,8 +77,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-idempotency"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     idempotency_key: Some("\"deposit:test\"".to_owned()),
@@ -96,8 +94,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "with-alg"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
             ))
             .await?;
@@ -109,8 +107,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "reordered-parameters"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     parameters: vec![
@@ -130,8 +128,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "different-label"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     label: "checkout".to_owned(),
@@ -148,8 +146,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &origin_path,
                 serde_json::to_vec(&json!({"external_id": "origin-form-query"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     origin_form: true,
@@ -165,8 +163,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "wrong-algorithm"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     parameters: vec![
@@ -187,7 +185,7 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                &product_kid,
+                ADMIN_KID,
                 &wrong_key,
                 now,
             ))
@@ -200,8 +198,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": "future-created"}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 (Utc::now() + Duration::minutes(6)).timestamp(),
             ))
             .await?;
@@ -211,8 +209,8 @@ async fn signature_verification_vectors() -> Result<()> {
             Method::GET,
             &path,
             body.clone(),
-            &product_kid,
-            &product_key,
+            ADMIN_KID,
+            &admin_key,
             now,
         );
         *tampered.body_mut() = Body::from(r#"{"external_id":"tampered"}"#);
@@ -225,8 +223,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 body.clone(),
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 (Utc::now() - Duration::minutes(6)).timestamp(),
             ))
             .await?;
@@ -236,14 +234,14 @@ async fn signature_verification_vectors() -> Result<()> {
             Method::GET,
             &path,
             serde_json::to_vec(&json!({"external_id": "missing-component"}))?,
-            &product_kid,
-            &product_key,
+            ADMIN_KID,
+            &admin_key,
             now,
         );
         missing_component.headers_mut().insert(
             "signature-input",
             format!(
-                "sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{product_kid}\";alg=\"ed25519\""
+                "sig1=(\"@method\" \"@target-uri\");created={now};keyid=\"{ADMIN_KID}\";alg=\"ed25519\""
             )
             .parse()?,
         );
@@ -257,8 +255,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 replay_body.clone(),
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
             ))
             .await?;
@@ -268,8 +266,8 @@ async fn signature_verification_vectors() -> Result<()> {
                 Method::GET,
                 &path,
                 replay_body,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
             ))
             .await?;
@@ -283,27 +281,24 @@ async fn signature_verification_vectors() -> Result<()> {
 }
 
 /// Behind the gateway `Host` and `X-Forwarded-*` describe the internal hop; only the configured
-/// public origin determines `@target-uri`.
+/// public origin determines an admin request's `@target-uri`.
 #[tokio::test]
-async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
+async fn admin_target_uri_uses_the_configured_public_origin() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[7; 32]);
         let admin_key = SigningKey::from_bytes(&[9; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
         let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/config".to_owned();
+        let path = "/v1/admin/report/daily".to_owned();
         let now = Utc::now().timestamp();
         let request = |external_id: &str, origin: &str| -> Result<_> {
             let mut request = signed_request_with_options(
                 Method::GET,
                 &path,
                 serde_json::to_vec(&json!({"external_id": external_id}))?,
-                &product_kid,
-                &product_key,
+                ADMIN_KID,
+                &admin_key,
                 now,
                 &SignatureOptions {
                     origin_form: true,
@@ -339,7 +334,7 @@ async fn target_uri_uses_the_configured_public_origin() -> Result<()> {
 
         // A signature for one path must not authorize a request to another route.
         let mut tampered = request("tampered-path", TEST_ORIGIN)?;
-        *tampered.uri_mut() = "/v1/deposits".parse()?;
+        *tampered.uri_mut() = "/v1/admin/deposits/dep_00000000000000000000000000000000".parse()?;
         let response = app.clone().oneshot(tampered).await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
         Ok(())
@@ -355,12 +350,9 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[17; 32]);
-        let other_key = SigningKey::from_bytes(&[18; 32]);
         let admin_key = SigningKey::from_bytes(&[19; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
-        let other = seed_product(&database.app_pool, "builder", &other_key).await?;
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        let (other, _) = seed_product(&database.app_pool, "builder").await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
 
@@ -372,13 +364,11 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         let cross_tenant_path = format!("/v1/deposits/dep_{}", other_deposit.simple());
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::GET,
                 &cross_tenant_path,
                 Vec::new(),
-                &product_kid,
                 &product_key,
-                now,
             ))
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
@@ -388,16 +378,15 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
             "/v1/admin/accounts/{}/customers/account-001/pause",
             product.public_id
         );
-        let pause_body = serde_json::to_vec(&json!({"scopes": ["quotes", "settlement"]}))?;
+        let pause_body =
+            serde_json::to_vec(&json!({"scopes": ["quotes", "settlement"], "livemode": true}))?;
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 &pause_path,
                 pause_body.clone(),
-                &product_kid,
                 &product_key,
-                now,
             ))
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
@@ -430,16 +419,14 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         // The paused customer gets no quote.
         let paused_quote = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 "/v1/quotes",
                 serde_json::to_vec(&json!({
                     "account_id": "account-001", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
-                &product_kid,
                 &product_key,
-                now + 2,
             ))
             .await?;
         ensure!(paused_quote.status() == StatusCode::CONFLICT);
@@ -449,13 +436,11 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
         let admin_body = serde_json::to_vec(&json!({"scopes": ["refunds"]}))?;
         let product_signed = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 admin_path,
                 admin_body.clone(),
-                &product_kid,
                 &product_key,
-                now,
             ))
             .await?;
         ensure!(product_signed.status() == StatusCode::UNAUTHORIZED);
@@ -507,13 +492,17 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
     };
     let result = async {
         let pool = &database.app_pool;
-        let owner_key = SigningKey::from_bytes(&[21; 32]);
-        let other_key = SigningKey::from_bytes(&[22; 32]);
         let admin_key = SigningKey::from_bytes(&[23; 32]);
-        let owner = seed_product(pool, "owner", &owner_key).await?;
-        let other = seed_product(pool, "other", &other_key).await?;
-        let owner_kid = seed::key_id(&owner);
-        let other_kid = seed::key_id(&other);
+        let (owner, owner_key) = seed_product(pool, "owner").await?;
+        let (_, other_key) = seed_product(pool, "other").await?;
+        // The owner's own key of the other mode.
+        let owner_test_key = seed::create_api_key(pool, owner.id, false).await?;
+        let owner_key_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM api_keys WHERE account_id = $1 AND livemode ORDER BY created_at LIMIT 1",
+        )
+        .bind(owner.id)
+        .fetch_one(pool)
+        .await?;
         let customer = seed_customer(pool, owner.id, "owned-customer").await?;
         let address = seed::insert_address(
             pool,
@@ -574,6 +563,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         let quote = topup::ids::format(topup::ids::QUOTE, address.quote_id);
         let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit);
         let refund = topup::ids::format(topup::ids::REFUND, refund);
+        let api_key = topup::ids::format(topup::ids::API_KEY, owner_key_id);
         let refund_body = serde_json::to_vec(&json!({
             "deposit": deposit,
             "destination_address": format!("{:#x}", Address::repeat_byte(0x68)),
@@ -604,6 +594,16 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
                 Vec::new(),
             ),
             (Method::POST, "/v1/refunds".to_owned(), refund_body),
+            (Method::GET, format!("/v1/api_keys/{api_key}"), Vec::new()),
+        ];
+        // Key mutations the owner is not asked to make: another tenant must not reach them.
+        let key_mutations = [
+            (
+                Method::POST,
+                format!("/v1/api_keys/{api_key}/roll"),
+                serde_json::to_vec(&json!({"expires_in": 60}))?,
+            ),
+            (Method::DELETE, format!("/v1/api_keys/{api_key}"), Vec::new()),
         ];
         let lists = [
             "/v1/deposits".to_owned(),
@@ -611,16 +611,8 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
             "/v1/deposits?account_id=owned-customer".to_owned(),
         ];
         let app = test_router(pool, &admin_key);
-        let created = std::sync::atomic::AtomicI64::new(Utc::now().timestamp() - 60);
-        let call = |method: Method, path: &str, body: Vec<u8>, kid: &str, key: &SigningKey| {
-            let request = signed_request(
-                method,
-                path,
-                body,
-                kid,
-                key,
-                created.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            );
+        let call = |method: Method, path: &str, body: Vec<u8>, key: &str| {
+            let request = merchant_request(method, path, body, key);
             let app = app.clone();
             async move {
                 let response = app.oneshot(request).await?;
@@ -632,7 +624,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         // The owner reaches every one of its objects; its refund request succeeds.
         for (method, path, body) in &object_requests {
             let (status, answer) =
-                call(method.clone(), path, body.clone(), &owner_kid, &owner_key).await?;
+                call(method.clone(), path, body.clone(), &owner_key).await?;
             ensure!(
                 status == StatusCode::OK,
                 "owner {method} {path}: {status} {answer}"
@@ -640,25 +632,17 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         }
         for path in &lists {
             let (status, answer) =
-                call(Method::GET, path, Vec::new(), &owner_kid, &owner_key).await?;
+                call(Method::GET, path, Vec::new(), &owner_key).await?;
             ensure!(status == StatusCode::OK && answer["data"].as_array().map(Vec::len) == Some(1));
         }
 
-        // Another account, and then the owner's own key moved to test mode, see nothing.
-        for (who, kid, key) in [
-            ("other account", &other_kid, &other_key),
-            ("other mode", &owner_kid, &owner_key),
+        // Another account, and the owner's own key of the other mode, see nothing.
+        for (who, key) in [
+            ("other account", &other_key),
+            ("other mode", &owner_test_key),
         ] {
-            if who == "other mode" {
-                sqlx::query(
-                    "UPDATE request_signing_keys SET livemode = false WHERE account_id = $1",
-                )
-                .bind(owner.id)
-                .execute(pool)
-                .await?;
-            }
-            for (method, path, body) in &object_requests {
-                let (status, answer) = call(method.clone(), path, body.clone(), kid, key).await?;
+            for (method, path, body) in object_requests.iter().chain(&key_mutations) {
+                let (status, answer) = call(method.clone(), path, body.clone(), key).await?;
                 ensure!(
                     status == StatusCode::NOT_FOUND
                         && answer["error"]["code"] == "resource_missing",
@@ -666,7 +650,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
                 );
             }
             for path in &lists {
-                let (status, answer) = call(Method::GET, path, Vec::new(), kid, key).await?;
+                let (status, answer) = call(Method::GET, path, Vec::new(), key).await?;
                 ensure!(
                     status == StatusCode::OK && answer["data"] == json!([]),
                     "{who} {path}: {status} {answer}"
@@ -677,7 +661,6 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
                 Method::GET,
                 &format!("/v1/deposits?starting_after={deposit}"),
                 Vec::new(),
-                kid,
                 key,
             )
             .await?;
@@ -686,7 +669,6 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
                 Method::GET,
                 &format!("/v1/deposits?starting_after={unknown}"),
                 Vec::new(),
-                kid,
                 key,
             )
             .await?;
@@ -722,7 +704,6 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
         std::process::id()
     ));
     let result = async {
-        let product_key = SigningKey::from_bytes(&[43; 32]);
         let admin_key = SigningKey::from_bytes(&[44; 32]);
         let app = topup::api::read_only_router(
             app_state(database.app_pool.clone(), &admin_key),
@@ -754,9 +735,10 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
                 "/v1/admin/accounts",
                 serde_json::to_vec(&json!({
                     "name": "Phala Cloud",
-                    "livemode": true,
-                    "public_key": public_key_base64(&product_key),
-                    "webhook_url": "https://product.test/webhooks",
+                    "contact": {"name": "Ops", "email": "ops@product.test"},
+                    "due_diligence": {"reference": "DD-1", "reviewed_at": "2026-09-28",
+                                      "reviewed_by": "operator"},
+                    "reason": "onboarding",
                 }))?,
                 ADMIN_KID,
                 &admin_key,
@@ -778,272 +760,14 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
     result.and(cleanup)
 }
 
-/// `POST /v1/admin/accounts` issues an account and its request signing key until self-serve
-/// signup and API keys replace it: admin-signed, validated at the boundary, and audited.
-#[tokio::test]
-async fn admin_account_issuance() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let merchant_key = SigningKey::from_bytes(&[40; 32]);
-        let product_key = SigningKey::from_bytes(&[41; 32]);
-        let admin_key = SigningKey::from_bytes(&[42; 32]);
-        let merchant = seed_product(&database.app_pool, "merchant", &merchant_key).await?;
-        let app = test_router(&database.app_pool, &admin_key);
-        let path = "/v1/admin/accounts";
-        let now = Utc::now().timestamp();
-        let register = |body: Value, created: i64, kid: &str, key: &SigningKey| -> Result<_> {
-            Ok(signed_request(
-                Method::POST,
-                path,
-                serde_json::to_vec(&body)?,
-                kid,
-                key,
-                created,
-            ))
-        };
-        let valid = json!({
-            "name": "Phala Cloud",
-            "livemode": true,
-            "public_key": public_key_base64(&product_key),
-            "webhook_url": "https://product.test/webhooks",
-        });
-
-        let response = app
-            .clone()
-            .oneshot(register(
-                valid.clone(),
-                now,
-                &seed::key_id(&merchant),
-                &merchant_key,
-            )?)
-            .await?;
-        ensure!(response.status() == StatusCode::UNAUTHORIZED);
-
-        let invalid = [
-            json!({"name": " ", "livemode": true, "public_key": public_key_base64(&product_key),
-                   "webhook_url": "https://product.test/webhooks"}),
-            json!({"name": "Phala Cloud", "livemode": true, "public_key": "AAAA",
-                   "webhook_url": "https://product.test/webhooks"}),
-            // The test origin is `http`, so only non-HTTP schemes are refused here.
-            json!({"name": "Phala Cloud", "livemode": true,
-                   "public_key": public_key_base64(&product_key),
-                   "webhook_url": "ftp://product.test/webhooks"}),
-            json!({"name": "Phala Cloud", "livemode": true,
-                   "public_key": public_key_base64(&product_key),
-                   "webhook_url": "https://user:secret@product.test/webhooks"}),
-        ];
-        for (offset, body) in (1_i64..).zip(invalid) {
-            let response = app
-                .clone()
-                .oneshot(register(body.clone(), now + offset, ADMIN_KID, &admin_key)?)
-                .await?;
-            ensure!(
-                response.status() == StatusCode::BAD_REQUEST,
-                "{body} must be rejected"
-            );
-            ensure!(response_json(response).await?["error"]["code"] == "parameter_invalid");
-        }
-
-        let response = app
-            .clone()
-            .oneshot(register(valid.clone(), now + 10, ADMIN_KID, &admin_key)?)
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        let created = response_json(response).await?;
-        let id = created["id"].as_str().context("account id")?.to_owned();
-        ensure!(id.starts_with("acct_") && id.len() == 37, "{created}");
-        ensure!(created["key_id"] == format!("{id}/v1"));
-        ensure!(created["name"] == "Phala Cloud" && created["livemode"] == true);
-        ensure!(created["public_key"] == valid["public_key"]);
-        ensure!(created["webhook_url"] == "https://product.test/webhooks");
-
-        // Each issuance is a new account.
-        let response = app
-            .clone()
-            .oneshot(register(valid.clone(), now + 11, ADMIN_KID, &admin_key)?)
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        ensure!(response_json(response).await?["id"] != created["id"]);
-
-        let audit = sqlx::query(
-            "SELECT account_id, actor_type, actor_id, action FROM audit WHERE subject = $1",
-        )
-        .bind(format!("account:{id}"))
-        .fetch_all(&database.app_pool)
-        .await?;
-        ensure!(audit.len() == 1);
-        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
-        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
-        ensure!(audit[0].try_get::<String, _>("action")? == "account.issue");
-        ensure!(
-            audit[0].try_get::<Option<Uuid>, _>("account_id")?
-                == topup::ids::parse(topup::ids::ACCOUNT, &id)
-        );
-
-        // The issued key authenticates merchant requests under the key id `{acct_…}/v1`.
-        let response = app
-            .oneshot(signed_request(
-                Method::GET,
-                "/v1/config",
-                Vec::new(),
-                &format!("{id}/v1"),
-                &product_key,
-                now,
-            ))
-            .await?;
-        ensure!(response.status() == StatusCode::OK);
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
-/// `PUT /v1/admin/accounts/{account}` replaces an account's key and webhook URL: a hard cut from
-/// the old key to the new one under the same key id, audited once with the replaced values.
-#[tokio::test]
-async fn admin_account_key_replacement() -> Result<()> {
-    let Some(database) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let result = async {
-        let old_key = SigningKey::from_bytes(&[45; 32]);
-        let new_key = SigningKey::from_bytes(&[46; 32]);
-        let admin_key = SigningKey::from_bytes(&[47; 32]);
-        let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
-        let update = |account: &str, body: &Value, created: i64| -> Result<_> {
-            Ok(signed_request(
-                Method::PUT,
-                &format!("/v1/admin/accounts/{account}"),
-                serde_json::to_vec(body)?,
-                ADMIN_KID,
-                &admin_key,
-                created,
-            ))
-        };
-        let valid = json!({
-            "public_key": public_key_base64(&new_key),
-            "webhook_url": "https://product.test/rotated",
-            "reason": "scheduled key rotation",
-        });
-
-        let unknown = topup::ids::format(topup::ids::ACCOUNT, Uuid::new_v4());
-        let response = app
-            .clone()
-            .oneshot(update(&unknown, &valid, now - 1)?)
-            .await?;
-        ensure!(response.status() == StatusCode::NOT_FOUND, "not issued");
-        let product = seed_product(&database.app_pool, "phala-cloud", &old_key).await?;
-        let product_kid = seed::key_id(&product);
-        let config = |key: &SigningKey, created: i64| {
-            signed_request(
-                Method::GET,
-                &format!("/v1/config?request={created}"),
-                Vec::new(),
-                &product_kid,
-                key,
-                created,
-            )
-        };
-
-        let response = app
-            .clone()
-            .oneshot(signed_request(
-                Method::PUT,
-                &format!("/v1/admin/accounts/{}", product.public_id),
-                serde_json::to_vec(&valid)?,
-                &product_kid,
-                &old_key,
-                now,
-            ))
-            .await?;
-        ensure!(
-            response.status() == StatusCode::UNAUTHORIZED,
-            "only the admin key"
-        );
-
-        for (offset, (field, value)) in (1_i64..).zip([
-            ("public_key", json!("AAAA")),
-            ("webhook_url", json!("ftp://product.test/rotated")),
-            ("reason", json!(" ")),
-        ]) {
-            let mut body = valid.clone();
-            body[field] = value;
-            let response = app
-                .clone()
-                .oneshot(update(&product.public_id, &body, now + offset)?)
-                .await?;
-            ensure!(
-                response.status() == StatusCode::BAD_REQUEST,
-                "{body} must be rejected"
-            );
-        }
-        let response = app.clone().oneshot(config(&old_key, now + 10)).await?;
-        ensure!(
-            response.status() == StatusCode::OK,
-            "the old key works before"
-        );
-
-        for offset in [11, 12] {
-            let response = app
-                .clone()
-                .oneshot(update(&product.public_id, &valid, now + offset)?)
-                .await?;
-            ensure!(response.status() == StatusCode::OK);
-            let updated = response_json(response).await?;
-            ensure!(updated["id"] == json!(product.public_id));
-            ensure!(updated["key_id"] == json!(product_kid));
-            ensure!(updated["public_key"] == valid["public_key"]);
-            ensure!(updated["webhook_url"] == "https://product.test/rotated");
-        }
-
-        let response = app.clone().oneshot(config(&old_key, now + 13)).await?;
-        ensure!(
-            response.status() == StatusCode::UNAUTHORIZED,
-            "the old key is cut"
-        );
-        let response = app.clone().oneshot(config(&new_key, now + 14)).await?;
-        ensure!(response.status() == StatusCode::OK, "the new key verifies");
-
-        let audit = sqlx::query(
-            "SELECT actor_type, actor_id, action, reason FROM audit WHERE subject = $1",
-        )
-        .bind(format!("account:{}", product.public_id))
-        .fetch_all(&database.app_pool)
-        .await?;
-        ensure!(
-            audit.len() == 1,
-            "a repeat with the stored values is not audited again"
-        );
-        ensure!(audit[0].try_get::<String, _>("actor_type")? == "admin");
-        ensure!(audit[0].try_get::<String, _>("actor_id")? == ADMIN_KID);
-        ensure!(audit[0].try_get::<String, _>("action")? == "account.update");
-        let evidence: Value = serde_json::from_str(&audit[0].try_get::<String, _>("reason")?)?;
-        ensure!(evidence["reason"] == "scheduled key rotation", "{evidence}");
-        ensure!(
-            evidence["replaced"]["public_key"] == json!(public_key_base64(&old_key)),
-            "{evidence}"
-        );
-        Ok(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result.and(cleanup)
-}
-
 #[tokio::test]
 async fn frozen_chain_refuses_quotes() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[31; 32]);
         let admin_key = SigningKey::from_bytes(&[32; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
         seed_customer(&database.app_pool, product.id, "frozen-account").await?;
         sqlx::query(
             r#"
@@ -1055,19 +779,16 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
         .await?;
 
         let app = test_router(&database.app_pool, &admin_key);
-        let now = Utc::now().timestamp();
         let lock_body = serde_json::to_vec(&json!({
             "account_id": "frozen-account", "amount": 1000, "currency": "usd",
             "chain_id": 1, "asset": "pha",
         }))?;
         let response = app
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 "/v1/quotes",
                 lock_body,
-                &product_kid,
                 &product_key,
-                now + 2,
             ))
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
@@ -1094,10 +815,8 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[33; 32]);
         let admin_key = SigningKey::from_bytes(&[34; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
         seed_customer(&database.app_pool, product.id, "lift-account").await?;
         sqlx::query(
             r#"
@@ -1144,13 +863,11 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         let reason = json!({"reason": "INC-7: factory confirmed, stored rows restored"});
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 lift,
                 serde_json::to_vec(&reason)?,
-                &product_kid,
                 &product_key,
-                now + 1,
             ))
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
@@ -1212,16 +929,14 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
         // router does not configure.
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 "/v1/quotes",
                 serde_json::to_vec(&json!({
                     "account_id": "lift-account", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
-                &product_kid,
                 &product_key,
-                now + 6,
             ))
             .await?;
         ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
@@ -1249,10 +964,8 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[35; 32]);
         let admin_key = SigningKey::from_bytes(&[36; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
         let deposit = seed_other_tenant_deposit(&database.app_pool, product.id).await?;
         let event_id = Uuid::new_v4();
         let payload = json!({"object": {"id": format!("dep_{}", deposit.simple())}});
@@ -1260,9 +973,9 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
             r#"
             WITH event AS (
                 INSERT INTO events (id, account_id, livemode, type, object_type, object_id, data,
-                                    created)
+                                    created, actor)
                 VALUES ($1, $3, true, 'deposit.credited', 'deposit', $4, $2,
-                        now() - interval '1 hour')
+                        now() - interval '1 hour', 'system')
                 RETURNING id, account_id
             )
             INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at, delivered_at)
@@ -1303,13 +1016,11 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
         let reason = serde_json::to_vec(&json!({"reason": "product lost the event"}))?;
         let response = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 &replay,
                 reason.clone(),
-                &product_kid,
                 &product_key,
-                now + 1,
             ))
             .await?;
         ensure!(response.status() == StatusCode::UNAUTHORIZED);
@@ -1472,6 +1183,7 @@ fn app_state_with_attestor(
         attestor,
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
         client_reads: Arc::default(),
+        rate_limits: Arc::default(),
     }
 }
 
@@ -1539,16 +1251,18 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
 }
 
 /// A live account signing with `key`, with a webhook endpoint.
-async fn seed_product(pool: &sqlx::PgPool, name: &str, key: &SigningKey) -> Result<Account> {
-    Ok(seed::create_account(
+/// A live account and its live secret key.
+async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, String)> {
+    let account = seed::create_account(
         pool,
         &NewAccount {
-            public_key: public_key_base64(key),
             webhook_url: "https://product.test/webhooks".to_owned(),
             ..NewAccount::named(name)
         },
     )
-    .await?)
+    .await?;
+    let key = seed::create_api_key(pool, account.id, true).await?;
+    Ok((account, key))
 }
 
 async fn seed_customer(

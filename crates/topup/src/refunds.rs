@@ -541,6 +541,7 @@ async fn confirm_refund(
             livemode: check.livemode,
             object: crate::db::EventObject::Deposit(check.deposit_id),
             next_attempt_at: chrono::Utc::now(),
+            actor: crate::db::SYSTEM_ACTOR.to_owned(),
         },
     )
     .await?;

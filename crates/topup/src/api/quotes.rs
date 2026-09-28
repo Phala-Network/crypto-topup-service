@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse as _, Response};
 use sqlx::PgPool;
 use topup_core::money::MinorAmount;
@@ -18,7 +18,7 @@ use crate::tenancy::{Permission, Scope};
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
-use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
+use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::{ensure_customer, validate_external_id};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
@@ -36,7 +36,7 @@ use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
         (status = 200, description = "OK", body = Config),
         (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "config"
 )]
 /// The assets, limits, and quote terms of the attested routes in the credential's mode.
@@ -97,8 +97,9 @@ pub(crate) async fn get_config(
     params(
         (
             "Idempotency-Key" = Option<String>, Header,
-            description = "Up to 255 characters; a repeat with the same parameters returns the \
-                           same quote, and with other parameters is `409 idempotency_error`."
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
         )
     ),
     request_body = CreateQuoteRequest,
@@ -108,14 +109,14 @@ pub(crate) async fn get_config(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (
             status = 409,
-            description = "`exposure_cap_exceeded`, `paused`, `chain_frozen`, \
-                           `signature_replayed`, or `idempotency_error`",
+            description = "`exposure_cap_exceeded`, `paused`, `chain_frozen`, or \
+                           `idempotency_key_in_use`",
             body = ErrorResponse
         ),
         (status = 429, description = "Too Many Requests", body = ErrorResponse),
         (status = 503, description = "Service Unavailable", body = ErrorResponse)
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "quotes"
 )]
 /// Quotes `amount` cents payable in `asset` on `chain_id`: a locked price, the exact token amount,
@@ -123,13 +124,11 @@ pub(crate) async fn get_config(
 pub(crate) async fn create_quote(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
-    headers: HeaderMap,
     ApiJson(request): ApiJson<CreateQuoteRequest>,
 ) -> ApiResult<Json<Quote>> {
     merchant
         .require(&state.pool, Permission::QuotesWrite)
         .await?;
-    let key = idempotency_key(&headers)?;
     validate_external_id(&request.account_id)?;
     if request.currency != "usd" {
         return Err(ApiError::invalid_param("currency", "currency must be usd"));
@@ -154,16 +153,6 @@ pub(crate) async fn create_quote(
     }
     let credit = MinorAmount::new(request.amount);
     let customer = ensure_customer(&state, merchant.scope, &request.account_id).await?;
-    // A repeat creates nothing, so a `quotes` pause does not hide a quote the merchant already
-    // showed.
-    if let Some(key) = key.as_deref()
-        && let Some(existing) = locks::find_by_idempotency_key(&state.pool, merchant.scope, key)
-            .await
-            .map_err(map_error)?
-    {
-        let lock = locks::replay(existing, &customer, route, credit).map_err(map_error)?;
-        return respond_with_client_secret(&state, lock).await;
-    }
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
     }
@@ -177,7 +166,6 @@ pub(crate) async fn create_quote(
         &merchant.account,
         &customer,
         route,
-        key.as_deref(),
         credit,
     )
     .await
@@ -190,19 +178,19 @@ pub(crate) async fn create_quote(
     path = "/v1/quotes/{id}",
     params(
         ("id" = String, Path, description = "Quote id, `qt_…`"),
-        ("expand[]" = Option<Vec<String>>, Query, description = "`deposit`; signed requests only"),
+        ("expand[]" = Option<Vec<String>>, Query, description = "`deposit`; API key requests only"),
         (
             "client_secret" = Option<String>, Query,
-            description = "The quote's `client_secret`, to read its public view without a \
-                           signature. Send the request without `Signature` headers; the response \
-                           then allows any origin."
+            description = "The quote's `client_secret`, to read its public view without an \
+                           API key. Send the request without `Authorization`; the response then \
+                           allows any origin."
         )
     ),
     responses(
         (
             status = 200,
-            description = "OK: a `Quote` to a signed request, a `ClientQuote` to a request by \
-                           `client_secret`",
+            description = "OK: a `Quote` to a request with an API key, a `ClientQuote` to a \
+                           request by `client_secret`",
             body = QuoteView
         ),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -213,11 +201,11 @@ pub(crate) async fn create_quote(
         ),
         (status = 429, description = "Too Many Requests: reads by `client_secret`", body = ErrorResponse)
     ),
-    security(("http_message_signature" = []), ()),
+    security(("api_key" = []), ()),
     tag = "quotes"
 )]
 /// One quote, for example to resume a checkout page. The payer's browser can read the quote's
-/// public view with its `client_secret` instead of a signature, as Stripe.js reads a PaymentIntent.
+/// public view with its `client_secret` instead of an API key, as Stripe.js reads a PaymentIntent.
 pub(crate) async fn get_quote(
     State(state): State<AppState>,
     merchant: Option<Extension<Merchant>>,
@@ -339,7 +327,15 @@ async fn client_quote(
 #[utoipa::path(
     post,
     path = "/v1/quotes/{id}/cancel",
-    params(("id" = String, Path, description = "Quote id, `qt_…`")),
+    params(
+        ("id" = String, Path, description = "Quote id, `qt_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
     responses(
         (status = 200, description = "OK", body = Quote),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -352,7 +348,7 @@ async fn client_quote(
             body = ErrorResponse
         )
     ),
-    security(("http_message_signature" = [])),
+    security(("api_key" = [])),
     tag = "quotes"
 )]
 /// Cancels an open, unpaid quote; a canceled quote is returned unchanged. Later payments to its
@@ -487,7 +483,6 @@ fn map_error(error: RateLockError) -> ApiError {
         RateLockError::NotOpen(current) => ApiError::quote_unexpected_state(status(current)),
         RateLockError::WindowClosed => ApiError::quote_window_closed(),
         RateLockError::PendingPayment => ApiError::quote_payment_received(),
-        RateLockError::IdempotencyMismatch => ApiError::idempotency_key_reused(),
         RateLockError::Arithmetic
         | RateLockError::EntropyUnavailable
         | RateLockError::DatabaseInvariant => ApiError::internal(),

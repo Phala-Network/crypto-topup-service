@@ -447,52 +447,205 @@ pub struct RecordRefundRequest {
     pub tx_hash: String,
 }
 
-/// Administrative account issuance body, until self-serve signup (design PR 5) and API keys
-/// (design PR 6) replace it.
+/// The merchant's contact recorded at onboarding (design D8): the operator's channel for the key
+/// hand-over, recovery, incidents, and restores, and the only personal data kept.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Contact {
+    /// The contact's name, 1 to 200 characters.
+    pub name: String,
+    /// The security contact's email address.
+    pub email: String,
+}
+
+/// The record of the operator's offline due diligence (design D8): a reference to it, when, and
+/// by whom.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DueDiligence {
+    /// Reference to the review in Phala's records, 1 to 200 characters.
+    pub reference: String,
+    /// Date of the review, `YYYY-MM-DD`.
+    #[schema(value_type = String, format = Date)]
+    pub reviewed_at: chrono::NaiveDate,
+    /// Who reviewed, 1 to 200 characters.
+    pub reviewed_by: String,
+}
+
+/// `POST /v1/admin/accounts` body. Accounts are created only by the operator (design D8).
 #[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAccountRequest {
     /// Display name, 1 to 200 characters.
     pub name: String,
-    /// The mode the account's signing key acts in: `true` for live routes, `false` for test
-    /// routes.
-    pub livemode: bool,
-    /// Standard base64 of the account's 32-byte ed25519 request-verification public key.
-    pub public_key: String,
-    /// Absolute `https` URL of the account's webhook receiver; `http` only when the service's
-    /// own public origin uses `http` (local stacks).
-    pub webhook_url: String,
+    /// The merchant's contact.
+    pub contact: Contact,
+    /// The due diligence the decision rests on.
+    pub due_diligence: DueDiligence,
+    /// Whether the account may use live mode (design D12). Default `false`.
+    #[serde(default)]
+    pub charges_enabled: bool,
+    /// Why the account is created, 1 to 1024 bytes.
+    pub reason: String,
+    /// Absolute `https` URL of the account's webhook receiver, registered in each enabled mode;
+    /// `http` only when the service's own public origin uses `http` (local stacks). Until
+    /// merchants register endpoints through the API (design PR 8).
+    #[serde(default)]
+    pub webhook_url: Option<String>,
 }
 
-/// Administrative replacement of an account's verification key and webhook URL. The key id and
-/// mode stay.
+/// `POST /v1/admin/accounts/{account}` body; absent fields stay as they are.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAccountRequest {
-    /// Standard base64 of the account's new 32-byte ed25519 request-verification public key.
-    pub public_key: String,
-    /// Absolute `https` URL of the account's webhook receiver; `http` only when the service's
-    /// own public origin uses `http` (local stacks).
-    pub webhook_url: String,
-    /// Why the credentials change, 1 to 1024 bytes: the rotation or incident it rests on.
+    /// Enables or disables live mode. Enabling it for an account without a live key returns the
+    /// account's first live key.
+    #[serde(default)]
+    pub charges_enabled: Option<bool>,
+    /// Marks the account restricted for review.
+    #[serde(default)]
+    pub restricted: Option<bool>,
+    /// Replaces the merchant's contact.
+    #[serde(default)]
+    pub contact: Option<Contact>,
+    /// Replaces the URL of the account's webhook endpoints (until design PR 8).
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
 
-/// An issued account and its request signing credential.
+/// An account as the operator sees it.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AccountResponse {
     /// Account id, `acct_…`.
     pub id: String,
+    /// Always `account`.
+    pub object: String,
     /// Display name.
     pub name: String,
-    /// The mode the account's signing key acts in.
-    pub livemode: bool,
-    /// The key id the account signs its requests with, `{id}/v1`.
-    pub key_id: String,
-    /// Standard base64 of the account's ed25519 public key.
-    pub public_key: String,
-    /// Webhook receiver URL.
-    pub webhook_url: String,
+    /// The merchant's contact.
+    pub contact: Contact,
+    /// The due diligence record.
+    pub due_diligence: DueDiligence,
+    /// Whether the account may use live mode.
+    pub charges_enabled: bool,
+    /// Whether the account is restricted for review.
+    pub restricted: bool,
     /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// The secret keys this request issued, each with its `secret` shown only here: at creation
+    /// a test key and, with `charges_enabled`, a live key; on an update that enables live mode,
+    /// the first live key. Send them to the contact; the merchant rolls them on receipt.
+    pub api_keys: Vec<ApiKeyObject>,
+}
+
+/// `POST /v1/admin/accounts/{account}/api_keys` body: a recovery key (design D7).
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueApiKeyRequest {
+    /// The key's mode; `true` needs `charges_enabled`.
+    pub livemode: bool,
+    /// Revokes every key of the mode first, for a leak the merchant cannot win by rolling.
+    #[serde(default)]
+    pub revoke_existing: bool,
+    /// The key's label, at most 200 characters.
+    #[serde(default)]
+    pub name: String,
+    /// Why, 1 to 1024 bytes: how the request was verified with the recorded contact.
+    pub reason: String,
+}
+
+/// The account of the request's API key (`GET /v1/account`), in the key's mode.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AccountObject {
+    /// Account id, `acct_…`.
+    pub id: String,
+    /// Always `account`.
+    pub object: String,
+    /// The mode of the key that reads it.
+    pub livemode: bool,
+    /// Display name.
+    pub name: String,
+    /// Whether the operator enabled live mode.
+    pub charges_enabled: bool,
+    /// Active account-level pause scopes.
+    pub paused_scopes: Vec<String>,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+}
+
+/// Administrative pause or resume of one customer of an account.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+pub struct CustomerPauseRequest {
+    /// Pause scopes to add or remove.
+    pub scopes: Vec<String>,
+    /// The mode of the customer: customers of test and live mode are separate.
+    pub livemode: bool,
+}
+
+/// An API key (design D7). `secret` is present only in the response that created it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ApiKeyObject {
+    /// Key id, `key_…`.
+    pub id: String,
+    /// Always `api_key`.
+    pub object: String,
+    /// The key's mode.
+    pub livemode: bool,
+    /// `secret`; `restricted` keys come later.
+    #[serde(rename = "type")]
+    pub key_type: String,
+    /// The key's label.
+    pub name: String,
+    /// The whole key, `ppay_sk_…`, shown once. Store it in a secret manager.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.
+    pub redacted: String,
+    /// `active`; `expiring` for a rolled key that still works until `expires_at`; `expired`;
+    /// `revoked`.
+    pub status: String,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// When a rolled key stops working, Unix seconds.
+    pub expires_at: Option<i64>,
+    /// Last use, Unix seconds, to the minute.
+    pub last_used: Option<i64>,
+}
+
+/// `GET /v1/api_keys` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ApiKeyList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/api_keys`.
+    pub url: String,
+    /// Always `false`: every key of the mode is listed.
+    pub has_more: bool,
+    /// The mode's keys, newest first.
+    pub data: Vec<ApiKeyObject>,
+}
+
+/// `POST /v1/api_keys` body.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateApiKeyRequest {
+    /// The key's label, at most 200 characters.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `POST /v1/api_keys/{id}/roll` body.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RollApiKeyRequest {
+    /// Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at
+    /// once.
+    #[serde(default)]
+    pub expires_in: u32,
 }
 
 /// Administrative deposit nudge result.

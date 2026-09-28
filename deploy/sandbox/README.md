@@ -64,23 +64,14 @@ until the product acknowledges it, and a deposit is credited once.
 
 Credential issuance is a human step on both sides.
 
-1. Create the product signing key on a machine you control and keep the seed file secret:
-
-   ```sh
-   cd sdk/python
-   uv run --locked topup-sdk keygen --keyid acme/v1 --seed-out ~/acme-sandbox.seed
-   ```
-
-   It prints `{"keyid": ..., "public_key": ...}`. Use this key only for the sandbox and create
-   a separate key for every other deployment: each deployment records used signatures in its
-   own database, so a request signed with a shared key could be replayed within the five-minute
-   freshness window against another deployment that shares the same public origin.
-2. Send the operator, through the agreed support channel: the product slug you want (lowercase
-   letters, digits, and dashes), the printed key id and public key, and public HTTPS URLs for
-   your webhook receiver. Never send the seed.
-3. The operator returns the sandbox service URL, your route name, the chain id, the forwarder
-   factory and implementation addresses, the test token and unsupported-token addresses, and the
-   attestation instructions for pinning the settlement key (`keyid = settlement/v1`).
+1. Send the operator, through the agreed support channel: your company's name, a security
+   contact (name and email), and the public HTTPS URL of your webhook receiver.
+2. The operator creates your sandbox account (`acct_…`) and returns, to your contact through an
+   encrypted channel, its first secret key (`ppay_sk_test_…`), the sandbox service URL, your
+   route name, the chain id, the forwarder factory and implementation addresses, the test token
+   and unsupported-token addresses, and the attestation instructions for pinning the settlement
+   key (`keyid = settlement/v1`). Roll the key at once (`POST /v1/api_keys/{id}/roll`) and keep
+   the new one in a mode-0600 file; use it only for the sandbox.
 
 Test tokens are free: `MockERC20.mint(address,uint256)` is public. You also need Sepolia ETH for
 gas from a public faucet.
@@ -96,8 +87,7 @@ gas from a public faucet.
      --rpc-url "$SEPOLIA_RPC_URL" --account sandbox-deployer
    ```
 
-2. Render and validate the integrator's route (one route per product). Its product slug must
-   match the issued product, whose key id is `{slug}/v1`:
+2. Render and validate the integrator's route (one route per product; the slug names the route):
 
    ```sh
    FORWARDER_FACTORY=0x... TREASURY=0x... TEST_TOKEN=0x... \
@@ -122,17 +112,16 @@ gas from a public faucet.
 
 4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment that
-   holds only the sandbox's own secrets (the `staging.env.example` names). Integrators sign the
-   URL they call and the service verifies `@target-uri` against the rendered
-   `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every signed request fail with `401`. Run
+   holds only the sandbox's own secrets (the `staging.env.example` names). The admin API verifies
+   `@target-uri` against the rendered `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every admin
+   request fail with `401`. Run
    `deploy/sandbox/smoke.py` against the deployed sandbox URL before opening it to
    integrators.
-5. **HUMAN-ONLY, sandbox admin key holder:** issue the product with `POST /v1/admin/products`
-   against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
-   [Product credentials](../README.md#product-credentials) describes: the integrator's slug (the
-   route's `product`), public key, and HTTPS webhook URL. The request is audited; a repeat with
-   the same values returns the same product, and different values for an issued slug are refused
-   with `409`. The key id is `{slug}/v1`.
+5. **HUMAN-ONLY, sandbox admin key holder:** create the integrator's account with
+   `POST /v1/admin/accounts` against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
+   [Account credentials](../README.md#account-credentials) describes: its name, contact, due
+   diligence record, and HTTPS webhook URL, with `charges_enabled: false`. The request is
+   audited; send the returned test key to the contact through an encrypted channel.
 
 ## Running the scenarios against Sepolia (integrators)
 
@@ -142,9 +131,8 @@ Write a configuration file; the fields are those of `ProductConfig` in
 ```json
 {
   "service_url": "https://sandbox.topup.example",
-  "product_slug": "acme",
-  "product_keyid": "acme/v1",
-  "product_seed_file": "/home/me/acme-sandbox.seed",
+  "product_slug": "acct_…",
+  "api_key_file": "/home/me/acme-sandbox.key",
   "route": "sandbox-acme-tpha-usd",
   "chain_id": 11155111,
   "rpc_url": "https://your-sepolia-rpc.example",

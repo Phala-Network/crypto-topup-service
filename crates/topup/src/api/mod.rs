@@ -1,5 +1,7 @@
-//! Axum API, RFC 9421 authentication, and generated OpenAPI.
+//! Axum API: merchant routes authenticated by API keys, the admin routes by RFC 9421
+//! signatures, and the generated OpenAPI.
 
+mod account;
 mod attestation;
 mod auth;
 mod client_limit;
@@ -7,9 +9,12 @@ mod deposits;
 mod error;
 mod extract;
 mod handlers;
+mod idempotency;
+mod keys;
 pub mod models;
 mod pending;
 mod quotes;
+mod rate_limit;
 mod repository;
 
 use std::path::{Path, PathBuf};
@@ -26,7 +31,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::openapi::{Info, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -34,6 +39,7 @@ use utoipa_axum::routes;
 pub use attestation::{AttestationError, AttestationFuture, Attestor};
 pub use auth::VerificationKey;
 pub use client_limit::ClientReadLimiter;
+pub use rate_limit::{ApiRateLimiter, RateLimits};
 pub use topup_adapters::http_signature::PublicOrigin;
 
 /// Shared state for all API handlers.
@@ -45,14 +51,16 @@ pub struct AppState {
     pub routes: Arc<RouteSet>,
     /// Separately configured administrative verification key.
     pub admin_key: VerificationKey,
-    /// Public origin used to rebuild the signed `@target-uri` of every request.
+    /// Public origin used to rebuild the signed `@target-uri` of every admin request.
     pub public_origin: PublicOrigin,
     /// Current attestation provider.
     pub attestor: Arc<dyn Attestor>,
     /// Validated current-price provider for rate-lock creation.
     pub rate_lock_quotes: Arc<dyn QuoteProvider>,
-    /// Rate limit of unsigned quote reads by `client_secret`.
+    /// Rate limit of anonymous quote reads by `client_secret`.
     pub client_reads: Arc<ClientReadLimiter>,
+    /// Per-account and platform rate limits of authenticated merchant requests.
+    pub rate_limits: Arc<ApiRateLimiter>,
 }
 
 impl AppState {
@@ -87,8 +95,8 @@ impl AppState {
 }
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
-/// about, as returned by `GET /v1/deposits/{id}` or `GET /v1/quotes/{id}` to the event's account
-/// and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/api_keys/{id}`,
+/// or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
 /// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
@@ -103,6 +111,17 @@ pub(crate) async fn event_data(
         crate::db::EventObject::Quote(id) => quotes::find_quote(pool, routes, scope, id)
             .await
             .map(|quote| quote.map(serde_json::to_value)),
+        crate::db::EventObject::ApiKey(id) => crate::api_keys::get(pool, scope, id)
+            .await
+            .map(|key| key.map(|key| serde_json::to_value(keys::api_key_object(&key, None))))
+            .map_err(error::ApiError::from),
+        crate::db::EventObject::Account(id) if id == scope.account_id() => {
+            account::find_account(pool, scope)
+                .await
+                .map(|account| account.map(serde_json::to_value))
+                .map_err(error::ApiError::from)
+        }
+        crate::db::EventObject::Account(_) => Ok(None),
     };
     match rendered {
         Ok(Some(Ok(value))) => Ok(Some(serde_json::json!({ "object": value }))),
@@ -128,6 +147,15 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(deposits::get_deposit))
         .routes(routes!(deposits::create_refund))
         .routes(routes!(deposits::get_refund))
+        .routes(routes!(account::get_account))
+        .routes(routes!(keys::list_api_keys, keys::create_api_key))
+        .routes(routes!(keys::get_api_key, keys::revoke_api_key))
+        .routes(routes!(keys::roll_api_key))
+        // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            idempotency::idempotent_post,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
@@ -136,6 +164,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
     let admin = OpenApiRouter::new()
         .routes(routes!(handlers::create_account))
         .routes(routes!(handlers::update_account))
+        .routes(routes!(handlers::issue_api_key))
         .routes(routes!(handlers::admin_get_deposit))
         .routes(routes!(handlers::pause_customer))
         .routes(routes!(handlers::resume_customer))
@@ -152,7 +181,7 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             auth::authenticate_admin,
         ));
 
-    // A quote is also readable without a signature by its `client_secret`.
+    // A quote is also readable without an API key by its `client_secret`.
     let quote = OpenApiRouter::new()
         .routes(routes!(quotes::get_quote))
         .route_layer(middleware::from_fn_with_state(
@@ -170,20 +199,33 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         "Authenticated merchant and administrative API for Phala Pay crypto payments.".to_owned(),
     );
     documented.get_openapi_mut().info = info;
-    documented
+    let components = documented
         .get_openapi_mut()
         .components
-        .get_or_insert_default()
-        .add_security_scheme(
-            "http_message_signature",
-            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
-                "Signature",
-                "RFC 9421 ed25519 signature over `@method`, `@target-uri`, `content-digest`, and \
-                 `idempotency-key` when sent. `@target-uri` is the service's configured public \
-                 origin (`TOPUP_PUBLIC_ORIGIN`) followed by the request path and query, so sign \
-                 the public URL you call; `Host` and `X-Forwarded-*` headers are ignored.",
-            ))),
-        );
+        .get_or_insert_default();
+    components.add_security_scheme(
+        "api_key",
+        SecurityScheme::Http(
+            HttpBuilder::new()
+                .scheme(HttpAuthScheme::Bearer)
+                .description(Some(
+                    "A secret key, `Authorization: Bearer ppay_sk_test_…` or `ppay_sk_live_…`; \
+                     the key selects the account and the mode. HTTP Basic is not accepted.",
+                ))
+                .build(),
+        ),
+    );
+    components.add_security_scheme(
+        "http_message_signature",
+        SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+            "Signature",
+            "The operator's admin API only: an RFC 9421 ed25519 signature over `@method`, \
+             `@target-uri`, `content-digest`, and `idempotency-key` when sent. `@target-uri` is \
+             the service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by the \
+             request path and query, so sign the public URL you call; `Host` and \
+             `X-Forwarded-*` headers are ignored.",
+        ))),
+    );
     let documented = documented.route("/healthz", get(healthz));
     let (router, openapi) = documented.with_state(state).split_for_parts();
     let document = Arc::new(openapi.clone());
@@ -309,6 +351,7 @@ mod tests {
             attestor: Arc::new(topup_adapters::attestation::DstackAttestor::new()),
             rate_lock_quotes: Arc::new(crate::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
+            rate_limits: Arc::default(),
         };
         let response = super::router(state)
             .0

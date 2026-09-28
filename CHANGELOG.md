@@ -7,7 +7,33 @@ webhook receivers must ignore unknown fields. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking**: API keys replace RFC 9421 request signing for merchants
+  (docs/design/multi-tenant.md D7, D8, D12, §16 PR 5). Send `Authorization: Bearer
+  ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account and the mode. A missing,
+  invalid, or revoked key is `401 api_key_missing` or `401 api_key_invalid`, a rolled key past its
+  expiry `401 api_key_expired`, and a live key of an account not enabled for live mode
+  `403 testmode_charges_only`. Requests are limited per account and mode (100/s live, 25/s test,
+  with a test-mode platform ceiling): `429 rate_limit`.
+- **Breaking**: every `POST` is idempotent by `Idempotency-Key` for 24 hours per account and mode:
+  a repeat of the same request replays the first response (`Idempotent-Replayed: true`), another
+  request with the same key is `400 idempotency_key_reused` (was `409`), and a repeat while the
+  first runs is `409 idempotency_key_in_use`. A repeated quote creation now returns the same
+  `client_secret` instead of a new one.
+- **Breaking**: accounts are created only by the operator: `POST /v1/admin/accounts {name,
+  contact, due_diligence, charges_enabled, reason, webhook_url?}` returns the first secret keys;
+  `POST /v1/admin/accounts/{account}` (was `PUT`) updates live mode, the restricted flag, the
+  contact, or the webhook URL, and enabling live mode returns the first live key;
+  `POST /v1/admin/accounts/{account}/api_keys {livemode, revoke_existing, reason}` issues a
+  recovery key. Customer pauses take `livemode`.
+
 ### Added
+
+- `GET /v1/account`; `GET|POST /v1/api_keys`, `GET|DELETE /v1/api_keys/{id}`, and
+  `POST /v1/api_keys/{id}/roll {expires_in}` (the old key works for up to 7 days; `0` revokes it).
+- Events `api_key.created`, `api_key.updated`, `api_key.revoked`, and `account.updated`; every
+  event records its `actor` (an API key id, `admin`, or `system`).
 
 - Accounts and tenancy (docs/design/multi-tenant.md §14, D13, PR 3). The tenant is an account,
   `acct_…`. Its request signing key id is `{acct_…}/v1`, and the key is live or test: it quotes on

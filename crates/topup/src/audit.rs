@@ -7,8 +7,6 @@ use uuid::Uuid;
 /// The kind of actor an audit row names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActorType {
-    /// A dashboard user.
-    User,
     /// An account's API credential.
     ApiKey,
     /// The operator, through the admin API.
@@ -22,7 +20,6 @@ impl ActorType {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
-            Self::User => "user",
             Self::ApiKey => "api_key",
             Self::Admin => "admin",
             Self::System => "system",
@@ -35,12 +32,13 @@ impl ActorType {
 pub struct Actor {
     /// Kind of actor.
     pub actor_type: ActorType,
-    /// The actor's id within its kind: a key id, a user id, or a component name.
+    /// The actor's id within its kind: an API key id (`key_…`), the admin key id, or a component
+    /// name.
     pub id: String,
 }
 
 impl Actor {
-    /// An account's API credential, by its key id.
+    /// An account's API key, by its id (`key_…`).
     #[must_use]
     pub fn api_key(key_id: impl Into<String>) -> Self {
         Self {

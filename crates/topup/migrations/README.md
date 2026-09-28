@@ -18,11 +18,19 @@ of `reconciliation_custody_cursors`. It recreates `flushed` as the chain-sourced
 §14, adds `flush_failures` and `addresses.deployed_block`, and indexes credited deposits by
 address for the sweep linkage.
 
+`20261006000000_operator_onboarding` applies the 2026-09-28 amendment of the design (operator
+onboarding, API only; design PR 5): it drops what `20261004000000` created for the dashboard
+(`users`, `identities`, `passkeys`, `recovery_codes`, `memberships`, `invitations`, `sessions`,
+the `role:*` grants, `accounts.business_profile`, `country`, `tos_acceptance`, `live_access`, and
+the `user` audit actor), drops `request_signing_keys` and the per-object `quotes.idempotency_key`
+and `refunds.idempotency_key`, and adds `accounts.contact`, `accounts.due_diligence`,
+`events.actor`, and `api_keys.created_by` as the creating key id or `admin`.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
-`topup migrate`, starts the service, and re-issues each account with `POST /v1/admin/accounts`
+`topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
 (`deploy/README.md`, Account credentials). Nothing is migrated: deposits, quotes, and events of the
-old schema are discarded, and merchants take their new `acct_…` id and key id `{acct_…}/v1`.
+old schema are discarded, and merchants take their new `acct_…` id and first API key.
 Backups of the old database stay restorable only with a binary built before this migration.
 
 The service runs through the login role configured by `DATABASE_URL`. That login role must be a
@@ -52,7 +60,7 @@ list, so a new table fails it until it is listed there and, if narrowed, here.
 
 Every tenant table (`customers`, `quotes`, `addresses`, `deposits`, `refunds`, `api_keys`,
 `webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`, and the account-owned
-`confirmation_policies`, `treasuries`, `memberships`, `invitations`, `request_signing_keys`)
+`confirmation_policies` and `treasuries`)
 carries `account_id`, and the mode-bearing ones `livemode`. Merchant queries are built from a
 server-side scope of both (`crate::tenancy::Scope`); the chain workers and the admin API act for the
 platform and read across accounts. Composite foreign keys, `(parent_id, account_id, livemode)`
@@ -62,24 +70,16 @@ two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush
 `refund_payment_claims`, and `webhook_deliveries` have no `account_id` and are reached only
 through their scoped parent.
 
-`permissions` is the one authorization table (design D13): each row grants a permission to a role
-(`role:owner`, `role:administrator`, `role:developer`, `role:view_only`) or an API key kind
-(`key:secret`, `key:restricted`). The migration seeds it and the service can only read it.
+`permissions` is the one authorization table (design D13): each row grants a permission to an API
+key kind (`key:secret`, `key:restricted`); there are no roles. The migrations seed it and the
+service can only read it.
 
 ## Kept until a later design PR
 
-- `request_signing_keys` holds each account's RFC 9421 ed25519 key until API keys replace merchant
-  request signing (design PR 5). Its key id is `{accounts.public_id}/v1`, and the key's `livemode`
-  is the mode of every request it signs.
 - The refund workflow columns (`requested_by`, `approved_by`, the `requested`, `approved`, `sent`,
   `confirmed` statuses, `to_address`) are the operator-approved flow design PR 9 replaces.
-- `quotes.idempotency_key` and `refunds.idempotency_key` keep today's per-object replay until
-  `idempotency_keys` serves every `POST` (design PR 5).
-- Tables for API keys, treasuries, confirmation policies, account limits, and idempotency keys
-  are created now and used by design PRs 5 and 7. The user, identity, passkey, recovery-code,
-  membership, invitation, and session tables, the `role:*` principals, and the account profile,
-  ToS, and `live_access` columns were created for a dashboard the design no longer has; design
-  PR 5 drops them in an additive migration.
+- Tables for treasuries, confirmation policies, and account limits are created now and used by
+  later design PRs (7 and 10).
 
 ## Points the schema does not show on its own
 

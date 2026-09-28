@@ -8,13 +8,13 @@ With `demo_dir` configured, the product serves the built page of deploy/product/
 - `POST api/quotes` `{"amount"}` (cents): creates a quote with the SDK and returns its
   `client_secret` for `<Checkout>`;
 - `GET api/quotes/{id}`: the payment's timeline, built only from real data: the service's quote
-  and deposit (signed reads with the product key), the webhook events and ledger rows of this
+  and deposit (read with the product's API key), the webhook events and ledger rows of this
   product, and the sweep transfer on chain; with the service requests behind it;
 - `GET api/trust`: the service's attestation, with the report-data binding checked by the SDK, and
   the app id and compose hash of its TLS evidence.
 
-The browser never holds a key: the product signs every service request itself, and the developer
-view shows those requests with their signatures shortened. Balances move only through the
+The browser never holds a key: the product sends every service request itself, and the developer
+view shows those requests with the API key redacted to its prefix. Balances move only through the
 `deposit.credited` webhook (reference_product.fulfillment), exactly as for any other account.
 """
 
@@ -117,7 +117,7 @@ class RateLimiter:
 
 class ApiRecorder(httpx.BaseTransport):
     """The product's transport to the service; records the exchanges of the current request for
-    the developer view, with the RFC 9421 signature shortened and client secrets masked."""
+    the developer view, with the API key redacted to its prefix and client secrets masked."""
 
     def __init__(self, inner: httpx.BaseTransport | None = None) -> None:
         self._inner = inner or httpx.HTTPTransport()
@@ -558,7 +558,8 @@ class DemoConsole:
             if self._client is None:
                 self._client = TopupClient(
                     self.config.service_url,
-                    self.config.signer(),
+                    self.config.api_key(),
+                    account=self.config.product_slug,
                     forwarder=(
                         self.config.factory,
                         self.config.implementation,
@@ -744,11 +745,11 @@ def _event_refs(payload: dict[str, Any]) -> set[str]:
 
 
 def _exchange(request: httpx.Request, response: httpx.Response) -> dict[str, Any]:
+    # An allowlist: the API key never leaves the server, only its mode's prefix is shown.
     headers = {
-        name: _shorten(value) if name == "signature" else value
+        name: _redact_key(value) if name == "authorization" else value
         for name, value in request.headers.items()
-        if name
-        in ("content-type", "idempotency-key", "content-digest", "signature-input", "signature")
+        if name in ("authorization", "content-type", "idempotency-key")
     }
     return {
         "method": request.method,
@@ -781,8 +782,13 @@ def _mask(value: Any) -> Any:
     return value
 
 
-def _shorten(value: str) -> str:
-    return value if len(value) <= 40 else value[:24] + "…" + value[-8:]
+def _redact_key(authorization: str) -> str:
+    """`Bearer ppay_sk_test_…`: the scheme and the key's prefix, never the key."""
+    _, _, key = authorization.partition(" ")
+    for prefix in ("ppay_sk_test_", "ppay_sk_live_"):
+        if key.startswith(prefix):
+            return f"Bearer {prefix}…"
+    return "Bearer …"
 
 
 def _topic(address: str) -> str:

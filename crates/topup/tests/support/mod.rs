@@ -189,6 +189,40 @@ where
 /// Public origin the test routers are configured with and requests are signed for by default.
 pub const TEST_ORIGIN: &str = "http://api.test";
 
+/// A merchant request authenticated with `Authorization: Bearer {api_key}`.
+pub fn merchant_request(method: Method, path: &str, body: Vec<u8>, api_key: &str) -> Request<Body> {
+    merchant_request_builder(method, path, api_key)
+        .body(Body::from(body))
+        .expect("test request must be valid")
+}
+
+/// A merchant request that also sends `Idempotency-Key`.
+pub fn merchant_request_with_key(
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    api_key: &str,
+    idempotency_key: &str,
+) -> Request<Body> {
+    merchant_request_builder(method, path, api_key)
+        .header("idempotency-key", idempotency_key)
+        .body(Body::from(body))
+        .expect("test request must be valid")
+}
+
+fn merchant_request_builder(
+    method: Method,
+    path: &str,
+    api_key: &str,
+) -> axum::http::request::Builder {
+    Request::builder()
+        .method(method)
+        .uri(format!("{TEST_ORIGIN}{path}"))
+        .header("host", "api.test")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {api_key}"))
+}
+
 pub fn public_key_base64(key: &SigningKey) -> String {
     STANDARD.encode(key.verifying_key().as_bytes())
 }

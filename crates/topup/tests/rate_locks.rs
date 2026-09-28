@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewCustomer};
 use support::{
-    TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, signed_request_with_key,
+    TEST_ORIGIN, TestDatabase, merchant_request, merchant_request_with_key, public_key_base64,
 };
 
 const ADMIN_KID: &str = "admin/v1";
@@ -64,13 +64,9 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         return Ok(());
     };
     let result = async {
-        let product_key = SigningKey::from_bytes(&[41; 32]);
-        let other_key = SigningKey::from_bytes(&[42; 32]);
         let admin_key = SigningKey::from_bytes(&[43; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let other = seed_product(&database.app_pool, "builder", &other_key).await?;
-        let product_kid = seed::key_id(&product);
-        let other_kid = seed::key_id(&other);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        let (other, other_key) = seed_product(&database.app_pool, "builder").await?;
         let account = seed_account(&database.app_pool, product.id, "account-rl").await?;
         let other_account = seed_account(&database.app_pool, other.id, "account-rl").await?;
         let mut route = test_route();
@@ -89,6 +85,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(FixedQuote),
             client_reads: Arc::default(),
+            rate_limits: Arc::default(),
         })
         .0;
         let now = Utc::now().timestamp();
@@ -98,21 +95,13 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
                 "chain_id": 1, "asset": "pha"
             }))
         };
-        let create = |key: &str, body: Vec<u8>, created: i64| {
-            signed_request_with_key(
-                Method::POST,
-                "/v1/quotes",
-                body,
-                &product_kid,
-                &product_key,
-                created,
-                key,
-            )
+        let create = |key: &str, body: Vec<u8>| {
+            merchant_request_with_key(Method::POST, "/v1/quotes", body, &product_key, key)
         };
 
         let created = app
             .clone()
-            .oneshot(create("key-1", quote_body("account-rl", 100)?, now))
+            .oneshot(create("key-1", quote_body("account-rl", 100)?))
             .await?;
         ensure!(created.status() == StatusCode::OK);
         let created = response_json(created).await?;
@@ -151,21 +140,16 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .context("client_secret names its quote")?;
         ensure!(random.len() == 48 && random.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
+        // A retry with the same key and request replays the first response, secret included.
         let retried = app
             .clone()
-            .oneshot(create("key-1", quote_body("account-rl", 100)?, now + 1))
+            .oneshot(create("key-1", quote_body("account-rl", 100)?))
             .await?;
         ensure!(retried.status() == StatusCode::OK);
+        ensure!(retried.headers()["idempotent-replayed"] == "true");
         let retried = response_json(retried).await?;
-        ensure!(retried["id"] == quote_id);
-        // Only the secret's hash is stored, so a repeat issues a new one and the first stops working.
-        let client_secret = retried["client_secret"].as_str().context("client_secret")?;
-        ensure!(client_secret != first_secret);
-        let stale = app
-            .clone()
-            .oneshot(client_read(&quote_id, &first_secret)?)
-            .await?;
-        ensure!(stale.status() == StatusCode::NOT_FOUND);
+        ensure!(retried == created, "{retried}");
+        let client_secret = first_secret.as_str();
 
         // The payer's browser reads the public view with the secret alone, from any origin.
         let public = app
@@ -189,13 +173,11 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         // Signed reads never return the secret; unsigned reads need the quote's own secret.
         let signed = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::GET,
                 &format!("/v1/quotes/{quote_id}"),
                 Vec::new(),
-                &product_kid,
                 &product_key,
-                now + 1,
             ))
             .await?;
         ensure!(signed.status() == StatusCode::OK);
@@ -228,16 +210,16 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
 
         let mismatched = app
             .clone()
-            .oneshot(create("key-1", quote_body("account-rl", 200)?, now + 1))
+            .oneshot(create("key-1", quote_body("account-rl", 200)?))
             .await?;
-        ensure!(mismatched.status() == StatusCode::CONFLICT);
+        ensure!(mismatched.status() == StatusCode::BAD_REQUEST);
         let mismatched = response_json(mismatched).await?;
         ensure!(mismatched["error"]["type"] == "idempotency_error");
         ensure!(mismatched["error"]["code"] == "idempotency_key_reused");
 
         let limited = app
             .clone()
-            .oneshot(create("key-2", quote_body("account-rl", 100)?, now + 2))
+            .oneshot(create("key-2", quote_body("account-rl", 100)?))
             .await?;
         ensure!(limited.status() == StatusCode::TOO_MANY_REQUESTS);
         ensure!(response_json(limited).await?["error"]["code"] == "rate_limit");
@@ -272,7 +254,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         ] {
             let answer = app
                 .clone()
-                .oneshot(create("key-bad", body, now + 2))
+                .oneshot(create(&format!("key-bad-{param}-{code}"), body))
                 .await?;
             ensure!(answer.status() == StatusCode::BAD_REQUEST, "{code}");
             let answer = response_json(answer).await?;
@@ -287,11 +269,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         // A quote for an account the service has not seen creates it, like a checkout session.
         let implicit = app
             .clone()
-            .oneshot(create(
-                "key-implicit",
-                quote_body("implicit-rl", 100)?,
-                now + 3,
-            ))
+            .oneshot(create("key-implicit", quote_body("implicit-rl", 100)?))
             .await?;
         ensure!(implicit.status() == StatusCode::OK);
         ensure!(response_json(implicit).await?["account_id"] == "implicit-rl");
@@ -308,26 +286,17 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let path = format!("/v1/quotes/{quote_id}");
         let cross_tenant = app
             .clone()
-            .oneshot(signed_request(
-                Method::GET,
-                &path,
-                Vec::new(),
-                &other_kid,
-                &other_key,
-                now,
-            ))
+            .oneshot(merchant_request(Method::GET, &path, Vec::new(), &other_key))
             .await?;
         ensure!(cross_tenant.status() == StatusCode::NOT_FOUND);
         ensure!(response_json(cross_tenant).await?["error"]["code"] == "resource_missing");
         let cross_tenant_cancel = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::POST,
                 &format!("{path}/cancel"),
                 Vec::new(),
-                &other_kid,
                 &other_key,
-                now + 1,
             ))
             .await?;
         ensure!(cross_tenant_cancel.status() == StatusCode::NOT_FOUND);
@@ -343,29 +312,29 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         let paused = app
             .clone()
-            .oneshot(create("key-3", quote_body("account-rl", 100)?, now + 3))
+            .oneshot(create("key-3", quote_body("account-rl", 100)?))
             .await?;
         ensure!(paused.status() == StatusCode::CONFLICT);
         ensure!(response_json(paused).await?["error"]["code"] == "paused");
         // A repeat creates nothing, so the pause does not hide the quote the product showed.
         let paused_replay = app
             .clone()
-            .oneshot(create("key-1", quote_body("account-rl", 100)?, now + 10))
+            .oneshot(create("key-1", quote_body("account-rl", 100)?))
             .await?;
         ensure!(paused_replay.status() == StatusCode::OK);
         ensure!(response_json(paused_replay).await?["address"] == created["address"]);
         let paused_mismatch = app
             .clone()
-            .oneshot(create("key-1", quote_body("account-rl", 200)?, now + 11))
+            .oneshot(create("key-1", quote_body("account-rl", 200)?))
             .await?;
-        ensure!(paused_mismatch.status() == StatusCode::CONFLICT);
+        ensure!(paused_mismatch.status() == StatusCode::BAD_REQUEST);
 
         seed::set_customer_paused_scopes(&database.app_pool, account.id, &[]).await?;
         seed::set_account_paused_scopes(&database.app_pool, product.id, &["quotes".to_owned()])
             .await?;
         let product_paused = app
             .clone()
-            .oneshot(create("key-4", quote_body("account-rl", 100)?, now + 4))
+            .oneshot(create("key-4", quote_body("account-rl", 100)?))
             .await?;
         ensure!(product_paused.status() == StatusCode::CONFLICT);
 
@@ -376,39 +345,35 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         let route_paused = app
             .clone()
-            .oneshot(create("key-5", quote_body("account-rl", 100)?, now + 5))
+            .oneshot(create("key-5", quote_body("account-rl", 100)?))
             .await?;
         ensure!(route_paused.status() == StatusCode::CONFLICT);
 
         let get = app
             .clone()
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::GET,
                 &path,
                 Vec::new(),
-                &product_kid,
                 &product_key,
-                now + 6,
             ))
             .await?;
         ensure!(get.status() == StatusCode::OK);
         ensure!(response_json(get).await?["status"] == "open");
 
-        let cancel = |id: &str, created: i64| {
-            signed_request(
+        let cancel = |id: &str| {
+            merchant_request(
                 Method::POST,
                 &format!("/v1/quotes/{id}/cancel"),
                 Vec::new(),
-                &product_kid,
                 &product_key,
-                created,
             )
         };
-        let canceled = app.clone().oneshot(cancel(&quote_id, now + 7)).await?;
+        let canceled = app.clone().oneshot(cancel(&quote_id)).await?;
         ensure!(canceled.status() == StatusCode::OK);
         ensure!(response_json(canceled).await?["status"] == "canceled");
         // Canceling again returns the canceled quote.
-        let again = app.clone().oneshot(cancel(&quote_id, now + 8)).await?;
+        let again = app.clone().oneshot(cancel(&quote_id)).await?;
         ensure!(again.status() == StatusCode::OK);
         ensure!(response_json(again).await?["status"] == "canceled");
         let audit_count: i64 =
@@ -428,7 +393,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         let paid = app
             .clone()
-            .oneshot(create("key-6", quote_body("account-rl", 100)?, now + 8))
+            .oneshot(create("key-6", quote_body("account-rl", 100)?))
             .await?;
         ensure!(paid.status() == StatusCode::OK);
         let paid_id = response_json(paid).await?["id"]
@@ -437,7 +402,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .to_owned();
         let paid_address_id = quote_address_id(&database.app_pool, &paid_id).await?;
         insert_rejected_deposit(&database.app_pool, &route, paid_address_id).await?;
-        let refused = app.clone().oneshot(cancel(&paid_id, now + 9)).await?;
+        let refused = app.clone().oneshot(cancel(&paid_id)).await?;
         ensure!(refused.status() == StatusCode::CONFLICT);
         ensure!(response_json(refused).await?["error"]["code"] == "quote_payment_received");
         ensure!(quote_status(&database.app_pool, &paid_id).await? == "open");
@@ -449,7 +414,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         let lapsed = app
             .clone()
-            .oneshot(create("key-7", quote_body("account-rl", 100)?, now + 10))
+            .oneshot(create("key-7", quote_body("account-rl", 100)?))
             .await?;
         ensure!(lapsed.status() == StatusCode::OK);
         let lapsed_id = response_json(lapsed).await?["id"]
@@ -460,19 +425,17 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .bind(topup::ids::parse(topup::ids::QUOTE, &lapsed_id).context("quote id")?)
             .execute(&database.app_pool)
             .await?;
-        let window_closed = app.clone().oneshot(cancel(&lapsed_id, now + 11)).await?;
+        let window_closed = app.clone().oneshot(cancel(&lapsed_id)).await?;
         ensure!(window_closed.status() == StatusCode::CONFLICT);
         ensure!(response_json(window_closed).await?["error"]["code"] == "quote_window_closed");
         ensure!(quote_status(&database.app_pool, &lapsed_id).await? == "open");
 
         let config = app
-            .oneshot(signed_request(
+            .oneshot(merchant_request(
                 Method::GET,
                 "/v1/config",
                 Vec::new(),
-                &product_kid,
                 &product_key,
-                now + 12,
             ))
             .await?;
         ensure!(config.status() == StatusCode::OK);
@@ -525,7 +488,6 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
             &product,
             &account,
             &route,
-            Some("round-up-1"),
             MinorAmount::new(1),
         )
         .await?;
@@ -557,10 +519,8 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
             }
         }
 
-        let product_key = SigningKey::from_bytes(&[44; 32]);
         let admin_key = SigningKey::from_bytes(&[45; 32]);
-        let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
-        let product_kid = seed::key_id(&product);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
         seed_account(&database.app_pool, product.id, "short-amount").await?;
         let mut route = test_route();
         route.asset.decimals = 18;
@@ -581,6 +541,7 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(CentsPriceQuote),
             client_reads: Arc::default(),
+            rate_limits: Arc::default(),
         })
         .0;
         let body = serde_json::to_vec(&json!({
@@ -588,13 +549,11 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
             "chain_id": 1, "asset": "pha"
         }))?;
         let response = app
-            .oneshot(signed_request_with_key(
+            .oneshot(merchant_request_with_key(
                 Method::POST,
                 "/v1/quotes",
                 body,
-                &product_kid,
                 &product_key,
-                Utc::now().timestamp(),
                 "short-amount-1",
             ))
             .await?;
@@ -642,7 +601,6 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
             &first,
             &first_account,
             &account_route,
-            Some("account-cap-1"),
             MinorAmount::new(100),
         )
         .await?;
@@ -653,7 +611,6 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &first,
                 &first_account,
                 &account_route,
-                Some("account-cap-2"),
                 MinorAmount::new(1),
             )
             .await,
@@ -662,23 +619,17 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 ..
             })
         ));
-        cancel_lock(
-            &database.app_pool,
-            &first,
-            lock_id(&database.app_pool, first_account.id, "account-cap-1").await?,
-        )
-        .await?;
+        cancel_lock(&database.app_pool, &first, first_lock.id).await?;
 
         let mut product_route = account_route.clone();
         product_route.rate_lock.max_open_minor.account = 1_000;
         product_route.rate_lock.max_open_minor.product = 100;
-        locks::create(
+        let product_lock = locks::create(
             &database.app_pool,
             &quotes,
             &first,
             &first_account,
             &product_route,
-            Some("product-cap-1"),
             MinorAmount::new(100),
         )
         .await?;
@@ -689,7 +640,6 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &first,
                 &second_account,
                 &product_route,
-                Some("product-cap-2"),
                 MinorAmount::new(1),
             )
             .await,
@@ -698,12 +648,7 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 ..
             })
         ));
-        cancel_lock(
-            &database.app_pool,
-            &first,
-            lock_id(&database.app_pool, first_account.id, "product-cap-1").await?,
-        )
-        .await?;
+        cancel_lock(&database.app_pool, &first, product_lock.id).await?;
 
         let mut global_route = account_route.clone();
         global_route.rate_lock.max_open_minor.account = 1_000;
@@ -715,7 +660,6 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
             &first,
             &first_account,
             &global_route,
-            Some("global-cap-1"),
             MinorAmount::new(100),
         )
         .await?;
@@ -726,7 +670,6 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 &second,
                 &other_account,
                 &global_route,
-                Some("global-cap-2"),
                 MinorAmount::new(1),
             )
             .await,
@@ -781,15 +724,7 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "unpaid").await?;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(
-            &database,
-            &quotes,
-            &product,
-            &account,
-            &test_route(),
-            "unpaid-1",
-        )
-        .await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &test_route()).await?;
         let expires_at = Utc::now() - chrono::Duration::minutes(5);
         sqlx::query("UPDATE quotes SET expires_at = $2 WHERE id = $1")
             .bind(lock.id)
@@ -803,14 +738,9 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         ensure!(locks::expire_once(&database.app_pool).await? == 0);
         set_finalized_time(&database.app_pool, expires_at).await?;
         ensure!(locks::expire_once(&database.app_pool).await? == 0);
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "open");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
         ensure!(matches!(
-            cancel_lock(
-                &database.app_pool,
-                &product,
-                lock_id(&database.app_pool, account.id, "unpaid-1").await?
-            )
-            .await,
+            cancel_lock(&database.app_pool, &product, lock.id).await,
             Err(RateLockError::WindowClosed)
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 100);
@@ -826,14 +756,9 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         )
         .await?;
         ensure!(locks::expire_once(&database.app_pool).await? == 1);
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "unpaid-1").await? == "expired");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "expired");
         ensure!(matches!(
-            cancel_lock(
-                &database.app_pool,
-                &product,
-                lock_id(&database.app_pool, account.id, "unpaid-1").await?
-            )
-            .await,
+            cancel_lock(&database.app_pool, &product, lock.id).await,
             Err(RateLockError::NotOpen(_))
         ));
         ensure!(exposure(&database.app_pool, &account_key).await? == 0);
@@ -858,15 +783,7 @@ async fn another_chains_cursor_never_expires_a_lock() -> Result<()> {
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "cross-chain").await?;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(
-            &database,
-            &quotes,
-            &product,
-            &account,
-            &test_route(),
-            "chain-a",
-        )
-        .await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &test_route()).await?;
         let expires_at = Utc::now() - chrono::Duration::minutes(5);
         sqlx::query("UPDATE quotes SET expires_at = $2 WHERE id = $1")
             .bind(lock.id)
@@ -883,7 +800,7 @@ async fn another_chains_cursor_never_expires_a_lock() -> Result<()> {
         .execute(&database.app_pool)
         .await?;
         ensure!(locks::expire_once(&database.app_pool).await? == 0);
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "chain-a").await? == "open");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
         ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 100);
         Ok(())
     }
@@ -902,13 +819,11 @@ async fn new_lock_addresses_start_scanning_at_the_chain_cursor() -> Result<()> {
         let account = seed_account(&database.app_pool, product.id, "cursor").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let before_cursor =
-            create_lock(&database, &quotes, &product, &account, &route, "c-1").await?;
+        let before_cursor = create_lock(&database, &quotes, &product, &account, &route).await?;
         sqlx::query("INSERT INTO cursors (chain_id, scanned_block) VALUES (1, 1234)")
             .execute(&database.app_pool)
             .await?;
-        let after_cursor =
-            create_lock(&database, &quotes, &product, &account, &route, "c-2").await?;
+        let after_cursor = create_lock(&database, &quotes, &product, &account, &route).await?;
         for (address_id, expected) in [
             (before_cursor.address_id, 0),
             (after_cursor.address_id, 1234),
@@ -950,7 +865,7 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
         route.rate_lock.max_creations_per_minute = 1;
         let counter = Arc::new(CountingQuote(AtomicUsize::new(0)));
         let quotes: Arc<dyn QuoteProvider> = counter.clone();
-        create_lock(&database, &quotes, &product, &account, &route, "limited-1").await?;
+        create_lock(&database, &quotes, &product, &account, &route).await?;
         ensure!(matches!(
             locks::create(
                 &database.app_pool,
@@ -958,7 +873,6 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
                 &product,
                 &account,
                 &route,
-                Some("limited-2"),
                 MinorAmount::new(100),
             )
             .await,
@@ -982,18 +896,13 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
         let account = seed_account(&database.app_pool, product.id, "paid").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(&database, &quotes, &product, &account, &route, "paid-1").await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &route).await?;
         insert_rejected_deposit(&database.app_pool, &route, lock.address_id).await?;
         ensure!(matches!(
-            cancel_lock(
-                &database.app_pool,
-                &product,
-                lock_id(&database.app_pool, account.id, "paid-1").await?
-            )
-            .await,
+            cancel_lock(&database.app_pool, &product, lock.id).await,
             Err(RateLockError::PendingPayment)
         ));
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "paid-1").await? == "open");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
         ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 100);
         Ok(())
     }
@@ -1016,7 +925,7 @@ async fn a_creation_reaching_ninety_percent_of_the_account_cap_raises_an_alert()
         route.rate_lock.max_open_minor.product = 110;
         route.rate_lock.max_open_minor.global = 1_000_000;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        create_lock(&database, &quotes, &product, &account, &route, "exposed-1").await?;
+        create_lock(&database, &quotes, &product, &account, &route).await?;
 
         ensure!(logs_contain("TopupLockExposureNearCap"));
         ensure!(logs_contain("tags.scope=\"account\""));
@@ -1060,7 +969,6 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
                     &product,
                     &account,
                     &route,
-                    Some(&format!("race-{index}")),
                     MinorAmount::new(100),
                 )
                 .await
@@ -1103,8 +1011,8 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
         let second = seed_account(&database.app_pool, product.id, "expiring-b").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let first_lock = create_lock(&database, &quotes, &product, &first, &route, "a-1").await?;
-        let second_lock = create_lock(&database, &quotes, &product, &second, &route, "b-1").await?;
+        let first_lock = create_lock(&database, &quotes, &product, &first, &route).await?;
+        let second_lock = create_lock(&database, &quotes, &product, &second, &route).await?;
         sqlx::query(
             "UPDATE quotes SET expires_at = now() - interval '1 second' WHERE id = ANY($1)",
         )
@@ -1114,7 +1022,7 @@ async fn expiring_two_accounts_does_not_deadlock_with_a_concurrent_creation() ->
         finalize_chain_past_now(&database.app_pool).await?;
         let (expired, created) = tokio::join!(
             locks::expire_once(&database.app_pool),
-            create_lock(&database, &quotes, &product, &second, &route, "b-2"),
+            create_lock(&database, &quotes, &product, &second, &route),
         );
         ensure!(expired? == 2);
         created?;
@@ -1140,7 +1048,7 @@ async fn cancel_waits_for_an_uncommitted_deposit_to_the_lock_address() -> Result
         let account = seed_account(&database.app_pool, product.id, "racing").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(&database, &quotes, &product, &account, &route, "race-1").await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &route).await?;
 
         // A scanner transaction has inserted the payment but not committed yet.
         let mut scanner = database.app_pool.begin().await?;
@@ -1157,7 +1065,7 @@ async fn cancel_waits_for_an_uncommitted_deposit_to_the_lock_address() -> Result
         }
         scanner.commit().await?;
         ensure!(matches!(cancel.await?, Err(RateLockError::PendingPayment)));
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "race-1").await? == "open");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
         ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 100);
         Ok(())
     }
@@ -1177,7 +1085,7 @@ async fn failing_expiry_scans_alert_and_recover() -> Result<()> {
         let account = seed_account(&database.app_pool, product.id, "failing").await?;
         let route = test_route();
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-        let lock = create_lock(&database, &quotes, &product, &account, &route, "fail-1").await?;
+        let lock = create_lock(&database, &quotes, &product, &account, &route).await?;
         sqlx::query("UPDATE quotes SET expires_at = now() - interval '1 second' WHERE id = $1")
             .bind(lock.id)
             .execute(&database.app_pool)
@@ -1206,20 +1114,20 @@ async fn failing_expiry_scans_alert_and_recover() -> Result<()> {
             logs_contain("TopupLockExpiryFailing"),
             "expiry never failed"
         );
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "open");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
 
         sqlx::query("GRANT INSERT ON events TO topup_app")
             .execute(&database.owner_pool)
             .await?;
         for _ in 0..400 {
-            if lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "expired" {
+            if lock_status(&database.app_pool, lock.id).await? == "expired" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         cancellation.cancel();
         running.await?;
-        ensure!(lock_status_by_ref(&database.app_pool, account.id, "fail-1").await? == "expired");
+        ensure!(lock_status(&database.app_pool, lock.id).await? == "expired");
         ensure!(exposure(&database.app_pool, "global").await? == 0);
         Ok(())
     }
@@ -1246,22 +1154,23 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
         for index in 0..ACCOUNTS {
             let account =
                 seed_account(&database.app_pool, product.id, &format!("c-{index}")).await?;
+            let mut ids = std::collections::HashMap::new();
             for name in ["consume", "cancel", "expire", "keep"] {
-                let lock =
-                    create_lock(&database, &quotes, &product, &account, &route, name).await?;
+                let lock = create_lock(&database, &quotes, &product, &account, &route).await?;
                 if name == "expire" {
                     sqlx::query("UPDATE quotes SET expires_at = now() WHERE id = $1")
                         .bind(lock.id)
                         .execute(&database.app_pool)
                         .await?;
                 }
+                ids.insert(name, lock.id);
             }
-            accounts.push(account);
+            accounts.push((account, ids["cancel"], ids["consume"]));
         }
         finalize_chain_past_now(&database.app_pool).await?;
 
         let mut tasks = tokio::task::JoinSet::new();
-        for (index, account) in accounts.iter().cloned().enumerate() {
+        for (index, (account, cancel_id, consume_id)) in accounts.iter().cloned().enumerate() {
             let (pool, quotes, product, route) = (
                 database.app_pool.clone(),
                 Arc::clone(&quotes),
@@ -1269,21 +1178,19 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
                 Arc::clone(&route),
             );
             tasks.spawn(async move {
-                for round in 0..3 {
-                    let key = format!("{}/new-{round}", account.client_reference_id);
+                for _ in 0..3 {
                     locks::create(
                         &pool,
                         &quotes,
                         &product,
                         &account,
                         &route,
-                        Some(&key),
                         MinorAmount::new(100),
                     )
                     .await?;
                 }
-                cancel_lock(&pool, &product, lock_id(&pool, account.id, "cancel").await?).await?;
-                consume_lock(&pool, account.id, "consume", u8::try_from(index)?).await?;
+                cancel_lock(&pool, &product, cancel_id).await?;
+                consume_lock(&pool, consume_id, u8::try_from(index)?).await?;
                 anyhow::Ok(())
             });
         }
@@ -1310,7 +1217,7 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
         let open = exposure(&database.app_pool, "global").await?;
         ensure!(open == 4 * 100 * ACCOUNTS as u64, "{open}");
         ensure!(exposure(&database.app_pool, &format!("product:{}", product.id)).await? == open);
-        for account in &accounts {
+        for (account, _, _) in &accounts {
             ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 400);
         }
         Ok(())
@@ -1341,13 +1248,7 @@ async fn set_finalized_time(pool: &sqlx::PgPool, time: chrono::DateTime<Utc>) ->
 }
 
 /// Consumes a lock the way the confirm step does: a leased deposit transition with consumption.
-async fn consume_lock(
-    pool: &sqlx::PgPool,
-    customer_id: Uuid,
-    lock_ref: &str,
-    number: u8,
-) -> Result<()> {
-    let quote_id = lock_id(pool, customer_id, lock_ref).await?;
+async fn consume_lock(pool: &sqlx::PgPool, quote_id: Uuid, number: u8) -> Result<()> {
     let address_id: Uuid = sqlx::query_scalar("SELECT id FROM addresses WHERE quote_id = $1")
         .bind(quote_id)
         .fetch_one(pool)
@@ -1458,7 +1359,6 @@ async fn create_lock(
     product: &Account,
     account: &Customer,
     route: &RouteFile,
-    lock_ref: &str,
 ) -> Result<locks::RateLock> {
     Ok(locks::create(
         &database.app_pool,
@@ -1466,7 +1366,6 @@ async fn create_lock(
         product,
         account,
         route,
-        Some(&format!("{}/{lock_ref}", account.client_reference_id)),
         MinorAmount::new(100),
     )
     .await?)
@@ -1481,7 +1380,7 @@ async fn cancel_lock(
     locks::cancel(
         pool,
         Scope::new(product.id, true),
-        &Actor::api_key(seed::key_id(product)),
+        &Actor::api_key(format!("key_{}", Uuid::nil().simple())),
         quote_id,
     )
     .await
@@ -1504,33 +1403,11 @@ async fn exposure(pool: &sqlx::PgPool, scope: &str) -> Result<u64> {
     Ok(open.parse()?)
 }
 
-/// The id of the customer's quote created with `lock_ref`: its idempotency key is `lock_ref`
-/// itself or, from [`create_lock`], `{client_reference_id}/{lock_ref}`.
-async fn lock_id(pool: &sqlx::PgPool, customer_id: Uuid, lock_ref: &str) -> Result<Uuid> {
-    Ok(sqlx::query_scalar(
-        r#"
-        SELECT quote.id
-        FROM quotes AS quote
-        JOIN customers AS customer ON customer.id = quote.customer_id
-        WHERE quote.customer_id = $1
-          AND quote.idempotency_key IN ($2, customer.client_reference_id || '/' || $2)
-        "#,
-    )
-    .bind(customer_id)
-    .bind(lock_ref)
-    .fetch_one(pool)
-    .await?)
-}
-
-/// Status of the customer's quote created with `lock_ref` (see [`lock_id`]).
-async fn lock_status_by_ref(
-    pool: &sqlx::PgPool,
-    customer_id: Uuid,
-    lock_ref: &str,
-) -> Result<String> {
+/// Status of the quote `quote_id`.
+async fn lock_status(pool: &sqlx::PgPool, quote_id: Uuid) -> Result<String> {
     Ok(
         sqlx::query_scalar("SELECT status FROM quotes WHERE id = $1")
-            .bind(lock_id(pool, customer_id, lock_ref).await?)
+            .bind(quote_id)
             .fetch_one(pool)
             .await?,
     )
@@ -1603,22 +1480,22 @@ fn test_route() -> RouteFile {
     route
 }
 
-/// A live account signing with `key`.
-async fn seed_product(pool: &sqlx::PgPool, name: &str, key: &SigningKey) -> Result<Account> {
-    Ok(seed::create_account(
+/// A live account and its live secret key.
+async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, String)> {
+    let account = seed::create_account(
         pool,
         &NewAccount {
-            public_key: public_key_base64(key),
             webhook_url: "https://product.test/webhooks".to_owned(),
             ..NewAccount::named(name)
         },
     )
-    .await?)
+    .await?;
+    let key = seed::create_api_key(pool, account.id, true).await?;
+    Ok((account, key))
 }
 
 async fn seed_product_without_key(pool: &sqlx::PgPool, name: &str) -> Result<Account> {
-    let key = SigningKey::from_bytes(&[51; 32]);
-    seed_product(pool, name, &key).await
+    Ok(seed_product(pool, name).await?.0)
 }
 
 /// A live customer of `account_id`.

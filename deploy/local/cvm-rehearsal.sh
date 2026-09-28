@@ -273,8 +273,6 @@ jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$tmp/s
     >/dev/null || die "the rehearsal stack bind-mounts a host path"
 
 echo "== writing the unsealed .env with write-staging-env.sh"
-product_key=$(product_python -m topup_sdk keygen --keyid phala-cloud/v1 \
-    --seed-out /opt/product.seed)
 # The owner-sealed secrets, the only env values.
 declare -A values=(
     [AWS_ACCESS_KEY_ID]=topup-s3
@@ -399,11 +397,12 @@ wait_for "a fresh backup marker" 120 marker_fresh
 echo "ok: WAL archiving refreshed the backup marker"
 
 echo "== one quote-first deposit against the reference product"
-# A CVM has no database access, so the owner issues the account through the signed admin API.
+# A CVM has no database access, so the operator creates the account through the signed admin API;
+# the answer's first test key goes straight to the client container, never to this shell's output.
 # `-j` omits the trailing newline, so the body passes through an argument byte for byte.
-jq -cjn --arg public_key "$(jq -er .public_key <<<"$product_key")" \
-    '{name: "phala-cloud", livemode: false, public_key: $public_key,
-      webhook_url: "http://product:8089/webhooks"}' \
+jq -cjn '{name: "phala-cloud", contact: {name: "Rehearsal", email: "rehearsal@example.com"},
+      due_diligence: {reference: "rehearsal", reviewed_at: "2026-09-28", reviewed_by: "cvm-rehearsal"},
+      charges_enabled: false, reason: "CVM rehearsal", webhook_url: "http://product:8089/webhooks"}' \
     >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
     http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" rehearsal-admin/v1)
@@ -414,12 +413,15 @@ headers["content-type"] = "application/json"
 response = httpx.post("http://topup:8080/v1/admin/accounts", content=sys.argv[1].encode(),
                       headers=headers, timeout=30)
 assert response.status_code == 200, (response.status_code, response.text)
-print(response.json()["id"])
+account = response.json()
+with open("/opt/product.key", "w", encoding="ascii") as key:
+    key.write(account["api_keys"][0]["secret"])
+print(account["id"])
 PY
-) || die "POST /v1/admin/accounts did not issue the account"
-echo "ok: POST /v1/admin/accounts issued $account"
+) || die "POST /v1/admin/accounts did not create the account"
+echo "ok: POST /v1/admin/accounts created $account with its first test key"
 
-echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed seed"
+echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed key"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
 # The committed product compose with this chain's addresses, as for the route above.
 sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
@@ -427,7 +429,6 @@ sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"treasury\": \).*|\1\"$treasury\",|" \
     -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
     -e "s|^\(        \"product_slug\": \).*|\1\"$account\",|" \
-    -e "s|^\(        \"product_keyid\": \).*|\1\"$account/v1\",|" \
     "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
@@ -451,7 +452,7 @@ networks:
 YAML
 : >"$tmp/product.env"
 env -i PATH="$PATH" "$root/deploy/write-staging-env.sh" --product "$tmp/product.env" >/dev/null
-[[ "$(<"$tmp/product.env")" == PRODUCT_SEED= ]] || die "the unsealed product env is not only an empty seed"
+[[ "$(<"$tmp/product.env")" == PRODUCT_API_KEY= ]] || die "the unsealed product env is not only an empty key"
 pc up -d >/dev/null
 product_healthy() {
     [[ "$(http_status http://product:8089/healthz)" == 200 ]]
@@ -468,15 +469,15 @@ pc exec -T product cat /etc/product/config.json | jq -e '.public_url == "http://
     die "the recreated product does not read the re-rendered public URL"
 wait_for "the product's /healthz after the public URL" 90 product_healthy
 echo "ok: a re-rendered setting recreated the product with the new config"
-seed=$(docker exec "$client" cat /opt/product.seed)
-sed -i "s/^PRODUCT_SEED=\$/PRODUCT_SEED=$seed/" "$tmp/product.env"
-unset seed
+api_key=$(docker exec "$client" cat /opt/product.key)
+sed -i "s/^PRODUCT_API_KEY=\$/PRODUCT_API_KEY=$api_key/" "$tmp/product.env"
+unset api_key
 pc up -d >/dev/null
 wait_for "the product's /healthz after sealing" 90 product_healthy
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
     --arg payer "$owner" --arg treasury "$treasury" --arg account "$account" \
     '{service_url: "http://topup:8080", product_slug: $account,
-      product_keyid: ($account + "/v1"), route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
+      route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       treasury: $treasury, token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
     docker exec -i "$client" sh -c 'cat >/opt/driver.json'

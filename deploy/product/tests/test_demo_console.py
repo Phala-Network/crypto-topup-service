@@ -24,7 +24,6 @@ QUOTE = "qt_" + "0c" * 16
 CONFIG = ProductConfig(
     service_url="http://service.test",
     product_slug="acme",
-    product_keyid="acme/v1",
     route="sandbox-acme-tpha-usd",
     chain_id=11155111,
     rpc_url="http://rpc.test",
@@ -111,10 +110,10 @@ class Service:
 def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
     (tmp_path / "index.html").write_text("<!doctype html>")
     (tmp_path / "secret.txt").write_text("not served")
-    (tmp_path / "product.seed").write_text("00" * 32)
+    (tmp_path / "product.key").write_text("ppay_sk_test_" + "A" * 43 + "000000\n")
     service = Service()
     console = DemoConsole(
-        replace(CONFIG, product_seed_file=str(tmp_path / "product.seed")),
+        replace(CONFIG, api_key_file=str(tmp_path / "product.key")),
         ProductLedger(),
         tmp_path,
         recorder=ApiRecorder(httpx.MockTransport(service)),
@@ -137,7 +136,11 @@ def _create_quote(console: DemoConsole, cookie: str) -> None:
     headers = {"Cookie": cookie, "Content-Type": "application/json"}
     response = console.handle("POST", "/demo/api/quotes", headers, b'{"amount": 2500}')
     assert response.status == HTTPStatus.OK
-    assert json.loads(response.body)["client_secret"].startswith(QUOTE)
+    body = json.loads(response.body)
+    assert body["client_secret"].startswith(QUOTE)
+    # The developer view shows only the key's prefix.
+    assert body["api"][0]["request"]["headers"]["authorization"] == "Bearer ppay_sk_test_…"
+    assert "AAAA" not in response.body.decode()
 
 
 def _steps(console: DemoConsole, cookie: str) -> dict[str, str]:

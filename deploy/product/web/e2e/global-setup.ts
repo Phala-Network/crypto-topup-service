@@ -69,8 +69,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     }
 
     const settlementSeed = randomBytes(32);
-    const productSeed = randomBytes(32);
-    writeFileSync(join(work, "product.seed"), productSeed.toString("hex"), { mode: 0o600 });
+    // The stand-in service does not check the key; the SDK needs a secret key's form.
+    writeFileSync(join(work, "product.key"), `ppay_sk_test_${"A".repeat(43)}000000`, { mode: 0o600 });
     const product = `http://127.0.0.1:${productPort}`;
     const service = `http://127.0.0.1:${servicePort}`;
     const uv = ["run", "--locked", "--project", join(root, "sdk/python"), "python"];
@@ -93,8 +93,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     const config = {
       service_url: service,
       product_slug: "acme",
-      product_keyid: "acme/v1",
-      product_seed_file: join(work, "product.seed"),
+      api_key_file: join(work, "product.key"),
       route: "sandbox-acme-tpha-usd",
       chain_id: sepolia.id,
       rpc_url: anvil,
