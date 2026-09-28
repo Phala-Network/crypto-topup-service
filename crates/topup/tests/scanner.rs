@@ -24,7 +24,7 @@ use topup_adapters::chain::evm::{
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
-use topup_core::route::{ChainHeads, Confirmations, RouteFile};
+use topup_core::route::{Backstop, ChainHeads, Confirmations, RouteFile};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordedRequest {
+    /// Recipients in the request's filter; empty for a token-wide request.
     addresses: Vec<Address>,
     from_block: u64,
     to_block: u64,
@@ -94,6 +95,24 @@ impl ChainReader for RecordingReader {
             .map_err(|_| ChainError::HealthStateUnavailable)?
             .push(RecordedRequest {
                 addresses: addresses.to_vec(),
+                from_block,
+                to_block,
+            });
+        Ok(Vec::new())
+    }
+
+    async fn token_transfers(
+        &self,
+        _tokens: &[Address],
+        _recipients: &std::collections::BTreeSet<Address>,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        self.requests
+            .lock()
+            .map_err(|_| ChainError::HealthStateUnavailable)?
+            .push(RecordedRequest {
+                addresses: Vec::new(),
                 from_block,
                 to_block,
             });
@@ -259,8 +278,9 @@ impl RouteFixture {
 }
 
 /// Loads a route file through the same validation and grouping `topup run` uses.
-fn scanner_route(path: &Path) -> Result<ChainRoutes> {
-    let route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(path)?)?;
+fn scanner_route(path: &Path, backstop: Backstop) -> Result<ChainRoutes> {
+    let mut route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(path)?)?;
+    route.asset.backstop = backstop;
     chain_routes(&RouteSet::new(vec![route]).map_err(anyhow::Error::msg)?)
         .into_iter()
         .next()
@@ -357,7 +377,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     anvil.mine(2)?;
 
     let route_fixture = RouteFixture::create(supported_token)?;
-    let routes = scanner_route(&route_fixture.path)?;
+    let routes = scanner_route(&route_fixture.path, Backstop::Addresses)?;
     let reader = reader(&anvil.rpc_url)?;
     let expected_cursor = reader.finalized_head().await?.number;
     let first = scan_once(&database.app_pool, &reader, &routes).await?;
@@ -496,7 +516,7 @@ async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
         .await?;
 
     let route_fixture = RouteFixture::create(token)?;
-    let routes = scanner_route(&route_fixture.path)?;
+    let routes = scanner_route(&route_fixture.path, Backstop::Addresses)?;
     let reader = BackfillReader::new(recipient, token, 2);
 
     ensure!(
@@ -547,7 +567,7 @@ async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
         .await?;
 
     let route_fixture = RouteFixture::create(token)?;
-    let routes = scanner_route(&route_fixture.path)?;
+    let routes = scanner_route(&route_fixture.path, Backstop::Addresses)?;
     let finalized_time = DateTime::from_timestamp(1_700_000_000, 0).context("finalized time")?;
     let reader = RecordingReader::new(4_001, finalized_time);
     let stats = scan_once(&database.app_pool, &reader, &routes).await?;
@@ -602,6 +622,26 @@ async fn run_sharding_scenario(database: &TestDatabase) -> Result<()> {
             ],
         "unexpected request sharding: {shapes:?}"
     );
+
+    // Token mode reads each window once, token-wide, whatever the number of addresses.
+    let token_routes = scanner_route(&route_fixture.path, Backstop::Token)?;
+    let token_reader = RecordingReader::new(8_001, finalized_time);
+    scan_once(&database.app_pool, &token_reader, &token_routes).await?;
+    let shapes = token_reader
+        .requests()
+        .iter()
+        .map(|request| {
+            (
+                request.addresses.len(),
+                request.from_block,
+                request.to_block,
+            )
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        shapes == vec![(0, 4_002, 6_001), (0, 6_002, 8_001)],
+        "unexpected token-mode requests: {shapes:?}"
+    );
     Ok(())
 }
 
@@ -619,7 +659,7 @@ async fn run_confirm_scenario(
     primary_anvil.mine(2)?;
 
     let fixture = RouteFixture::create(token)?;
-    let scanner_routes = scanner_route(&fixture.path)?;
+    let scanner_routes = scanner_route(&fixture.path, Backstop::Token)?;
     let scanner_reader = reader(&primary_anvil.rpc_url)?;
     ensure!(
         scan_once(&database.app_pool, &scanner_reader, &scanner_routes)

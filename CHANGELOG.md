@@ -94,6 +94,14 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- Every issued address is scanned at every block, not only open quotes' addresses: a late,
+  repeated, or wrong-amount payment, or one to a persistent address, is credited at the route's
+  confirmation (about 15 seconds after inclusion on Ethereum at depth 2) instead of at finality,
+  and shows as `seen` in the quote's `payment` meanwhile. RPC usage no longer grows with polling
+  (docs/architecture.md §8): one `eth_blockNumber` per block time and one `eth_getLogs` per new
+  block per chain, whatever the number of addresses; the admin-signed `GET /v1/admin/metrics`
+  reports the calls per provider, chain, and method (deploy/README.md, "Measuring RPC usage").
+
 - **Breaking:** refunds are paid by the merchant (docs/design/multi-tenant.md D5, PR 9), in
   BTCPay's two-step payout flow. `POST /v1/refunds` creates a `pending` refund of a final deposit
   and reserves its amount; its destination is screened for sanctions

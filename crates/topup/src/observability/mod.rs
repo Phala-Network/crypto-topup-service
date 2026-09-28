@@ -2,6 +2,7 @@
 
 mod backup;
 mod logging;
+pub mod metrics;
 mod redaction;
 mod reporting;
 mod request;

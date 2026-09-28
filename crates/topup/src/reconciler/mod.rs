@@ -3,13 +3,18 @@
 //! Every §13 check runs on every round, independently of the others. Per-deposit failures are
 //! recorded as findings; a check that cannot complete is reported in
 //! [`ReconciliationReport::failed_checks`] and withholds the round heartbeat.
+//!
+//! Chain reads stay proportional to what changed: the service's rounds run only after provider
+//! A's `finalized` advanced, reuse the head the scanner published, verify each stored
+//! `(address, salt, treasury)` against the factory once per process, and read balances only of
+//! forwarders that hold unswept funds by the ledger.
 
 mod chain;
 mod store;
 mod types;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use alloy_primitives::Address;
@@ -25,7 +30,8 @@ use uuid::Uuid;
 use crate::db::{self, ApplyTransitionError, ScanAddress};
 use crate::routes::RouteSet;
 use crate::scanner::{
-    ChainRoutes, MAX_SCAN_WINDOW, ScannerError, chain_routes, resolve_logs_for_reconciliation,
+    ChainRoutes, FinalizedHeads, MAX_SCAN_WINDOW, ScannerError, chain_routes,
+    resolve_logs_for_reconciliation,
 };
 
 pub use chain::ReconciliationChain;
@@ -104,7 +110,10 @@ impl From<ApplyTransitionError> for ReconciliationError {
 }
 
 /// Finalized heads read once per chain and shared by every check in a round.
-type FinalizedHeads = BTreeMap<u64, u64>;
+type RoundHeads = BTreeMap<u64, u64>;
+
+/// A stored address the factory derived identically: `(chain, row, salt, treasury, address)`.
+type VerifiedDerivation = (u64, Uuid, alloy_primitives::B256, Address, Address);
 
 /// Runs every §13 check against configured routes and dependencies.
 pub struct Reconciler {
@@ -112,6 +121,8 @@ pub struct Reconciler {
     routes: Arc<RouteSet>,
     scanner_routes: BTreeMap<u64, ChainRoutes>,
     chains: BTreeMap<u64, Arc<dyn ReconciliationChain>>,
+    /// Derivations already confirmed on chain; a changed row is a new key and is read again.
+    verified: Mutex<BTreeSet<VerifiedDerivation>>,
 }
 
 impl Reconciler {
@@ -143,6 +154,7 @@ impl Reconciler {
             routes,
             scanner_routes,
             chains,
+            verified: Mutex::default(),
         }
     }
 
@@ -175,13 +187,21 @@ impl Reconciler {
     /// round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
         let mut findings = Vec::new();
-        self.run_check(check, &mut FinalizedHeads::new(), &mut findings)
+        self.run_check(check, &mut RoundHeads::new(), &mut findings)
             .await?;
         Ok(findings)
     }
 
     async fn run_checks(&self, post_restore: bool) -> ReconciliationReport {
-        let mut heads = FinalizedHeads::new();
+        self.run_checks_at(post_restore, RoundHeads::new()).await
+    }
+
+    /// Runs a round with finalized heads already known for some chains; the others are read.
+    async fn run_checks_at(
+        &self,
+        post_restore: bool,
+        mut heads: RoundHeads,
+    ) -> ReconciliationReport {
         let mut report = ReconciliationReport::default();
         for check in REGULAR_CHECKS {
             let mut findings = Vec::new();
@@ -220,7 +240,7 @@ impl Reconciler {
     async fn run_check(
         &self,
         check: CheckName,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         match check {
@@ -232,29 +252,48 @@ impl Reconciler {
         }
     }
 
-    /// Runs periodic reconciliation until cancellation.
-    pub async fn run_loop(&self, every: Duration, cancellation: CancellationToken) {
+    /// Runs a round every `every` in which provider A's `finalized`, as `heads` publishes it,
+    /// advanced on some chain since the last complete round, until cancellation. A round without
+    /// an advance would read the same finalized state, so it is skipped and reported healthy.
+    pub async fn run_loop(
+        &self,
+        every: Duration,
+        heads: FinalizedHeads,
+        cancellation: CancellationToken,
+    ) {
         let monitor = crate::observability::CronMonitor::reconciler(every);
         let mut ticks = interval(every);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut reconciled: Option<RoundHeads> = None;
         loop {
             tokio::select! {
                 () = cancellation.cancelled() => return,
-                _ = ticks.tick() => {
-                    tokio::select! {
-                        () = cancellation.cancelled() => return,
-                        report = self.run_checks(false) => {
-                            monitor.check_in(report.succeeded());
-                            crate::observability::record_reconciliation(
-                                report
-                                    .failed_checks
-                                    .iter()
-                                    .map(|check| check.code().to_owned())
-                                    .zip(report.check_errors)
-                                    .collect(),
-                            );
-                        }
+                _ = ticks.tick() => {}
+            }
+            let published = self
+                .chains
+                .keys()
+                .filter_map(|chain_id| Some((*chain_id, heads.get(*chain_id)?.number)))
+                .collect::<RoundHeads>();
+            if !published.is_empty() && reconciled.as_ref() == Some(&published) {
+                monitor.check_in(true);
+                continue;
+            }
+            tokio::select! {
+                () = cancellation.cancelled() => return,
+                report = self.run_checks_at(false, published.clone()) => {
+                    monitor.check_in(report.succeeded());
+                    if report.succeeded() {
+                        reconciled = Some(published);
                     }
+                    crate::observability::record_reconciliation(
+                        report
+                            .failed_checks
+                            .iter()
+                            .map(|check| check.code().to_owned())
+                            .zip(report.check_errors)
+                            .collect(),
+                    );
                 }
             }
         }
@@ -286,12 +325,28 @@ impl Reconciler {
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let chain = self.chain(chain_id)?;
+        let key = |address: &db::Address| {
+            (
+                chain_id,
+                address.id,
+                address.salt,
+                address.treasury,
+                address.address,
+            )
+        };
         let mut by_treasury = BTreeMap::<Address, Vec<db::Address>>::new();
-        for address in db::list_chain_addresses(&self.pool, chain_id).await? {
-            by_treasury
-                .entry(address.treasury)
-                .or_default()
-                .push(address);
+        let stored = db::list_chain_addresses(&self.pool, chain_id).await?;
+        {
+            let verified = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
+            for address in stored {
+                if verified.contains(&key(&address)) {
+                    continue;
+                }
+                by_treasury
+                    .entry(address.treasury)
+                    .or_default()
+                    .push(address);
+            }
         }
         for (treasury, addresses) in by_treasury {
             let salts = addresses
@@ -306,6 +361,10 @@ impl Reconciler {
             }
             for (stored, observed) in addresses.iter().zip(derived) {
                 if stored.address == observed {
+                    self.verified
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(key(stored));
                     continue;
                 }
                 store::block_chain(
@@ -336,7 +395,7 @@ impl Reconciler {
     /// Repairs finalized transfers missing from the deposit ledger through the scanner path.
     async fn missing_deposits(
         &self,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let mut failure = None;
@@ -362,7 +421,7 @@ impl Reconciler {
         &self,
         chain_id: u64,
         routes: &ChainRoutes,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let chain = Arc::clone(self.chain(chain_id)?);
@@ -579,7 +638,7 @@ impl Reconciler {
     /// freezes the chain on any mismatch (design §13).
     async fn custody_balances(
         &self,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let mut failure = None;
@@ -608,7 +667,7 @@ impl Reconciler {
     async fn custody_for_route(
         &self,
         route: &RouteFile,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let chain_id = route.chain.chain_id;
@@ -666,7 +725,7 @@ impl Reconciler {
 
     async fn finalized(
         &self,
-        heads: &mut FinalizedHeads,
+        heads: &mut RoundHeads,
         chain_id: u64,
     ) -> Result<u64, ReconciliationError> {
         if let Some(head) = heads.get(&chain_id) {

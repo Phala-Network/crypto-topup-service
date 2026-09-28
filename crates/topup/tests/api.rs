@@ -984,6 +984,62 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
     result.and(cleanup)
 }
 
+/// `GET /v1/admin/metrics` serves the RPC call counters to the admin key only, in the
+/// Prometheus text format.
+#[tokio::test]
+async fn admin_metrics_serve_rpc_call_counters_to_the_admin_only() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let admin_key = SigningKey::from_bytes(&[38; 32]);
+        let (_, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        let app = test_router(&database.app_pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let path = "/v1/admin/metrics";
+
+        let response = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::GET,
+                path,
+                Vec::new(),
+                &product_key,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(signed_request(
+                Method::GET,
+                path,
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                now + 1,
+            ))
+            .await?;
+        ensure!(response.status() == StatusCode::OK);
+        ensure!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/plain; version=0.0.4"))
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let text = String::from_utf8(body.to_vec())?;
+        ensure!(
+            text.contains("# TYPE topup_rpc_calls_total counter"),
+            "{text}"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 /// `POST /v1/admin/outbox/{event_id}/replay` requeues an existing event without touching its
 /// payload; the operator finds the event id, `evt_…`, in the admin deposit view.
 #[tokio::test]

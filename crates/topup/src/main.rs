@@ -85,9 +85,17 @@ struct RunArgs {
     /// Delay before retrying an expected wait outcome.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     wait_interval_s: u64,
-    /// Delay between scanner polls of each chain.
-    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
-    scanner_poll_interval_s: u64,
+    /// Delay between `eth_blockNumber` polls of each chain's provider A; defaults to one block
+    /// time (12 s).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    head_poll_interval_s: Option<u64>,
+    /// Least delay between reads of each chain's `finalized` head on provider A; its advances
+    /// drive the finalized backstop, the finality watch, and reconciliation.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    finalized_poll_interval_s: u64,
+    /// Least delay between reconciliation rounds; a round runs only after `finalized` advanced.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..))]
+    reconcile_interval_s: u64,
 }
 
 /// Concurrent deposit pumps in one service process.
@@ -96,8 +104,6 @@ const PUMPS: usize = 1;
 const STEP_TIMEOUT: Duration = Duration::from_secs(240);
 /// Interval between deposit state-age scans.
 const AGE_ALERT_INTERVAL: Duration = Duration::from_secs(60);
-/// Interval between full reconciliation passes.
-const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Args)]
 struct ReconcileArgs {
@@ -650,18 +656,25 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
 
     let scanner_pool = pool.clone();
     let scanner_routes = Arc::clone(&routes);
-    let scanner_poll_interval = Duration::from_secs(args.scanner_poll_interval_s);
+    let scan_config = topup::scanner::ScanConfig {
+        head_poll_interval: args.head_poll_interval_s.map(Duration::from_secs),
+        finalized_poll_interval: Duration::from_secs(args.finalized_poll_interval_s),
+    };
+    let finalized_heads = topup::scanner::FinalizedHeads::default();
+    let scanner_heads = finalized_heads.clone();
     tasks.spawn("scanner", |cancellation| async move {
         topup::scanner::run(
             scanner_pool,
             &scanner_routes,
-            scanner_poll_interval,
+            scan_config,
+            scanner_heads,
             cancellation,
         )
         .await
     });
+    let watch_heads = finalized_heads.clone();
     tasks.spawn("finality watch", |cancellation| async move {
-        finality_watch.run(cancellation).await;
+        finality_watch.run(watch_heads, cancellation).await;
     });
     tasks.spawn("refund verification worker", |cancellation| async move {
         refund_worker.run(cancellation).await;
@@ -690,9 +703,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     tasks.spawn("webhook delivery worker", |cancellation| async move {
         delivery_worker.run(cancellation).await;
     });
+    let reconcile_interval = Duration::from_secs(args.reconcile_interval_s);
     tasks.spawn("reconciler", |cancellation| async move {
         reconciler
-            .run_loop(RECONCILIATION_INTERVAL, cancellation)
+            .run_loop(reconcile_interval, finalized_heads, cancellation)
             .await;
     });
 

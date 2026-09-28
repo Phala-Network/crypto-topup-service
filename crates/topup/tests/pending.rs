@@ -307,11 +307,11 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 }
 
 #[tokio::test]
-async fn head_scan_watches_only_open_quote_addresses() -> Result<()> {
-    with_database(|database| Box::pin(run_watched_scenario(&database.app_pool))).await
+async fn a_lagging_head_leaves_pending_rows_above_it() -> Result<()> {
+    with_database(|database| Box::pin(run_lagging_head_scenario(&database.app_pool))).await
 }
 
-async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
+async fn run_lagging_head_scenario(pool: &sqlx::PgPool) -> Result<()> {
     let (_, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
@@ -321,12 +321,11 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
         "ws-0",
     )
     .await?;
-    // An address whose quote was canceled is found by the finalized scanner, but the head scan
-    // does not watch it. Its address is `0x0…0`.
+    let address_id = Uuid::new_v4();
     seed::insert_address(
         pool,
         &NewAddress {
-            id: Uuid::new_v4(),
+            id: address_id,
             customer_id: customer.id,
             chain_id: CHAIN_ID,
             route: "r".to_owned(),
@@ -335,75 +334,9 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
         },
     )
     .await?;
-    for (index, status, expires, watched) in [
-        (
-            0xffff_00a1_u64,
-            "open",
-            "now() + interval '10 minutes'",
-            true,
-        ),
-        (
-            0xffff_00a2,
-            "expired",
-            "now() - interval '30 minutes'",
-            true,
-        ),
-        (0xffff_00a3, "expired", "now() - interval '2 hours'", false),
-        (
-            0xffff_00a4,
-            "cancelled",
-            "now() + interval '10 minutes'",
-            false,
-        ),
-    ] {
-        let address = format!("0x{index:040x}");
-        let address_id = Uuid::new_v4();
-        seed::insert_address(
-            pool,
-            &NewAddress {
-                id: address_id,
-                customer_id: customer.id,
-                chain_id: CHAIN_ID,
-                route: "r".to_owned(),
-                salt: B256::from(U256::from(index)),
-                address: address.parse()?,
-            },
-        )
-        .await?;
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE quotes SET amount_atomic = 1, price_scaled = 1, credit_minor = 1, \
-             expires_at = {expires}, status = $2, \
-             closed_at = CASE WHEN $2 = 'open' THEN NULL ELSE now() END \
-             WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)"
-        )))
-        .bind(address_id)
-        .bind(status)
-        .execute(pool)
-        .await?;
-        let listed = topup::db::list_watched_addresses(pool, CHAIN_ID)
-            .await?
-            .iter()
-            .any(|watched| format!("{:#x}", watched.address) == address);
-        ensure!(
-            listed == watched,
-            "lock {status} expiring {expires}: watched = {listed}"
-        );
-    }
-    ensure!(
-        topup::db::list_watched_addresses(pool, CHAIN_ID)
-            .await?
-            .iter()
-            .all(|watched| watched.address != Address::ZERO),
-        "the head scan watches an address whose quote was canceled"
-    );
 
     // A head scan from a provider that lags behind a stored row leaves the row alone; the next
     // scan whose range covers it and does not see it removes it.
-    let address_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM addresses WHERE address = '0x0000000000000000000000000000000000000000'",
-    )
-    .fetch_one(pool)
-    .await?;
     let row = NewPendingTransfer {
         chain_id: CHAIN_ID,
         tx_hash: B256::repeat_byte(0x51),

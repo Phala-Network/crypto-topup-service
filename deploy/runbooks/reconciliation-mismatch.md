@@ -3,7 +3,8 @@
 **Trigger:** `TopupReconciliationMismatch` (tagged with its `check`), or the `topup-reconciler`
 Crons monitor checking in `error` (a check could not complete) or missing its check-in.
 
-**Impact:** the reconciler runs the architecture §13 checks every 10 minutes and stores each first
+**Impact:** the reconciler runs the architecture §13 checks every 10 minutes (when `finalized` has
+advanced since the last round) and stores each first
 observation once. Safe repairs raise no alert. By check:
 
 | `check` | Automatic action | Blast radius |

@@ -10,7 +10,7 @@ its check-ins because the frozen chain's scanner has paused.
 prove where deposits go, or a forwarder's finalized balance is not its final deposits minus its
 finalized `Flushed` amounts (`custody_balance`), so a transfer or sweep is missing from, or wrong
 in, the ledger. Until the freeze is lifted, the chain's deposits wait (nothing is credited), its
-scanner and head scan stop, and address issuance and rate-lock creation answer `423`. Other chains
+scanner (the per-block scan and the finalized backstop) stops, and address issuance and rate-lock creation answer `423`. Other chains
 keep running; credited facts are never rolled back.
 
 ## First steps
@@ -68,8 +68,8 @@ admin POST "/v1/admin/reconciliation-blocks/chain:$CHAIN_ID/lift" '{"reason":"IN
 ```
 
 The chain resumes on the next iteration of each component, without a restart. The lift does not
-re-check: if any stored address still disagrees, the next reconciliation round (every 10 minutes)
-freezes the chain again.
+re-check: if any stored address still disagrees, the next reconciliation round (every 10 minutes, once
+`finalized` has advanced) freezes the chain again.
 
 ## Done when
 

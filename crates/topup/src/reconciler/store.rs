@@ -131,11 +131,14 @@ pub(crate) struct ForwarderLedger {
     pub(crate) flushed: U256,
 }
 
-/// Returns the ledger of every backfilled forwarder of `chain_id` with activity in `token` at or
-/// below `block` whose deposits there are all settled: final or reversed.
+/// Returns the ledger of every backfilled forwarder of `chain_id` that holds unswept `token` funds
+/// by its ledger at `block` (deposits there minus finalized `Flushed` amounts is not zero) and
+/// whose deposits there are all settled: final or reversed.
 ///
 /// A forwarder with a deposit the finality watch has not settled yet is left for a later round,
-/// because its transfer could still move or disappear.
+/// because its transfer could still move or disappear. A forwarder whose ledger is swept to zero
+/// is not read: a transfer the ledger lacks is found by the missing-deposit check, which reads
+/// every issued address's finalized transfers.
 pub(crate) async fn forwarder_ledgers(
     pool: &PgPool,
     chain_id: u64,
@@ -164,7 +167,7 @@ pub(crate) async fn forwarder_ledgers(
         LEFT JOIN deposit_totals d ON d.address_id = a.id
         LEFT JOIN flushed_totals f ON f.address_id = a.id
         WHERE a.chain_id = $1 AND a.backfilled
-          AND (d.address_id IS NOT NULL OR f.address_id IS NOT NULL)
+          AND COALESCE(d.total, 0) <> COALESCE(f.total, 0)
           AND NOT COALESCE(d.unsettled, false)
         ORDER BY a.id
         "#,

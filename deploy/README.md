@@ -265,11 +265,11 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
 
   | Monitor | Checks in | Margin |
   |---|---|---|
-  | `topup-scanner-<chain_id>` | after each finalized scan, every minute | 5 min |
+  | `topup-scanner-<chain_id>` | after each head poll (every block time), `error` while the finalized backstop fails | 5 min |
   | `topup-pump-<n>`, `topup-outbox-<n>` | each iteration or poll, every minute | 5 min |
   | `topup-lock-expiry` | after each successful expiry scan, every minute | 5 min |
-  | `topup-finality-watch` | each poll of the finality watch, every minute | 5 min |
-  | `topup-reconciler` | `ok` after a complete round, `error` after failed checks, every 10 min | 10 min |
+  | `topup-finality-watch` | after each `finalized` advance's passes, and every minute | 5 min |
+  | `topup-reconciler` | `ok` after a complete round or one skipped because nothing newly finalized, `error` after failed checks, every 10 min | 10 min |
   | `topup-backup` | `ok` while the WAL-G success marker is at most 120 s old, else `error`; 3 errors open an issue | 2 min |
 
 - **Uptime**: `/healthz` of each Environment ([One-time setup](#one-time-setup-human-only-repository-owner)).
@@ -277,6 +277,58 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
 
 A restore-check instance runs no loop and reports as `<environment>-restore`, so it never checks
 in or raises an alert of the live environment.
+
+## Measuring RPC usage
+
+Every JSON-RPC call the service sends is counted by configured provider id (`provider-a`,
+`provider-b`, never a URL), chain id, and method (16 named methods; any other counts as
+`other`), from process start. The admin-signed `GET /v1/admin/metrics` returns the counters in
+the Prometheus text format; with the `admin` helper from the
+[runbooks](runbooks/README.md#environment):
+
+```sh
+admin GET /v1/admin/metrics
+```
+
+```text
+topup_rpc_calls_total{provider="provider-a",chain_id="11155111",method="eth_blockNumber"} 8012
+topup_rpc_calls_total{provider="provider-a",chain_id="11155111",method="eth_getLogs"} 7390
+topup_rpc_calls_total{provider="provider-b",chain_id="11155111",method="eth_getTransactionReceipt"} 214
+topup_rpc_calls_since_seconds 1790500000
+```
+
+A day's usage is the difference of two readings a day apart (or a counter over
+`now − topup_rpc_calls_since_seconds`, scaled to a day); counters restart at zero with the
+process. A production CVM has no collector, so read it on staging, or occasionally on
+production, with the admin key.
+
+**Cost formula.** For one provider and one chain, with `n(m)` the calls a day of method `m` and
+`p(m)` the provider's price of one call of `m` (compute units, credits, or currency: the
+provider's current price list is the input, not this document):
+
+```text
+cost per day   = Σ_m n(m) × p(m)
+cost per month = 30 × cost per day
+```
+
+The cadences of docs/architecture.md §8 predict `n(m)` for provider A with `B` blocks a day
+(86 400 / block time; 7 200 on Ethereum), `F` `finalized` advances a day (225 on Ethereum),
+`R` reconciliation rounds a day (at most 144, and at most `F`), `P` payments a day, `A` issued
+addresses, `U` forwarders holding unswept funds, and `L = 1` in token mode or `⌈A / 1 000⌉` in
+address mode:
+
+| Method | Calls a day, provider A | Provider B |
+|---|---|---|
+| `eth_blockNumber` | `1.1 B` (head polls) `+ P` (credit check) | `P` |
+| `eth_getBlockByNumber` | `86 400 / finalized poll interval` (1 440) `+ F` (backstop), `+ B` for a `safe` route | `≤ min(P, F)` (finality passes) |
+| `eth_getLogs` | `L × B` (per-block scan) `+ (L + 1) × F` (backstop) `+ ⌈A / 1 000⌉ × R` (missing-deposit check) | 0 |
+| `eth_getTransactionReceipt` | `3 P` (detection, credit, finality) | `2 P` (credit, finality) |
+| `eth_getTransactionByHash` | `P` (the nonce, at detection) | 0 |
+| `eth_getBlockByHash` | `≤ B` blocks with a payment, 0 on nodes returning `blockTimestamp` with logs | 0 |
+| `eth_call` | `P` (sanctions) `+ ⌈U / 200⌉ × R` (custody) `+` new addresses `/ 200` per round (derivation) | `P` (sanctions) |
+
+Retries (a lagging provider B is re-checked every 2 s; a failed read backs off) add to these;
+compare the prediction with the counters before relying on it.
 
 ## Attestation, ingress, and egress
 

@@ -1,7 +1,9 @@
 //! The EVM JSON-RPC client shared by every consumer of one (chain, provider), and the
 //! finalized-log reader built on it.
 
-use std::collections::{HashMap, VecDeque};
+pub mod metrics;
+
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::future::{Future, IntoFuture};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,6 +18,7 @@ use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::{CallItem, MULTICALL3_ADDRESS, MulticallError, Provider, RootProvider};
+use alloy::rpc::client::ClientBuilder;
 use alloy::rpc::types::{
     Filter, Log, Topic, TransactionInput, TransactionReceipt, TransactionRequest,
 };
@@ -23,6 +26,7 @@ use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
 use alloy::transports::TransportError;
 use chrono::{DateTime, Utc};
+use metrics::{CallLabels, CountingLayer};
 use tokio::time::timeout;
 use topup_core::money::AtomicAmount;
 use topup_core::route::{ChainHeads, Confirmations};
@@ -95,6 +99,18 @@ impl ReceiptLookup {
             Self::Included { transfer, .. } => transfer.as_deref(),
         }
     }
+}
+
+/// What a recorded deposit already proves about its transfer, so re-reading it costs one receipt:
+/// a block hash fixes the block's time, and a transaction hash fixes the transaction's nonce.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KnownTransfer {
+    /// Block hash the transfer was recorded in.
+    pub block_hash: B256,
+    /// Time of that block.
+    pub block_time: DateTime<Utc>,
+    /// Nonce of the transfer's transaction.
+    pub tx_nonce: u64,
 }
 
 /// The provider's current finalized block.
@@ -187,8 +203,9 @@ pub trait ChainReader: Send + Sync {
     /// Returns the provider's current finalized block number and time.
     fn finalized_head(&self) -> impl Future<Output = Result<FinalizedHead, ChainError>> + Send;
 
-    /// Returns the heads `confirmations` is evaluated on: `finalized` always, `latest` for a depth,
-    /// `safe` for `safe`.
+    /// Returns the one head `confirmations` is evaluated on: `latest` for a depth, `safe` for
+    /// `safe`, `finalized` for `finalized`. An unread `finalized` is 0, a lower bound, so a check
+    /// on a depth or `safe` costs one head read.
     fn confirmation_heads(
         &self,
         confirmations: Confirmations,
@@ -213,12 +230,48 @@ pub trait ChainReader: Send + Sync {
         to_block: u64,
     ) -> impl Future<Output = Result<Vec<TransferLog>, ChainError>> + Send;
 
+    /// Returns transfers of `tokens` to any address in `recipients` in the inclusive block range.
+    ///
+    /// A provider reader requests every transfer of the tokens, one request per block window
+    /// whatever the recipient count, and keeps those to `recipients` locally.
+    fn token_transfers(
+        &self,
+        tokens: &[Address],
+        recipients: &BTreeSet<Address>,
+        from_block: u64,
+        to_block: u64,
+    ) -> impl Future<Output = Result<Vec<TransferLog>, ChainError>> + Send {
+        async move {
+            let addresses = recipients.iter().copied().collect::<Vec<_>>();
+            let logs = self
+                .transfer_logs_to(&addresses, from_block, to_block)
+                .await?;
+            Ok(logs
+                .into_iter()
+                .filter(|log| tokens.contains(&log.token))
+                .collect())
+        }
+    }
+
     /// Reads the transaction's receipt and the ERC-20 transfer at `receipt_log_index` in it.
     fn receipt_transfer(
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
     ) -> impl Future<Output = Result<ReceiptLookup, ChainError>> + Send;
+
+    /// [`Self::receipt_transfer`] for a recorded transfer: a provider reader reads only the
+    /// receipt, taking the block time from `known` while the block hash is unchanged and the
+    /// nonce from `known` always.
+    fn receipt_transfer_known(
+        &self,
+        tx_hash: B256,
+        receipt_log_index: u64,
+        known: KnownTransfer,
+    ) -> impl Future<Output = Result<ReceiptLookup, ChainError>> + Send {
+        let _ = known;
+        self.receipt_transfer(tx_hash, receipt_log_index)
+    }
 
     /// Returns `account`'s nonce at block `block`: the number of its transactions included up to
     /// and including that block.
@@ -309,6 +362,7 @@ pub struct EvmClient {
     provider: RootProvider,
     endpoint: Redacted,
     request_timeout: Duration,
+    labels: CallLabels,
 }
 
 impl fmt::Debug for EvmClient {
@@ -317,8 +371,18 @@ impl fmt::Debug for EvmClient {
             .debug_struct("EvmClient")
             .field("endpoint", &self.endpoint)
             .field("request_timeout", &self.request_timeout)
+            .field("labels", &self.labels)
             .finish_non_exhaustive()
     }
+}
+
+/// An HTTP provider whose every request is counted under `labels` ([`metrics`]).
+fn counted_provider(endpoint: &Redacted, labels: &CallLabels) -> RootProvider {
+    RootProvider::new(
+        ClientBuilder::default()
+            .layer(CountingLayer::new(labels.clone()))
+            .http(endpoint.expose().clone()),
+    )
 }
 
 impl EvmClient {
@@ -330,17 +394,31 @@ impl EvmClient {
     /// Creates a client with an explicit request timeout, for tests.
     pub fn with_timeout(rpc_url: &str, request_timeout: Duration) -> Result<Self, ChainError> {
         let endpoint = Redacted::parse(rpc_url).map_err(|_| ChainError::InvalidUrl)?;
+        let labels = CallLabels::default();
         Ok(Self {
-            provider: RootProvider::new_http(endpoint.expose().clone()),
+            provider: counted_provider(&endpoint, &labels),
             endpoint,
             request_timeout,
+            labels,
         })
     }
 
-    /// Labels provider errors with the configured provider id instead of the URL.
+    /// Labels provider errors and call counters with the configured provider id instead of the
+    /// URL.
     #[must_use]
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        let provider = provider.into();
+        self.labels.provider.clone_from(&provider);
         self.endpoint = self.endpoint.with_provider(provider);
+        self.provider = counted_provider(&self.endpoint, &self.labels);
+        self
+    }
+
+    /// Counts this client's calls under `chain_id`.
+    #[must_use]
+    pub fn with_chain_id(mut self, chain_id: u64) -> Self {
+        self.labels.chain_id = Some(chain_id);
+        self.provider = counted_provider(&self.endpoint, &self.labels);
         self
     }
 
@@ -553,6 +631,15 @@ impl fmt::Debug for FinalizedReader {
     }
 }
 
+/// How a transfer-log request selects recipients.
+#[derive(Clone, Copy)]
+enum Recipients<'a> {
+    /// In the request's recipient topic.
+    Topic(&'a [Address]),
+    /// Kept locally from every transfer of the requested tokens.
+    Local(&'a BTreeSet<Address>),
+}
+
 /// A decoded `Transfer` log before its receipt position and transaction origin are known.
 struct DecodedTransfer {
     tx_hash: B256,
@@ -608,9 +695,15 @@ impl FinalizedReader {
         &self.client
     }
 
-    /// Returns the provider's current `latest` block number, for the display-only head scan.
+    /// Returns the provider's current `latest` block number (`eth_blockNumber`).
     pub async fn latest_head(&self) -> Result<u64, ChainError> {
         self.client.latest_head().await
+    }
+
+    /// Returns the provider's current `safe` block number.
+    pub async fn safe_head(&self) -> Result<u64, ChainError> {
+        self.tagged_block_number(BlockNumberOrTag::Safe, "safe head fetch")
+            .await
     }
 
     async fn block_time(&self, block_hash: B256) -> Result<DateTime<Utc>, ChainError> {
@@ -731,19 +824,22 @@ impl FinalizedReader {
     async fn transfer_logs_request(
         &self,
         tokens: &[Address],
-        addresses: &[Address],
+        recipients: Recipients<'_>,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ChainError> {
-        let recipients = addresses
-            .iter()
-            .copied()
-            .fold(Topic::default(), Topic::extend);
         let mut filter = Filter::new()
             .from_block(from_block)
             .to_block(to_block)
-            .event_signature(Transfer::SIGNATURE_HASH)
-            .topic2(recipients);
+            .event_signature(Transfer::SIGNATURE_HASH);
+        if let Recipients::Topic(addresses) = recipients {
+            filter = filter.topic2(
+                addresses
+                    .iter()
+                    .copied()
+                    .fold(Topic::default(), Topic::extend),
+            );
+        }
         if !tokens.is_empty() {
             filter = filter.address(tokens.to_vec());
         }
@@ -753,18 +849,31 @@ impl FinalizedReader {
             .get_logs(&filter)
             .await
             .map_err(|error| self.client.transport("transfer log fetch", &error))?;
-        let mut transfers = Vec::with_capacity(logs.len());
+        let mut transfers = Vec::new();
         for log in logs {
-            if let Some(decoded) = decode_transfer_log(&log)? {
-                transfers.push(self.complete(decoded).await?);
+            let Some(decoded) = decode_transfer_log(&log)? else {
+                continue;
+            };
+            if let Recipients::Local(kept) = recipients
+                && !kept.contains(&decoded.to)
+            {
+                continue;
             }
+            // Nodes that report the block time with the log spare one block read per block.
+            if let Some(timestamp) = log.block_timestamp {
+                let time = utc_timestamp(timestamp)?;
+                self.block_times
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(decoded.block_hash, time);
+            }
+            transfers.push(self.complete(decoded).await?);
         }
         Ok(transfers)
     }
 
     async fn transfer_logs(
         &self,
-        tokens: &[Address],
         addresses: &[Address],
         from_block: u64,
         to_block: u64,
@@ -782,54 +891,47 @@ impl FinalizedReader {
         for (window_from, window_to) in block_windows(from_block, to_block)? {
             for batch in addresses.chunks(MAX_ADDRESSES_PER_REQUEST) {
                 transfers.extend(
-                    self.transfer_logs_request(tokens, batch, window_from, window_to)
-                        .await?,
+                    self.transfer_logs_request(
+                        &[],
+                        Recipients::Topic(batch),
+                        window_from,
+                        window_to,
+                    )
+                    .await?,
                 );
             }
         }
         Ok(transfers)
     }
 
-    /// Returns transfers of the given token contracts only; used by the display-only head scan
-    /// so unsupported tokens cannot create pending rows or notifications.
-    pub async fn token_transfer_logs_to(
-        &self,
-        tokens: &[Address],
-        addresses: &[Address],
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<TransferLog>, ChainError> {
-        if tokens.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.transfer_logs(tokens, addresses, from_block, to_block)
-            .await
-    }
-
+    /// Every factory event in the range, one request whatever the forwarder count, kept when it
+    /// is about one of `forwarders`.
     async fn factory_logs_request(
         &self,
         factory: Address,
-        forwarders: &[Address],
+        forwarders: &BTreeSet<Address>,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<FactoryLog>, ChainError> {
-        let forwarders = forwarders
-            .iter()
-            .copied()
-            .fold(Topic::default(), Topic::extend);
         let filter = Filter::new()
             .address(factory)
             .from_block(from_block)
             .to_block(to_block)
-            .event_signature(factory_event_signatures().to_vec())
-            .topic2(forwarders);
+            .event_signature(factory_event_signatures().to_vec());
         let logs = self
             .client
             .provider
             .get_logs(&filter)
             .await
             .map_err(|error| self.client.transport("factory log fetch", &error))?;
-        logs.iter().map(decode_factory_log).collect()
+        let mut kept = Vec::new();
+        for log in &logs {
+            let decoded = decode_factory_log(log)?;
+            if forwarders.contains(&decoded.event.forwarder()) {
+                kept.push(decoded);
+            }
+        }
+        Ok(kept)
     }
 
     async fn tagged_block_number(
@@ -961,25 +1063,15 @@ impl ChainReader for FinalizedReader {
         &self,
         confirmations: Confirmations,
     ) -> Result<ChainHeads, ChainError> {
-        let finalized = ChainReader::finalized_head(self).await?.number;
-        let latest = if confirmations.needs_latest() {
-            Some(self.client.latest_head().await?)
+        let mut heads = ChainHeads::default();
+        if confirmations.needs_latest() {
+            heads.latest = Some(self.client.latest_head().await?);
+        } else if confirmations.needs_safe() {
+            heads.safe = Some(self.safe_head().await?);
         } else {
-            None
-        };
-        let safe = if confirmations.needs_safe() {
-            Some(
-                self.tagged_block_number(BlockNumberOrTag::Safe, "safe head fetch")
-                    .await?,
-            )
-        } else {
-            None
-        };
-        Ok(ChainHeads {
-            latest,
-            safe,
-            finalized,
-        })
+            heads.finalized = ChainReader::finalized_head(self).await?.number;
+        }
+        Ok(heads)
     }
 
     async fn transfer_logs_to(
@@ -988,8 +1080,38 @@ impl ChainReader for FinalizedReader {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ChainError> {
-        self.transfer_logs(&[], addresses, from_block, to_block)
-            .await
+        self.transfer_logs(addresses, from_block, to_block).await
+    }
+
+    async fn token_transfers(
+        &self,
+        tokens: &[Address],
+        recipients: &BTreeSet<Address>,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        if from_block > to_block {
+            return Err(ChainError::InvalidRange {
+                from_block,
+                to_block,
+            });
+        }
+        let mut transfers = Vec::new();
+        if tokens.is_empty() || recipients.is_empty() {
+            return Ok(transfers);
+        }
+        for (window_from, window_to) in block_windows(from_block, to_block)? {
+            transfers.extend(
+                self.transfer_logs_request(
+                    tokens,
+                    Recipients::Local(recipients),
+                    window_from,
+                    window_to,
+                )
+                .await?,
+            );
+        }
+        Ok(transfers)
     }
 
     async fn factory_logs(
@@ -1009,13 +1131,12 @@ impl ChainReader for FinalizedReader {
         if forwarders.is_empty() {
             return Ok(logs);
         }
+        let forwarders = forwarders.iter().copied().collect::<BTreeSet<_>>();
         for (window_from, window_to) in block_windows(from_block, to_block)? {
-            for batch in forwarders.chunks(MAX_ADDRESSES_PER_REQUEST) {
-                logs.extend(
-                    self.factory_logs_request(factory, batch, window_from, window_to)
-                        .await?,
-                );
-            }
+            logs.extend(
+                self.factory_logs_request(factory, &forwarders, window_from, window_to)
+                    .await?,
+            );
         }
         Ok(logs)
     }
@@ -1024,6 +1145,36 @@ impl ChainReader for FinalizedReader {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        self.receipt_lookup(tx_hash, receipt_log_index, None).await
+    }
+
+    async fn receipt_transfer_known(
+        &self,
+        tx_hash: B256,
+        receipt_log_index: u64,
+        known: KnownTransfer,
+    ) -> Result<ReceiptLookup, ChainError> {
+        self.receipt_lookup(tx_hash, receipt_log_index, Some(known))
+            .await
+    }
+
+    async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
+        self.client
+            .provider
+            .get_transaction_count(account)
+            .block_id(BlockId::number(block))
+            .await
+            .map_err(|error| self.client.transport("nonce fetch", &error))
+    }
+}
+
+impl FinalizedReader {
+    async fn receipt_lookup(
+        &self,
+        tx_hash: B256,
+        receipt_log_index: u64,
+        known: Option<KnownTransfer>,
     ) -> Result<ReceiptLookup, ChainError> {
         let Some(receipt) = self.receipt(tx_hash).await? else {
             return Ok(ReceiptLookup::Missing);
@@ -1051,8 +1202,15 @@ impl ChainReader for FinalizedReader {
         };
         let transfer = match decoded {
             Some(decoded) => {
-                let block_time = self.block_time(block_hash).await?;
-                let origin = (receipt.from, self.origin(tx_hash).await?.1);
+                let block_time = match known {
+                    Some(known) if known.block_hash == block_hash => known.block_time,
+                    _ => self.block_time(block_hash).await?,
+                };
+                let nonce = match known {
+                    Some(known) => known.tx_nonce,
+                    None => self.origin(tx_hash).await?.1,
+                };
+                let origin = (receipt.from, nonce);
                 Some(Box::new(decoded.complete(
                     receipt_log_index,
                     block_time,
@@ -1066,15 +1224,6 @@ impl ChainReader for FinalizedReader {
             block_hash,
             transfer,
         })
-    }
-
-    async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
-        self.client
-            .provider
-            .get_transaction_count(account)
-            .block_id(BlockId::number(block))
-            .await
-            .map_err(|error| self.client.transport("nonce fetch", &error))
     }
 }
 

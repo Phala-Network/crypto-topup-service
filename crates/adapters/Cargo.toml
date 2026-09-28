@@ -32,6 +32,7 @@ sfv.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tower.workspace = true
 topup-core = { path = "../core" }
 tracing.workspace = true
 url.workspace = true

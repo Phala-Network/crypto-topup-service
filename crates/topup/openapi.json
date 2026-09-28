@@ -527,6 +527,31 @@
         ]
       }
     },
+    "/v1/admin/metrics": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "OK: the process's counters in the Prometheus text format, such as `topup_rpc_calls_total{provider, chain_id, method}`; they restart at zero with the process",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/outbox/{event_id}/replay": {
       "post": {
         "tags": [

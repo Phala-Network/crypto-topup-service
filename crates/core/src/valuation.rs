@@ -481,6 +481,7 @@ mod tests {
                     contract: asset,
                     decimals: 18,
                     min_refund_atomic: AtomicAmount::new(U256::ZERO),
+                    backstop: crate::route::Backstop::Token,
                 },
                 destination: DestinationConfig { unit_decimals: 2 },
                 screening: ScreeningConfig {

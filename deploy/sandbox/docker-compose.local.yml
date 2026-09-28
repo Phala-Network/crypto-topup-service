@@ -38,7 +38,9 @@ services:
       - /etc/topup/routes/sandbox.yaml
       - --wait-interval-s
       - "2"
-      - --scanner-poll-interval-s
+      - --head-poll-interval-s
+      - "1"
+      - --finalized-poll-interval-s
       - "1"
     environment:
       TOPUP_RPC_PROVIDER_A_URL: http://anvil:8545

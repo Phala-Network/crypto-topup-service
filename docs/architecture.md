@@ -68,7 +68,7 @@ product owns (identity, balance, debt, entitlements, billing policy, welcome pro
    route's confirmation on provider A and credited once both providers show the same log there
    (§8). A watch re-reads every deposit by its receipt until it is final: a re-included
    transaction is followed, and only a transaction proven dropped (its nonce consumed by another)
-   or a transfer missing at finality makes a deposit `reversed`. The display-only head scan shows
+   or a transfer missing at finality makes a deposit `reversed`. The display-only pending view shows
    a transfer as seen within seconds of its block; it never creates, rejects, values, or credits
    anything.
 3. **Custody location is a chain fact, not a state.** A flush, sent by anyone, moves an
@@ -236,8 +236,8 @@ addresses     id, account_id, livemode, chain_id, quote_id UNIQUE | deposit_addr
               (exactly one), salt, treasury, address,
               deployed_block                      -- finalized ForwarderCreated for the pair
               UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
-cursors       chain_id PK, scanned_block, scanned_block_time,       -- finalized scanner
-              confirmed_block                                       -- fast scan (§8)
+cursors       chain_id PK, scanned_block, scanned_block_time,       -- finalized backstop
+              confirmed_block                                       -- per-block scan (§8)
 pending_transfers  chain_id, tx_hash, log_index, receipt_log_index, block_number, block_hash,
               block_time, head_block, address_id, asset_contract, from_address, amount_atomic,
               first_seen_at
@@ -326,13 +326,16 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 
 | Step | Does |
 |---|---|
-| `detected → confirmed` | From both providers, by the transaction's receipt: the log at the deposit's receipt position, in the same block (same hash), and that block has reached the route's confirmation on each (§8, §14). A lagging provider is waited for at the head poll interval (2 s), 12 s for `finalized`. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality` until the finality watch decides; before finality it waits. When both providers' `finalized` covers the block, the deposit is marked final (`final_at`) in the same transaction. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
+| `detected → confirmed` | From both providers, by the transaction's receipt: the log at the deposit's receipt position, in the same block (same hash), and that block has reached the route's confirmation on each (§8, §14). Each check reads, per provider, the one head the confirmation needs and the transaction's receipt; the block time and the nonce come from the recorded deposit, which its block hash and transaction hash fix. A lagging provider is waited for every 2 s, 12 s for `finalized`. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality` until the finality watch decides; before finality it waits. For a `finalized` route, whose check reads `finalized`, the deposit is marked final (`final_at`) in the same transaction; otherwise the finality watch marks it. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
 | `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account, product, and route not paused for `settlement` (paused → `Wait`, never a rejection). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is owed to the product, whatever the product answers, unless the deposit is reversed before finality. |
 | `credited → swept` | The deposit is final and a `flushed` row (a finalized `Flushed` event for its address, token, and treasury, whoever sent it) exists at a log position `(block_number, log_index)` greater than the deposit's. Applied in SQL, with the finalized `Flushed` event as evidence, when the scanner indexes the event, when the deposit is credited or becomes final, and by the reconciler's repair pass; the pump's credited step only waits. |
 
-**Finality watch.** Whenever provider A's `finalized` advances (polled every 12 s), every deposit
-of the chain that is neither final nor reversed is re-read on both providers by its transaction's
-receipt:
+**Finality watch.** Whenever the head loop publishes an advance of provider A's `finalized` (§8),
+every deposit of the chain that is neither final nor reversed and whose recorded block is at or
+below it is re-read on both providers by its transaction's receipt, once per provider (the block
+time and nonce come from the deposit), plus provider B's `finalized` once per pass; nothing is
+read while no deposit is due. A deposit re-included in a later block is found at its recorded
+block's finality and waits for its new block's:
 
 | Both providers show | Then |
 |---|---|
@@ -363,58 +366,94 @@ reproduces crediting only final deposits.
 | OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` |
 | Any other chain | `finalized` | `finalized` |
 
-**Head loop** per chain, on provider A, every 2 s (a sixth of a slot, or the scanner poll
-interval if shorter): the fast scan, then the display-only head scan.
+**Head loop** per chain, on provider A: the only reader of provider A's heads. It polls
+`latest` with `eth_blockNumber` once per block time (12 s by default, `--head-poll-interval-s`;
+also the rate at which an OP-stack `safe` head, which follows L1, can move) and locks onto block
+arrival: after a poll that found a new head it waits one block time; after one that did not, a
+quarter of one (up to four times, then a block time again, for a missed slot or a stalled chain);
+and until the phase is known, and every eighth block, three quarters of one, so the next block is
+found early or missed, which fixes the phase. A block is thus seen within about 3 s of arriving,
+for about 1.1 polls per block. It reads `finalized` (`eth_getBlockByNumber`, with its time) at
+most once per `--finalized-poll-interval-s` (60 s by default; Ethereum finalizes once per 6.4-minute
+epoch) and publishes each advance, which wakes the finalized backstop, the finality watch, and the
+reconciler; none of them polls a head. `safe` is read on each new head only for a `safe` route.
+A poll that finds the same head does nothing else, so an idle chain costs one `eth_blockNumber`
+per block time.
 
-**Fast scan** (routes with a depth or `safe`): read the heads the confirmation needs, and fetch
-`Transfer(*, watched addresses)` (below) from any contract in
-`(max(finalized cursor, fast cursor), horizon]`,
-at most one 2 000-block window below the horizon, where the horizon is the highest block that has
-reached the confirmation. Each transfer's receipt gives its receipt position (its identity, §0)
-and its transaction's sender and nonce. New transfers become `detected` deposits
-(`ON CONFLICT DO NOTHING` on the identity), and the fast cursor advances in the same transaction;
-the pump confirms them on both providers at once, so a payment is typically credited within
-about 30 seconds (inclusion, one more slot, polling). A transfer the fast scan does not record,
-such as a payment to an address no open quote watches or one a reorg deeper than the
-confirmation introduced below its cursor, is recorded by the finalized scanner and credited at
-finality.
+**Per-block scan** (every route; each new head): fetch `Transfer` logs to **every issued address**
+in `(max(finalized cursor, fast cursor), latest]`, at most one 2 000-block window below `latest`,
+in one request whatever the number of addresses or accounts:
 
-**Finalized scanner** per chain: read `finalized` from provider A; fetch
-`Transfer(*, our addresses)` from any contract in windows ≤ 2 000 blocks and ≤ 1 000 addresses;
-insert with `ON CONFLICT DO NOTHING` on the identity, so a deposit the fast scan recorded is left
-to the finality watch. In the same windows it indexes the route factory's `ForwarderCreated`,
-`Flushed`, and `FlushFailed` events whose forwarder topic is one of our addresses, whoever called
-the factory, and keeps only those of a known `(address, treasury)` pair (`FlushFailed` carries no
-treasury; the forwarder address commits to it): `ForwarderCreated` sets the address's
-`deployed_block`, `Flushed` inserts a `flushed` row and sweeps the address's final credited
-deposits before it (§7), and `FlushFailed` inserts a `flush_failures` row, leaving the deposits
-unswept. Every other factory event is ignored: anyone can call the factory. The cursor advances
-after both are committed, so everything at or below it is indexed at finality. New addresses
-backfill from creation (the chain's committed cursor when the address is issued); retired and
-lock addresses stay in the filter. Later option: Helios as one provider.
+- `asset.backstop: token` (the default; for tokens with few transfers per block, such as PHA): every
+  `Transfer` of the chain's routed token contracts, no recipient filter, kept locally when the
+  recipient is an issued address. One `eth_getLogs` per new head.
+- `asset.backstop: addresses` (for tokens with many transfers per block, such as USDC, whose
+  token-wide logs would be large): `Transfer(*, issued addresses)` of any contract, 1 000
+  addresses per request. A chain uses address mode when any current route on it asks for it, since
+  those requests cover every token.
 
-**Head scan (display only)** per chain, on provider A, in the head loop: read non-zero `Transfer` logs emitted by the chain's routed token contracts to
-watched addresses in `[finalized + 1, latest]` and, in one transaction, upsert the rows seen into
-`pending_transfers` and delete rows in that range not seen this time (reorged, or no longer
-watched). Other tokens are never requested, so they cannot create pending rows or
-notifications; they appear only after finality, as `rejected(unsupported_asset)`. Block times are
-read by block hash. The head scan reads the finalized cursor `FOR SHARE`, and the finalized
-scanner deletes rows at or below its cursor in the transaction that advances it, so a transfer
-moves from pending to deposit atomically and no row below the cursor is written afterwards.
-Pending rows never feed deposits, transitions, locks, exposure, credits, or reconciliation;
-lock amount and timeliness are computed when read, never stored. When the head scan sees
-`finalized` advance it wakes the finalized scanner. A row that is already a deposit is shown as
-the deposit (§12). While reconciliation has frozen
-a chain its head scan stops too, so the pending view stops updating.
+The address list is read after `latest`, so an address issued later is paid only above the range
+scanned without it; its earlier range is the backstop's. Each kept transfer's receipt gives its
+receipt position (its identity, §0) and its transaction's sender, and one transaction read gives
+the nonce; a node that returns `blockTimestamp` with the log spares the block read (otherwise read
+by block hash, once per block). For a route with a depth or `safe`, transfers at or below the
+horizon (the highest block that has reached the confirmation) become `detected` deposits
+(`ON CONFLICT DO NOTHING` on the identity), and the fast cursor advances to the horizon in the
+same transaction, so the blocks above it are read again on the next head and a block below it is
+not read by this loop again. The pump confirms them on both providers at once, so a payment to any
+issued address (an open quote's, a closed or expired one's, a repeated or wrong amount, or a
+persistent address) is typically credited about 15 seconds after inclusion at depth 2 (one more
+slot, up to a quarter slot of polling, confirmation). A transfer the per-block scan does not record
+(in a range it skipped after downtime longer than a window, or introduced below its cursor by a
+reorg deeper than the confirmation) is recorded by the finalized backstop and credited at
+finality. In token mode, transfers of other tokens are not requested: the reconciler's
+missing-deposit pass (§13), which reads every issued address's finalized transfers of any
+contract, records them as `rejected(unsupported_asset)` after finality.
 
-Watched addresses, read by the fast scan and the head scan: quote addresses whose quote is neither
-completed nor canceled, until one hour after `expires_at`, and every deposit address, active or
-retired. Open quotes are bounded by the exposure caps (each reserves at least
-`min_credit_minor` against the global cap) and, for the hour after expiry, by the per-account
-creation rate limit; active deposit addresses by the per-account cap and retired ones by the
-rotation limit (§9); any number is requested in batches of 1 000. A payment to any other issued
-address (a closed quote's) shows no `payment` before finality and is not credited before it; the
-finalized scanner records it, and it is credited at spot.
+**Pending view (display only)**, from the same logs: the non-zero transfers of routed tokens in the
+scanned range are upserted into `pending_transfers`, and rows in that range not seen this time
+(reorged) are deleted, in one transaction. Blocks the fast cursor has passed are not re-read, so a
+row there reorged away by more than the confirmation stays until the finalized backstop's cursor
+passes it; such a transfer is a deposit by then and is shown as one (§12). The pending view reads
+the finalized cursor `FOR SHARE`, and the finalized backstop deletes rows at or below its cursor
+in the transaction that advances it, so a transfer moves from pending to deposit atomically and no
+row below the cursor is written afterwards. Pending rows never feed deposits, transitions, locks,
+exposure, credits, or reconciliation; lock amount and timeliness are computed when read, never
+stored. While reconciliation has frozen a chain, its head loop stops scanning, so the pending
+view stops updating.
+
+**Finalized backstop** per chain, once per published `finalized` advance (and at least every 15
+minutes should an advance be missed): read `finalized` from provider A; fetch the same logs as
+the per-block scan (token-wide or by 1 000 addresses) for **every issued address** in windows ≤
+2 000 blocks, and the route factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events in
+one `eth_getLogs` on the factory address per window (no forwarder filter), kept locally when the
+forwarder is an issued address; so a window costs two requests in token mode however many
+addresses exist, and late payments to expired quotes are found. Deposits insert with
+`ON CONFLICT DO NOTHING` on the identity, so one the per-block scan recorded is left to the
+finality watch. Of the factory events it keeps only those of a known `(address, treasury)` pair
+(`FlushFailed` carries no treasury; the forwarder address commits to it): `ForwarderCreated` sets
+the address's `deployed_block`, `Flushed` inserts a `flushed` row and sweeps the address's final
+credited deposits before it (§7), and `FlushFailed` inserts a `flush_failures` row, leaving the
+deposits unswept. Every other factory event is ignored: anyone can call the factory. The cursor
+advances after both are committed, so everything at or below it is indexed at finality. New
+addresses backfill from creation (the chain's committed cursor when the address is issued), all
+pending ones together in the same windows; retired and lock addresses stay in the filter. Later
+option: Helios as one provider.
+
+**Not used, and why.** `eth_subscribe("newHeads")` bills per delivered header (Alchemy about 40
+compute units per event against 10 for `eth_blockNumber`, and a WebSocket to keep alive), so it
+costs more than polling for the same information. Prefiltering blocks by `logsBloom` saves nothing
+on Ethereum mainnet, whose blocks' blooms are saturated, and would cost a block read per block.
+Provider push webhooks (address activity notifications) are left out: they depend on one
+provider's delivery and would at most be non-authoritative hints to poll sooner, never evidence.
+
+**RPC cost per chain** follows from the cadences above (deploy/README.md, "Measuring RPC usage",
+has the formula and the counters): with `B` blocks a day (7 200 on Ethereum), provider A makes
+about `1.1 B` `eth_blockNumber` and, on a chain with any issued address, `B` `eth_getLogs` in
+token mode, whether payments arrive or not; `finalized` is read 1 440 times a day; each advance
+adds two backstop `eth_getLogs`; each payment adds a receipt, transaction, and block read at
+detection and one receipt per provider at credit and at finality (below, and §7). Provider B is
+read only for specific deposits.
 
 **Valuation** happens inside the confirm step, so `valuation_at` is the confirmation
 observation and the price is always current at fetch time. Every route's pricing configuration declares
@@ -497,7 +536,7 @@ it sends no transactions and pays no gas (design D2, D4).
 `flush(treasury, salts[], token)`; each forwarder pays only the treasury its address commits to,
 so the only effect is moving funds to their owner. The merchant sends it from its own wallet or
 Safe when sweeping is worth the gas (design D4); the SDK builds the call or a Safe Transaction
-Builder batch (design PR 10). The service learns of every sweep from the chain: the finalized scanner indexes `Flushed` and
+Builder batch (design PR 10). The service learns of every sweep from the chain: the finalized backstop indexes `Flushed` and
 `FlushFailed` for its addresses (§8), and deposits are swept by the rule in §7. A `FlushFailed`
 target (a token or treasury refusing the transfer) keeps its balance and its deposits stay
 `credited`; it is recorded in `flush_failures` for the merchant, not raised as a platform alert.
@@ -648,6 +687,7 @@ POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state ch
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
 GET    /v1/admin/report/daily                 treasury, unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
+GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
 ```
 
 **Metadata.** Quotes, deposits, and refunds carry Stripe's
@@ -839,19 +879,26 @@ from fetched state, never from webhook order.
 
 ## 13. Reconciliation
 
-The reconciler runs every 10 minutes and stores each finding once; repairs are silent, every
-other finding raises `TopupReconciliationMismatch` (§16).
+The reconciler runs a round every 10 minutes (`--reconcile-interval-s`) in which provider A's
+`finalized` advanced on some chain since the last complete round, using the head the scanner
+published (a round with nothing newly final is skipped and checks in healthy), and stores each
+finding once; repairs are silent, every other finding raises `TopupReconciliationMismatch` (§16).
+Chain reads stay proportional to what changed: each stored `(address, salt, treasury)` is checked
+against `addressOf` once per process (a changed row is checked again), and balances are read only
+of forwarders holding unswept funds by the ledger.
 
 | Check | Action |
 |---|---|
 | Finalized transfer to our address with no deposit row, in the range the scanner has committed | insert `detected` |
 | `credit_minor` ≠ recomputation from stored inputs | alert |
 | Final `credited` deposit with a `flushed` row at a later log position | sweep it (replay of indexed events) |
-| Per forwarder with activity, at block `B` = min(`finalized`, scanner cursor): its token balance at `B` ≠ Σ deposits at or below `B` (not reversed) − Σ `flushed.amount_atomic` at or below `B` | freeze chain, alert |
+| Per forwarder whose ledger holds unswept funds (Σ deposits ≠ Σ flushed), at block `B` = min(`finalized`, scanner cursor): its token balance at `B` ≠ Σ deposits at or below `B` (not reversed) − Σ `flushed.amount_atomic` at or below `B` | freeze chain, alert |
 | `addressOf(treasury, salt)` on chain ≠ stored address, with each address's own treasury | freeze chain, alert |
 | After a restore, in the read-only restore-check instance (§14) | the checks above, on the restored ledger alone: the service's record is authoritative for its credits, so the restore asks the product nothing and does not depend on it being reachable |
 
-**Reconciliation per forwarder** (design §13). Every transfer to a watched address and every
+**Reconciliation per forwarder** (design §13). A forwarder whose ledger is swept to zero is not
+read: a transfer its ledger lacks is a finalized transfer to an issued address, which the
+missing-deposit check finds. Every transfer to an issued address and every
 factory event about one is indexed at or below the scanner cursor, and only finalized events are
 indexed, so at `B` the chain and the ledger describe the same state whoever flushed. A forwarder is
 compared only once it is backfilled and every deposit of it at or below `B` is settled (final or
@@ -904,6 +951,7 @@ defaulted addresses from it. The defaults and why:
 | `chain.implementation` | the factory's first `CREATE` (nonce 1), which its constructor deploys; startup verifies `implementation()` on chain (§4) |
 | `chain.sanctions_oracle` | the Chainalysis oracle published for the chain (Ethereum and most EVM chains `0x40C5…aC8fb`, Base `0x3A91…D739B`); required on any other chain, such as Sepolia |
 | `chain.rpc_providers` | `[provider-a, provider-b]`, whose URLs are `TOPUP_RPC_PROVIDER_A_URL` and `_B_URL` |
+| `asset.backstop` | `token`: every transfer of the token is requested and kept locally, one request per block range whatever the address count; `addresses` for a token with many transfers per block, such as USDC (§8) |
 | `pricing.mode`, `pricing.check.fx` | `spot`; Kraken `USDT/USD` for a USDT-quoted market, required otherwise |
 | `pricing.max_age_s`, `max_deviation_bps`, `max_fx_deviation_bps` | 120 (two Coin Metrics intervals), 100, 50 |
 | `limits.min_deposit_atomic` | 0: `min_credit_minor` rejects dust *(policy: finance confirms before production)* |
@@ -1019,7 +1067,9 @@ monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconci
 any stopped loop; a Sentry Uptime monitor watches `/healthz`. Business state (deposits by state and
 age, unflushed balance, open lock exposure, undelivered `deposit.credited` events and their age,
 reconciliation) is in the daily admin
-report (`GET /v1/admin/report/daily`). Log lines and their spans (`deposit_id`, `chain_id`,
+report (`GET /v1/admin/report/daily`); RPC calls per provider, chain, and method are counters in
+the admin-signed `GET /v1/admin/metrics` (Prometheus text), read on demand since no collector
+runs. Log lines and their spans (`deposit_id`, `chain_id`,
 `state`, `attempt`) serve local stacks.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against
@@ -1038,7 +1088,10 @@ retired `cleared`; fast credit with `anvil_reorg` (a depth-1 reorg before credit
 nothing; a transaction re-included in a later block keeps its deposit id and is followed, not
 reversed, when its block-wide `log_index` changes; a transaction replaced with the same nonce is
 reversed with one `deposit.reversed` and its quote reopened; a lagging provider B delays the
-credit; inclusion to `deposit.credited` under 30 s on 12 s blocks); the fast-credit migration on
+credit; inclusion to `deposit.credited` under 30 s on 12 s blocks with the head loop at its
+production cadence); RPC cost (an idle chain polls only `eth_blockNumber`, a new block costs one
+`eth_getLogs` whatever the address count, a window of the finalized backstop costs one token-wide
+request, an address issued mid-run is scanned from the next block without a gap); the fast-credit migration on
 recorded deposits. The suite's shared route fixture credits at `finalized`, so it also checks
 that `finalized` reproduces crediting only final deposits. The reference product's tests cover the §11 obligations (credit once across
 redeliveries, forged deliveries refused, holds); `topup-sdk send-test-event` checks any receiver;
