@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import base64
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from topup_sdk import SignatureError, verify_webhook, verify_webhook_signature
+from topup_sdk import (
+    SignatureError,
+    WebhookEvent,
+    sign_webhook,
+    verify_webhook,
+    verify_webhook_signature,
+)
 
 # Fixed vector from crates/topup/src/outbox/signature.rs (seed [7; 32]).
 RUST_KEY = Ed25519PrivateKey.from_private_bytes(bytes([7] * 32))
@@ -59,52 +64,111 @@ def test_tampered_or_stale_deliveries_are_rejected(
         verify_webhook_signature(headers, body, RUST_KEY.public_key(), now=now)
 
 
-def _signed(envelope: Mapping[str, object], webhook_id: str) -> tuple[dict[str, str], bytes]:
+ACCOUNT = "acct_" + "a1" * 16
+OTHER_KEY = Ed25519PrivateKey.from_private_bytes(bytes([8] * 32))
+
+
+def _signed(
+    envelope: Mapping[str, object],
+    webhook_id: str,
+    keys: Sequence[Ed25519PrivateKey] = (RUST_KEY,),
+) -> tuple[dict[str, str], bytes]:
     body = json.dumps(envelope).encode()
-    signature = RUST_KEY.sign(f"{webhook_id}.{RUST_TIMESTAMP}.".encode() + body)
-    headers = {
-        "webhook-id": webhook_id,
-        "webhook-timestamp": str(RUST_TIMESTAMP),
-        "webhook-signature": "v1a," + base64.b64encode(signature).decode(),
-    }
+    headers = sign_webhook(keys, webhook_id, RUST_TIMESTAMP, body)
     return headers, body
 
 
 EVENT_ID = "evt_26a20351ab10595a852f9c1aa0372d73"
+ENVELOPE: dict[str, object] = {
+    "id": EVENT_ID,
+    "object": "event",
+    "account": ACCOUNT,
+    "livemode": True,
+    "type": "deposit.credited",
+    "created": 1_790_410_321,
+    "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit"}},
+}
+
+
+def _verify(
+    headers: Mapping[str, str],
+    body: bytes,
+    keys: Ed25519PublicKey | Sequence[Ed25519PublicKey] | None = None,
+    *,
+    account: str = ACCOUNT,
+    livemode: bool = True,
+) -> WebhookEvent:
+    return verify_webhook(
+        headers,
+        body,
+        RUST_KEY.public_key() if keys is None else keys,
+        expected_account=account,
+        expected_livemode=livemode,
+        now=RUST_TIMESTAMP,
+    )
 
 
 def test_event_is_parsed_and_bound_to_the_webhook_id() -> None:
-    envelope = {
-        "id": EVENT_ID,
-        "object": "event",
-        "type": "deposit.credited",
-        "created": 1_790_410_321,
-        "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit"}},
-    }
-    headers, body = _signed(envelope, EVENT_ID)
-    event = verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+    headers, body = _signed(ENVELOPE, EVENT_ID)
+    event = _verify(headers, body)
     assert (event.id, event.type, event.created) == (EVENT_ID, "deposit.credited", 1_790_410_321)
-    assert event.object == envelope["data"]["object"]  # type: ignore[index]
+    assert (event.account, event.livemode) == (ACCOUNT, True)
+    assert event.object == ENVELOPE["data"]["object"]  # type: ignore[index]
 
-    headers, body = _signed({**envelope, "id": "evt_" + "0" * 32}, EVENT_ID)
+    headers, body = _signed({**ENVELOPE, "id": "evt_" + "0" * 32}, EVENT_ID)
     with pytest.raises(SignatureError, match="does not match"):
-        verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
-    headers, body = _signed({**envelope, "object": "deposit"}, EVENT_ID)
+        _verify(headers, body)
+    headers, body = _signed({**ENVELOPE, "object": "deposit"}, EVENT_ID)
     with pytest.raises(SignatureError, match="malformed"):
-        verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
+        _verify(headers, body)
 
 
-def test_an_event_in_the_old_envelope_is_still_parsed() -> None:
-    # An operator replay of an event delivered before prefixed ids is byte-identical to the
-    # original: a bare UUID id and a flat payload.
-    envelope = {
-        "event_id": RUST_ID,
-        "type": "deposit.credited",
-        "created_at": "2026-09-22T00:00:00.123456789Z",
-        "data": {"deposit_id": "d"},
-    }
-    headers, body = _signed(envelope, RUST_ID)
-    event = verify_webhook(headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP)
-    assert (event.id, event.type, event.data) == (RUST_ID, "deposit.credited", {"deposit_id": "d"})
-    assert event.created == 1_790_035_200
-    assert event.object is None
+@pytest.mark.parametrize(
+    ("account", "livemode", "match"),
+    [
+        ("acct_" + "b2" * 16, True, "another account"),
+        (ACCOUNT, False, "other mode"),
+    ],
+)
+def test_an_event_of_another_account_or_mode_is_refused(
+    account: str, livemode: bool, match: str
+) -> None:
+    headers, body = _signed(ENVELOPE, EVENT_ID)
+    with pytest.raises(SignatureError, match=match):
+        _verify(headers, body, account=account, livemode=livemode)
+
+
+def test_an_envelope_without_account_or_mode_fails_closed() -> None:
+    for missing in ("account", "livemode"):
+        envelope = {key: value for key, value in ENVELOPE.items() if key != missing}
+        headers, body = _signed(envelope, EVENT_ID)
+        with pytest.raises(SignatureError, match="malformed"):
+            _verify(headers, body)
+    # The envelope before `evt_` ids names no account: it no longer verifies.
+    legacy = {"event_id": RUST_ID, "type": "deposit.credited", "created_at": "", "data": {}}
+    headers, body = _signed(legacy, RUST_ID)
+    with pytest.raises(SignatureError, match="malformed"):
+        _verify(headers, body)
+
+
+def test_another_accounts_key_does_not_verify() -> None:
+    headers, body = _signed(ENVELOPE, EVENT_ID, keys=(OTHER_KEY,))
+    with pytest.raises(SignatureError, match="no valid webhook signature"):
+        _verify(headers, body)
+    with pytest.raises(SignatureError, match="no webhook public key"):
+        _verify(headers, body, [])
+
+
+def test_during_a_rotation_either_pinned_key_verifies_and_then_only_the_new_one() -> None:
+    # The service signs with the new key and the old one until the old one's overlap ends.
+    headers, body = _signed(ENVELOPE, EVENT_ID, keys=(OTHER_KEY, RUST_KEY))
+    assert len(headers["webhook-signature"].split()) == 2
+    for pinned in (RUST_KEY, OTHER_KEY):
+        assert _verify(headers, body, pinned.public_key()).id == EVENT_ID
+    both = [OTHER_KEY.public_key(), RUST_KEY.public_key()]
+    assert _verify(headers, body, both).id == EVENT_ID
+
+    headers, body = _signed(ENVELOPE, EVENT_ID, keys=(OTHER_KEY,))
+    with pytest.raises(SignatureError, match="no valid webhook signature"):
+        _verify(headers, body, RUST_KEY.public_key())
+    assert _verify(headers, body, both).id == EVENT_ID

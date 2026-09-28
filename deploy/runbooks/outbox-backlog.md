@@ -1,6 +1,6 @@
 # Outbox backlog
 
-**Trigger:** the `topup-outbox-<n>` monitor missing its check-ins, `outbox delivery poll failed`
+**Trigger:** the `topup-outbox-test` or `topup-outbox-live` monitor missing its check-ins, `outbox delivery poll failed`
 issues, a non-zero `credited_undelivered` in the daily report (`GET /v1/admin/report/daily`), or
 a product reporting that webhooks or credits stopped.
 
@@ -38,5 +38,5 @@ forever by themselves. One product's receiver or every product.
 
 ## Done when
 
-`topup-outbox-<n>` checks in again and the product receives new events; receivers deduplicate by
+`topup-outbox-<mode>` checks in again and the product receives new events; receivers deduplicate by
 webhook id.

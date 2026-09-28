@@ -54,9 +54,14 @@ def _deposit(**overrides: Any) -> dict[str, Any]:
     return deposit
 
 
+ACCOUNT = "acct_" + "a1" * 16
+
+
 def _event(deposit: dict[str, Any], event_type: str = CREDITED_EVENT) -> WebhookEvent:
     return WebhookEvent(
         id=credited_event_id(DEPOSIT),
+        account=ACCOUNT,
+        livemode=False,
         type=event_type,
         created=1_790_410_321,
         data={"object": deposit},
@@ -100,9 +105,11 @@ def test_spot_and_swept_credits_parse() -> None:
         _event(_deposit(quote="q-981")),
         _event(_deposit(log_index=-1)),
         _event(_deposit(chain_id=True)),
-        # An operator replay of a credit delivered in the old envelope.
+        # A flat payload without `object`.
         WebhookEvent(
             id="26a20351-ab10-595a-852f-9c1aa0372d73",
+            account=ACCOUNT,
+            livemode=False,
             type=CREDITED_EVENT,
             created=0,
             data={"deposit_id": "3f1c2b9e-6a8d-5c47-9e21-0b7d4f6a8c13", "state": "credited"},
@@ -122,7 +129,13 @@ def test_sign_webhook_reproduces_the_service_signature() -> None:
 def _receiver(key: Ed25519PrivateKey, credits: dict[str, int]) -> httpx.MockTransport:
     def handle(request: httpx.Request) -> httpx.Response:
         try:
-            event = verify_webhook(request.headers, request.content, key.public_key())
+            event = verify_webhook(
+                request.headers,
+                request.content,
+                key.public_key(),
+                expected_account=ACCOUNT,
+                expected_livemode=False,
+            )
         except SignatureError:
             return httpx.Response(400)
         credit = CreditedDeposit.from_event(event)
@@ -138,12 +151,13 @@ def test_send_test_event_passes_a_verifying_deduplicating_receiver() -> None:
     report = send_test_event(
         "https://product.example/webhooks",
         key,
+        account=ACCOUNT,
         account_id="team-42",
         amount=250,
         transport=_receiver(key, credits),
     )
     assert report["passed"], json.dumps(report)
-    assert [result["status"] for result in report["results"]] == [204, 204, 400]
+    assert [result["status"] for result in report["results"]] == [204, 204, 400, 400]
     assert credits == {report["deposit_id"]: 250}
     assert report["event_id"] == credited_event_id(report["deposit_id"])
 
@@ -152,6 +166,7 @@ def test_send_test_event_fails_a_receiver_that_skips_verification() -> None:
     report = send_test_event(
         "https://product.example/webhooks",
         Ed25519PrivateKey.generate(),
+        account=ACCOUNT,
         account_id="team-42",
         amount=250,
         transport=httpx.MockTransport(lambda _request: httpx.Response(200)),

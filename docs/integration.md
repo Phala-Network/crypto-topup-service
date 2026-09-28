@@ -40,8 +40,8 @@ example) and fail to find the package; install it with `uv` or `pip` directly, a
 `phala-pay` from PyPI once it is released.
 
 **Configure.** The operator creates your account and sends your contact its first secret key,
-`ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin the
-service's settlement key from its attestation (§5.3).
+`ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin your
+account's webhook key for the mode from its attestation (§5.3).
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
 `client_secret`; repeating the call with the same `idempotency_key` within 24 hours returns the
@@ -91,7 +91,9 @@ from phala_pay import SignatureVerificationError
 @app.post("/webhooks/phala-pay")
 async def webhook(request: Request) -> Response:
     try:
-        event = pay.webhooks.construct_event(await request.body(), request.headers, SETTLEMENT_KEY)
+        event = pay.webhooks.construct_event(
+            await request.body(), request.headers, WEBHOOK_KEYS, ACCOUNT, expected_livemode=False
+        )
     except (SignatureVerificationError, ValueError):
         return Response(status_code=400)
     if event.type == "deposit.credited":
@@ -465,7 +467,10 @@ from topup_sdk import CreditedDeposit, SignatureError, verify_webhook
 
 def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
     try:
-        event = verify_webhook(headers, raw_body, SETTLEMENT_KEY)  # pinned (§5.3); 300 s tolerance
+        # Pinned keys (§5.3); fails closed for another account or mode; 300 s tolerance.
+        event = verify_webhook(
+            headers, raw_body, WEBHOOK_KEYS, expected_account=ACCOUNT, expected_livemode=False
+        )
     except SignatureError:
         return 400
     if event.type == "deposit.credited":
@@ -492,7 +497,7 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 
 | # | Obligation | Why |
 |---|---|---|
-| 1 | Verify the `v1a` signature over the raw body against the pinned `(settlement/v1, public key)`; answer `400` otherwise. | Only the attested service may credit. |
+| 1 | Verify the `v1a` signature over the raw body against your account's pinned key for the mode, and that the event's `account` and `livemode` are yours; answer `400` otherwise. | Only the attested service may credit, and only your own account's events: a key is per account and mode, so another merchant cannot replay its events to you. |
 | 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
@@ -528,15 +533,16 @@ Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto
 ### 2.6 Delivery and event types
 
 Every event, `deposit.credited` included, is Standard Webhooks with the asymmetric `v1a` scheme,
-signed with the `settlement/v1` key and `POST`ed to the registered webhook URL:
+signed with your account's key in the event's mode and `POST`ed to the registered webhook URL:
 
 ```text
 webhook-id: evt_…
 webhook-timestamp: <Unix seconds of this attempt>
 webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{raw body}">
+                   (one space-separated entry per key while a rotation overlaps, §5.3)
 
-{"id": "<same evt_ id>", "object": "event", "type": "deposit.credited", "created": 1790409590,
- "data": {"object": {…}}}
+{"id": "<same evt_ id>", "object": "event", "account": "acct_…", "livemode": false,
+ "type": "deposit.credited", "created": 1790409590, "data": {"object": {…}}}
 ```
 
 The body is Stripe's [Event object](https://docs.stripe.com/api/events/object) without its
@@ -690,14 +696,15 @@ as it is. Your key selects the mode: `ppay_sk_test_` keys act on test routes (Se
 
 ```sh
 cd sdk/python
-uv run --locked topup-sdk keygen --keyid settlement/v1 --seed-out /tmp/test-service.seed
-# Configure your test instance to pin the printed public key in place of the service key, then:
+uv run --locked topup-sdk keygen --keyid test-webhooks/v1 --seed-out /tmp/test-service.seed
+# Configure your test instance to pin the printed public key in place of your webhook key, then:
 uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
-  --seed-file /tmp/test-service.seed --account-id test-workspace --amount 250
+  --seed-file /tmp/test-service.seed --account acct_… --account-id test-workspace --amount 250
 ```
 
-It sends a signed `deposit.credited`, the same event again, and a copy signed by another key, and
-passes when your answers are `2xx`, `2xx`, and `4xx`. Then check your ledger: exactly one credit
+It sends a signed test-mode `deposit.credited` of your account, the same event again, a copy
+signed by another key, and another account's event signed by the pinned key, and passes when
+your answers are `2xx`, `2xx`, `4xx`, and `4xx`. Then check your ledger: exactly one credit
 of `--amount` cents for `--account-id`. The reference product's tests
 ([deploy/product/tests](../deploy/product/tests)) are a worked example of the §2 obligations.
 
@@ -717,7 +724,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       refusals recorded as holds, never answered `5xx`.
 - [ ] Live mode enabled by the operator; the first live key rolled on receipt and kept in the
       secret store, never in code or logs; webhook URL agreed.
-- [ ] Settlement key pinned from verified attestation of production (§5.3), with the keyid.
+- [ ] Your account's live webhook key pinned from verified attestation of production (§5.3),
+      and the receiver checking your `acct_…` id and `livemode: true`.
 - [ ] Every address recomputed before display; the `client_secret` handed only to the paying
       customer's page and never logged.
 - [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
@@ -768,16 +776,19 @@ only test objects, a live key only live ones; another account's or the other mod
 answer `404`, as a missing one does. Keep keys in your secret store, never in code, logs, or a
 browser.
 
-### 5.3 Pin the service's settlement key
+### 5.3 Pin your account's webhook keys
 
-The service signs its webhooks with one ed25519 key, `settlement/v1` (the name is a dstack key
-domain and stays), derived inside its confidential VM. You hold only its public key, so nothing
-you store can forge a credit. Pin it only from verified attestation ([architecture §14](architecture.md#14-configuration-and-deployment)):
+The service signs your webhooks with your account's own ed25519 key for each mode (design D11),
+derived inside its confidential VM at `settlement/{acct}/{live|test}/v{n}`; no other account's
+events are signed with it. You hold only its public key, so nothing you store can forge a credit,
+and the key is stable across releases. Pin it only from verified attestation, fetched with a
+secret key of the mode ([architecture §14](architecture.md#14-configuration-and-deployment)):
 
 ```sh
 export TOPUP_ORIGIN=https://pay-api-staging.phala.com
 export NONCE="$(openssl rand -hex 32)"
-curl -fsS "$TOPUP_ORIGIN/v1/attestation?nonce=$NONCE" > attestation.json
+curl -fsS -H "Authorization: Bearer $PHALA_PAY_SECRET_KEY" \
+  "$TOPUP_ORIGIN/v1/attestation?nonce=$NONCE" > attestation.json
 # The official dstack verifier, pinned by digest (Docker): quote, TCB, event log, OS image.
 jq '{quote: null, attestation: .quote}' attestation.json |
   deploy/dstack-verifier.sh > verification.json
@@ -790,7 +801,8 @@ jq -e --arg app "$APP_ID" --arg compose "$COMPOSE_HASH" \
 
 `APP_ID` and `COMPOSE_HASH` are the values the operator gives you for the deployment
 ([deploy/README.md](../deploy/README.md#attestation-ingress-and-egress) shows how the operator
-derives them). Then check that `report_data` binds your nonce and the key:
+derives them). Then check that `report_data` binds your nonce, your account, the mode, and the
+keys:
 
 ```python
 import json, os
@@ -798,13 +810,29 @@ from topup_client.models import AttestationResponse
 from topup_sdk import verify_attestation_binding
 
 response = AttestationResponse.from_dict(json.load(open("attestation.json")))
-verify_attestation_binding(response, bytes.fromhex(os.environ["NONCE"]))  # raises AttestationError
-assert response.keyid == "settlement/v1"
-print(response.settlement_pubkey)  # hex; pin it together with the keyid
+keys = verify_attestation_binding(  # raises AttestationError
+    response,
+    bytes.fromhex(os.environ["NONCE"]),
+    expected_account="acct_…",
+    expected_livemode=False,
+)
+print([key.public_key for key in response.webhook_keys])  # hex, current first; pin them
 ```
 
 `TopupClient.attestation(nonce)` fetches and runs the same binding check. The binding alone is
 worthless without the verifier step: it proves only that the response is self-consistent.
+
+`report_data` is `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
+public_key)*)`: one-byte lengths, the UTF-8 `acct_` id, one byte `1` live or `0` test, and each
+listed key's version as 4 big-endian bytes followed by its 32 raw bytes.
+
+**Rolling.** `POST /v1/account/webhook_keys/roll {expires_in}` (`TopupClient.roll_webhook_key`)
+makes the next version sign every delivery; the current one keeps signing beside it for
+`expires_in` seconds (at most 604800, 7 days; `0`, the default, stops it at once), so each
+delivery carries one `v1a` entry per key. Fetch and verify the new key from attestation, pin it
+next to the old one (`construct_event` and `verify_webhook` accept a list), and drop the old one
+once it expires; `GET /v1/account` lists the versions and their `expires_at`. The roll is
+announced as `account.updated`.
 
 ### 5.4 Manage and roll keys
 
@@ -841,8 +869,8 @@ unknown, or revoked one `401 api_key_invalid`, and a rolled key past its expiry
 ```python
 from topup_sdk import TopupClient
 
-# The forwarder factory and implementation, pinned from the attested deployment like the settlement
-# key (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
+# The forwarder factory and implementation, pinned from the attested deployment like your webhook
+# keys (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
 forwarder = (
     "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",  # factory
     "0x70B714508BFa441449DC09f790Ca03Baa5170360",  # implementation
@@ -885,7 +913,7 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
-| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes`, and the key's `livemode`. | `get_account` |
+| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes`, the key's `livemode`, and the mode's `webhook_keys` versions. | `get_account` |
 | `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
 | `POST /v1/quotes` `{account_id, amount, currency: "usd", chain_id, asset, metadata?}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The account is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
 | `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
@@ -900,7 +928,8 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until its transaction is final, then `succeeded` or `failed`, or `canceled`; `expand[]=deposit`. | `get_refund` |
 | `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
 | `GET\|POST /v1/api_keys`, `GET\|DELETE /v1/api_keys/{id}`, `POST /v1/api_keys/{id}/roll` | Your keys (§5.4). | — |
-| `GET /v1/attestation?nonce=` | Settlement key evidence (§5.3); unauthenticated. | `attestation` |
+| `GET /v1/attestation?nonce=` | Your account's webhook keys in the key's mode, with evidence (§5.3). | `attestation` |
+| `POST /v1/account/webhook_keys/roll` `{expires_in?}` | Roll the mode's webhook key (§5.3). | `roll_webhook_key` |
 
 ### 5.8 Errors
 

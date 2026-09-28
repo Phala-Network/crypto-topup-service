@@ -3,15 +3,18 @@ fulfillment.
 
 - `POST /topups` `{"amount": 2500}` creates a quote for the signed-in team and returns its
   `client_secret`, which the browser passes to `<Checkout clientSecret apiBase />`.
-- `POST /webhooks/phala-pay` verifies each delivery with `pay.webhooks.construct_event` and, for
-  `deposit.credited`, credits `amount` cents to `account_id` once per deposit id, in the same
-  transaction that records the credit, before answering `200`.
+- `POST /webhooks/phala-pay` verifies each delivery with `pay.webhooks.construct_event`, which
+  fails closed unless it is signed by your account's key in the key's mode and names your account
+  and mode, and, for `deposit.credited`, credits `amount` cents to `account_id` once per deposit
+  id, in the same transaction that records the credit, before answering `200`.
 
 Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
 
     PHALA_PAY_API_BASE=https://pay.example.com \\
     PHALA_PAY_SECRET_KEY=ppay_sk_test_... \\
-    PHALA_PAY_WEBHOOK_KEY=<settlement public key, pinned from attestation> \\
+    PHALA_PAY_ACCOUNT=acct_... \\
+    PHALA_PAY_WEBHOOK_KEYS=<your account's webhook public key in this mode, pinned from \\
+        GET /v1/attestation; comma-separated while a rotation overlaps> \\
     uvicorn --factory fastapi_app:app_from_env
 """
 
@@ -59,7 +62,14 @@ def current_team(x_team_id: Annotated[str, Header(pattern=r"^[A-Za-z0-9._-]{1,64
 
 
 def create_app(
-    pay: PhalaPay, webhook_key: str, database: str, *, chain_id: int, asset: str
+    pay: PhalaPay,
+    webhook_keys: list[str],
+    database: str,
+    *,
+    account: str,
+    livemode: bool,
+    chain_id: int,
+    asset: str,
 ) -> FastAPI:
     app = FastAPI()
 
@@ -111,7 +121,9 @@ def create_app(
     async def webhook(request: Request) -> dict[str, bool]:
         payload = await request.body()
         try:
-            event = pay.webhooks.construct_event(payload, request.headers, webhook_key)
+            event = pay.webhooks.construct_event(
+                payload, request.headers, webhook_keys, account, expected_livemode=livemode
+            )
         except (SignatureVerificationError, ValueError) as error:
             raise HTTPException(400) from error
 
@@ -138,14 +150,14 @@ def create_app(
 
 
 def app_from_env() -> FastAPI:
-    pay = PhalaPay(
-        os.environ["PHALA_PAY_API_BASE"],
-        os.environ["PHALA_PAY_SECRET_KEY"],
-    )
+    secret_key = os.environ["PHALA_PAY_SECRET_KEY"]
+    pay = PhalaPay(os.environ["PHALA_PAY_API_BASE"], secret_key)
     return create_app(
         pay,
-        os.environ["PHALA_PAY_WEBHOOK_KEY"],
+        [key.strip() for key in os.environ["PHALA_PAY_WEBHOOK_KEYS"].split(",") if key.strip()],
         os.environ.get("DATABASE", "topups.sqlite3"),
+        account=os.environ["PHALA_PAY_ACCOUNT"],
+        livemode=secret_key.startswith("ppay_sk_live_"),
         chain_id=int(os.environ.get("PHALA_PAY_CHAIN_ID", "11155111")),
         asset=os.environ.get("PHALA_PAY_ASSET", "pha"),
     )

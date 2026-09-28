@@ -603,7 +603,7 @@ pub(crate) async fn find_refund(
 ) -> ApiResult<Option<Refund>> {
     let row = sqlx::query_as::<_, RefundRow>(
         r#"
-        SELECT refund.id, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
+        SELECT refund.id, refund.livemode, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
                refund.destination_address, address.treasury, refund.status,
                refund.failure_reason, refund.tx_hash, refund.log_index, refund.created_at,
                refund.metadata
@@ -622,6 +622,7 @@ pub(crate) async fn find_refund(
         Ok(Refund {
             id: ids::format(ids::REFUND, row.id),
             object: "refund".to_owned(),
+            livemode: row.livemode,
             deposit: ExpandableDeposit::Id(ids::format(ids::DEPOSIT, row.deposit_id)),
             amount_atomic: row.amount_atomic,
             destination_address: row.destination_address,
@@ -644,6 +645,7 @@ pub(crate) async fn find_refund(
 #[derive(FromRow)]
 struct RefundRow {
     id: Uuid,
+    livemode: bool,
     deposit_id: Uuid,
     amount_atomic: String,
     destination_address: String,
@@ -659,6 +661,7 @@ struct RefundRow {
 #[derive(FromRow)]
 struct DepositRow {
     id: Uuid,
+    livemode: bool,
     external_id: String,
     quote_id: Option<Uuid>,
     deposit_address_id: Option<Uuid>,
@@ -686,7 +689,8 @@ struct DepositRow {
 fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
     let mut builder = QueryBuilder::new(
         r#"
-        SELECT deposit.id, customer.client_reference_id AS external_id, address.quote_id,
+        SELECT deposit.id, deposit.livemode, customer.client_reference_id AS external_id,
+               address.quote_id,
                address.deposit_address_id,
                deposit.state, deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
@@ -724,6 +728,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
     Ok(Deposit {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
+        livemode: row.livemode,
         account_id: row.external_id,
         quote: row
             .quote_id

@@ -87,6 +87,7 @@ pub(crate) async fn get_config(
         .collect();
     Ok(Json(Config {
         object: "config".to_owned(),
+        livemode: merchant.scope.livemode(),
         currency: "usd".to_owned(),
         max_open_amount_per_account,
         assets,
@@ -482,6 +483,7 @@ pub(crate) async fn quote_object(
     Ok(Quote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
+        livemode: lock.livemode,
         account_id: lock.client_reference_id,
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),

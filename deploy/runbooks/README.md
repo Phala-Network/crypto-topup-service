@@ -12,7 +12,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Sentry | the issue: its `alert` tag and grouping tags (`route`, `state`, `check`, `chain`, `scope`), a `runbook` link, and the log line's fields (for example `deposit_id`, or a finding's `subjects`, `expected`, `observed`); at most one event per issue every 10 minutes. Crons monitors for every loop; an Uptime monitor on `/healthz` |
 | Daily report, admin-signed `GET /v1/admin/report/daily` | per route: `deposits_by_state`, `age_in_state_max_seconds`, `settlements_by_status`, `refunds_by_status`, `unflushed_balance_atomic` (what forwarders still hold for merchants to sweep), `open_rate_lock_exposure_atomic`, `rejected_holds_atomic`, and `treasury_balance_atomic`; globally `exposure_minor`, the last reconciliation round's `failed_checks`, and the active `reconciliation_blocks` (`block_key`, `scope`, `check`, `reason`) |
 | Deposit view, admin-signed `GET /v1/admin/deposits/{id}` (`dep_…` or the UUID) | the deposit's stored facts with its transition timeline (each step's evidence) and its webhook `events` (`id`, `event_type`, `delivered_at`). The product finds deposits with its product-signed `GET /v1/deposits?tx_hash=…` or `?account_id=…` |
-| Attestation, `GET /v1/attestation?nonce=` | the settlement key ([verification](../README.md#attestation-ingress-and-egress)) |
+| Attestation, `GET /v1/attestation?nonce=`, with an account's API key | that account's webhook keys in the key's mode ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
 | Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`; outbox event `replay` |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
@@ -64,7 +64,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | `TopupLockExpiryFailing`, `topup-lock-expiry` | [Lock expiry worker failure](lock-expiry-worker-failure.md) |
 | `topup-scanner-<chain_id>` | [Scanner lag](scanner-lag.md) |
 | `topup-backup` | [Backup age](backup-age.md) |
-| `topup-outbox-<n>`, `outbox delivery poll failed`, daily report `credited_undelivered`, product reports missing webhooks or credits | [Outbox backlog](outbox-backlog.md) |
+| `topup-outbox-test`, `topup-outbox-live`, `outbox delivery poll failed`, daily report `credited_undelivered`, product reports missing webhooks or credits | [Outbox backlog](outbox-backlog.md) |
 | `TopupUnsupportedInflows`, rejected funds at the treasury | [Rejected funds at treasury](rejected-funds-at-treasury.md) |
 | `TopupDepositReversed`, `TopupDepositPendingAfterReorg`, `topup-finality-watch` | [Deposit reversed or pending after a reorg](deposit-reversed.md) |
 | Merchant reports a secret key exposed or lost, or requests it did not make | [API key compromise and key recovery](api-key-compromise.md) |

@@ -211,6 +211,10 @@ pub struct Quote {
     pub id: String,
     /// Always `quote`.
     pub object: String,
+    /// Whether the quote was created with a live key. Always sent; optional in the schema so
+    /// clients also parse objects from servers, and events rendered, before it.
+    #[schema(required = false)]
+    pub livemode: bool,
     /// Your account identifier.
     pub account_id: String,
     /// Credit in the currency's minor unit.
@@ -358,6 +362,10 @@ pub struct Deposit {
     pub id: String,
     /// Always `deposit`.
     pub object: String,
+    /// Whether the deposit is on a live-mode route. Always sent; optional in the schema like the
+    /// quote's.
+    #[schema(required = false)]
+    pub livemode: bool,
     /// Your account identifier.
     pub account_id: String,
     /// The quote whose address received the transfer; `null` for a deposit address.
@@ -566,6 +574,10 @@ pub struct Refund {
     pub id: String,
     /// Always `refund`.
     pub object: String,
+    /// Whether the refund was requested with a live key. Always sent; optional in the schema like
+    /// the quote's.
+    #[schema(required = false)]
+    pub livemode: bool,
     /// The refunded deposit: its `dep_` id, or the object with `expand[]=deposit`.
     pub deposit: ExpandableDeposit,
     /// Token amount in base units, as a decimal string.
@@ -602,6 +614,10 @@ pub struct Refund {
 pub struct Config {
     /// Always `config`.
     pub object: String,
+    /// The mode of the key that reads it: `assets` lists that mode's routes. Always sent;
+    /// optional in the schema like the quote's.
+    #[schema(required = false)]
+    pub livemode: bool,
     /// Credit currency, `usd`.
     pub currency: String,
     /// Per-account cap on the credit of open quotes, in cents; no single quote can exceed it.
@@ -774,6 +790,11 @@ pub struct AccountObject {
     pub charges_enabled: bool,
     /// Active account-level pause scopes.
     pub paused_scopes: Vec<String>,
+    /// The keys that sign this mode's webhooks: the current one first, then any previous one
+    /// still signing during a rotation. Their public keys come from `GET /v1/attestation`. Always
+    /// sent; optional in the schema so clients also parse objects from servers before it.
+    #[schema(required = false)]
+    pub webhook_keys: Vec<WebhookKeyVersion>,
     /// Creation time, Unix seconds.
     pub created: i64,
 }
@@ -1006,15 +1027,56 @@ pub struct AttestationQuery {
     pub nonce: String,
 }
 
-/// TDX evidence binding a nonce to the settlement public key.
+/// TDX evidence binding a nonce to the webhook public keys of the caller's account in the
+/// caller's mode (design D11).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AttestationResponse {
-    /// Settlement key identifier.
-    pub keyid: String,
-    /// Raw ed25519 settlement public key as lowercase hexadecimal.
-    pub settlement_pubkey: String,
-    /// `sha256(nonce ‖ settlement_pubkey)` as lowercase hexadecimal.
+    /// Always `attestation`.
+    pub object: String,
+    /// The caller's account, `acct_…`.
+    pub account: String,
+    /// The caller's mode; each mode has its own key.
+    pub livemode: bool,
+    /// The keys that sign the account's deliveries in this mode: the current one first, then any
+    /// previous one still signing during a rotation.
+    pub webhook_keys: Vec<WebhookKeyObject>,
+    /// `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
+    /// public_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,
+    /// `livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is
+    /// its version as 4 big-endian bytes and its 32 raw public-key bytes.
     pub report_data: String,
     /// Versioned dstack attestation bytes as lowercase hexadecimal.
     pub quote: String,
+}
+
+/// One version of an account's webhook signing key, with its public key.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WebhookKeyObject {
+    /// Key version, from 1; it grows by one per roll.
+    pub version: u32,
+    /// Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:
+    /// every delivery carries a `v1a` signature by it.
+    pub public_key: String,
+    /// When a rolled key stops signing, Unix seconds; `null` for the current key.
+    pub expires_at: Option<i64>,
+}
+
+/// One version of an account's webhook signing key; its public key comes from
+/// `GET /v1/attestation`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WebhookKeyVersion {
+    /// Key version, from 1.
+    pub version: u32,
+    /// When a rolled key stops signing, Unix seconds; `null` for the current key.
+    pub expires_at: Option<i64>,
+}
+
+/// `POST /v1/account/webhook_keys/roll` body.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RollWebhookKeyRequest {
+    /// Seconds the current key keeps signing beside the new one, up to 604800 (7 days); 0, the
+    /// default, stops it at once.
+    #[serde(default)]
+    pub expires_in: u32,
 }

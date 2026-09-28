@@ -13,23 +13,17 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row;
-#[cfg(feature = "dev-signer")]
-use topup::api::models::AttestationResponse;
-use topup::api::{AppState, Attestor, PublicOrigin, VerificationKey};
-#[cfg(feature = "dev-signer")]
-use topup::api::{AttestationError, AttestationFuture};
+use topup::api::{
+    AppState, AttestationEvidence, AttestationFuture, AttestationRequest, Attestor, PublicOrigin,
+    VerificationKey,
+};
 use topup::db::{Account, NewDeposit};
-use topup_adapters::attestation::DstackAttestor;
-#[cfg(feature = "dev-signer")]
-use topup_adapters::attestation::report_data;
-#[cfg(feature = "dev-signer")]
-use topup_adapters::signer::DevSigner;
+use topup_adapters::attestation::{AttestedWebhookKey, DstackAttestor, report_data};
 use topup_core::deposit::DepositState;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
-#[cfg(feature = "dev-signer")]
-use topup_core::{SETTLEMENT_KEY_DOMAIN, SecretKey32, Signer as _};
+use topup_core::{Ed25519PublicKey, WebhookKeyId};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1183,36 +1177,174 @@ async fn admin_replay_requeues_a_delivered_event_once() -> Result<()> {
     result.and(cleanup)
 }
 
-#[cfg(feature = "dev-signer")]
+/// `GET /v1/attestation` needs an API key and binds the nonce, the key's account and mode, and
+/// that account's webhook keys in that mode; a roll adds the new key and keeps the old one bound
+/// until it expires.
 #[tokio::test]
-async fn attestation_http_path_uses_the_dev_signer() -> Result<()> {
-    let admin_key = SigningKey::from_bytes(&[30; 32]);
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
-    let seed = [1; 32];
-    let attestor = Arc::new(DevHttpAttestor(seed));
-    let state = app_state_with_attestor(pool, &admin_key, attestor);
-    let app = topup::api::router(state).0;
-    let response = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/v1/attestation?nonce=00010203")
-                .body(Body::empty())?,
-        )
-        .await?;
-    ensure!(response.status() == StatusCode::OK);
-    let response = response_json(response).await?;
-    ensure!(response["keyid"] == SETTLEMENT_KEY_DOMAIN);
-    ensure!(response["quote"] == "");
+async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[30; 32]);
+        let seed = [1; 32];
+        let app = topup::api::router(app_state_with_attestor(
+            pool.clone(),
+            &admin_key,
+            Arc::new(TestAttestor(seed)),
+        ))
+        .0;
+        let (owner, live_key) = seed_product(pool, "attested").await?;
+        let test_key = seed::create_api_key(pool, owner.id, false).await?;
+        let (other, other_key) = seed_product(pool, "other").await?;
+        let path = "/v1/attestation?nonce=00010203";
+        let attest = |key: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(merchant_request(Method::GET, path, Vec::new(), &key))
+                    .await?;
+                ensure!(response.status() == StatusCode::OK, "{}", response.status());
+                response_json(response).await
+            }
+        };
+        let check = |response: &Value, account: &Account, livemode: bool, versions: &[u32]| {
+            let keys: Vec<AttestedWebhookKey> = versions
+                .iter()
+                .map(|&version| AttestedWebhookKey {
+                    version,
+                    public_key: TestAttestor::public_key(
+                        seed,
+                        &account.public_id,
+                        livemode,
+                        version,
+                    ),
+                })
+                .collect();
+            let listed: Vec<Value> = keys
+                .iter()
+                .map(|key| {
+                    json!({"version": key.version, "public_key": hex::encode(key.public_key.0)})
+                })
+                .collect();
+            let returned: Vec<Value> = response["webhook_keys"]
+                .as_array()
+                .context("webhook keys")?
+                .iter()
+                .map(|key| json!({"version": key["version"], "public_key": key["public_key"]}))
+                .collect();
+            let expected = report_data(&[0, 1, 2, 3], &account.public_id, livemode, &keys)
+                .context("report data")?;
+            ensure!(response["object"] == "attestation" && response["quote"] == "");
+            ensure!(response["account"] == account.public_id.as_str());
+            ensure!(response["livemode"] == livemode);
+            ensure!(returned == listed, "{response}");
+            ensure!(response["report_data"] == hex::encode(expected));
+            Ok(())
+        };
 
-    let settlement = DevSigner::derive(&SecretKey32::new(seed))
-        .settlement_public_key()
+        let live = attest(live_key.clone()).await?;
+        check(&live, &owner, true, &[1])?;
+        let test = attest(test_key.clone()).await?;
+        check(&test, &owner, false, &[1])?;
+        let other_account = attest(other_key).await?;
+        check(&other_account, &other, true, &[1])?;
+        // Every account and mode has its own key.
+        let public_keys = [&live, &test, &other_account]
+            .map(|response| response["webhook_keys"][0]["public_key"].clone());
+        ensure!(public_keys[0] != public_keys[1] && public_keys[0] != public_keys[2]);
+
+        // Without a key, or with an unknown one, there is no attestation.
+        let anonymous = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure!(anonymous.status() == StatusCode::UNAUTHORIZED);
+        let forged = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::GET,
+                path,
+                Vec::new(),
+                "ppay_sk_live_0000000000000000000000000000000000000000000",
+            ))
+            .await?;
+        ensure!(forged.status() == StatusCode::UNAUTHORIZED);
+
+        // A roll of the live key signs with both until the old one expires; test mode is apart.
+        let roll = |expires_in: u32| {
+            let app = app.clone();
+            let live_key = live_key.clone();
+            async move {
+                app.oneshot(merchant_request(
+                    Method::POST,
+                    "/v1/account/webhook_keys/roll",
+                    serde_json::to_vec(&json!({ "expires_in": expires_in }))?,
+                    &live_key,
+                ))
+                .await
+                .map_err(anyhow::Error::from)
+            }
+        };
+        let too_long = roll(604_801).await?;
+        ensure!(too_long.status() == StatusCode::BAD_REQUEST);
+        let rolled = roll(3600).await?;
+        ensure!(rolled.status() == StatusCode::OK);
+        let account = response_json(rolled).await?;
+        ensure!(account["webhook_keys"][0] == json!({"version": 2, "expires_at": null}));
+        ensure!(account["webhook_keys"][1]["version"] == 1);
+        let expires_at = account["webhook_keys"][1]["expires_at"]
+            .as_i64()
+            .context("the old key expires")?;
+        ensure!(
+            (Utc::now().timestamp() + 3590..=Utc::now().timestamp() + 3600).contains(&expires_at)
+        );
+        let overlap = attest(live_key.clone()).await?;
+        check(&overlap, &owner, true, &[2, 1])?;
+        ensure!(overlap["webhook_keys"][1]["expires_at"] == expires_at);
+        check(&attest(test_key.clone()).await?, &owner, false, &[1])?;
+        let announced: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE account_id = $1 AND livemode \
+             AND type = 'account.updated'",
+        )
+        .bind(owner.id)
+        .fetch_one(pool)
         .await?;
-    ensure!(response["settlement_pubkey"] == hex::encode(settlement.0));
-    // The service sends no transactions, so no operator is attested.
-    ensure!(response.get("operators").is_none());
-    ensure!(response["report_data"] == hex::encode(report_data(&[0, 1, 2, 3], &settlement)));
-    Ok(())
+        ensure!(announced == 1, "{announced}");
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit WHERE account_id = $1 AND action = 'webhook_key.roll'",
+        )
+        .bind(owner.id)
+        .fetch_one(pool)
+        .await?;
+        ensure!(audited == 1);
+
+        // Rolling again with no overlap drops every previous key at once.
+        ensure!(roll(0).await?.status() == StatusCode::OK);
+        check(&attest(live_key.clone()).await?, &owner, true, &[3])?;
+
+        // A live key attests only while the operator keeps live mode enabled (design D12).
+        sqlx::query("UPDATE accounts SET charges_enabled = false WHERE id = $1")
+            .bind(owner.id)
+            .execute(pool)
+            .await?;
+        let refused = app
+            .clone()
+            .oneshot(merchant_request(Method::GET, path, Vec::new(), &live_key))
+            .await?;
+        ensure!(refused.status() == StatusCode::FORBIDDEN);
+        ensure!(response_json(refused).await?["error"]["code"] == "testmode_charges_only");
+        check(&attest(test_key).await?, &owner, false, &[1])?;
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
 }
 
 #[tokio::test]
@@ -1272,23 +1404,52 @@ fn app_state_with_attestor(
     }
 }
 
-/// Development attestor deriving every key from one seed, as `topup attest --dev` does.
-#[cfg(feature = "dev-signer")]
-struct DevHttpAttestor([u8; 32]);
+/// Attestor deriving every key as `SHA-256(seed ‖ domain)`, as `topup attest --dev` does, with an
+/// empty quote.
+struct TestAttestor([u8; 32]);
 
-#[cfg(feature = "dev-signer")]
-impl Attestor for DevHttpAttestor {
-    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a> {
+impl TestAttestor {
+    fn public_key(seed: [u8; 32], account: &str, livemode: bool, version: u32) -> Ed25519PublicKey {
+        use sha2::{Digest as _, Sha256};
+        let domain = WebhookKeyId::new(account, livemode, version)
+            .map(|key| key.domain())
+            .unwrap_or_default();
+        let secret: [u8; 32] = Sha256::new()
+            .chain_update(seed)
+            .chain_update(domain.as_bytes())
+            .finalize()
+            .into();
+        Ed25519PublicKey(SigningKey::from_bytes(&secret).verifying_key().to_bytes())
+    }
+}
+
+impl Attestor for TestAttestor {
+    fn attest<'a>(&'a self, request: AttestationRequest<'a>) -> AttestationFuture<'a> {
         Box::pin(async move {
-            let public_key = DevSigner::derive(&SecretKey32::new(self.0))
-                .settlement_public_key()
-                .await
-                .map_err(|_| AttestationError::Unavailable)?;
-            Ok(AttestationResponse {
-                keyid: SETTLEMENT_KEY_DOMAIN.to_owned(),
-                settlement_pubkey: hex::encode(public_key.0),
-                report_data: hex::encode(report_data(nonce, &public_key)),
-                quote: String::new(),
+            let webhook_keys: Vec<AttestedWebhookKey> = request
+                .versions
+                .iter()
+                .map(|&version| AttestedWebhookKey {
+                    version,
+                    public_key: Self::public_key(
+                        self.0,
+                        request.account,
+                        request.livemode,
+                        version,
+                    ),
+                })
+                .collect();
+            let report_data = report_data(
+                request.nonce,
+                request.account,
+                request.livemode,
+                &webhook_keys,
+            )
+            .ok_or(topup::api::AttestationError::Unavailable)?;
+            Ok(AttestationEvidence {
+                webhook_keys,
+                report_data,
+                quote: Vec::new(),
             })
         })
     }

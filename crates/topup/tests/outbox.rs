@@ -21,6 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -31,7 +32,9 @@ use topup::routes::RouteSet;
 use topup_core::deposit::DepositState;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
-use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer as CoreSigner, SignerError};
+use topup_core::{
+    Ed25519PublicKey, Ed25519Signature, Signer as CoreSigner, SignerError, WebhookKeyId,
+};
 use uuid::Uuid;
 
 use support::TestDatabase;
@@ -39,32 +42,66 @@ use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 
 const TIMESTAMP_TOLERANCE_SECONDS: i64 = 5 * 60;
 
+/// Derives each webhook key as `SHA-256(seed ‖ domain)`, so every account, mode, and version has
+/// its own key, as dstack derives them.
 #[derive(Clone)]
-struct TestSigner(SigningKey);
+struct TestSigner([u8; 32]);
 
 impl TestSigner {
     fn fixed() -> Self {
-        Self(SigningKey::from_bytes(&[11_u8; 32]))
+        Self([11_u8; 32])
     }
 
-    fn verifying_key(&self) -> VerifyingKey {
-        self.0.verifying_key()
+    fn signing_key(&self, key: &WebhookKeyId) -> SigningKey {
+        let mut hasher = Sha256::new();
+        hasher.update(self.0);
+        hasher.update(key.domain().as_bytes());
+        SigningKey::from_bytes(&hasher.finalize().into())
+    }
+
+    /// The key of `account`'s deliveries in `livemode` at `version`.
+    fn key(&self, account: Uuid, livemode: bool, version: u32) -> VerifyingKey {
+        let id = WebhookKeyId::new(&acct(account), livemode, version)
+            .unwrap_or_else(|| unreachable!("acct_ ids name keys"));
+        self.signing_key(&id).verifying_key()
+    }
+
+    /// The live key of `account`'s deliveries at version 1.
+    fn verifying_key(&self, account: Uuid) -> VerifyingKey {
+        self.key(account, true, 1)
     }
 }
 
 impl CoreSigner for TestSigner {
-    async fn sign_settlement(&self, content: &[u8]) -> Result<Ed25519Signature, SignerError> {
-        Ok(Ed25519Signature(self.0.sign(content).to_bytes()))
+    async fn sign_webhook(
+        &self,
+        key: &WebhookKeyId,
+        content: &[u8],
+    ) -> Result<Ed25519Signature, SignerError> {
+        Ok(Ed25519Signature(
+            self.signing_key(key).sign(content).to_bytes(),
+        ))
     }
 
-    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
-        Ok(Ed25519PublicKey(self.0.verifying_key().to_bytes()))
+    async fn webhook_public_key(
+        &self,
+        key: &WebhookKeyId,
+    ) -> Result<Ed25519PublicKey, SignerError> {
+        Ok(Ed25519PublicKey(
+            self.signing_key(key).verifying_key().to_bytes(),
+        ))
     }
+}
+
+/// An account's `acct_` id.
+fn acct(account: Uuid) -> String {
+    topup::ids::format(topup::ids::ACCOUNT, account)
 }
 
 #[derive(Clone, Debug)]
 struct ReceivedWebhook {
     id: String,
+    signature: String,
     body: Vec<u8>,
 }
 
@@ -180,6 +217,15 @@ impl ReferenceReceiver {
             .and_then(|delivery| serde_json::from_slice(&delivery.body).ok())
     }
 
+    async fn signatures(&self) -> Vec<String> {
+        self.received
+            .lock()
+            .await
+            .iter()
+            .map(|delivery| delivery.signature.clone())
+            .collect()
+    }
+
     async fn bodies(&self) -> Vec<Vec<u8>> {
         self.received
             .lock()
@@ -256,6 +302,9 @@ async fn reference_webhook(
     let _guard = InFlightGuard(Arc::clone(&state.in_flight));
     state.received.lock().await.push(ReceivedWebhook {
         id,
+        signature: header(&headers, "webhook-signature")
+            .unwrap_or_default()
+            .to_owned(),
         body: body.to_vec(),
     });
     if !plan.delay.is_zero() {
@@ -323,6 +372,7 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, ()> {
     headers.get(name).ok_or(())?.to_str().map_err(|_| ())
 }
 
+/// A worker of live-mode events.
 fn worker(pool: &PgPool, signer: Arc<TestSigner>) -> Result<DeliveryWorker<TestSigner>> {
     worker_with_timeout(pool, signer, StdDuration::from_secs(2))
 }
@@ -332,10 +382,20 @@ fn worker_with_timeout(
     signer: Arc<TestSigner>,
     request_timeout: StdDuration,
 ) -> Result<DeliveryWorker<TestSigner>> {
+    mode_worker(pool, signer, true, request_timeout)
+}
+
+fn mode_worker(
+    pool: &PgPool,
+    signer: Arc<TestSigner>,
+    livemode: bool,
+    request_timeout: StdDuration,
+) -> Result<DeliveryWorker<TestSigner>> {
     DeliveryWorker::new(
         pool.clone(),
         Arc::new(RouteSet::new(Vec::new()).map_err(anyhow::Error::msg)?),
         signer,
+        livemode,
         DeliveryConfig {
             batch_size: 1,
             request_timeout,
@@ -348,11 +408,12 @@ fn worker_with_timeout(
     .map_err(Into::into)
 }
 
-/// Seeds a live account whose one webhook endpoint is `webhook_url`; returns the account id.
-async fn seed_account(pool: &PgPool, webhook_url: &str) -> Result<Uuid> {
+/// Seeds the live account `id` whose one webhook endpoint is `webhook_url`; returns its id.
+async fn seed_account(pool: &PgPool, id: Uuid, webhook_url: &str) -> Result<Uuid> {
     let account = seed::create_account(
         pool,
         &NewAccount {
+            id,
             webhook_url: webhook_url.to_owned(),
             ..NewAccount::named("webhook-test")
         },
@@ -378,13 +439,24 @@ async fn add_endpoint(pool: &PgPool, account_id: Uuid, livemode: bool, url: &str
 /// Enqueues `deposit.credited` about a new live deposit of `account_id`, due now; returns the
 /// deposit id.
 async fn seed_account_event(pool: &PgPool, account_id: Uuid, event_id: Uuid) -> Result<Uuid> {
+    seed_mode_event(pool, account_id, true, event_id).await
+}
+
+/// Enqueues `deposit.credited` about a new deposit of `account_id` in `livemode`, due now;
+/// returns the deposit id.
+async fn seed_mode_event(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    event_id: Uuid,
+) -> Result<Uuid> {
     let unique = alloy_primitives::keccak256(event_id.as_bytes());
     let customer = seed::create_customer(
         pool,
         &NewCustomer {
             id: Uuid::new_v4(),
             account_id,
-            livemode: true,
+            livemode,
             client_reference_id: format!("account-{event_id}"),
             paused_scopes: Vec::new(),
         },
@@ -438,7 +510,7 @@ async fn seed_account_event(pool: &PgPool, account_id: Uuid, event_id: Uuid) -> 
             id: event_id,
             event_type: "deposit.credited".to_owned(),
             account_id,
-            livemode: true,
+            livemode,
             object: EventObject::Deposit(deposit_id),
             next_attempt_at: Utc::now() - Duration::seconds(1),
             actor: topup::db::SYSTEM_ACTOR.to_owned(),
@@ -453,8 +525,13 @@ fn evt(event_id: Uuid) -> String {
     topup::ids::format(topup::ids::EVENT, event_id)
 }
 
-async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<Uuid> {
-    let account_id = seed_account(pool, webhook_url).await?;
+async fn seed_event(
+    pool: &PgPool,
+    account: Uuid,
+    webhook_url: &str,
+    event_id: Uuid,
+) -> Result<Uuid> {
+    let account_id = seed_account(pool, account, webhook_url).await?;
     seed_account_event(pool, account_id, event_id).await?;
     Ok(account_id)
 }
@@ -462,13 +539,26 @@ async fn seed_event(pool: &PgPool, webhook_url: &str, event_id: Uuid) -> Result<
 #[tokio::test]
 async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<()> {
     let signer = TestSigner::fixed();
-    let receiver =
-        ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO).await?;
+    let account = Uuid::new_v4();
+    let receiver = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
     let client = reqwest::Client::new();
     let event_id = Uuid::new_v4();
     let body = br#"{"type":"deposit.confirmed","data":{}}"#;
 
-    let signed = SignedWebhook::new(&signer, &evt(event_id), Utc::now().timestamp(), body).await?;
+    let key = WebhookKeyId::new(&acct(account), true, 1).context("key id")?;
+    let signed = SignedWebhook::new(
+        &signer,
+        std::slice::from_ref(&key),
+        &evt(event_id),
+        Utc::now().timestamp(),
+        body,
+    )
+    .await?;
     let tampered = client
         .post(&receiver.url)
         .header("webhook-id", &signed.id)
@@ -480,7 +570,7 @@ async fn reference_receiver_rejects_tampering_and_stale_timestamps() -> Result<(
     ensure!(tampered.status() == StatusCode::BAD_REQUEST);
 
     let stale_timestamp = Utc::now().timestamp() - TIMESTAMP_TOLERANCE_SECONDS - 1;
-    let stale = SignedWebhook::new(&signer, &evt(event_id), stale_timestamp, body).await?;
+    let stale = SignedWebhook::new(&signer, &[key], &evt(event_id), stale_timestamp, body).await?;
     let stale_response = client
         .post(&receiver.url)
         .header("webhook-id", &stale.id)
@@ -501,10 +591,15 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
-    let receiver =
-        ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO).await?;
+    let account = Uuid::new_v4();
+    let receiver = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
     let row = sqlx::query(
@@ -559,18 +654,24 @@ async fn events_reach_only_their_accounts_endpoints_in_their_mode() -> Result<()
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
-    let start =
-        || ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO);
+    let account = Uuid::new_v4();
+    let start = || {
+        ReferenceReceiver::start(
+            signer.verifying_key(account),
+            StatusCode::OK,
+            StdDuration::ZERO,
+        )
+    };
     let (first, second, test_mode, other_account) = (
         start().await?,
         start().await?,
         start().await?,
         start().await?,
     );
-    let account_id = seed_account(&context.app_pool, &first.url).await?;
+    let account_id = seed_account(&context.app_pool, account, &first.url).await?;
     add_endpoint(&context.app_pool, account_id, true, &second.url).await?;
     add_endpoint(&context.app_pool, account_id, false, &test_mode.url).await?;
-    seed_account(&context.app_pool, &other_account.url).await?;
+    seed_account(&context.app_pool, Uuid::new_v4(), &other_account.url).await?;
     let event_id = Uuid::new_v4();
     seed_account_event(&context.app_pool, account_id, event_id).await?;
 
@@ -595,14 +696,15 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         StatusCode::INTERNAL_SERVER_ERROR,
         StdDuration::ZERO,
     )
     .await?;
     let event_id = Uuid::nil();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
     let before = Utc::now();
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
@@ -635,14 +737,15 @@ async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         StatusCode::OK,
         StdDuration::from_millis(150),
     )
     .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
     let first = worker(&context.app_pool, Arc::clone(&signer))?;
     let second = worker(&context.app_pool, signer)?;
 
@@ -660,8 +763,9 @@ async fn cancelled_delivery_releases_the_endpoint_lock() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start_with_plans(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         vec![
             ResponsePlan::new(StatusCode::OK, StdDuration::from_secs(5)),
             ResponsePlan::new(StatusCode::OK, StdDuration::ZERO),
@@ -669,7 +773,7 @@ async fn cancelled_delivery_releases_the_endpoint_lock() -> Result<()> {
     )
     .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
     let first = worker(&context.app_pool, Arc::clone(&signer))?;
     let first_task = tokio::spawn(async move { first.run_once().await });
 
@@ -701,13 +805,14 @@ async fn different_events_for_one_endpoint_are_delivered_sequentially() -> Resul
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         StatusCode::OK,
         StdDuration::from_millis(150),
     )
     .await?;
-    let account_id = seed_account(&context.app_pool, &receiver.url).await?;
+    let account_id = seed_account(&context.app_pool, account, &receiver.url).await?;
     let first_event = Uuid::new_v4();
     let second_event = Uuid::new_v4();
     seed_account_event(&context.app_pool, account_id, first_event).await?;
@@ -737,14 +842,15 @@ async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         StatusCode::OK,
         StdDuration::from_millis(250),
     )
     .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
 
     let delivery = worker_with_timeout(&context.app_pool, signer, StdDuration::from_millis(50))?;
     ensure!(delivery.run_once().await? == 1);
@@ -773,13 +879,14 @@ async fn redirect_is_not_followed_and_is_recorded() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start_with_plans(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         vec![ResponsePlan::redirect("/redirect-target")],
     )
     .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
 
     ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
     let row = sqlx::query("SELECT attempts, response FROM webhook_deliveries WHERE event_id = $1")
@@ -802,8 +909,9 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
     let receiver = ReferenceReceiver::start_with_plans(
-        signer.verifying_key(),
+        signer.verifying_key(account),
         vec![
             ResponsePlan::new(StatusCode::INTERNAL_SERVER_ERROR, StdDuration::ZERO),
             ResponsePlan::new(StatusCode::OK, StdDuration::ZERO),
@@ -811,7 +919,7 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
     )
     .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
     let delivery = worker(&context.app_pool, signer)?;
 
     ensure!(delivery.run_once().await? == 1);
@@ -850,10 +958,15 @@ async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
         return Ok(());
     };
     let signer = Arc::new(TestSigner::fixed());
-    let receiver =
-        ReferenceReceiver::start(signer.verifying_key(), StatusCode::OK, StdDuration::ZERO).await?;
+    let account = Uuid::new_v4();
+    let receiver = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
     let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, &receiver.url, event_id).await?;
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
     let delivery = worker(&context.app_pool, signer)?;
     ensure!(delivery.run_once().await? == 1);
 
@@ -879,5 +992,171 @@ async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
     ensure!(audit_count == 1);
 
     receiver.stop().await;
+    context.cleanup().await
+}
+
+/// Each delivery names its account and mode and is signed with that account's key in that mode
+/// only: a receiver that pinned another account's key, or the other mode's key, refuses it.
+#[tokio::test]
+async fn deliveries_verify_only_with_their_accounts_key_in_their_mode() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let start = |key| ReferenceReceiver::start(key, StatusCode::OK, StdDuration::ZERO);
+    let own = start(signer.key(account, true, 1)).await?;
+    let other_account = start(signer.key(other, true, 1)).await?;
+    let other_mode = start(signer.key(account, false, 1)).await?;
+    seed_account(&context.app_pool, account, &own.url).await?;
+    seed_account(&context.app_pool, other, "").await?;
+    add_endpoint(&context.app_pool, account, true, &other_account.url).await?;
+    add_endpoint(&context.app_pool, account, true, &other_mode.url).await?;
+    let event_id = Uuid::new_v4();
+    seed_account_event(&context.app_pool, account, event_id).await?;
+
+    let delivery = worker(&context.app_pool, signer)?;
+    for _ in 0..3 {
+        ensure!(delivery.run_once().await? == 1);
+    }
+    ensure!(own.ids().await == vec![evt(event_id)]);
+    let envelope = own.first_body().await.context("missing webhook body")?;
+    ensure!(envelope["account"] == acct(account) && envelope["livemode"] == true);
+    ensure!(envelope["data"]["object"]["livemode"] == true);
+    ensure!(other_account.count().await == 0 && other_mode.count().await == 0);
+    let refused: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_deliveries \
+         WHERE event_id = $1 AND delivered_at IS NULL AND response ->> 'status' = '400'",
+    )
+    .bind(event_id)
+    .fetch_one(&context.app_pool)
+    .await?;
+    ensure!(refused == 2);
+
+    for receiver in [own, other_account, other_mode] {
+        receiver.stop().await;
+    }
+    context.cleanup().await
+}
+
+/// Test and live events have separate workers: each delivers its own mode's events only, signed
+/// with that mode's key.
+#[tokio::test]
+async fn test_and_live_workers_deliver_only_their_modes_events() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let live = ReferenceReceiver::start(
+        signer.key(account, true, 1),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let test = ReferenceReceiver::start(
+        signer.key(account, false, 1),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    seed_account(&context.app_pool, account, &live.url).await?;
+    add_endpoint(&context.app_pool, account, false, &test.url).await?;
+    let (live_event, test_event) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_mode_event(&context.app_pool, account, true, live_event).await?;
+    seed_mode_event(&context.app_pool, account, false, test_event).await?;
+
+    let timeout = StdDuration::from_secs(2);
+    let test_worker = mode_worker(&context.app_pool, Arc::clone(&signer), false, timeout)?;
+    let live_worker = mode_worker(&context.app_pool, signer, true, timeout)?;
+    ensure!(test_worker.run_once().await? == 1);
+    ensure!(test_worker.run_once().await? == 0);
+    ensure!(test.ids().await == vec![evt(test_event)] && live.count().await == 0);
+    let envelope = test
+        .first_body()
+        .await
+        .context("missing test webhook body")?;
+    ensure!(envelope["livemode"] == false && envelope["data"]["object"]["livemode"] == false);
+    ensure!(live_worker.run_once().await? == 1);
+    ensure!(live_worker.run_once().await? == 0);
+    ensure!(live.ids().await == vec![evt(live_event)]);
+
+    live.stop().await;
+    test.stop().await;
+    context.cleanup().await
+}
+
+/// A roll signs with both keys during the overlap, so receivers pinned to either verify; after
+/// the overlap only the new key signs.
+#[tokio::test]
+async fn a_rolled_key_signs_beside_the_new_one_until_its_overlap_ends() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let old = ReferenceReceiver::start(
+        signer.key(account, true, 1),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let new = ReferenceReceiver::start(
+        signer.key(account, true, 2),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    seed_account(&context.app_pool, account, &old.url).await?;
+    add_endpoint(&context.app_pool, account, true, &new.url).await?;
+    let scope = topup::tenancy::Scope::new(account, true);
+    let actor =
+        topup::audit::Actor::api_key(topup::ids::format(topup::ids::API_KEY, Uuid::new_v4()));
+    let keys =
+        topup::webhook_keys::roll(&context.app_pool, scope, Duration::hours(1), &actor).await?;
+    ensure!(
+        keys.versions
+            .iter()
+            .map(|key| key.version)
+            .collect::<Vec<_>>()
+            == [2, 1]
+    );
+    // The roll's own `account.updated` is not about this test.
+    sqlx::query("DELETE FROM webhook_deliveries")
+        .execute(&context.app_pool)
+        .await?;
+    let during = Uuid::new_v4();
+    seed_account_event(&context.app_pool, account, during).await?;
+
+    let delivery = worker(&context.app_pool, signer)?;
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(old.ids().await == vec![evt(during)] && new.ids().await == vec![evt(during)]);
+    ensure!(
+        new.signatures()
+            .await
+            .iter()
+            .all(|signature| signature.split(' ').count() == 2)
+    );
+
+    sqlx::query("UPDATE retiring_webhook_keys SET expires_at = now() - interval '1 second'")
+        .execute(&context.app_pool)
+        .await?;
+    let after = Uuid::new_v4();
+    seed_account_event(&context.app_pool, account, after).await?;
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(new.ids().await == vec![evt(during), evt(after)]);
+    ensure!(old.ids().await == vec![evt(during)]);
+    ensure!(
+        new.signatures()
+            .await
+            .last()
+            .is_some_and(|signature| signature.split(' ').count() == 1)
+    );
+
+    old.stop().await;
+    new.stop().await;
     context.cleanup().await
 }

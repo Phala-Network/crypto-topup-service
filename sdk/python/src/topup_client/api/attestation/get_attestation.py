@@ -46,6 +46,11 @@ def _parse_response(
 
         return response_400
 
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
+
     if response.status_code == 503:
         response_503 = ErrorResponse.from_dict(response.json())
 
@@ -70,10 +75,14 @@ def _build_response(
 
 def sync_detailed(
     *,
-    client: AuthenticatedClient | Client,
+    client: AuthenticatedClient,
     nonce: str,
 ) -> Response[AttestationResponse | ErrorResponse]:
-    """
+    """TDX evidence binding a fresh `nonce` to the webhook public keys of the key's account and mode
+    (design D11). Verify the quote once with the dstack verifier, check that its report data is
+    `report_data` zero-padded to 64 bytes and that `report_data` binds your nonce, account, mode,
+    and the listed keys, then pin the public keys: they are stable across releases.
+
     Args:
         nonce (str):
 
@@ -98,10 +107,14 @@ def sync_detailed(
 
 def sync(
     *,
-    client: AuthenticatedClient | Client,
+    client: AuthenticatedClient,
     nonce: str,
 ) -> AttestationResponse | ErrorResponse | None:
-    """
+    """TDX evidence binding a fresh `nonce` to the webhook public keys of the key's account and mode
+    (design D11). Verify the quote once with the dstack verifier, check that its report data is
+    `report_data` zero-padded to 64 bytes and that `report_data` binds your nonce, account, mode,
+    and the listed keys, then pin the public keys: they are stable across releases.
+
     Args:
         nonce (str):
 
@@ -121,10 +134,14 @@ def sync(
 
 async def asyncio_detailed(
     *,
-    client: AuthenticatedClient | Client,
+    client: AuthenticatedClient,
     nonce: str,
 ) -> Response[AttestationResponse | ErrorResponse]:
-    """
+    """TDX evidence binding a fresh `nonce` to the webhook public keys of the key's account and mode
+    (design D11). Verify the quote once with the dstack verifier, check that its report data is
+    `report_data` zero-padded to 64 bytes and that `report_data` binds your nonce, account, mode,
+    and the listed keys, then pin the public keys: they are stable across releases.
+
     Args:
         nonce (str):
 
@@ -147,10 +164,14 @@ async def asyncio_detailed(
 
 async def asyncio(
     *,
-    client: AuthenticatedClient | Client,
+    client: AuthenticatedClient,
     nonce: str,
 ) -> AttestationResponse | ErrorResponse | None:
-    """
+    """TDX evidence binding a fresh `nonce` to the webhook public keys of the key's account and mode
+    (design D11). Verify the quote once with the dstack verifier, check that its report data is
+    `report_data` zero-padded to 64 bytes and that `report_data` binds your nonce, account, mode,
+    and the listed keys, then pin the public keys: they are stable across releases.
+
     Args:
         nonce (str):
 

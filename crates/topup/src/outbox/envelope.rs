@@ -15,6 +15,11 @@ pub struct Event {
     pub id: String,
     /// Always `event`.
     pub object: &'static str,
+    /// The account the event belongs to, `acct_…`. Receivers check it against their own account:
+    /// an event for another account never verifies with their key, and is refused if it does.
+    pub account: String,
+    /// Whether the event happened in live mode; each mode has its own key.
+    pub livemode: bool,
     /// Stable, full-stop-delimited event type.
     #[serde(rename = "type")]
     pub event_type: String,

@@ -20,12 +20,12 @@ fn validate_secp256k1(secret: &SecretKey32) -> Result<(), SignerError> {
         .map_err(|_| SignerError::InvalidKey)
 }
 
-fn sign_settlement(secret: &SecretKey32, payload: &[u8]) -> Ed25519Signature {
+fn sign_ed25519(secret: &SecretKey32, payload: &[u8]) -> Ed25519Signature {
     let signing_key = ed25519_signing_key(secret);
     Ed25519Signature(signing_key.sign(payload).to_bytes())
 }
 
-pub(crate) fn settlement_public_key(secret: &SecretKey32) -> Ed25519PublicKey {
+pub(crate) fn ed25519_public_key(secret: &SecretKey32) -> Ed25519PublicKey {
     let signing_key = ed25519_signing_key(secret);
     Ed25519PublicKey(signing_key.verifying_key().to_bytes())
 }

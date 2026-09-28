@@ -35,8 +35,25 @@ webhook receivers must ignore unknown fields. The format follows
   network.
   Permissions `deposit_addresses.read` and `.write` join the authorization table.
 
+- `POST /v1/account/webhook_keys/roll {expires_in}` (docs/design/multi-tenant.md D11, §16 PR 6):
+  the next version of the mode's webhook key signs every delivery, and the current one keeps
+  signing beside it for up to 7 days (`0` stops it at once), so each delivery carries one `v1a`
+  entry per key. `GET /v1/account` lists the versions as `webhook_keys` (`version`, `expires_at`);
+  the roll is announced as `account.updated`. Needs `account.write`.
+- `livemode` on quotes, deposits, refunds, and `/v1/config`; events carry `account` (`acct_…`) and
+  `livemode`.
+
 ### Changed
 
+- **Breaking**: webhooks are signed with a key per account and mode (docs/design/multi-tenant.md
+  D11, §16 PR 6), derived in the attested CVM at `settlement/{acct}/{live|test}/v{n}`, instead of
+  the one shared `settlement/v1` key: an event signed for one account never verifies at another.
+  `GET /v1/attestation?nonce=` now needs an API key (`401` without) and returns `{object:
+  "attestation", account, livemode, webhook_keys: [{version, public_key, expires_at}],
+  report_data, quote}`, where `report_data = sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖
+  livemode ‖ (version ‖ public_key)*)`; `keyid` and `settlement_pubkey` are removed. Pin your
+  account's key per mode and check the event's `account` and `livemode`. Test and live events
+  are delivered by separate workers.
 - **Breaking**: API keys replace RFC 9421 request signing for merchants
   (docs/design/multi-tenant.md D7, D8, D12, §16 PR 5). Send `Authorization: Bearer
   ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account and the mode. A missing,

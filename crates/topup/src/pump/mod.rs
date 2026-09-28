@@ -450,8 +450,8 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use topup_adapters::signer::actor::SignerHandle;
-    use topup_core::Signer as _;
     use topup_core::deposit::{StepOutcome, WaitReason};
+    use topup_core::{Signer as _, WebhookKeyId};
 
     use super::{Deposit, Step, StepResult};
 
@@ -462,7 +462,9 @@ mod tests {
     #[async_trait]
     impl Step for SignerBackedStep {
         async fn run(&self, _deposit: &Deposit) -> StepResult {
-            let _ = self.signer.settlement_public_key().await;
+            if let Some(key) = WebhookKeyId::new("acct_a", false, 1) {
+                let _ = self.signer.webhook_public_key(&key).await;
+            }
             StepResult::new(
                 StepOutcome::Wait {
                     reason: WaitReason::Paused,

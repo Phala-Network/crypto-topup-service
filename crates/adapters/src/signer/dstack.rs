@@ -3,7 +3,8 @@
 //! Keys come from the `GetKey` method of the dstack 0.5 guest API on `/var/run/dstack.sock`. That
 //! agent derives the key from the domain (its `path`) and the app key alone: the algorithm only
 //! selects the public key it signs, so one domain has one secret. The pinned SDK always requests
-//! `secp256k1`; the `settlement/v1` secret is used as an ed25519 seed. Every domain here has one
+//! `secp256k1`; a webhook key's secret (`settlement/{account}/{live|test}/v{n}`, design D11) is used
+//! as an ed25519 seed. Every domain here has one
 //! fixed algorithm, which [`DerivedKey`] checks locally because the response carries no public key.
 //!
 //! The pinned SDK deserializes RPC JSON into ordinary response buffers before returning them. Those
@@ -16,12 +17,12 @@ use std::time::Duration;
 use dstack_sdk::dstack_client::DstackClient;
 use tokio::time::timeout;
 use topup_core::{
-    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, SETTLEMENT_KEY_DOMAIN, SecretKey32,
-    Signer, SignerError,
+    BACKUP_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError,
+    WebhookKeyId,
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::{settlement_public_key, sign_settlement, validate_secp256k1};
+use super::{ed25519_public_key, sign_ed25519, validate_secp256k1};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -107,18 +108,25 @@ impl DstackSigner {
 }
 
 impl Signer for DstackSigner {
-    async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
+    async fn sign_webhook(
+        &self,
+        key: &WebhookKeyId,
+        payload: &[u8],
+    ) -> Result<Ed25519Signature, SignerError> {
         let key = self
-            .derive_key(SETTLEMENT_KEY_DOMAIN, KeyAlgorithm::Ed25519)
+            .derive_key(&key.domain(), KeyAlgorithm::Ed25519)
             .await?;
-        Ok(sign_settlement(&key.secret, payload))
+        Ok(sign_ed25519(&key.secret, payload))
     }
 
-    async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {
+    async fn webhook_public_key(
+        &self,
+        key: &WebhookKeyId,
+    ) -> Result<Ed25519PublicKey, SignerError> {
         let key = self
-            .derive_key(SETTLEMENT_KEY_DOMAIN, KeyAlgorithm::Ed25519)
+            .derive_key(&key.domain(), KeyAlgorithm::Ed25519)
             .await?;
-        Ok(settlement_public_key(&key.secret))
+        Ok(ed25519_public_key(&key.secret))
     }
 }
 

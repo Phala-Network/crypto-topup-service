@@ -35,7 +35,8 @@ use pricing::{PricingRuntime, ValidatedQuote};
 macro_rules! select_lock {
     () => {
         r#"
-    SELECT quote.id, address.id AS address_id, customer.client_reference_id, quote.route,
+    SELECT quote.id, quote.livemode, address.id AS address_id, customer.client_reference_id,
+           quote.route,
            address.chain_id, address.address,
            quote.amount_atomic::text AS amount_atomic,
            quote.price_scaled::text AS price_scaled,
@@ -90,6 +91,8 @@ impl RateLockStatus {
 pub struct RateLock {
     /// Quote identifier.
     pub id: Uuid,
+    /// The quote's mode.
+    pub livemode: bool,
     /// The quote's address row.
     pub address_id: Uuid,
     /// The customer's `client_reference_id`.
@@ -343,6 +346,7 @@ pub async fn create(
     transaction.commit().await?;
     Ok(RateLock {
         id,
+        livemode: scope.livemode(),
         address_id,
         client_reference_id: customer.client_reference_id.clone(),
         route: route.route.clone(),
@@ -829,6 +833,7 @@ fn near_cap(open: u64, cap: u64) -> bool {
 #[derive(FromRow)]
 struct RateLockRow {
     id: Uuid,
+    livemode: bool,
     address_id: Uuid,
     client_reference_id: String,
     route: String,
@@ -850,6 +855,7 @@ impl TryFrom<RateLockRow> for RateLock {
     fn try_from(row: RateLockRow) -> Result<Self, Self::Error> {
         Ok(Self {
             id: row.id,
+            livemode: row.livemode,
             address_id: row.address_id,
             client_reference_id: row.client_reference_id,
             route: row.route,

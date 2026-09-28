@@ -1552,6 +1552,7 @@ async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Val
         pool.clone(),
         Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).map_err(anyhow::Error::msg)?),
         Arc::new(WebhookSigner(SigningKey::from_bytes(&[11; 32]))),
+        true,
         DeliveryConfig {
             batch_size: 10,
             request_timeout: StdDuration::from_secs(2),
@@ -1574,9 +1575,11 @@ async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Val
 
 struct WebhookSigner(SigningKey);
 
+/// Signs with one key whatever the account; this receiver does not verify signatures.
 impl topup_core::Signer for WebhookSigner {
-    async fn sign_settlement(
+    async fn sign_webhook(
         &self,
+        _key: &topup_core::WebhookKeyId,
         content: &[u8],
     ) -> Result<topup_core::Ed25519Signature, topup_core::SignerError> {
         use ed25519_dalek::Signer as _;
@@ -1585,8 +1588,9 @@ impl topup_core::Signer for WebhookSigner {
         ))
     }
 
-    async fn settlement_public_key(
+    async fn webhook_public_key(
         &self,
+        _key: &topup_core::WebhookKeyId,
     ) -> Result<topup_core::Ed25519PublicKey, topup_core::SignerError> {
         Ok(topup_core::Ed25519PublicKey(
             self.0.verifying_key().to_bytes(),

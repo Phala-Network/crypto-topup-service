@@ -16,8 +16,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reference_product.config import DRIVER_KEYID, ProductConfig
-from reference_product.fulfillment import Answer, Fulfillment
+from reference_product.config import DRIVER_KEYID, MissingProductKeyError, ProductConfig
+from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
 from reference_product.ledger import ProductLedger
 from reference_product.server import AccountApi
 from topup_sdk import RequestSigner, credited_event_id, load_public_key, sign_webhook
@@ -28,7 +28,7 @@ SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([3] * 32))
 
 CONFIG = ProductConfig(
     service_url="http://service.test",
-    product_slug="acme",
+    product_slug="acct_" + "ac" * 16,
     api_key_file="unused",
     route="sandbox-acme-tpha-usd",
     chain_id=11155111,
@@ -50,12 +50,17 @@ CONFIG = ProductConfig(
 def _fulfillment(*, suspended: bool = False) -> Fulfillment:
     ledger = ProductLedger()
     ledger.add_team(TEAM, suspended=suspended)
-    public_key = SERVICE_KEY.public_key()
-    return Fulfillment(CONFIG, ledger, public_key)
+    pinned = PinnedKeys(livemode=False, keys=[SERVICE_KEY.public_key()])
+    return Fulfillment(CONFIG, ledger, lambda: pinned)
 
 
 def _credited(
-    number: int = 1, amount_minor: int = 2_500, team: str = TEAM
+    number: int = 1,
+    amount_minor: int = 2_500,
+    team: str = TEAM,
+    *,
+    account: str = CONFIG.product_slug,
+    livemode: bool = False,
 ) -> tuple[dict[str, str], bytes]:
     tx_hash = "0x" + f"{number:02x}" * 32
     deposit = deposit_id(CONFIG.chain_id, tx_hash, 0)
@@ -64,6 +69,8 @@ def _credited(
         {
             "id": event_id,
             "object": "event",
+            "account": account,
+            "livemode": livemode,
             "type": "deposit.credited",
             "created": 1_790_410_321,
             "data": {
@@ -155,8 +162,8 @@ def test_a_credit_for_an_unknown_workspace_is_held() -> None:
     assert (order.status, order.reason, order.team_id) == ("held", "unknown_account", None)
 
 
-def test_a_legacy_credited_event_is_acknowledged_without_a_credit() -> None:
-    # An operator replay of a credit delivered before prefixed ids keeps its old envelope.
+def test_a_legacy_credited_event_is_refused_without_a_credit() -> None:
+    # The envelope before `evt_` ids names no account, so it no longer verifies.
     fulfillment = _fulfillment()
     legacy_id = str(uuid.UUID(int=7))
     legacy = {
@@ -167,8 +174,26 @@ def test_a_legacy_credited_event_is_acknowledged_without_a_credit() -> None:
     }
     legacy_body = json.dumps(legacy).encode()
     legacy_headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), legacy_body)
-    assert fulfillment.handle(legacy_headers, legacy_body).status == 204
+    assert fulfillment.handle(legacy_headers, legacy_body).status == 400
     assert fulfillment.ledger.credits_for(TEAM) == []
+
+
+def test_another_accounts_or_modes_event_is_refused_without_a_credit() -> None:
+    fulfillment = _fulfillment()
+    for delivery in (
+        _credited(account="acct_" + "0b" * 16),
+        _credited(livemode=True),
+    ):
+        assert fulfillment.handle(*delivery).status == 400
+    assert fulfillment.ledger.credits_for(TEAM) == []
+
+
+def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
+    def unpinned() -> PinnedKeys:
+        raise MissingProductKeyError("not sealed yet")
+
+    fulfillment = Fulfillment(CONFIG, ProductLedger(), unpinned)
+    assert fulfillment.handle(*_credited()).status == 503
 
 
 def test_orders_keyed_by_the_old_deposit_key_are_migrated(tmp_path: Path) -> None:

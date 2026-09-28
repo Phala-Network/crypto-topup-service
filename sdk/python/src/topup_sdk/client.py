@@ -41,7 +41,7 @@ from typing import Any, Literal, TypeVar
 import httpx
 
 from topup_client import AuthenticatedClient
-from topup_client.api.account import get_account
+from topup_client.api.account import get_account, roll_webhook_key
 from topup_client.api.attestation import get_attestation
 from topup_client.api.config import get_config
 from topup_client.api.deposit_addresses import (
@@ -77,6 +77,7 @@ from topup_client.models import (
     MetadataParamType0,
     Quote,
     Refund,
+    RollWebhookKeyRequest,
     UpdateMetadataRequest,
 )
 from topup_client.types import UNSET, Response, Unset
@@ -100,7 +101,7 @@ class TopupClient:
     """Merchant API client authenticated with a secret key, `ppay_sk_test_…` or `ppay_sk_live_…`.
 
     `forwarder` is the `(factory, implementation, treasury)` triple pinned from the attested
-    deployment and the merchant's treasury, as the settlement key is; given it, open quotes are
+    deployment and the merchant's treasury, as the webhook keys are; given it, open quotes are
     checked before they are returned. The check needs the account id (`acct_…`): pass `account`,
     or the client reads it once from `GET /v1/account`.
     """
@@ -151,6 +152,20 @@ class TopupClient:
     def get_account(self) -> AccountObject:
         """Returns the key's account, in the key's mode."""
         return self._call(lambda: get_account.sync_detailed(client=self._client), AccountObject)
+
+    def roll_webhook_key(self, *, expires_in: int = 0) -> AccountObject:
+        """Rolls this mode's webhook signing key: the next version signs from now on, and the
+        current one keeps signing beside it for `expires_in` seconds (at most 7 days; `0` stops it
+        at once). Pin the new public key from `attestation` before the old one expires. Retries
+        reuse one `Idempotency-Key`, so they never roll twice."""
+        key = sf_string(str(uuid.uuid4()))
+        body = RollWebhookKeyRequest(expires_in=expires_in)
+        return self._call(
+            lambda: roll_webhook_key.sync_detailed(
+                client=self._client, body=body, idempotency_key=key
+            ),
+            AccountObject,
+        )
 
     def account_id(self) -> str:
         """The key's account id, `acct_…`, read once."""
@@ -421,11 +436,13 @@ class TopupClient:
         )
 
     def attestation(self, nonce: bytes) -> AttestationResponse:
-        """Fetches attestation evidence binding `nonce` to the settlement key.
+        """Fetches attestation evidence binding `nonce` to the webhook keys of this key's account
+        and mode.
 
-        Raises `AttestationError` unless `report_data` binds `nonce` and `settlement_pubkey`.
-        Verify the quote with the dstack verifier (`deploy/dstack-verifier.sh`), including that
-        its report data is `report_data` zero-padded to 64 bytes, before pinning the key.
+        Raises `AttestationError` unless `report_data` binds `nonce`, the account, the mode, and
+        every listed key. Verify the quote with the dstack verifier (`deploy/dstack-verifier.sh`),
+        including that its report data is `report_data` zero-padded to 64 bytes, before pinning
+        the keys.
         """
         response = self._call(
             lambda: get_attestation.sync_detailed(client=self._client, nonce=nonce.hex()),

@@ -9,7 +9,7 @@ webhook signature, and the attestation binding use the SDK's own helpers, so the
 them exactly as it checks the real service.
 
     python fake_service.py --port 8545 --rpc http://127.0.0.1:8546 --token 0x… \\
-        --product-webhook http://127.0.0.1:8089/webhooks --settlement-seed <64 hex> \\
+        --product-webhook http://127.0.0.1:8089/webhooks --webhook-seed <64 hex> \\
         --factory 0x… --implementation 0x… --product acme --treasury 0x…
 """
 
@@ -54,7 +54,7 @@ class FakeTopup:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.state = State()
-        self.key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(args.settlement_seed))
+        self.key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(args.webhook_seed))
         self.rpc = httpx.Client(timeout=10)
         self.stop = threading.Event()
 
@@ -170,6 +170,8 @@ class FakeTopup:
             {
                 "id": event_id,
                 "object": "event",
+                "account": self.args.product,
+                "livemode": False,
                 "type": "deposit.credited",
                 "created": int(time.time()),
                 "data": {"object": {k: v for k, v in deposit.items() if not k.startswith("_")}},
@@ -284,10 +286,14 @@ class FakeTopup:
 
     def attestation(self, nonce: str) -> dict[str, Any]:
         public = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-        report = attestation_report_data(bytes.fromhex(nonce), public)
+        report = attestation_report_data(
+            bytes.fromhex(nonce), self.args.product, False, [(1, public)]
+        )
         return {
-            "keyid": "settlement/v1",
-            "settlement_pubkey": public.hex(),
+            "object": "attestation",
+            "account": self.args.product,
+            "livemode": False,
+            "webhook_keys": [{"version": 1, "public_key": public.hex(), "expires_at": None}],
             "report_data": report.hex(),
             "quote": "00" * 1024,
         }
@@ -374,7 +380,7 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for name in ("rpc", "token", "product-webhook", "settlement-seed", "factory"):
+    for name in ("rpc", "token", "product-webhook", "webhook-seed", "factory"):
         parser.add_argument(f"--{name}", required=True)
     for name in ("implementation", "product", "treasury"):
         parser.add_argument(f"--{name}", required=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from phala_pay import (
     AddressMismatchError,
     Deposit,
+    Event,
     PhalaPay,
     Quote,
     Refund,
@@ -30,6 +32,7 @@ QUOTE_ID = "qt_" + "0c" * 16
 EVENT_ID = "evt_" + "26" * 16
 REFUND_ID = "re_" + "0d" * 16
 ADDRESS = "0x" + "11" * 20
+ACCOUNT = "acct_" + "a1" * 16
 
 
 def _quote(**fields: object) -> dict[str, object]:
@@ -341,12 +344,16 @@ def _delivery(
     event_id: str = EVENT_ID,
     webhook_id: str = EVENT_ID,
     timestamp: int | None = None,
-    key: Ed25519PrivateKey = SERVICE_KEY,
+    key: Ed25519PrivateKey | list[Ed25519PrivateKey] = SERVICE_KEY,
+    account: str = ACCOUNT,
+    livemode: bool = False,
 ) -> tuple[bytes, dict[str, str]]:
     body = json.dumps(
         {
             "id": event_id,
             "object": "event",
+            "account": account,
+            "livemode": livemode,
             "type": event_type,
             "created": 1_790_000_321,
             "data": {"object": _deposit() if obj is None else obj},
@@ -356,10 +363,21 @@ def _delivery(
     return body, sign_webhook(key, webhook_id, stamp, body)
 
 
+def _construct(
+    body: bytes,
+    headers: dict[str, str],
+    key: str | list[str] = SERVICE_PUBLIC_KEY,
+    account: str = ACCOUNT,
+    livemode: bool = False,
+) -> Event:
+    return Webhook.construct_event(body, headers, key, account, expected_livemode=livemode)
+
+
 def test_construct_event_returns_the_typed_deposit() -> None:
     body, headers = _delivery()
-    event = Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)
+    event = _construct(body, headers)
     assert (event.id, event.type, event.created) == (EVENT_ID, "deposit.credited", 1_790_000_321)
+    assert (event.account, event.livemode) == (ACCOUNT, False)
     assert isinstance(event.data.object, Deposit)
     assert (event.deposit.id, event.deposit.account_id, event.deposit.amount) == (
         f"dep_{1:032x}",
@@ -379,6 +397,8 @@ def test_construct_event_parses_quote_events_and_accepts_text_and_any_header_cas
         body.decode(),
         {k.upper(): v for k, v in headers.items()},
         load_public_key(SERVICE_PUBLIC_KEY),
+        ACCOUNT,
+        expected_livemode=False,
     )
     assert isinstance(event.data.object, Quote)
     assert event.quote.status == "expired"
@@ -399,7 +419,7 @@ def test_construct_event_parses_a_failed_refund() -> None:
         "created": 1_790_000_000,
     }
     body, headers = _delivery("refund.failed", refund)
-    event = Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)
+    event = _construct(body, headers)
     assert isinstance(event.data.object, Refund)
     assert event.refund.status == "failed"
     assert event.refund.failure_reason == "sender_mismatch"
@@ -409,7 +429,7 @@ def test_construct_event_parses_a_failed_refund() -> None:
 
 def test_construct_event_keeps_unknown_types_raw() -> None:
     body, headers = _delivery("payout.paid", {"id": "po_1"})
-    assert Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY).data.object == {"id": "po_1"}
+    assert _construct(body, headers).data.object == {"id": "po_1"}
 
 
 @pytest.mark.parametrize(
@@ -436,7 +456,7 @@ def test_construct_event_rejects_forgeries(case: str, match: str) -> None:
         body, headers = _delivery()
         headers = {}
     with pytest.raises(SignatureVerificationError, match=match):
-        Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)
+        _construct(body, headers)
 
 
 def test_construct_event_rejects_a_verified_body_that_is_not_an_event() -> None:
@@ -452,4 +472,44 @@ def test_construct_event_rejects_a_verified_body_that_is_not_an_event() -> None:
     ).encode()
     headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), body)
     with pytest.raises(ValueError, match="not an event"):
-        Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)
+        _construct(body, headers)
+
+
+@pytest.mark.parametrize(
+    ("delivery", "account", "livemode", "match"),
+    [
+        ({"account": "acct_" + "b2" * 16}, ACCOUNT, False, "another account"),
+        ({}, "acct_" + "b2" * 16, False, "another account"),
+        ({"livemode": True}, ACCOUNT, False, "other mode"),
+        ({}, ACCOUNT, True, "other mode"),
+    ],
+)
+def test_construct_event_fails_closed_for_another_account_or_mode(
+    delivery: dict[str, Any], account: str, livemode: bool, match: str
+) -> None:
+    body, headers = _delivery(**delivery)
+    with pytest.raises(SignatureVerificationError, match=match):
+        _construct(body, headers, account=account, livemode=livemode)
+
+
+def test_construct_event_requires_the_expected_account() -> None:
+    body, headers = _delivery()
+    with pytest.raises(ValueError, match="expected_account"):
+        _construct(body, headers, account="")
+    with pytest.raises(TypeError):
+        Webhook.construct_event(body, headers, SERVICE_PUBLIC_KEY)  # type: ignore[call-arg]
+
+
+def test_construct_event_accepts_either_pinned_key_during_a_rotation() -> None:
+    new_key = Ed25519PrivateKey.from_private_bytes(bytes([10] * 32))
+    new_public = base64.b64encode(
+        new_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
+    body, headers = _delivery(key=[new_key, SERVICE_KEY])
+    for pinned in (SERVICE_PUBLIC_KEY, new_public, [new_public, SERVICE_PUBLIC_KEY]):
+        assert _construct(body, headers, pinned).id == EVENT_ID
+    # After the overlap only the new key signs: the old pin alone no longer verifies.
+    body, headers = _delivery(key=new_key)
+    with pytest.raises(SignatureVerificationError, match="no valid webhook signature"):
+        _construct(body, headers)
+    assert _construct(body, headers, [new_public, SERVICE_PUBLIC_KEY]).id == EVENT_ID

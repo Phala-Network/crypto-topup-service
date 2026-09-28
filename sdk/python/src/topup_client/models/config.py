@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
@@ -27,12 +28,15 @@ class Config:
         max_open_amount_per_account (int): Per-account cap on the credit of open quotes, in cents; no single quote can
             exceed it.
         object_ (str): Always `config`.
+        livemode (bool | Unset): The mode of the key that reads it: `assets` lists that mode's routes. Always sent;
+            optional in the schema like the quote's.
     """
 
     assets: list[ConfigAsset]
     currency: str
     max_open_amount_per_account: int
     object_: str
+    livemode: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -49,6 +53,8 @@ class Config:
 
         object_ = self.object_
 
+        livemode = self.livemode
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -59,6 +65,8 @@ class Config:
                 "object": object_,
             }
         )
+        if livemode is not UNSET:
+            field_dict["livemode"] = livemode
 
         return field_dict
 
@@ -80,11 +88,14 @@ class Config:
 
         object_ = d.pop("object")
 
+        livemode = d.pop("livemode", UNSET)
+
         config = cls(
             assets=assets,
             currency=currency,
             max_open_amount_per_account=max_open_amount_per_account,
             object_=object_,
+            livemode=livemode,
         )
 
         config.additional_properties = d

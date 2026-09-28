@@ -49,7 +49,9 @@ Fulfil from the webhook, once per deposit, and answer `2xx` after the credit is 
 from phala_pay import SignatureVerificationError
 
 try:
-    event = pay.webhooks.construct_event(raw_body, request.headers, SETTLEMENT_PUBLIC_KEY)
+    event = pay.webhooks.construct_event(
+        raw_body, request.headers, WEBHOOK_PUBLIC_KEY, "acct_…", expected_livemode=False
+    )
 except (SignatureVerificationError, ValueError):
     return Response(status_code=400)
 
@@ -58,9 +60,11 @@ if event.type == "deposit.credited":
     credit_once(key=deposit.id, account=deposit.account_id, cents=deposit.amount)
 ```
 
-`SETTLEMENT_PUBLIC_KEY` is the service's webhook key, pinned from its attestation
-(docs/integration.md §5.3). `construct_event` checks the Standard Webhooks
-signature, the timestamp (five minutes' tolerance), and that the body's id is the `webhook-id`;
+`WEBHOOK_PUBLIC_KEY` is your account's webhook key in the mode, pinned from `GET
+/v1/attestation` (docs/integration.md §5.3); pass a list of keys while a rotation overlaps.
+`construct_event` fails closed: it checks the Standard Webhooks signature, the timestamp (five
+minutes' tolerance), that the body's id is the `webhook-id`, and that the event's `account` and
+`livemode` are the expected ones;
 `event.data.object` is the `Deposit` (or, for `quote.expired`, the `Quote`) as it was when the
 event happened. `sdk/examples/fastapi_app.py` is a complete FastAPI backend with both routes.
 

@@ -3,14 +3,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use topup_adapters::attestation::DstackAttestor;
-use topup_core::SETTLEMENT_KEY_DOMAIN;
-
-use super::models::AttestationResponse;
+use topup_adapters::attestation::{AttestedWebhookKey, DstackAttestor};
 
 /// Boxed attestation operation suitable for an application-state trait object.
 pub type AttestationFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<AttestationResponse, AttestationError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<AttestationEvidence, AttestationError>> + Send + 'a>>;
 
 /// Failure to collect current attestation evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,23 +16,53 @@ pub enum AttestationError {
     Unavailable,
 }
 
-/// Runtime source of nonce-bound settlement-key evidence.
+/// What an attestation binds: a nonce, and an account's webhook keys in one mode.
+#[derive(Clone, Copy, Debug)]
+pub struct AttestationRequest<'a> {
+    /// Decoded caller nonce, at most 32 bytes.
+    pub nonce: &'a [u8],
+    /// The caller's account, `acct_…`.
+    pub account: &'a str,
+    /// The caller's mode.
+    pub livemode: bool,
+    /// Key versions that sign the account's deliveries, current first.
+    pub versions: &'a [u32],
+}
+
+/// Evidence binding a request (`topup_adapters::attestation::report_data`).
+#[derive(Clone, Debug)]
+pub struct AttestationEvidence {
+    /// The requested keys, in the requested order.
+    pub webhook_keys: Vec<AttestedWebhookKey>,
+    /// The report data the quote carries.
+    pub report_data: [u8; 32],
+    /// Versioned dstack attestation bytes.
+    pub quote: Vec<u8>,
+}
+
+/// Runtime source of nonce-bound webhook-key evidence.
 pub trait Attestor: Send + Sync {
-    /// Collects attestation evidence binding the decoded nonce bytes and the settlement key.
-    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a>;
+    /// Derives the requested keys and collects evidence binding them, the account, the mode, and
+    /// the nonce.
+    fn attest<'a>(&'a self, request: AttestationRequest<'a>) -> AttestationFuture<'a>;
 }
 
 impl Attestor for DstackAttestor {
-    fn attest<'a>(&'a self, nonce: &'a [u8]) -> AttestationFuture<'a> {
+    fn attest<'a>(&'a self, request: AttestationRequest<'a>) -> AttestationFuture<'a> {
         Box::pin(async move {
-            let evidence = DstackAttestor::attest(self, nonce)
-                .await
-                .map_err(|_| AttestationError::Unavailable)?;
-            Ok(AttestationResponse {
-                keyid: SETTLEMENT_KEY_DOMAIN.to_owned(),
-                settlement_pubkey: hex::encode(evidence.settlement_public_key.0),
-                report_data: hex::encode(evidence.report_data),
-                quote: hex::encode(evidence.quote),
+            let evidence = DstackAttestor::attest(
+                self,
+                request.nonce,
+                request.account,
+                request.livemode,
+                request.versions,
+            )
+            .await
+            .map_err(|_| AttestationError::Unavailable)?;
+            Ok(AttestationEvidence {
+                webhook_keys: evidence.webhook_keys,
+                report_data: evidence.report_data,
+                quote: evidence.quote,
             })
         })
     }
