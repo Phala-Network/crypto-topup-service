@@ -68,3 +68,21 @@ contract ReentrantTreasury {
         }
     }
 }
+
+/// A treasury whose token-received hook burns all its gas for transfers from the forwarders it
+/// is told to, and accepts every other transfer.
+contract ExpensiveHookTreasury {
+    mapping(address from => bool) public expensive;
+    uint256 public counter;
+
+    function setExpensive(address from) external {
+        expensive[from] = true;
+    }
+
+    function onTokenReceived(address from, uint256) external {
+        if (!expensive[from]) return;
+        while (true) {
+            ++counter;
+        }
+    }
+}

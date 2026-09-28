@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { Clones } from "@openzeppelin/contracts/proxy/Clones.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Test, Vm } from "forge-std/Test.sol";
 
@@ -10,6 +11,7 @@ import { ForwarderFactory } from "../src/ForwarderFactory.sol";
 import {
     DelegatingReceiver,
     EventReceiverSingleton,
+    ExpensiveHookTreasury,
     GasGriefingTreasury,
     ReentrantTreasury,
     RejectingTreasury
@@ -18,11 +20,20 @@ import {
     BlacklistToken,
     FalseReturningToken,
     FeeOnTransferToken,
+    HookToken,
+    HostileToken,
     MockERC20,
     NoReturnToken,
     ReentrantToken,
-    RevertBombToken
+    RevertBombToken,
+    TokenProxy,
+    UsdcLikeToken,
+    UsdtLikeToken
 } from "./mocks/MockTokens.sol";
+
+interface IMintable {
+    function mint(address account, uint256 amount) external;
+}
 
 contract ForwarderFactoryTest is Test {
     event ForwarderCreated(
@@ -330,6 +341,189 @@ contract ForwarderFactoryTest is Test {
         assertEq(failed.topics[0], FlushFailed.selector);
         bytes memory reason = abi.decode(failed.data, (bytes));
         assertEq(reason.length, factory.MAX_REASON_LENGTH());
+    }
+
+    function test_BalanceReadFailuresFailOnlyTheirOwnTargets() public {
+        HostileToken hostile = new HostileToken();
+        bytes32[] memory salts = new bytes32[](5);
+        address[] memory forwarders = new address[](5);
+        for (uint256 i; i < salts.length; ++i) {
+            salts[i] = keccak256(abi.encode("balance", i));
+            forwarders[i] = factory.addressOf(treasury, salts[i]);
+            hostile.mint(forwarders[i], 1 ether);
+        }
+        hostile.setMode(forwarders[1], HostileToken.Mode.BalanceReverts);
+        hostile.setMode(forwarders[2], HostileToken.Mode.BalanceReturnsShortData);
+        hostile.setMode(forwarders[3], HostileToken.Mode.BalanceBurnsGas);
+
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(salts[0], forwarders[0], address(hostile), treasury, 1 ether);
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit FlushFailed(
+            salts[1],
+            forwarders[1],
+            address(hostile),
+            abi.encodeWithSelector(HostileToken.Hostile.selector)
+        );
+        vm.expectEmit(true, true, true, true, address(factory));
+        // The short return data itself is the reason.
+        emit FlushFailed(salts[2], forwarders[2], address(hostile), new bytes(31));
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit FlushFailed(salts[3], forwarders[3], address(hostile), "");
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(salts[4], forwarders[4], address(hostile), treasury, 1 ether);
+        vm.prank(caller);
+        factory.flush{ gas: 1_000_000 }(treasury, salts, address(hostile));
+
+        assertEq(hostile.balanceOf(treasury), 2 ether);
+        // A forwarder whose balance cannot be read is not deployed.
+        for (uint256 i = 1; i < 4; ++i) {
+            assertEq(forwarders[i].code.length, 0);
+        }
+    }
+
+    function test_TransferBurningAllGasFailsOnlyItsTarget() public {
+        HostileToken hostile = new HostileToken();
+        bytes32[] memory salts = new bytes32[](3);
+        address[] memory forwarders = new address[](3);
+        for (uint256 i; i < salts.length; ++i) {
+            salts[i] = keccak256(abi.encode("transfer", i));
+            forwarders[i] = factory.addressOf(treasury, salts[i]);
+            hostile.mint(forwarders[i], 1 ether);
+        }
+        hostile.setMode(forwarders[1], HostileToken.Mode.TransferBurnsGas);
+
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(salts[0], forwarders[0], address(hostile), treasury, 1 ether);
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit FlushFailed(salts[1], forwarders[1], address(hostile), "");
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(salts[2], forwarders[2], address(hostile), treasury, 1 ether);
+        vm.prank(caller);
+        factory.flush{ gas: 1_000_000 }(treasury, salts, address(hostile));
+
+        assertEq(hostile.balanceOf(forwarders[1]), 1 ether);
+        assertEq(hostile.balanceOf(treasury), 2 ether);
+    }
+
+    function test_ExpensiveTreasuryHookFailsOnlyItsTarget() public {
+        HookToken hookToken = new HookToken();
+        ExpensiveHookTreasury hookTreasury = new ExpensiveHookTreasury();
+        bytes32 cheapSalt = keccak256("cheap-hook");
+        bytes32 expensiveSalt = keccak256("expensive-hook");
+        address cheap = factory.addressOf(address(hookTreasury), cheapSalt);
+        address expensive = factory.addressOf(address(hookTreasury), expensiveSalt);
+        hookToken.mint(cheap, 3 ether);
+        hookToken.mint(expensive, 5 ether);
+        hookTreasury.setExpensive(expensive);
+
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit FlushFailed(expensiveSalt, expensive, address(hookToken), "");
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(cheapSalt, cheap, address(hookToken), address(hookTreasury), 3 ether);
+        factory.flush{ gas: 1_000_000 }(
+            address(hookTreasury), _pair(expensiveSalt, cheapSalt), address(hookToken)
+        );
+
+        assertEq(hookToken.balanceOf(expensive), 5 ether);
+        assertEq(hookToken.balanceOf(address(hookTreasury)), 3 ether);
+    }
+
+    /// A caller's gas cannot make a target fail: a call short of a target's gas bound reverts.
+    function test_InsufficientGasRevertsTheBatch() public {
+        bytes32 salt = keccak256("short-of-gas");
+        address forwarder = factory.addressOf(treasury, salt);
+        token.mint(forwarder, 1 ether);
+
+        uint256 gasLimit = factory.FLUSH_GAS();
+        vm.expectRevert(ForwarderFactory.InsufficientGas.selector);
+        factory.flush{ gas: gasLimit }(treasury, _single(salt), address(token));
+
+        assertEq(forwarder.code.length, 0);
+        assertEq(token.balanceOf(forwarder), 1 ether);
+    }
+
+    // Gas bounds: cold-state measurements of legitimate targets, logged by `forge test -vv`.
+
+    function test_StandardErc20FlushesFitTheGasBounds() public {
+        _assertErc20FitsGasBounds("PHA-like (OpenZeppelin ERC20)", address(new MockERC20()));
+        _assertErc20FitsGasBounds(
+            "USDC-like (proxied)", address(new TokenProxy(address(new UsdcLikeToken())))
+        );
+        _assertErc20FitsGasBounds(
+            "USDT-like (proxied)", address(new TokenProxy(address(new UsdtLikeToken())))
+        );
+    }
+
+    function test_NativeFlushesFitTheGasBound() public {
+        address proxyTreasury =
+            address(new DelegatingReceiver(address(new EventReceiverSingleton())));
+        _assertNativeFitsGasBound("ETH to a new account", makeAddr("new-account"));
+        _assertNativeFitsGasBound("ETH to a Safe-like proxy", proxyTreasury);
+    }
+
+    function _assertErc20FitsGasBounds(string memory label, address asset) private {
+        address owner = makeAddr(string.concat("treasury ", label));
+        address forwarder = _deployedForwarder(owner, keccak256(bytes(label)));
+        IMintable(asset).mint(forwarder, 1e6);
+        _coolAll(asset, forwarder, owner);
+
+        IERC20(asset).balanceOf(forwarder);
+        uint256 readGas = vm.lastFrameGas().gasTotalUsed;
+        _coolAll(asset, forwarder, owner);
+        vm.prank(address(factory));
+        Forwarder(payable(forwarder)).flush(asset);
+        uint256 flushGas = vm.lastFrameGas().gasTotalUsed;
+
+        emit log_named_uint(string.concat(label, " balanceOf gas"), readGas);
+        emit log_named_uint(string.concat(label, " flush gas"), flushGas);
+        assertEq(IERC20(asset).balanceOf(owner), 1e6);
+        assertLt(readGas * 3, factory.BALANCE_OF_GAS());
+        assertLt(flushGas * 2, factory.FLUSH_GAS());
+    }
+
+    function _assertNativeFitsGasBound(string memory label, address owner) private {
+        address forwarder = _deployedForwarder(owner, keccak256(bytes(label)));
+        vm.deal(forwarder, 1 ether);
+        _coolAll(address(0), forwarder, owner);
+
+        vm.prank(address(factory));
+        Forwarder(payable(forwarder)).flush(address(0));
+        uint256 flushGas = vm.lastFrameGas().gasTotalUsed;
+
+        emit log_named_uint(string.concat(label, " flush gas"), flushGas);
+        assertEq(owner.balance, 1 ether);
+        assertLt(flushGas, factory.FLUSH_GAS());
+    }
+
+    /// Deploys the forwarder of `owner` and `salt` by flushing a token it then no longer holds.
+    function _deployedForwarder(address owner, bytes32 salt) private returns (address forwarder) {
+        forwarder = factory.addressOf(owner, salt);
+        MockERC20 deployer = new MockERC20();
+        deployer.mint(forwarder, 1);
+        factory.flush(owner, _single(salt), address(deployer));
+        assertGt(forwarder.code.length, 0);
+    }
+
+    function _coolAll(address asset, address forwarder, address owner) private {
+        if (asset != address(0)) {
+            vm.cool(asset);
+            // The proxy's implementation, read from the EIP-1967 slot.
+            address target = address(
+                uint160(
+                    uint256(
+                        vm.load(
+                            asset,
+                            0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+                        )
+                    )
+                )
+            );
+            if (target != address(0)) vm.cool(target);
+        }
+        vm.cool(forwarder);
+        vm.cool(owner);
+        vm.cool(address(factory.implementation()));
     }
 
     // ERC-20 edge cases

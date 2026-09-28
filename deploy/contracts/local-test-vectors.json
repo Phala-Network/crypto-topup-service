@@ -1,7 +1,7 @@
 {
-  "factory": "0xAD3c6285Ac6a57B3B55Fb16Af816C0D50AAF9a6f",
-  "implementation": "0xEe00439E91e7d57A95dbdAdb122987Aa3C7160CF",
-  "forwarder": "0x4cD017068e39DDc983a2F3aF2Be032574c7336B2",
-  "factory_code_hash": "0x27436dc35787975fd0216a07c716e43dd809734f481a88f10d0d8482c174afac",
-  "implementation_code_hash": "0xdba4f1d862a5d6024e4533546834bcb46d9901479be501d4d0361b24a61dd632"
+  "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
+  "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
+  "forwarder": "0x49e10C2d888C3B93258D394B9239e535dc99534b",
+  "factory_code_hash": "0x7ceec5e6f4848d2b971a25d70304d44b5bd792df4279031e006d919e6d465b8d",
+  "implementation_code_hash": "0x9b98e3d295372cb6518b00af8505c7156d839e9d192e92054c082799b9104e70"
 }

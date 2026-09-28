@@ -117,11 +117,15 @@ contract Forwarder {                                   // EIP-1167 implementatio
 }
 contract ForwarderFactory {                            // no roles, no admin, no constructor arguments
     Forwarder public immutable implementation;         // created in the constructor
+    uint256 public constant BALANCE_OF_GAS = 30_000;   // gas for a token's balanceOf (staticcall)
+    uint256 public constant FLUSH_GAS = 200_000;       // gas for one forwarder's flush
     function addressOf(address treasury, bytes32 salt) external view returns (address);
         // Clones.predictDeterministicAddressWithImmutableArgs
     function flush(address treasury, bytes32[] calldata salts, address token) external; // anyone
-        // per salt: skip a forwarder holding nothing; clone if no code (ForwarderCreated); call its
-        // flush with revert data truncated to 256 bytes; Flushed on success, FlushFailed and continue
+        // per salt: read the balance with BALANCE_OF_GAS; skip a forwarder holding nothing; clone if
+        // no code (ForwarderCreated); call its flush with FLUSH_GAS and revert data truncated to
+        // 256 bytes; Flushed on success, FlushFailed and continue; InsufficientGas if the caller's
+        // gas cannot cover a call's whole bound
 }
 ```
 
@@ -132,10 +136,17 @@ contract ForwarderFactory {                            // no roles, no admin, no
   `Flushed(salt, forwarder, token, treasury, amount)`, and `FlushFailed(salt, forwarder, token,
   reason)`. `amount` is what left the forwarder. The factory emits events for every caller and
   treasury, so readers filter by treasury.
-- A failing target (a blacklisted forwarder or treasury, a treasury refusing ETH) emits
-  `FlushFailed` and the batch continues, like Multicall3's `allowFailure`. Native sends forward at
-  most `NATIVE_SEND_GAS` and copy no return data, so a treasury cannot consume the batch's gas;
-  the factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
+- A failing target (a blacklisted forwarder or treasury, a treasury refusing ETH, a token whose
+  `balanceOf` reverts, burns gas, or returns short data, a token or treasury hook that burns gas)
+  emits `FlushFailed` and the batch continues, like Multicall3's `allowFailure`. Every call a
+  target makes is gas-bounded and copies at most 256 bytes of return data, so no token or treasury
+  can consume the batch's gas: a token's `balanceOf` gets `BALANCE_OF_GAS`, a forwarder's `flush`
+  `FLUSH_GAS`, and within it a native send `NATIVE_SEND_GAS`. The factory reverts with
+  `InsufficientGas` rather than start a call with less than its bound, so a caller's gas limit
+  cannot fail an honest target. Standard ERC-20s, including USDC- and USDT-like tokens behind
+  proxies, use under 75 000 of `FLUSH_GAS` cold (`contracts/README.md`); a token needing more than
+  200 000 per transfer cannot be swept through the factory and must not be enabled in a route. The
+  factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
   refused.
 - `salt = keccak256(abi.encode(account, client_reference_id, "quote", quote_id))`, where `account`
   is the merchant's `acct_…` id, `client_reference_id` its customer's identifier, and `quote_id` the

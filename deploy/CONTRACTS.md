@@ -22,8 +22,8 @@ keccak256("phala-pay.ForwarderFactory.v2")
 `ForwarderFactory` has no constructor arguments, no roles, and no admin
 ([design D3](../docs/design/multi-tenant.md#d3-contracts)). Its init code is the build's creation
 code, so the CREATE2 address depends only on the build and the salt: the factory is
-`0xAD3c6285Ac6a57B3B55Fb16Af816C0D50AAF9a6f` and its implementation (the factory's first CREATE)
-`0xEe00439E91e7d57A95dbdAdb122987Aa3C7160CF` on every chain (`local-test-vectors.json` records
+`0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its implementation (the factory's first CREATE)
+`0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` on every chain (`local-test-vectors.json` records
 both for the committed build). Anyone can deploy it; a treasury is chosen per forwarder, not per
 factory, so a treasury change never needs a new factory.
 
