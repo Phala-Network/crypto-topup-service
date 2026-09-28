@@ -313,6 +313,24 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     assert _account_call(api, "POST", f"/accounts/{TEAM}/quotes", quote).status == 503
 
 
+def test_the_account_view_lists_the_workspaces_quote_events() -> None:
+    class Service:
+        def list_deposits(self, *, client_reference_id: str) -> list[SimpleNamespace]:
+            return []
+
+    ledger = ProductLedger()
+    ledger.add_team(TEAM)
+    for team in (TEAM, "team-2"):
+        quote = {"object": {"id": f"qt_{team}", "client_reference_id": team}}
+        ledger.record_event(f"evt_{team}", "quote.expired", quote)
+    api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    api._client = Service()  # type: ignore[assignment]
+    answer = _account_call(api, "GET", f"/accounts/{TEAM}", b"")
+    assert answer.status == 200
+    assert answer.body is not None
+    assert [event["data"]["object"]["id"] for event in answer.body["events"]] == [f"qt_{TEAM}"]
+
+
 def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     own, other = "dep_" + uuid.uuid4().hex, "dep_" + uuid.uuid4().hex
     requested: list[tuple[str, str, int]] = []
