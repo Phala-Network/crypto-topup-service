@@ -772,8 +772,9 @@ async fn read_only_router_refuses_writes_and_reports_the_restore_check() -> Resu
             ))
             .await?;
         ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+        ensure!(response.headers().contains_key("retry-after"));
         let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
-        ensure!(body["error"]["code"] == "unavailable", "{body}");
+        ensure!(body["error"]["code"] == "service_restoring", "{body}");
         let accounts: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
             .fetch_one(&database.app_pool)
             .await?;
