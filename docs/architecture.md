@@ -204,8 +204,7 @@ config/routes     route files (attested)   deploy/  compose + Dockerfile   tests
 
 Amounts are `numeric(78,0) CHECK (>= 0)` mapped to `U256`; `transitions` and `audit` are
 append-only. Physical addresses belong to a quote, and so to an account, a mode, and a chain;
-routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (users,
-memberships, sessions, API keys, treasuries, confirmation policies, limits, idempotency keys, and
+routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, confirmation policies, limits, idempotency keys, and
 the authorization table) are listed in [design §14](design/multi-tenant.md#14-data-model); the
 tables the service uses today:
 
@@ -260,7 +259,7 @@ audit         id, account_id, actor_type (user|api_key|admin|system), actor_id, 
 Composite foreign keys tie each tenant row to its parent's account and mode (a quote to its
 customer, an address to its quote, a deposit to its address and customer, a refund to its
 deposit), so no row joins two accounts or two modes. The flusher tables and `deposits.flush_id`
-go with the flusher (design PR 4), `request_signing_keys` with API keys (design PR 6).
+go with the flusher (design PR 4), `request_signing_keys` with API keys (design PR 5).
 
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
 `(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`.
@@ -552,7 +551,7 @@ knows it. Where it departs, the last column says why.
 | Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h | On `POST /v1/quotes` and `POST /v1/refunds`, covered by the signature, stored on the object and never pruned |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
 | Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", type, created, data: {object}}`, `Stripe-Signature` | Same body; Standard Webhooks `v1a` signatures, asymmetric, so the product holds only a public key |
-| Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; `livemode` in objects comes with design PR 11 |
+| Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; `livemode` in objects comes with design PR 10 |
 
 Every merchant request is signed (§3); the account is the signature's `keyid`, which must have the
 form `{acct_…}/v1` and name an issued account with its stored key. The server builds the request's
