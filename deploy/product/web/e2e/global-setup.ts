@@ -154,7 +154,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       ledger_path: join(work, "ledger.sqlite3"),
       driver_public_key: rawPublicKey(generateKeyPairSync("ed25519").publicKey.export({ format: "der", type: "spki" })),
       webhook_public_keys: [rawPublicKey(publicKeyOf(webhookSeed))],
-      demo_dir: join(web, "dist"),
+      demo_dir: join(web, "dist", "client"),
     };
     writeFileSync(join(work, "product.json"), JSON.stringify(config));
     children.push(

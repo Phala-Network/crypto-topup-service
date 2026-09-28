@@ -3,8 +3,11 @@ import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  // src/components/ui is shadcn/ui's generated code, kept as its CLI writes it (still type-checked).
-  { ignores: ["dist", "node_modules", "test-results", "playwright-report", "src/components/ui"] },
+  // src/components/ui is shadcn/ui's generated code, kept as its CLI writes it (still type-checked);
+  // src/routeTree.gen.ts is TanStack Router's, generated from src/routes.
+  {
+    ignores: ["dist", "node_modules", "test-results", "playwright-report", "src/components/ui", "src/routeTree.gen.ts"],
+  },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   reactHooks.configs.flat.recommended,

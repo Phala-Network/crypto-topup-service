@@ -3,6 +3,8 @@ refunds, sweeps, and the timeline's and ledger's states."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 import sys
@@ -245,7 +247,7 @@ def _rpc(request: httpx.Request) -> httpx.Response:
 
 @pytest.fixture
 def demo(tmp_path: Path) -> tuple[DemoConsole, Service]:
-    # The built website's layout (deploy/product/web/dist).
+    # The built website's layout (deploy/product/web/dist/client).
     (tmp_path / "index.html").write_text("<!doctype html><title>Phala Pay</title>")
     (tmp_path / "demo").mkdir()
     (tmp_path / "demo" / "index.html").write_text("<!doctype html><title>Demo</title>")
@@ -526,6 +528,49 @@ def test_serves_only_the_built_page(demo: tuple[DemoConsole, Service]) -> None:
         assert console.handle("GET", path, {}, b"").status in (
             HTTPStatus.NOT_FOUND,
             HTTPStatus.UNAUTHORIZED,
+        )
+
+
+def test_each_page_runs_only_its_own_inline_scripts(tmp_path: Path) -> None:
+    # The prerendered pages carry inline scripts (the theme, the router's hydration data, with a
+    # NUL in it); each page's policy allows exactly its own, as a browser hashes them.
+    (tmp_path / "index.html").write_bytes(
+        b"<!doctype html><script>theme()</script><script>hydrate('\x00landing\x00')</script>"
+        b'<script type="module" src="/assets/index-0a1b2c.js"></script>'
+    )
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "index.html").write_bytes(
+        b"<!doctype html><script>theme()</script><script>hydrate('\x00demo\x00')</script>"
+    )
+    (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
+    console = DemoConsole(
+        replace(CONFIG, api_key_file=str(tmp_path / "product.key")), ProductLedger(), tmp_path
+    )
+
+    def source(script: str) -> str:
+        digest = hashlib.sha256(script.encode()).digest()
+        return f"'sha256-{base64.b64encode(digest).decode()}'"
+
+    landing = console.handle("GET", "/", {}, b"").headers["content-security-policy"]
+    page = console.handle("GET", "/demo/", {}, b"").headers["content-security-policy"]
+    theme = source("theme()")
+    hydrate_landing = source("hydrate('\ufffdlanding\ufffd')")
+    hydrate_demo = source("hydrate('\ufffddemo\ufffd')")
+    assert f"script-src 'self' {theme} {hydrate_landing};" in landing
+    assert f"script-src 'self' {theme} {hydrate_demo};" in page
+    assert "unsafe-inline" not in landing.split("; ")[1]
+
+
+def test_the_website_is_served_from_its_origins_root(
+    demo: tuple[DemoConsole, Service], tmp_path: Path
+) -> None:
+    console, _ = demo
+    # The built pages name `/assets/` and `/demo/` from the root.
+    with pytest.raises(ValueError, match="origin's root"):
+        DemoConsole(
+            replace(console.config, public_url="https://acme.example/topup"),
+            ProductLedger(),
+            tmp_path,
         )
 
 

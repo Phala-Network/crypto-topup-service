@@ -1,9 +1,11 @@
 """The Phala Pay website and demo: a cloud console's "Billing → Add credits" page, on staging.
 
-With `demo_dir` configured, the product serves the built website of deploy/product/web: its
-landing page at exactly `{public_url}/`, their shared assets at `{public_url}/assets/`, the demo
-page at `{public_url}/demo/`, and the demo's JSON API at `{public_url}/demo/api/`. The demo shows
-both ways to collect a payment, as the product's backend runs them with its API key:
+With `demo_dir` configured, the product serves the built website of deploy/product/web (its
+static `dist/client`, prerendered by TanStack Start for the root of its origin, so `public_url`
+has no path): its landing page at exactly `{public_url}/`, their shared assets at
+`{public_url}/assets/`, the demo page at `{public_url}/demo/`, and the demo's JSON API at
+`{public_url}/demo/api/`. The demo shows both ways to collect a payment, as the product's backend
+runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, the ledger lines behind it, and its payments;
@@ -34,6 +36,8 @@ product holds no wallet key: it never sweeps or pays a refund.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import re
@@ -45,6 +49,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
@@ -211,6 +216,9 @@ class DemoConsole:
         self.config = config
         self.ledger = ledger
         self.root = urlsplit(config.public_url).path.rstrip("/")
+        if self.root:
+            # Its pages and router name `/assets/` and `/demo/` from the origin's root.
+            raise ValueError("the website is built for its origin's root: public_url has a path")
         self.base = self.root + "/demo"
         root = Path(demo_dir)
         # Only files present at startup are served, by exact name: no request path is resolved.
@@ -225,11 +233,18 @@ class DemoConsole:
         service = urlsplit(config.service_url)
         # The page reads the public quote and deposit address views from the service, and sends
         # the visitor's own wallet requests through the wallet's provider (no network access).
-        self.csp = (
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            f"img-src 'self' data:; connect-src 'self' {service.scheme}://{service.netloc}; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-        )
+        # Each page may run only its own inline scripts as built (the router's hydration data and
+        # the theme), by hash: never 'unsafe-inline'.
+        self.csp = {
+            name: (
+                f"default-src 'none'; script-src 'self'{_script_hashes(content)}; "
+                "style-src 'self' 'unsafe-inline'; "
+                f"img-src 'self' data:; connect-src 'self' {service.scheme}://{service.netloc}; "
+                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            )
+            for name, content in self.files.items()
+            if name.endswith(".html")
+        }
         self.secure_cookie = urlsplit(config.public_url).scheme == "https"
         self.recorder = recorder or ApiRecorder()
         self._http = http or httpx.Client(timeout=10, follow_redirects=False)
@@ -364,7 +379,7 @@ class DemoConsole:
             "cache-control": "no-cache" if page else "public, max-age=31536000",
         }
         if page:
-            headers["content-security-policy"] = self.csp
+            headers["content-security-policy"] = self.csp[name]
             headers["referrer-policy"] = "no-referrer"
         return Response(HTTPStatus.OK, content, headers)
 
@@ -1328,3 +1343,42 @@ def _json(status: HTTPStatus, body: dict[str, Any]) -> Response:
         json.dumps(body).encode(),
         {"content-type": "application/json", "cache-control": "no-store"},
     )
+
+
+class _InlineScripts(HTMLParser):
+    """Collects the text of a page's inline `<script>` elements (those without `src`)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[str] = []
+        self._inline = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            self._inline = all(name != "src" for name, _ in attrs)
+            if self._inline:
+                self.scripts.append("")
+
+    def handle_data(self, data: str) -> None:
+        if self._inline:
+            self.scripts[-1] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script":
+            self._inline = False
+
+
+def _script_hashes(page: bytes) -> str:
+    """The `script-src` sources for exactly a built page's inline scripts: their SHA-256 hashes.
+
+    A browser hashes a script's text as parsed: line breaks read as `\\n`, and a NUL as U+FFFD
+    (TanStack Router writes NULs into its hydration data, TanStack/router#7581)."""
+    parser = _InlineScripts()
+    parser.feed(page.decode())
+    parser.close()
+    sources: dict[str, None] = {}
+    for script in parser.scripts:
+        text = script.replace("\r\n", "\n").replace("\r", "\n").replace("\0", "\ufffd")
+        digest = base64.b64encode(hashlib.sha256(text.encode()).digest()).decode()
+        sources[f" 'sha256-{digest}'"] = None
+    return "".join(sources)

@@ -381,3 +381,24 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
   await first.close();
   await second.close();
 });
+
+test("the prerendered pages run under their CSP: the landing hydrates, the demo renders", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      errors.push(message.text());
+    }
+  });
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.emulateMedia({ colorScheme: "light" });
+  const landing = await page.goto(new URL("../", env("DEMO_URL")).href);
+  expect(landing?.headers()["content-security-policy"]).toMatch(/script-src 'self'( 'sha256-[^']+')+;/);
+  await page.getByRole("button", { name: "Switch to dark theme" }).click();
+  await expect(page.locator("html")).toHaveClass("dark");
+  await page.getByRole("link", { name: "Try the demo" }).first().click();
+  await expect(page).toHaveURL(env("DEMO_URL"));
+  await expect(page.getByTestId("balance")).toHaveText("$0.00");
+  // The theme applies before the page renders, from the choice made on the landing page.
+  await expect(page.getByRole("button", { name: "Switch to light theme" })).toBeVisible();
+  expect(errors).toEqual([]);
+});
