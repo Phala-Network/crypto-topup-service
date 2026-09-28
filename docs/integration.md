@@ -1472,10 +1472,12 @@ you. Nothing is credited or delivered meanwhile; payments keep arriving at your 
 credited after the freeze. The operator sends your contact the restore point and asks, from your
 own records since then, for:
 
-- the API keys you revoked or rolled (the `key_…` id, or the prefix and last four characters): the
-  restore made them valid again, and the operator revokes them again;
+- the API keys you revoked or rolled, secret and restricted (the `key_…` id, or the prefix and last
+  four characters): the restore made them valid again, and the operator revokes them again;
 - the latest `treasury` object of each treasury you received an event about: a change you
-  canceled is canceled again before any treasury change can apply;
+  canceled is canceled again before any treasury change can apply, and crediting you paused
+  (`POST /v1/treasuries/{id}/pause`) or resumed is paused or resumed again before anything is
+  credited;
 - the webhook endpoints you deleted: they are deleted again before deliveries resume;
 - the deposit addresses you received (`client_reference_id`, `address`, and `id` or `version`):
   the address is derived from your account, mode, customer, and version, so the operator issues

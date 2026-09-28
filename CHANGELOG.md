@@ -116,7 +116,8 @@ webhook receivers must ignore unknown fields. The format follows
   deposit credited meanwhile. Merchants give the operator their records since the restore point
   (integration guide §5.12). Operators: `GET /v1/admin/restore` and
   `POST /v1/admin/restore/{api_keys/revoke, treasuries/verify, webhook_endpoints/delete,
-  deposit_addresses, events, unfreeze}` (`deploy/runbooks/restore.md`). On a restore-check
+  deposit_addresses, events, unfreeze}` (`deploy/runbooks/restore.md`); `treasuries/verify`
+  re-applies lost treasury cancellations and the merchant's crediting pauses and resumes. On a restore-check
   instance, writes other than these answer `503 service_restoring` (was `503 unavailable`).
 - `POST /v1/account {confirmation_policies}` requires, per chain, a confirmation stricter than the
   route's floor (a depth, `safe`, or `finalized`), applied to every deposit not credited yet;

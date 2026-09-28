@@ -240,7 +240,22 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "unavailable",
         503,
-        "A dependency (pricing, sanctions screening, attestation) is temporarily unavailable, or the instance is read-only. Retry with backoff; the same `Idempotency-Key` runs the request again.",
+        "A dependency (pricing, sanctions screening, attestation) is temporarily unavailable. Retry with backoff; the same `Idempotency-Key` runs the request again.",
+    ),
+    (
+        "service_restoring",
+        503,
+        "The service was restored from backup and is frozen until the operator has reconciled it with you: reads work, every write is refused, and nothing is credited or delivered meanwhile. Retry after `Retry-After` seconds; the operator contacts you for your records since the restore point.",
+    ),
+    (
+        "restore_not_frozen",
+        400,
+        "Admin API only: a restore reconciliation action needs the service frozen after a restore.",
+    ),
+    (
+        "restore_rescan_incomplete",
+        400,
+        "Admin API only: a chain is not rescanned since the restore (`GET /v1/admin/restore`); the freeze cannot be lifted yet.",
     ),
 ];
 
@@ -761,22 +776,23 @@ impl ApiError {
     }
 
     /// Returns a write refused while the service is frozen after a restore from backup
-    /// (`crate::restore_mode`); the response carries `Retry-After`.
+    /// (`crate::restore_mode`), retried after `retry_after` seconds.
     #[must_use]
-    pub fn service_restoring() -> Self {
+    pub fn service_restoring(retry_after: u64) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "service_restoring",
             "the service was restored from backup and is being reconciled: reads work, writes are \
-             paused; retry later",
+             paused; retry after Retry-After seconds",
         )
+        .with_retry_after(retry_after)
     }
 
     /// Returns a restore action that needs the service frozen after a restore.
     #[must_use]
     pub fn restore_not_frozen() -> Self {
         Self::new(
-            StatusCode::CONFLICT,
+            StatusCode::BAD_REQUEST,
             "restore_not_frozen",
             "the service is not frozen after a restore",
         )
@@ -786,7 +802,7 @@ impl ApiError {
     #[must_use]
     pub fn restore_rescan_incomplete() -> Self {
         Self::new(
-            StatusCode::CONFLICT,
+            StatusCode::BAD_REQUEST,
             "restore_rescan_incomplete",
             "a chain is not rescanned since the restore; see GET /v1/admin/restore",
         )
@@ -936,6 +952,9 @@ mod tests {
             ApiError::paused(""),
             ApiError::chain_frozen(),
             ApiError::service_unavailable(""),
+            ApiError::service_restoring(300),
+            ApiError::restore_not_frozen(),
+            ApiError::restore_rescan_incomplete(),
             ApiError::internal(),
             ApiError::unauthorized(),
             ApiError::signature_replayed(),

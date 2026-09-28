@@ -320,7 +320,120 @@ pub(super) fn schema(name: &str) -> Option<Value> {
                 "last_attempt_status": 503,
             }],
         }),
+        // The restore reconciliation (deploy/runbooks/restore.md).
+        "RestoreStatus" => json!({
+            "object": "restore_status",
+            "frozen": true,
+            "restore": restore(),
+            "rescan": [{
+                "chain_id": 1,
+                "restored_block": 23_401_200,
+                "scanned_block": 23_401_917,
+                "scanned_block_time": CREATED + 3_600,
+                "pending_backfills": 0,
+                "blocked": false,
+                "complete": true,
+            }],
+            "delivered_events": {
+                "imported": 1,
+                "findings": [{
+                    "event": EVENT,
+                    "type": "deposit.credited",
+                    "deposit": DEPOSIT,
+                    "status": "pending",
+                    "delivered_amount_atomic": "202510000000000000000",
+                    "delivered_amount": "2500",
+                    "ledger_amount_atomic": null,
+                    "ledger_amount": null,
+                }],
+            },
+        }),
+        "RestoreObject" => restore(),
+        "RestoreApiKeyRevokeRequest" => json!({
+            "account": ACCOUNT,
+            "prefix": "ppay_sk_live_",
+            "last4": "9Yz2",
+            "reason": "revoked by the merchant at 10:02 PDT, after the restore point; INC-12",
+        }),
+        "RestoreTreasuryVerifyRequest" => json!({
+            "account": ACCOUNT,
+            "livemode": true,
+            "treasuries": [{
+                "id": TREASURY,
+                "status": "canceled",
+                "chain_id": 1,
+                "address": TREASURY_ADDRESS,
+                "crediting_paused_by": [],
+            }],
+            "reapply": true,
+            "reason": "the merchant's treasury events since the restore point; INC-12",
+        }),
+        "RestoreTreasuryVerifyResponse" => json!({
+            "object": "list",
+            "data": [{
+                "id": TREASURY,
+                "received_status": "canceled",
+                "status": "canceled",
+                "result": "canceled",
+                "crediting": "matches",
+            }],
+        }),
+        "RestoreWebhookEndpointDeleteRequest" => json!({
+            "account": ACCOUNT,
+            "livemode": true,
+            "id": ENDPOINT,
+            "reason": "deleted by the merchant after the restore point; INC-12",
+        }),
+        "RestoreDepositAddressRequest" => json!({
+            "account": ACCOUNT,
+            "livemode": false,
+            "client_reference_id": "team-42",
+            "address": CUSTOMER_ADDRESS,
+            "id": DEPOSIT_ADDRESS,
+            "reason": "issued after the restore point, from the merchant's records; INC-12",
+        }),
+        "RestoreDepositAddressResponse" => json!({
+            "reissued": true,
+            "deposit_address": deposit_address(),
+        }),
+        "RestoreEventsImportRequest" => json!({
+            "events": [{
+                "id": EVENT,
+                "object": "event",
+                "account": ACCOUNT,
+                "livemode": false,
+                "type": "deposit.credited",
+                "created": CREATED,
+                "data": {"object": deposit()},
+            }],
+            "reason": "delivered after the restore point, from the merchant's receiver; INC-12",
+        }),
+        "RestoreEventsImportResponse" => json!({
+            "object": "list",
+            "data": [{"id": EVENT, "result": "imported"}],
+        }),
+        "RestoreUnfreezeRequest" => json!({
+            "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
+            "security_changes_reapplied": true,
+            "deposit_addresses_reissued": true,
+            "delivered_events_imported": true,
+        }),
         _ => return None,
+    })
+}
+
+fn restore() -> Value {
+    json!({
+        "id": "0b8e2f4a-6c1d-4e3b-9a5f-7d2c4e6a8b1f",
+        "object": "restore",
+        "detected_at": CREATED + 1_800,
+        "detected_by": "restore_check",
+        "timeline_id": 2,
+        "restore_point": CREATED + 1_740,
+        "restored_cursors": {"1": 23_401_200},
+        "unfrozen_at": null,
+        "unfrozen_by": null,
+        "unfreeze_reason": null,
     })
 }
 

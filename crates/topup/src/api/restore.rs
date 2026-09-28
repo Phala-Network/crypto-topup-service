@@ -13,7 +13,7 @@ use chrono::DateTime;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::api_keys::{self, ApiKey};
+use crate::api_keys;
 use crate::audit::{self, Actor};
 use crate::deposit_addresses::{self, ChainContracts, ReissueTarget};
 use crate::ids;
@@ -22,17 +22,16 @@ use crate::tenancy::Scope;
 use crate::treasuries::{self, Status as TreasuryStatus};
 
 use super::AppState;
+use super::auth::AdminActor;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::ApiJson;
-use super::handlers::{
-    admin_actor, parse_account_id, validate_client_reference_id, validate_reason,
-};
+use super::handlers::{parse_account_id, validate_client_reference_id, validate_reason};
 use super::models::{
-    self, ApiKeyObject, EventImport, RestoreApiKeyRevokeRequest, RestoreDepositAddressRequest,
-    RestoreDepositAddressResponse, RestoreEventsImportRequest, RestoreEventsImportResponse,
-    RestoreObject, RestoreStatus, RestoreTreasuryVerifyRequest, RestoreTreasuryVerifyResponse,
-    RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest, TreasuryVerification,
-    WebhookEndpointObject,
+    self, ApiKeyObject, DeletedWebhookEndpoint, EventImport, RestoreApiKeyRevokeRequest,
+    RestoreDepositAddressRequest, RestoreDepositAddressResponse, RestoreEventsImportRequest,
+    RestoreEventsImportResponse, RestoreObject, RestoreStatus, RestoreTreasuryVerifyRequest,
+    RestoreTreasuryVerifyResponse, RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest,
+    TreasuryVerification,
 };
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -104,10 +103,9 @@ pub(crate) async fn get_restore(State(state): State<AppState>) -> ApiResult<Json
     request_body = RestoreApiKeyRevokeRequest,
     responses(
         (status = 200, description = "OK: revoked, or already revoked", body = ApiKeyObject),
-        (status = 400, description = "Bad Request: no or both selectors, several keys match (name it by `id`), or `last_api_key` (issue a recovery key with `revoke_existing`)", body = ErrorResponse),
+        (status = 400, description = "Bad Request: no or both selectors, several keys match (name it by `id`), or `last_api_key` (issue a recovery key with `revoke_existing`); or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no key of the account matches", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+        (status = 404, description = "Not Found: no key of the account matches", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -117,6 +115,7 @@ pub(crate) async fn get_restore(State(state): State<AppState>) -> ApiResult<Json
 /// Announced as `api_key.revoked`. Audited.
 pub(crate) async fn revoke_api_key(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreApiKeyRevokeRequest>,
 ) -> ApiResult<Json<ApiKeyObject>> {
     validate_reason(&request.reason)?;
@@ -138,26 +137,31 @@ pub(crate) async fn revoke_api_key(
         }
         (None, Some(prefix), Some(last4)) => {
             let livemode = key_mode(prefix)?;
-            let matching: Vec<ApiKey> =
-                api_keys::list(&state.pool, Scope::new(account_id, livemode))
-                    .await?
-                    .into_iter()
-                    .filter(|key| key.prefix == *prefix && key.last4 == *last4)
-                    .collect();
-            let unrevoked: Vec<&ApiKey> = matching
-                .iter()
-                .filter(|key| key.revoked_at.is_none())
-                .collect();
-            match (unrevoked.as_slice(), matching.first()) {
-                ([key], _) => (*key).clone(),
-                ([], Some(revoked)) => revoked.clone(),
-                ([], None) => return Err(ApiError::not_found()),
+            let scope = Scope::new(account_id, livemode);
+            // The keys with this prefix and last four, not revoked first.
+            let matching: Vec<(Uuid, bool)> = sqlx::query_as(
+                "SELECT id, revoked_at IS NOT NULL FROM api_keys \
+                 WHERE account_id = $1 AND livemode = $2 AND prefix = $3 AND last4 = $4 \
+                 ORDER BY revoked_at IS NOT NULL, created_at",
+            )
+            .bind(account_id)
+            .bind(livemode)
+            .bind(prefix)
+            .bind(last4)
+            .fetch_all(&state.pool)
+            .await?;
+            let id = match matching.as_slice() {
+                [] => return Err(ApiError::not_found()),
+                [(id, _)] | [(id, false), (_, true), ..] | [(id, true), ..] => *id,
                 _ => {
                     return Err(ApiError::bad_request(
                         "several keys have this prefix and last4; revoke by id",
                     ));
                 }
-            }
+            };
+            api_keys::get(&state.pool, scope, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -165,7 +169,6 @@ pub(crate) async fn revoke_api_key(
             ));
         }
     };
-    let actor = admin_actor(&state);
     let revoked = api_keys::revoke(&state.pool, key.scope(), key.id, &actor)
         .await
         .map_err(super::keys::map_error)?;
@@ -188,18 +191,19 @@ pub(crate) async fn revoke_api_key(
     request_body = RestoreTreasuryVerifyRequest,
     responses(
         (status = 200, description = "OK", body = RestoreTreasuryVerifyResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+        (status = 400, description = "Bad Request; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
 /// Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,
-/// with `reapply_cancellations`, cancels again each pending change the merchant canceled after the
-/// restore point: while frozen no treasury change applies, so none takes effect first. Audited.
+/// with `reapply`, cancels again each pending change the merchant canceled after the restore point
+/// (while frozen no treasury change applies, so none takes effect first) and pauses or resumes
+/// crediting again as the merchant last did. Audited, each change announced as `treasury.*`.
 pub(crate) async fn verify_treasuries(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreTreasuryVerifyRequest>,
 ) -> ApiResult<Json<RestoreTreasuryVerifyResponse>> {
     validate_reason(&request.reason)?;
@@ -226,57 +230,92 @@ pub(crate) async fn verify_treasuries(
             .map_err(|_| ApiError::invalid_param("treasuries", "address must be an address"))?;
         received.push((id, treasury, address));
     }
-    let actor = admin_actor(&state);
     let mut data = Vec::new();
     for (id, treasury, address) in received {
         let current = treasuries::get(&state.pool, scope, id)
             .await
             .map_err(super::treasuries::map_error)?;
-        let (status, result) = match current {
-            None => (None, "missing"),
-            Some(current) => {
-                let object = super::treasuries::treasury_object(&current);
-                let same_place = current.chain_id == treasury.chain_id
-                    && object
-                        .address
-                        .eq_ignore_ascii_case(&format!("{address:#x}"));
-                if !same_place {
-                    (Some(object.status), "differs")
-                } else if object.status == treasury.status {
-                    (Some(object.status), "matches")
-                } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending
-                {
-                    if request.reapply_cancellations {
-                        let canceled = treasuries::cancel(&state.pool, scope, &actor, id)
-                            .await
-                            .map_err(super::treasuries::map_error)?;
-                        record(
-                            &state,
-                            &restore,
-                            Some(scope.account_id()),
-                            &actor,
-                            "restore.treasury_cancel",
-                            &format!("treasury:{}", treasury.id),
-                            &request.reason,
-                        )
-                        .await?;
-                        (
-                            Some(super::treasuries::treasury_object(&canceled).status),
-                            "canceled",
-                        )
-                    } else {
-                        (Some(object.status), "cancellation_lost")
-                    }
+        let Some(mut current) = current else {
+            data.push(TreasuryVerification {
+                id: treasury.id.clone(),
+                received_status: treasury.status.clone(),
+                status: None,
+                result: "missing".to_owned(),
+                crediting: treasury
+                    .crediting_paused_by
+                    .as_ref()
+                    .map(|_| "missing".to_owned()),
+            });
+            continue;
+        };
+        let same_place = current.chain_id == treasury.chain_id && current.address == address;
+        let current_status = super::treasuries::treasury_object(&current).status;
+        let result = if !same_place {
+            "differs"
+        } else if current_status == treasury.status {
+            "matches"
+        } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending {
+            if request.reapply {
+                current = treasuries::cancel(&state.pool, scope, &actor, id)
+                    .await
+                    .map_err(super::treasuries::map_error)?;
+                record(
+                    &state,
+                    &restore,
+                    Some(scope.account_id()),
+                    &actor,
+                    "restore.treasury_cancel",
+                    &format!("treasury:{}", treasury.id),
+                    &request.reason,
+                )
+                .await?;
+                "canceled"
+            } else {
+                "cancellation_lost"
+            }
+        } else {
+            "differs"
+        };
+        // The merchant's own crediting pause (design, "launch hardening"): a pause or resume
+        // after the restore point is lost with it. The operator's pauses are its own to re-apply.
+        let merchant = crate::pause::PauseOwner::Merchant;
+        let crediting = match &treasury.crediting_paused_by {
+            None => None,
+            Some(_) if !same_place => Some("differs"),
+            Some(received) => {
+                let paused = received.iter().any(|owner| owner == merchant.code());
+                let current_paused = current
+                    .crediting_paused_by
+                    .iter()
+                    .any(|owner| owner == merchant.code());
+                Some(if paused == current_paused {
+                    "matches"
+                } else if request.reapply {
+                    current = treasuries::set_crediting_paused(
+                        &state.pool,
+                        scope,
+                        id,
+                        merchant,
+                        paused,
+                        &actor,
+                        &format!("restore {}: {}", restore.id, request.reason.trim()),
+                    )
+                    .await
+                    .map_err(super::treasuries::map_error)?;
+                    if paused { "paused" } else { "resumed" }
+                } else if paused {
+                    "pause_lost"
                 } else {
-                    (Some(object.status), "differs")
-                }
+                    "resume_lost"
+                })
             }
         };
         data.push(TreasuryVerification {
             id: treasury.id.clone(),
             received_status: treasury.status.clone(),
-            status,
+            status: Some(super::treasuries::treasury_object(&current).status),
             result: result.to_owned(),
+            crediting: crediting.map(str::to_owned),
         });
     }
     record(
@@ -300,11 +339,10 @@ pub(crate) async fn verify_treasuries(
     path = "/v1/admin/restore/webhook_endpoints/delete",
     request_body = RestoreWebhookEndpointDeleteRequest,
     responses(
-        (status = 200, description = "OK: deleted", body = WebhookEndpointObject),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 200, description = "OK: deleted", body = DeletedWebhookEndpoint),
+        (status = 400, description = "Bad Request; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no endpoint of the account and mode, or deleted already", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+        (status = 404, description = "Not Found: no endpoint of the account and mode, or deleted already", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -313,14 +351,14 @@ pub(crate) async fn verify_treasuries(
 /// resume, announced as `webhook_endpoint.deleted`. Audited.
 pub(crate) async fn delete_webhook_endpoint(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreWebhookEndpointDeleteRequest>,
-) -> ApiResult<Json<WebhookEndpointObject>> {
+) -> ApiResult<Json<DeletedWebhookEndpoint>> {
     validate_reason(&request.reason)?;
     let restore = frozen(&state).await?;
     let scope = Scope::new(parse_account_id(&request.account)?, request.livemode);
     let id = ids::parse(ids::WEBHOOK_ENDPOINT, &request.id)
         .ok_or_else(|| ApiError::invalid_param("id", "id must be a we_ id"))?;
-    let actor = admin_actor(&state);
     let deleted = crate::webhook_endpoints::delete(&state.pool, scope, id, &actor)
         .await
         .map_err(super::webhook_endpoints::map_error)?;
@@ -334,7 +372,11 @@ pub(crate) async fn delete_webhook_endpoint(
         &request.reason,
     )
     .await?;
-    Ok(Json(deleted.object()))
+    Ok(Json(DeletedWebhookEndpoint {
+        id: deleted.public_id(),
+        object: "webhook_endpoint".to_owned(),
+        deleted: true,
+    }))
 }
 
 #[utoipa::path(
@@ -343,10 +385,9 @@ pub(crate) async fn delete_webhook_endpoint(
     request_body = RestoreDepositAddressRequest,
     responses(
         (status = 200, description = "OK: re-issued, or the customer's existing version", body = RestoreDepositAddressResponse),
-        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -357,6 +398,7 @@ pub(crate) async fn delete_webhook_endpoint(
 /// rescan credits payments made to it since. Audited.
 pub(crate) async fn reissue_deposit_address(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreDepositAddressRequest>,
 ) -> ApiResult<Json<RestoreDepositAddressResponse>> {
     validate_reason(&request.reason)?;
@@ -407,7 +449,7 @@ pub(crate) async fn reissue_deposit_address(
         target,
         id,
         &restore.restored_cursors,
-        &admin_actor(&state),
+        &actor,
         &request.reason,
     )
     .await
@@ -427,10 +469,9 @@ pub(crate) async fn reissue_deposit_address(
     request_body = RestoreEventsImportRequest,
     responses(
         (status = 200, description = "OK", body = RestoreEventsImportResponse),
-        (status = 400, description = "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive", body = ErrorResponse),
+        (status = 400, description = "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no account has an event's `account`", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`", body = ErrorResponse)
+        (status = 404, description = "Not Found: no account has an event's `account`", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -442,6 +483,7 @@ pub(crate) async fn reissue_deposit_address(
 /// Audited.
 pub(crate) async fn import_events(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreEventsImportRequest>,
 ) -> ApiResult<Json<RestoreEventsImportResponse>> {
     validate_reason(&request.reason)?;
@@ -469,7 +511,6 @@ pub(crate) async fn import_events(
             return Err(ApiError::not_found().with_param("events"));
         }
     }
-    let actor = admin_actor(&state);
     let mut data = Vec::new();
     for event in &events {
         let outcome =
@@ -491,9 +532,8 @@ pub(crate) async fn import_events(
     request_body = RestoreUnfreezeRequest,
     responses(
         (status = 200, description = "OK: unfrozen", body = RestoreObject),
-        (status = 400, description = "Bad Request: a checklist item is not `true`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 409, description = "`restore_not_frozen`, or `restore_rescan_incomplete`", body = ErrorResponse)
+        (status = 400, description = "Bad Request: a checklist item is not `true`, `restore_not_frozen`, or `restore_rescan_incomplete`", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
@@ -504,6 +544,7 @@ pub(crate) async fn import_events(
 /// in the restore and in `audit`.
 pub(crate) async fn unfreeze(
     State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreUnfreezeRequest>,
 ) -> ApiResult<Json<RestoreObject>> {
     validate_reason(&request.reason)?;
@@ -533,7 +574,7 @@ pub(crate) async fn unfreeze(
          delivered_events_imported",
         request.reason.trim()
     );
-    let restore = restore_mode::unfreeze(&state.pool, &state.routes, &admin_actor(&state), &reason)
+    let restore = restore_mode::unfreeze(&state.pool, &state.routes, &actor, &reason)
         .await
         .map_err(|error| match error {
             restore_mode::UnfreezeError::NotFrozen => ApiError::restore_not_frozen(),

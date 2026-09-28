@@ -1800,9 +1800,10 @@ pub struct RestoreTreasuryVerifyRequest {
     /// Each treasury's latest object the merchant received (an event's `data.object`), one per
     /// treasury; at most 100.
     pub treasuries: Vec<ReceivedTreasury>,
-    /// Cancel again each pending treasury the merchant received as `canceled`.
+    /// Apply again what the restore undid: cancel each pending treasury the merchant received as
+    /// `canceled`, and pause or resume crediting as the merchant's `crediting_paused_by` shows.
     #[serde(default)]
-    pub reapply_cancellations: bool,
+    pub reapply: bool,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
@@ -1818,6 +1819,10 @@ pub struct ReceivedTreasury {
     pub chain_id: u64,
     /// The received `address`.
     pub address: String,
+    /// The received `crediting_paused_by`; only its `merchant` entry is compared, the operator
+    /// re-applies its own pauses.
+    #[serde(default)]
+    pub crediting_paused_by: Option<Vec<String>>,
 }
 
 /// `POST /v1/admin/restore/treasuries/verify` response.
@@ -1839,10 +1844,14 @@ pub struct TreasuryVerification {
     /// The restored treasury's status now; `null` when it is missing.
     pub status: Option<String>,
     /// `matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,
-    /// the restore undid it: cancel it with `reapply_cancellations`); `missing` (created after the
+    /// the restore undid it: cancel it with `reapply`); `missing` (created after the
     /// restore point: the merchant creates it again after the unfreeze); or `differs` (another
     /// status, chain, or address; a change that applied after the restore point applies again).
     pub result: String,
+    /// The merchant's crediting pause, when `crediting_paused_by` was sent: `matches`; `paused` or
+    /// `resumed` (applied again now); `pause_lost` or `resume_lost` (without `reapply`); `missing`;
+    /// or `differs` (another chain or address).
+    pub crediting: Option<String>,
 }
 
 /// `POST /v1/admin/restore/webhook_endpoints/delete` body: an endpoint the merchant deleted

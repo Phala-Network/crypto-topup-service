@@ -853,7 +853,7 @@ GET    /v1/admin/reports/daily                 unflushed, open quotes, rejected 
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
 GET    /v1/admin/restore                      restore freeze, rescan per chain, imported events vs the ledger (§14)
 POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   revoke again after a restore
-POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply_cancellations, reason}
+POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply, reason}   cancellations and crediting pauses again
 POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
 POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, reason}   re-issue identically
 POST   /v1/admin/restore/events {events, reason}   import delivered deposit events as delivered
@@ -1268,8 +1268,8 @@ reads and `/healthz` stay up, every merchant write answers `503 service_restorin
 `Retry-After`, and the pumps, finality watch, refund verification, quote expiry, treasury
 time-lock, and webhook delivery wait; the scanner rescans from the restored cursor and the
 reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
-action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations and
-endpoint deletions applied again, deposit addresses given out after the restore point re-issued
+action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations, the
+merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses given out after the restore point re-issued
 identically from their deterministic salts (backfilled from the restored cursor), and the events
 merchants received imported as delivered, so a deposit rebuilt from the chain keeps its
 `deposit.credited` event id and delivered body and is never re-emitted with a re-valued amount; a

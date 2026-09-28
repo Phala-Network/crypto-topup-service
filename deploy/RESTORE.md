@@ -94,7 +94,8 @@ is re-valued. Before the unfreeze the operator imports the events each merchant 
 restore point, as delivered: the rebuilt deposit then finds its event recorded and nothing is sent
 again with another body, and `GET /v1/admin/restore` flags a re-valued amount that differs from
 the delivered one. The same reconciliation revokes again the keys, cancels again the treasury
-changes, and deletes again the endpoints that the restore brought back, and re-issues the deposit
+changes, pauses or resumes treasury crediting again, and deletes again the endpoints that the
+restore brought back, and re-issues the deposit
 addresses given out after the restore point, identically ([runbook](runbooks/restore.md)).
 
 A service that booted straight from backup into the service compose (an empty volume, so the

@@ -36,7 +36,7 @@ use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use crate::treasuries::ContractSignatures;
 use axum::extract::{Extension, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
@@ -245,25 +245,7 @@ fn merchant_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(events::list_events))
         .routes(routes!(events::get_event))
         .routes(routes!(events::resend_event))
-<<<<<<< HEAD
 }
-=======
-        // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            idempotency::idempotent_post,
-        ))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::authenticate_merchant,
-        ))
-        // Outermost: while frozen after a restore, a write is refused before anything else runs,
-        // so no idempotency key stores the refusal.
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            refuse_writes_while_frozen,
-        ));
->>>>>>> c0ce0cb (feat: restore mode after a restore from backup)
 
 /// The routes a quote's or deposit address's `client_secret` also reads.
 fn client_secret_routes() -> OpenApiRouter<AppState> {
@@ -291,7 +273,13 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::daily_report))
         .routes(routes!(handlers::metrics))
-<<<<<<< HEAD
+        .routes(routes!(restore::get_restore))
+        .routes(routes!(restore::revoke_api_key))
+        .routes(routes!(restore::verify_treasuries))
+        .routes(routes!(restore::delete_webhook_endpoint))
+        .routes(routes!(restore::reissue_deposit_address))
+        .routes(routes!(restore::import_events))
+        .routes(routes!(restore::unfreeze))
 }
 
 /// utoipa's merchant and admin documents, before [`openapi`] finishes them.
@@ -317,15 +305,6 @@ pub struct ApiDocs {
 pub fn router(state: AppState) -> (Router, ApiDocs) {
     // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
     let merchant = merchant_routes()
-=======
-        .routes(routes!(restore::get_restore))
-        .routes(routes!(restore::revoke_api_key))
-        .routes(routes!(restore::verify_treasuries))
-        .routes(routes!(restore::delete_webhook_endpoint))
-        .routes(routes!(restore::reissue_deposit_address))
-        .routes(routes!(restore::import_events))
-        .routes(routes!(restore::unfreeze))
->>>>>>> c0ce0cb (feat: restore mode after a restore from backup)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             idempotency::idempotent_post,
@@ -333,6 +312,12 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
+        ))
+        // Outermost: while frozen after a restore, a write is refused before anything else runs,
+        // so no idempotency key stores the refusal.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            refuse_writes_while_frozen,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let client_secret = client_secret_routes().route_layer(middleware::from_fn_with_state(
@@ -362,16 +347,11 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
 
 /// Seconds `Retry-After` asks a client to wait before retrying a write refused while the service
 /// is frozen after a restore: reconciliation takes minutes to hours.
-const RESTORE_RETRY_AFTER_SECONDS: u32 = 300;
+const RESTORE_RETRY_AFTER_SECONDS: u64 = 300;
 
 /// `503 service_restoring` with `Retry-After`.
 fn restoring() -> Response {
-    let mut response = error::ApiError::service_restoring().into_response();
-    response.headers_mut().insert(
-        header::RETRY_AFTER,
-        HeaderValue::from(RESTORE_RETRY_AFTER_SECONDS),
-    );
-    response
+    error::ApiError::service_restoring(RESTORE_RETRY_AFTER_SECONDS).into_response()
 }
 
 /// Refuses every merchant write while the service is frozen after a restore

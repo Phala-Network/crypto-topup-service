@@ -449,7 +449,7 @@ check_consistency_after_restore() {
     answer=$(admin_call POST /v1/admin/restore/unfreeze '{"reason":"restore drill",
         "security_changes_reapplied":true,"deposit_addresses_reissued":true,
         "delivered_events_imported":true}')
-    expect_call 409 "$answer"
+    expect_call 400 "$answer"
     call_body "$answer" | jq -e '.error.code == "restore_rescan_incomplete"' >/dev/null
     test "$(psql_value 'SELECT count(*) FROM restores WHERE unfrozen_at IS NULL')" = 1
 }

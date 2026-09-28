@@ -8,8 +8,9 @@
 it, at most the RPO before the loss), not the business as it was. Everything after the restore
 point is lost, and some of it matters beyond the database:
 
-- an API key the merchant revoked or rolled works again;
+- an API key the merchant revoked or rolled works again, secret or restricted;
 - a treasury change the merchant canceled is pending again and would apply at its `effective_at`;
+- a treasury whose crediting the merchant paused credits again (or a resume is undone);
 - a webhook endpoint the merchant deleted receives events again;
 - a deposit address given to a customer is unknown, so payments to it are not credited;
 - an event the merchant received is gone: re-derived from the chain, a spot-priced deposit is
@@ -26,7 +27,7 @@ rescanned.
 Work through the steps in order, with the runbook environment of the [README](README.md#environment)
 and `BASE_URL` set to the instance's origin: `$RESTORE_URL` on the restore-check instance (after
 [Restore](../RESTORE.md#restore) step 5), `https://$TOPUP_DOMAIN` once resumed. Every write below
-needs the freeze (`409 restore_not_frozen` otherwise) and writes `audit`. Steps 2 to 5 can run on
+needs the freeze (`400 restore_not_frozen` otherwise) and writes `audit`. Steps 2 to 5 can run on
 the restore-check instance, before the service resumes; do the security steps as early as possible.
 
 ## 1. Read the freeze and the restore point
@@ -44,9 +45,10 @@ Through [incident communication](incident-communication.md), send each account's
 the restore point and ask for what it did or received after it, from its own records (its webhook
 receiver's store, its database, or an `export_account` taken before the loss):
 
-1. API keys it created, revoked, or rolled: the key's `id` (`key_…`), or its prefix and last four
-   characters (`ppay_sk_live_…abcd`);
-2. the latest `treasury` object of each treasury it received an event about;
+1. API keys it created, revoked, or rolled, secret and restricted: the key's `id` (`key_…`), or its
+   prefix and last four characters (`ppay_sk_live_…abcd`, `ppay_rk_live_…abcd`);
+2. the latest `treasury` object of each treasury it received an event about (`treasury.created`,
+   `.updated`, `.canceled`), with its `status` and `crediting_paused_by`;
 3. webhook endpoints it deleted (`we_…`);
 4. deposit addresses it received: `client_reference_id`, `address`, and `id` (`da_…`) or
    `version`;
@@ -71,18 +73,24 @@ or with `"id":"key_…"` instead of `prefix` and `last4`. The answer is the key 
 prefix and last four (send the `id`), or `last_api_key` (issue a recovery key with
 `revoke_existing`).
 
-Compare the treasuries with what the merchant received and cancel again what it canceled:
+Compare the treasuries with what the merchant received, cancel again what it canceled, and pause
+or resume crediting again as it last did:
 
 ```sh
 admin POST /v1/admin/restore/treasuries/verify \
-  '{"account":"acct_…","livemode":true,"treasuries":[{"id":"trs_…","status":"canceled","chain_id":1,"address":"0x…"}],"reapply_cancellations":true,"reason":"INC-…"}' | jq
+  '{"account":"acct_…","livemode":true,"treasuries":[{"id":"trs_…","status":"canceled","chain_id":1,"address":"0x…","crediting_paused_by":["merchant"]}],"reapply":true,"reason":"INC-…"}' | jq
 ```
 
-Each result is `matches`, `canceled` (canceled again now), `cancellation_lost` (without
-`reapply_cancellations`), `missing` (proven after the restore point: the merchant proves it again
-after the unfreeze), or `differs` (a change that applied after the restore point: it applies again
-at its `effective_at` after the unfreeze; anything else, escalate). No treasury change applies
-while frozen, so none takes effect before this step.
+Each `result` is `matches`, `canceled` (canceled again now), `cancellation_lost` (without
+`reapply`), `missing` (proven after the restore point: the merchant proves it again after the
+unfreeze), or `differs` (a change that applied after the restore point: it applies again at its
+`effective_at` after the unfreeze; anything else, escalate). Each `crediting` (when
+`crediting_paused_by` was sent) is `matches`, `paused` or `resumed` (applied again now, announced
+as `treasury.updated`), or `pause_lost` or `resume_lost` (without `reapply`). No treasury change
+applies and nothing is credited while frozen, so none takes effect before this step. Only the
+merchant's own pause is compared: re-apply the operator's own treasury pauses made after the
+restore point from the incident record
+(`admin POST "/v1/admin/accounts/$ACCOUNT/treasuries/$TREASURY_ID/pause" '{"reason":"…"}'`).
 
 Delete again every endpoint the merchant deleted, before deliveries resume:
 
@@ -150,7 +158,7 @@ admin POST /v1/admin/restore/unfreeze \
   '{"reason":"INC-…: reconciled, signed off by …","security_changes_reapplied":true,"deposit_addresses_reissued":true,"delivered_events_imported":true}'
 ```
 
-`409 restore_rescan_incomplete` means a chain is not rescanned yet. The reason and checklist are
+`400 restore_rescan_incomplete` means a chain is not rescanned yet. The reason and checklist are
 recorded in the restore and in `audit`; crediting, settlement, quote expiry, treasury changes,
 refund verification, and event delivery resume, and merchants can write again.
 

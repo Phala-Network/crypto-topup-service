@@ -279,6 +279,18 @@ async fn frozen_merchant_writes_answer_service_restoring_and_reads_work() -> Res
                     json!({"client_reference_id": "team-1"}),
                 ),
                 (Method::POST, "/v1/account/pause", Value::Null),
+                (
+                    Method::POST,
+                    "/v1/api_keys",
+                    json!({"name": "worker", "type": "restricted", "permissions": ["quotes.read"]}),
+                ),
+                (Method::POST, "/v1/treasuries/trs_0/pause", Value::Null),
+                (Method::POST, "/v1/treasuries/trs_0/resume", Value::Null),
+                (
+                    Method::POST,
+                    "/v1/account/webhook_keys/roll",
+                    json!({"expires_in": 0}),
+                ),
                 (Method::DELETE, "/v1/webhook_endpoints/we_0", Value::Null),
             ] {
                 let refused = harness.merchant(method, path, &body).await?;
@@ -336,7 +348,7 @@ async fn unfreeze_needs_the_rescan_and_the_checklist_and_is_audited() -> Result<
                     &checklist("drill"),
                 )
                 .await?;
-            ensure!(not_frozen.status == StatusCode::CONFLICT);
+            ensure!(not_frozen.status == StatusCode::BAD_REQUEST);
             ensure!(not_frozen.body["error"]["code"] == "restore_not_frozen");
 
             harness
@@ -371,7 +383,7 @@ async fn unfreeze_needs_the_rescan_and_the_checklist_and_is_audited() -> Result<
                     &checklist("drill"),
                 )
                 .await?;
-            ensure!(incomplete.status == StatusCode::CONFLICT);
+            ensure!(incomplete.status == StatusCode::BAD_REQUEST);
             ensure!(incomplete.body["error"]["code"] == "restore_rescan_incomplete");
 
             // Caught up, but an issued address's history is not read yet.
@@ -592,7 +604,7 @@ async fn a_treasury_cancellation_lost_in_the_restore_is_applied_again() -> Resul
                         {"id": missing_id, "status": "pending", "chain_id": 1,
                          "address": format!("{:#x}", Address::repeat_byte(0x43))},
                     ],
-                    "reapply_cancellations": reapply,
+                    "reapply": reapply,
                     "reason": "treasury events the merchant received",
                 })
             };
@@ -615,6 +627,88 @@ async fn a_treasury_cancellation_lost_in_the_restore_is_applied_again() -> Resul
                     .fetch_one(&harness.pool)
                     .await?;
             ensure!(canceled.is_some());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_treasury_crediting_pause_lost_in_the_restore_is_applied_again() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let current: Uuid = sqlx::query_scalar(
+                "SELECT id FROM treasuries WHERE account_id = $1 AND replaced_at IS NULL",
+            )
+            .bind(harness.account.id)
+            .fetch_one(&harness.pool)
+            .await?;
+            harness.restore().await?;
+            let paused_by = || async {
+                let owners: Vec<String> =
+                    sqlx::query_scalar("SELECT crediting_paused_by FROM treasuries WHERE id = $1")
+                        .bind(current)
+                        .fetch_one(&harness.pool)
+                        .await?;
+                anyhow::Ok(owners)
+            };
+            let received = |owners: Value, reapply: bool| {
+                json!({
+                    "account": harness.account_id(),
+                    "livemode": true,
+                    "treasuries": [{
+                        "id": topup::ids::format(topup::ids::TREASURY, current),
+                        "status": "active",
+                        "chain_id": 1,
+                        "address": format!("{:#x}", seed::FIXTURE_TREASURY),
+                        "crediting_paused": true,
+                        "crediting_paused_by": owners,
+                    }],
+                    "reapply": reapply,
+                    "reason": "treasury.updated the merchant received",
+                })
+            };
+            let path = "/v1/admin/restore/treasuries/verify";
+            // The merchant paused crediting to the treasury after the restore point.
+            let lost = harness
+                .admin(Method::POST, path, &received(json!(["merchant"]), false))
+                .await?;
+            ensure!(lost.status == StatusCode::OK, "{}", lost.body);
+            ensure!(lost.body["data"][0]["result"] == "matches");
+            ensure!(lost.body["data"][0]["crediting"] == "pause_lost");
+            ensure!(paused_by().await?.is_empty());
+            let paused = harness
+                .admin(Method::POST, path, &received(json!(["merchant"]), true))
+                .await?;
+            ensure!(paused.body["data"][0]["crediting"] == "paused");
+            ensure!(paused_by().await? == vec!["merchant".to_owned()]);
+            let announced: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM events WHERE type = 'treasury.updated' AND object_id = $1",
+            )
+            .bind(current)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(announced == 1);
+
+            // A resume lost in the window is applied again; the operator's pause is not the
+            // merchant's to lift.
+            sqlx::query(
+                "UPDATE treasuries SET crediting_paused_by = ARRAY['merchant', 'operator'] \
+                 WHERE id = $1",
+            )
+            .bind(current)
+            .execute(&harness.pool)
+            .await?;
+            let resumed = harness
+                .admin(Method::POST, path, &received(json!(["operator"]), true))
+                .await?;
+            ensure!(resumed.body["data"][0]["crediting"] == "resumed");
+            ensure!(paused_by().await? == vec!["operator".to_owned()]);
+            let matches = harness
+                .admin(Method::POST, path, &received(json!(["operator"]), true))
+                .await?;
+            ensure!(matches.body["data"][0]["crediting"] == "matches");
             Ok(())
         })
     })
@@ -817,6 +911,7 @@ async fn a_delivered_event_is_kept_as_delivered_and_never_sent_again() -> Result
             let mut transaction = harness.pool.begin().await?;
             db::enqueue_in(
                 &mut transaction,
+                &topup::routes::RouteSet::default(),
                 &db::NewOutboxEvent {
                     id: event_id,
                     event_type: "deposit.credited".to_owned(),
@@ -825,7 +920,10 @@ async fn a_delivered_event_is_kept_as_delivered_and_never_sent_again() -> Result
                     object: db::EventObject::Deposit(deposit),
                     next_attempt_at: Utc::now(),
                     actor: db::SYSTEM_ACTOR.to_owned(),
+                    request: None,
+                    signing_key_version: None,
                 },
+                None,
             )
             .await?;
             transaction.commit().await?;

@@ -804,15 +804,18 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     starts a new timeline, so `topup run` freezes on a timeline newer than the acknowledged one).
     The freeze is a row of the database, so it survives the upgrade from the restore-check variant
     to the service. While frozen, reads and health stay up; every merchant write answers
-    `503 service_restoring` with `Retry-After` (key, treasury, endpoint, quote, deposit address,
-    and refund changes alike); nothing credits, settles, expires a quote, applies a treasury
+    `503 service_restoring` with `Retry-After` (key creation, restricted ones included, key and
+    webhook key rolls, treasury proofs, cancellations, and crediting pauses and resumes, endpoint,
+    quote, deposit address, and refund changes alike); nothing credits, settles, expires a quote, applies a treasury
     change, verifies a refund, or delivers an event. The scanner and the reconciler run: the
     rescan from the restored cursor re-derives every deposit, deduplicated by its deterministic id.
   - **Reconciliation, operator-driven and audited** (`/v1/admin/restore/…`, runbook
     `deploy/runbooks/restore.md`): the operator sends every contact the restore point and, from
     the merchant's records, revokes again the keys revoked after it (by id, or prefix and last
-    four), compares the treasuries with the `treasury` events the merchant received and cancels
-    again what it canceled, deletes again the endpoints it deleted, re-issues the deposit
+    four; secret and restricted keys alike), compares the treasuries with the `treasury` events
+    the merchant received and cancels again what it canceled and pauses or resumes their crediting
+    again as the merchant last did (the per-treasury crediting pause of the launch hardening; the
+    operator re-applies its own pauses), deletes again the endpoints it deleted, re-issues the deposit
     addresses it gave out (the salt formula of §5a gives the same address, backfilled from the
     restored cursor), and imports the deposit events it received as delivered: the delivered
     snapshot is the event, so a re-derived deposit never re-emits it with another body, and a
