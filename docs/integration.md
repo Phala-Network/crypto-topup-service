@@ -44,9 +44,19 @@ example) and fail to find the package; install it with `uv` or `pip` directly, a
 `phala-pay` from PyPI once it is released.
 
 **Configure.** The operator creates your account and sends your contact its first secret key,
-`ppay_sk_test_…` (§5.1); roll it at once and keep the new key in your secret store. Pin your
-account's webhook key for the mode from its attestation (§5.3). Set your treasury on each chain
-you accept (§1.6): payments go only there, and quotes answer `400 treasury_not_set` until it is.
+`ppay_sk_test_…` (§5.1); roll it at once and keep the new key offline, for administration.
+Create a restricted key for your servers (§5.4). Pin your account's webhook key for the mode from
+its attestation (§5.3). Set your treasury on each chain you accept (§1.6): payments go only there,
+and quotes answer `400 treasury_not_set` until it is.
+
+**Pin your addresses (required).** Configure in your own server, never from an API response, the
+inputs every address you show is recomputed from: your account id (`acct_…`), the forwarder
+factory and implementation of the attested deployment (§5.5), and **your own treasury on each
+chain**, as you proved it. The SDKs derive each address from these pins, never from the
+response's `treasury`: a compromised service could return an attacker's treasury together with the
+valid `CREATE2` address of that treasury, which a check over the response's own treasury would
+pass. In live mode the check fails closed without every pin (`AddressMismatchError`); test mode
+falls back to the response's treasury with a warning.
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
 `client_secret`; repeating the call with the same `idempotency_key` within 24 hours returns the
@@ -55,10 +65,12 @@ same response, secret included, which is how a reloaded page resumes.
 ```python
 from phala_pay import PhalaPay
 
-# PHALA_PAY_SECRET_KEY is your secret key, "ppay_sk_test_…" or "ppay_sk_live_…". FORWARDER is the
-# (factory, implementation) pair pinned from the attested deployment (§5.5): every quote's address
-# is recomputed from it before it is returned, and one you cannot derive raises.
-pay = PhalaPay(api_base=PHALA_PAY_API_BASE, api_key=PHALA_PAY_SECRET_KEY, forwarder=FORWARDER)
+# PHALA_PAY_API_KEY is your server's restricted key, "ppay_rk_test_…" or "ppay_rk_live_…" (§5.4).
+# ACCOUNT, FORWARDER (factory, implementation of the attested deployment, §5.5), and TREASURIES
+# ({chain_id: your treasury}) are your pins: every quote's address is recomputed from them before
+# it is returned, and one you cannot derive raises.
+pay = PhalaPay(api_base=PHALA_PAY_API_BASE, api_key=PHALA_PAY_API_KEY, account=ACCOUNT,
+               forwarder=FORWARDER, treasuries=TREASURIES)
 
 @app.post("/topups")
 def create_topup(body: TopupRequest, team: Team = Depends(current_team)) -> dict[str, str]:
@@ -127,7 +139,10 @@ cloud console's billing page, at `/demo/`.
 
 A quote is the way to pay a known amount, as a PaymentIntent is in Stripe: the user states an
 amount in dollars and receives a locked price, an exact token amount, and a single-use address to
-pay within the window. For top-ups of any amount at any time, give the customer a persistent
+pay within the window. A quote is a **payment instruction at a locked price, not a guarantee of
+payment in full**: an underpayment, an overpayment, or a late payment to its address is still
+credited, at spot, for what arrived (§1.3). Treat an order as paid in full only when the deposit's
+`price_source` is `quote` (or its `amount` is what you expected). For top-ups of any amount at any time, give the customer a persistent
 deposit address instead (§1.5). The service watches Ethereum for transfers to its addresses, waits for the
 route's confirmation (two blocks on Ethereum), prices each deposit, and screens it. A deposit that
 passes is credited, typically **about 30 seconds after paying**, and the service tells Phala Cloud
@@ -187,6 +202,11 @@ the typical credit time (`typical_credit_seconds`, 30), and the typical finality
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
 when you sweep, and never reduces a credit.
+
+**What `amount` means.** A deposit's `amount` in cents is a **valuation**: the USD value of the
+tokens at the locked or spot price, which you credit to your customer. What you receive is the
+tokens themselves, in forwarders that pay your treasury; Phala Pay converts nothing, so you carry
+the token's price risk from the payment until you sell it.
 
 `POST /v1/quotes {client_reference_id, amount, currency: "usd", chain_id, asset, metadata?}` with an
 `Idempotency-Key` returns the quote:
@@ -248,11 +268,13 @@ Semantics (spread, tolerance, expiry by finalized chain time, exposure caps) are
 
 **Recompute every address before you show it.** A quote's address salt is
 `keccak256(abi.encode(account, client_reference_id, "quote", quote_id))` with `account` your
-`acct_` id, and the address is the factory's `CREATE2` clone of the implementation over the
-quote's `treasury` and that salt. `PhalaPay` requires the pinned `forwarder=(factory,
-implementation)`, recomputes every quote, and raises `AddressMismatchError`, so a user never pays
-an address you did not derive; `treasuries={chain_id: treasury}` additionally refuses a quote over
-any treasury but yours. Pass the recomputed `address` to the page as `<Checkout expectedAddress>`,
+`acct_` id, and the address is the factory's `CREATE2` clone of the implementation over **your
+pinned treasury** of the quote's chain and that salt. `PhalaPay(account=…, forwarder=(factory,
+implementation), treasuries={chain_id: treasury})` recomputes every quote from those pins and
+raises `AddressMismatchError` when the quote names another treasury or shows another address, so
+a user never pays an address you did not derive; in live mode it raises without every pin. A Node
+backend does the same with `verifyQuoteAddress(pins, quote)` from `@phala/pay/server`, which
+returns the address. Pass the recomputed address to the page as `<Checkout expectedAddress>`,
 which fails closed on any other. You need no address records of your own to credit:
 `deposit.credited` carries the deposit, which names the customer (`client_reference_id`) and the
 quote (`quote`), also for a late or wrong-amount payment.
@@ -303,7 +325,7 @@ dark one with a light brand color), `colorBackground`, `colorText`, `colorTextSe
 ### 1.3 Payment outcomes
 
 A deposit's `status` is `pending` (recorded at the route's confirmation and being valued and
-screened, or held while `settlement` is paused), then `credited`, or `rejected` with a
+screened, or held while `settlement` or crediting of its treasury is paused, §1.6), then `credited`, or `rejected` with a
 `rejection_reason`, or `reversed` (Stripe's `status` with booleans beside it). `final` turns true
 once the deposit's block is final (about 15 minutes after paying on Ethereum; a final deposit can
 no longer be reversed, and only a final one is refunded), and `swept` once a finalized sweep after
@@ -403,9 +425,11 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   issuing it the first time: call it whenever the page opens; the same request returns the same
   address until it is rotated, and it adds a network supported since. Addresses are per mode: a
   test key never sees a live address, and `networks` lists the chains of that mode.
-- **One address, or one per network.** The address is the same on every network whose treasury is
-  the same address (an EOA, or a Safe deployed at the same address on each chain); then the
-  top-level `address` is it. Where a network's treasury differs, that network's address differs,
+- **One address, or one per network.** The address is the same on every network only where the
+  forwarder factory is the same deployment (the same factory address and implementation, which the
+  deterministic deployment gives every supported chain) and your treasury is the same address (an
+  EOA, or a Safe deployed at the same address on each chain), on an EVM chain with the same
+  `CREATE2` rule; then the top-level `address` is it. Where a network's treasury differs, that network's address differs,
   and the top-level `address` is `null`: show each network's own `networks[].address` then, never
   one address for all.
 - Show only the networks in `networks` and the tokens in their `assets`. A transfer of a listed
@@ -438,8 +462,9 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`
   with the types `(string, bool, string, string, uint256)` (no chain, no asset), and each
   network's address is the factory's `CREATE2` for that network's `treasury` and the salt.
-  `PhalaPay(..., forwarder=(factory, implementation))` checks every network of an active address
-  over its `treasury` (and against `treasuries=` when pinned) and raises `AddressMismatchError`;
+  `PhalaPay(account=…, forwarder=(factory, implementation), treasuries=…)` checks every network
+  of an active address over your pinned treasury of its chain and raises `AddressMismatchError`
+  (`verifyDepositAddress(pins, address)` in `@phala/pay/server`);
   `topup_sdk.deposit_address(...)` recomputes any version offline.
 - A network pays the treasury it was issued for, forever. When your treasury on one network
   changes, that network's address changes (the others do not); payments to the old address on
@@ -494,7 +519,17 @@ curl -sS https://api.phala-pay.example/v1/treasuries -H "Authorization: Bearer $
 - **What changes.** New quotes, and the chain's network of each of your deposit addresses (§1.5),
   pay the new treasury; each quote shows the `treasury` its address pays. Everything issued before
   keeps paying the old treasury for good (the address commits to it): those payments are still
-  credited, and their refunds are paid from the old treasury (§3), so keep control of it.
+  credited, and their refunds are paid from the old treasury (§3), so keep control of it. Update
+  the treasury you pin in your server (Quickstart) when the change applies (`treasury.updated`):
+  until then your pins refuse the new treasury's addresses, and after it the old one's.
+- **Pause crediting of a treasury.** If a treasury is compromised (for example a former
+  treasury's key leaked), `POST /v1/treasuries/{id}/pause` (`pay.treasuries.pause(id)`, a secret
+  key) stops crediting every deposit to the forwarders over that treasury's address: new payments
+  there stay `pending` and no `deposit.credited` is sent, so you do not credit customers for funds
+  that a thief can sweep; deposits already credited are unchanged. `POST /v1/treasuries/{id}/resume`
+  credits what it held. The operator can pause a treasury too, in an incident; your resume does not
+  lift the operator's pause (`crediting_paused_by` lists both). Each change is `treasury.updated`
+  ([runbook](../deploy/runbooks/treasury-credit-pause.md)).
 
 **Safe treasuries.** The Safe must be deployed on the chain, at its `finalized` block (about 15
 minutes on Ethereum): a counterfactual Safe is refused (`treasury_not_deployed`), and so are
@@ -776,7 +811,7 @@ Standard Webhooks, not `Stripe-Signature`, because you hold only the service's p
 | `quote.canceled` | A quote was canceled (`POST /v1/quotes/{id}/cancel`); later payments to its address are credited at spot. | The quote, `status: "canceled"` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
 | `treasury.created` | A treasury was proven (§1.6): `active` at once for a chain's first one and in test mode, else `pending` until `effective_at`. Cancel a change you did not request. | The treasury |
-| `treasury.updated` | A pending treasury took effect (`status: "active"`), or a newer one replaced it (`status: "replaced"`); `data.previous_attributes` has the former `status`. | The treasury |
+| `treasury.updated` | A pending treasury took effect (`status: "active"`), a newer one replaced it (`status: "replaced"`), or crediting of it was paused or resumed (`crediting_paused`, `crediting_paused_by`); `data.previous_attributes` has the former values. | The treasury |
 | `treasury.canceled` | A pending change was canceled, by you or because a sanctions list named it at its effective time. | The treasury, `status: "canceled"` |
 | `account.updated` | The operator changed your account (live mode, restriction, pauses), or your settings, pause, or webhook keys changed; `data.previous_attributes` names what changed. | The account, in the event's mode |
 | `api_key.created`, `api_key.updated`, `api_key.revoked` | A key of the mode was created, rolled (`updated`, with its former `status` and `expires_at`), or revoked (§5.4). | The key, without its secret |
@@ -946,16 +981,19 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       one credit.
 - [ ] Fulfillment keyed by the deposit id (`dep_…`) under a unique index, committed before `2xx`;
       refusals recorded as holds, never answered `5xx`.
-- [ ] Live mode enabled by the operator; the first live key rolled on receipt and kept in the
+- [ ] Live mode enabled by the operator; the first live key rolled on receipt and kept offline
+      for administration; production servers run with a restricted live key (§5.4), kept in the
       secret store, never in code or logs; webhook URL agreed.
 - [ ] Your account's live webhook key pinned from verified attestation of production (§5.3),
       and the receiver checking your `acct_…` id and `livemode: true`.
 - [ ] Your live treasury proven on every chain you accept (§1.6), and your receiver alerting you on
       `treasury.created`, and your monitoring polling your endpoints' `pending_deliveries`
       (§2.6, Delivery health).
-- [ ] Every address recomputed before display (`PhalaPay(forwarder=…)`, optionally
-      `treasuries=…`) and passed as `<Checkout expectedAddress>`; the `client_secret` handed only
-      to the paying customer's page and never logged.
+- [ ] Your pins configured in your server (Quickstart): `account`, `forwarder`, and your own
+      live treasury of every chain you accept; every address recomputed from them before display
+      (`PhalaPay(account=…, forwarder=…, treasuries=…)`, or `verifyQuoteAddress` in Node) and
+      passed as `<Checkout expectedAddress>`; the `client_secret` handed only to the paying
+      customer's page and never logged.
 - [ ] A sweep path (§1.7): `flush_transactions` from an EOA, or a `safe_batch` file for the
       treasury Safe's owners.
 - [ ] Webhook receiver verifies, stores every event by `webhook-id`, and drives UI from fetched
@@ -999,7 +1037,8 @@ Live mode is the operator's decision (`charges_enabled`); enabling it returns yo
 
 A secret key is `ppay_sk_{test|live}_`, 43 random base62 characters, and a 6-character CRC32
 checksum (GitHub's token format), so a mistyped key is refused without a lookup and secret scanners
-recognise a leaked one. The service stores only its SHA-256 and shows the key once.
+recognise a leaked one. The service stores only its SHA-256 and shows the key once. A restricted
+key has the same form with `ppay_rk_{test|live}_` (§5.4).
 
 The key selects your account and the mode: a test key quotes on test routes (Sepolia) and reads
 only test objects, a live key only live ones; another account's or the other mode's objects
@@ -1058,11 +1097,16 @@ listed key's version as 4 big-endian bytes followed by its 32 raw bytes.
 
 **Rolling.** `POST /v1/account/webhook_keys/roll {expires_in}` (`TopupClient.roll_webhook_key`)
 makes the next version sign every delivery; the current one keeps signing beside it for
-`expires_in` seconds (at most 604800, 7 days; `0`, the default, stops it at once), so each
-delivery carries one `v1a` entry per key. Fetch and verify the new key from attestation, pin it
-next to the old one (`construct_event` and `verify_webhook` accept a list), and drop the old one
-once it expires; `GET /v1/account` lists the versions and their `expires_at`. The roll is
-announced as `account.updated`.
+`expires_in` seconds, so each delivery carries one `v1a` entry per key. In live mode the overlap is
+172800 (48 hours, the default, as long as a treasury change's time-lock) to 604800 (7 days); test
+mode also accepts `0`, which stops the old key at once. The overlap keeps your security notices
+verifiable: someone holding a leaked secret key cannot cut off the key you pinned before a
+treasury change they made applies. The roll itself is announced as `account.updated`, **signed by
+the retiring key** as well, however late it is delivered, so the key you pinned always verifies
+the notice that it is being replaced; treat an unexpected roll as a leaked key (§5.4). Fetch and
+verify the new key from attestation, pin it next to the old one (`construct_event` and
+`verify_webhook` accept a list), and drop the old one once it expires; `GET /v1/account` lists the
+versions and their `expires_at`.
 
 ### 5.4 Manage and roll keys
 
@@ -1070,10 +1114,30 @@ With a secret key you manage the keys of its account and mode (design D7), as St
 
 | Method and path | Purpose |
 |---|---|
-| `GET /v1/api_keys`, `GET /v1/api_keys/{id}` | The mode's keys (`key_…`), with `redacted` (prefix and last four), `status` (`active`, `expiring`, `expired`, `revoked`), `expires_at`, and `last_used` (to the minute); never the secret. |
-| `POST /v1/api_keys` `{name?}` | A new secret key; its `secret` is in this response only. |
-| `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once. |
+| `GET /v1/api_keys`, `GET /v1/api_keys/{id}` | The mode's keys (`key_…`), with `type` (`secret` or `restricted`), `permissions` (a restricted key's), `redacted` (prefix and last four), `status` (`active`, `expiring`, `expired`, `revoked`), `expires_at`, and `last_used` (to the minute); never the secret. |
+| `POST /v1/api_keys` `{name?, type?, permissions?}` | A new secret key, or with `"type": "restricted"` a restricted key holding `permissions`; its `secret` is in this response only. |
+| `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name, type, and permissions; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once. |
 | `DELETE /v1/api_keys/{id}` | Revoke at once. The mode's last key that is neither revoked nor expiring cannot be revoked (`400 last_api_key`), so you always keep one. |
+
+**Restricted keys.** Run production with a restricted key, Stripe's
+[restricted keys](https://docs.stripe.com/keys#limit-access): `ppay_rk_…` holds only the
+permissions it is created with, so a server compromise cannot redirect your funds or silence your
+notices. Keep secret keys offline, for administration only: keys, treasuries, webhook endpoints,
+webhook keys, and account settings (confirmation policies, pause) are managed only with a secret
+key, and no permission lets a restricted key do so (`400` when requested, `403 permission_denied`
+when tried). A `write` permission includes its resource's `read`. A checkout server needs:
+
+```python
+runtime = pay.api_keys.create(name="checkout server", permissions=[
+    "quotes.write", "deposit_addresses.write", "deposits.read", "events.read", "refunds.read",
+    "account.read",  # GET /v1/config
+])
+```
+
+The grantable permissions are `account.read`, `api_keys.read`, `quotes.read|write`,
+`deposit_addresses.read|write`, `deposits.read|write` (`write`: metadata), `refunds.read|write`,
+`events.read`, `endpoints.read`, `treasury.read`, `sweeps.read`, and `forwarders.read`. Grant
+`refunds.write` only to the internal admin that requests refunds.
 
 A planned rotation: roll with an overlap (`{"expires_in": 86400}`), deploy the new key, and let
 the old one expire. A leak: roll with `{"expires_in": 0}` at once. If you lost every key of a
@@ -1085,10 +1149,10 @@ id, or `admin`) that made it; an operator change of your account is `account.upd
 
 ### 5.5 Authentication
 
-Every request carries your secret key as a Bearer token:
+Every request carries your API key, restricted or secret, as a Bearer token:
 
 ```http
-Authorization: Bearer ppay_sk_test_…
+Authorization: Bearer ppay_rk_test_…
 ```
 
 Only `Bearer` is accepted (no HTTP Basic). A missing key is `401 api_key_missing`, a malformed,
@@ -1100,16 +1164,18 @@ response's `Retry-After` seconds, with backoff.
 ```python
 from phala_pay import PhalaPay
 
-# The forwarder factory and implementation, pinned from the attested deployment like your webhook
-# keys (§5.3): every quote and deposit address is recomputed before it is returned. Pinning your
-# treasury per chain is optional hardening.
+# Your pins (Quickstart): your account id; the forwarder factory and implementation, pinned from
+# the attested deployment like your webhook keys (§5.3); and your own treasury per chain, as you
+# proved it. Every quote and deposit address is recomputed from them before it is returned; in
+# live mode a missing pin fails closed.
 forwarder = (
     "0x2407bE5Be2b632F5b166872A49E4946a70CCa531",  # factory
     "0x70B714508BFa441449DC09f790Ca03Baa5170360",  # implementation
 )
 with PhalaPay(
     "https://pay-api-staging.phala.com",
-    PHALA_PAY_SECRET_KEY,
+    PHALA_PAY_API_KEY,
+    account="acct_…",
     forwarder=forwarder,
     treasuries={11155111: "0x936c1991f8dA9a919fa11b557a3514719f5A4504"},
 ) as pay:
@@ -1125,7 +1191,7 @@ request raises `ApiError` with `status_code`, `code`, `param`, `doc_url`, `reque
 `429`, `retry_after`.
 
 Your account id, `acct_…` (`GET /v1/account`), is the first input of every quote's address salt;
-the client reads it once for the address check, or takes it as `account=`.
+pin it as `account=` (required in live mode; in test mode the client reads it once).
 
 ### 5.6 Idempotency and retries
 

@@ -1,6 +1,7 @@
 # API key compromise and key recovery
 
-**Trigger:** a merchant reports that a secret key (`ppay_sk_…`) was exposed, that it lost every
+**Trigger:** a merchant reports that a secret key (`ppay_sk_…`) or a restricted key (`ppay_rk_…`)
+was exposed, that it lost every
 key of a mode, or that requests it did not make appear in its `api_key.*` events; or GitHub secret
 scanning reports a Phala Pay key. The service raises no alert for this: only the merchant can
 tell its own requests from others.
@@ -13,6 +14,10 @@ endpoints, and a refund succeeds only once the merchant pays it from its treasur
 It can also prove a new live treasury, but that change waits 48 hours, is announced at once as
 `treasury.created` to every enabled endpoint of the mode whatever its subscriptions, and
 the merchant cancels it with `POST /v1/treasuries/{id}/cancel` ([Treasury change](treasury-change.md)).
+It cannot silence the account's notices by rolling the webhook key: a live roll keeps the pinned
+key signing for 48 hours and signs its own `account.updated` with it. A restricted key, which
+merchants run production with, holds only its granted permissions and can do none of this: no key,
+treasury, webhook endpoint, webhook key, or account setting changes.
 
 ## The merchant rolls the key
 

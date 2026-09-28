@@ -38,11 +38,12 @@
               "created": 1790467200,
               "expires_at": null,
               "id": "key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1",
-              "last_used": 1790553600,
+              "last_used": null,
               "livemode": false,
-              "name": "fulfillment worker",
+              "name": "",
               "object": "api_key",
-              "redacted": "ppay_sk_test_…Yz4x",
+              "permissions": null,
+              "redacted": "ppay_sk_test_…x4Yz",
               "secret": "ppay_sk_test_51Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv2Wx4Yz",
               "status": "active",
               "type": "secret"
@@ -147,6 +148,23 @@
         ],
         "type": "object"
       },
+      "AdminTreasuryPauseRequest": {
+        "additionalProperties": false,
+        "description": "Administrative pause or resume of crediting to one treasury of an account.",
+        "example": {
+          "reason": "former treasury key reported compromised by the contact; OPS-97"
+        },
+        "properties": {
+          "reason": {
+            "description": "Why, for the audit log and the `treasury.updated` event's audit row.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
       "ApiKeyObject": {
         "description": "An API key (design D7). `secret` is present only in the response that created it.",
         "example": {
@@ -157,10 +175,19 @@
           "livemode": false,
           "name": "fulfillment worker",
           "object": "api_key",
-          "redacted": "ppay_sk_test_…Yz4x",
-          "secret": null,
+          "permissions": [
+            "account.read",
+            "deposit_addresses.read",
+            "deposit_addresses.write",
+            "deposits.read",
+            "events.read",
+            "quotes.read",
+            "quotes.write",
+            "refunds.read"
+          ],
+          "redacted": "ppay_rk_test_…Yz4x",
           "status": "active",
-          "type": "secret"
+          "type": "restricted"
         },
         "properties": {
           "created": {
@@ -203,12 +230,22 @@
             ],
             "type": "string"
           },
+          "permissions": {
+            "description": "A restricted key's permissions, such as `quotes.write`; `null` for a secret key.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "redacted": {
             "description": "The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.",
             "type": "string"
           },
           "secret": {
-            "description": "The whole key, `ppay_sk_…`, shown once. Store it in a secret manager.",
+            "description": "The whole key, `ppay_sk_…` or `ppay_rk_…`, shown once. Store it in a secret manager.",
             "type": [
               "string",
               "null"
@@ -219,7 +256,7 @@
             "type": "string"
           },
           "type": {
-            "description": "`secret`; `restricted` keys come later.",
+            "description": "`secret`, holding every permission, or `restricted`, holding only `permissions`.",
             "type": "string"
           }
         },
@@ -1310,6 +1347,118 @@
         ],
         "type": "object"
       },
+      "Treasury": {
+        "description": "An account's treasury of one chain and mode (design D10): the only address the forwarders\nissued over it can pay.",
+        "example": {
+          "address": "0x936c1991f8da9a919fa11b557a3514719f5a4504",
+          "canceled_at": null,
+          "cancellation_reason": null,
+          "chain_id": 1,
+          "created": 1790467200,
+          "crediting_paused": false,
+          "crediting_paused_by": [],
+          "effective_at": 1790467200,
+          "id": "trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9",
+          "kind": "contract",
+          "livemode": false,
+          "object": "treasury",
+          "replaced_at": null,
+          "status": "active"
+        },
+        "properties": {
+          "address": {
+            "description": "The treasury address.",
+            "type": "string"
+          },
+          "canceled_at": {
+            "description": "When it was canceled, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cancellation_reason": {
+            "description": "Why it was canceled: `requested` (you canceled it) or `sanctioned` (a sanctions list named\nthe address when the change was due to apply, so it never applied).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created": {
+            "description": "When it was proven, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "crediting_paused": {
+            "description": "Whether crediting of deposits to forwarders over this address is paused: they stay\n`pending` and no `deposit.credited` is sent until it resumes.",
+            "type": "boolean"
+          },
+          "crediting_paused_by": {
+            "description": "Who paused crediting: `merchant` (`POST /v1/treasuries/{id}/pause`) and, or, `operator`.\nEach lifts only its own pause.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "effective_at": {
+            "description": "When the treasury applies or applied, Unix seconds: at once for a chain's first treasury\nand in test mode, 48 hours after the proof for a later live change.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Treasury id, `trs_…`.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`eoa` (an EIP-191 signature recovered to the address) or `contract` (a deployed\ncontract's EIP-1271 approval).",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "The mode.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `treasury`.",
+            "enum": [
+              "treasury"
+            ],
+            "type": "string"
+          },
+          "replaced_at": {
+            "description": "When a later treasury replaced it, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`pending` (a live change waiting for `effective_at`; cancel it with\n`POST /v1/treasuries/{id}/cancel`), `active` (the chain's current treasury: new quotes and\ndeposit address networks pay it), `replaced` (a former treasury; addresses issued over it\nstill pay it), or `canceled`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "chain_id",
+          "address",
+          "kind",
+          "status",
+          "effective_at",
+          "created",
+          "crediting_paused",
+          "crediting_paused_by"
+        ],
+        "type": "object"
+      },
       "UpdateAccountRequest": {
         "additionalProperties": false,
         "description": "`POST /v1/admin/accounts/{account}` body; absent fields stay as they are.",
@@ -2193,6 +2342,242 @@
           }
         ],
         "summary": "Resumes scopes of a whole account, for example after a sanctioned treasury was replaced and\nreviewed. Audited, and announced as `account.updated`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/treasuries/{treasury}/pause": {
+      "post": {
+        "operationId": "pause_treasury",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Treasury id, `trs_…`",
+            "in": "path",
+            "name": "treasury",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminTreasuryPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Treasury"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Pauses crediting of deposits to every forwarder over the treasury's address, for an incident\nsuch as a compromised former treasury: deposits stay `pending` and no `deposit.credited` is\nsent until the operator resumes; the merchant's own resume does not lift it. Audited, and\nannounced as `treasury.updated`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/treasuries/{treasury}/resume": {
+      "post": {
+        "operationId": "resume_treasury",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Treasury id, `trs_…`",
+            "in": "path",
+            "name": "treasury",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminTreasuryPauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Treasury"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Lifts the operator's crediting pause of the treasury; a pause the merchant set stays. Audited,\nand announced as `treasury.updated`.",
         "tags": [
           "admin"
         ]

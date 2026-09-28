@@ -190,7 +190,7 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "api_key_missing",
         401,
-        "No `Authorization: Bearer ppay_sk_…` header.",
+        "No `Authorization: Bearer` header with an API key (`ppay_rk_…` or `ppay_sk_…`).",
     ),
     (
         "api_key_invalid",
@@ -205,7 +205,7 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "permission_denied",
         403,
-        "The key may not make this request.",
+        "The key may not make this request: a restricted key lacks the permission, or the request manages keys, treasuries, webhook endpoints, webhook keys, or account settings, which needs a secret key.",
     ),
     (
         "testmode_charges_only",
@@ -354,7 +354,7 @@ impl ApiError {
         Self::new(
             StatusCode::UNAUTHORIZED,
             "api_key_missing",
-            "send your secret key as `Authorization: Bearer ppay_sk_…`",
+            "send your API key as `Authorization: Bearer ppay_rk_…` or `ppay_sk_…`",
         )
     }
 

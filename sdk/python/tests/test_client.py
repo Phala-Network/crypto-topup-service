@@ -12,10 +12,12 @@ from topup_sdk import (
     AddressMismatchError,
     ApiError,
     TopupClient,
+    UnpinnedTreasuryWarning,
     quote_address,
 )
 
 API_KEY = "ppay_sk_test_" + "A" * 43 + "000000"
+LIVE_KEY = "ppay_rk_live_" + "A" * 43 + "000000"
 ACCOUNT = "acct_" + "0a" * 16
 NOW = 1_790_000_000
 FACTORY = "0x" + "aa" * 20
@@ -65,7 +67,7 @@ class FakeService:
         self.requests: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        if request.headers.get("authorization") != f"Bearer {API_KEY}":
+        if request.headers.get("authorization") not in (f"Bearer {API_KEY}", f"Bearer {LIVE_KEY}"):
             return _error(401, "api_key_invalid")
         if request.method == "GET" and request.url.raw_path == b"/v1/account":
             return httpx.Response(
@@ -98,13 +100,16 @@ def _client(
     *,
     pinned: bool = True,
     max_attempts: int = 4,
-    treasuries: dict[int, str] | None = None,
+    treasuries: dict[int, str] | None = {11155111: TREASURY},  # noqa: B006 (never mutated)
+    api_key: str = API_KEY,
+    account: str | None = None,
 ) -> TopupClient:
     return TopupClient(
         "http://service.test:8080",
-        API_KEY,
+        api_key,
+        account=account,
         forwarder=(FACTORY, IMPLEMENTATION) if pinned else None,
-        treasuries=treasuries,
+        treasuries=treasuries if pinned else None,
         transport=httpx.MockTransport(service),
         sleep=lambda _: None,
         max_attempts=max_attempts,
@@ -181,10 +186,90 @@ def test_open_quotes_must_have_the_derived_address() -> None:
         assert client.get_quote(QUOTE_ID).address == forged["address"]
 
 
-def test_only_secret_keys_are_accepted() -> None:
-    for key in ["sk_test_123", "ppay_rk_test_" + "A" * 49, "acme/v1"]:
-        with pytest.raises(ValueError, match="secret key"):
+def test_only_secret_and_restricted_keys_are_accepted() -> None:
+    for key in ["sk_test_123", "rk_live_" + "A" * 49, "ppay_pk_test_" + "A" * 49, "acme/v1"]:
+        with pytest.raises(ValueError, match="restricted key"):
             TopupClient("http://service.test", key)
+    assert TopupClient("http://service.test", LIVE_KEY).livemode
+    assert not TopupClient("http://service.test", API_KEY).livemode
+
+
+def _live_quote(treasury: str = TREASURY) -> dict[str, object]:
+    return {**_quote(treasury=treasury), "livemode": True, "chain_id": 1}
+
+
+def test_live_address_checks_fail_closed_without_every_pin() -> None:
+    service = FakeService(lambda request, _: httpx.Response(200, json=_live_quote()))
+    for pins in (
+        {"pinned": False, "account": ACCOUNT},
+        {"treasuries": None, "account": ACCOUNT},
+        # The account is pinned too: a live client never takes it from the service.
+        {"treasuries": {1: TREASURY}},
+    ):
+        with (
+            _client(service, api_key=LIVE_KEY, **pins) as client,
+            pytest.raises(AddressMismatchError, match="live mode requires"),
+        ):
+            client.get_quote(QUOTE_ID)
+    with _client(service, api_key=LIVE_KEY, treasuries={1: TREASURY}, account=ACCOUNT) as client:
+        assert client.get_quote(QUOTE_ID).address == _live_quote()["address"]
+    assert all(request.url.raw_path != b"/v1/account" for request in service.requests)
+
+
+def test_a_spoofed_treasury_with_its_valid_address_is_refused_in_live_mode() -> None:
+    # A compromised service returns an attacker's treasury and the CREATE2 address that really
+    # derives from it: recomputing over the response's treasury would pass.
+    attacker = "0x" + "ee" * 20
+    spoofed = _live_quote(treasury=attacker)
+    assert spoofed["address"] == quote_address(
+        FACTORY,
+        IMPLEMENTATION,
+        attacker,
+        account=ACCOUNT,
+        client_reference_id="ws 1",
+        quote_id=QUOTE_ID,
+    )
+    service = FakeService(lambda request, _: httpx.Response(200, json=spoofed))
+    with (
+        _client(service, api_key=LIVE_KEY, treasuries={1: TREASURY}, account=ACCOUNT) as client,
+        pytest.raises(AddressMismatchError, match="not the pinned one"),
+    ):
+        client.get_quote(QUOTE_ID)
+    # The response naming the pinned treasury while showing the attacker's address fails too.
+    lying = {**spoofed, "treasury": TREASURY}
+    service = FakeService(lambda request, _: httpx.Response(200, json=lying))
+    with (
+        _client(service, api_key=LIVE_KEY, treasuries={1: TREASURY}, account=ACCOUNT) as client,
+        pytest.raises(AddressMismatchError, match="cannot derive"),
+    ):
+        client.get_quote(QUOTE_ID)
+
+
+def test_restricted_keys_are_created_with_their_permissions() -> None:
+    key = {
+        "id": "key_" + "01" * 16,
+        "object": "api_key",
+        "livemode": False,
+        "type": "restricted",
+        "name": "checkout",
+        "permissions": ["quotes.read", "quotes.write"],
+        "secret": "ppay_rk_test_" + "B" * 49,
+        "redacted": "ppay_rk_test_…BBBB",
+        "status": "active",
+        "created": NOW,
+        "expires_at": None,
+        "last_used": None,
+    }
+    service = FakeService(lambda request, _: httpx.Response(200, json=key))
+    with _client(service) as client:
+        created = client.create_api_key(name="checkout", permissions=["quotes.write"])
+    assert created.type_ == "restricted"
+    assert created.permissions == ["quotes.read", "quotes.write"]
+    assert json.loads(service.requests[0].content) == {
+        "name": "checkout",
+        "type": "restricted",
+        "permissions": ["quotes.write"],
+    }
 
 
 def _deposit(index: int) -> dict[str, object]:
@@ -336,7 +421,11 @@ def test_a_pinned_treasury_is_the_only_one_a_quote_may_pay() -> None:
     # The address derives from the quote's own treasury, so only the pin catches another one.
     moved = _quote(treasury=other)
     service = FakeService(lambda request, _: httpx.Response(200, json=moved))
-    with _client(service) as client:
+    # Test mode without pinned treasuries trusts the service's, and says so.
+    with (
+        _client(service, treasuries=None) as client,
+        pytest.warns(UnpinnedTreasuryWarning, match="test mode only"),
+    ):
         assert client.get_quote(QUOTE_ID).treasury == other
     for pins in ({11155111: TREASURY}, {1: other}):
         with _client(service, treasuries=pins) as client, pytest.raises(AddressMismatchError):
@@ -442,6 +531,7 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
         b"/v1/account": account,
         b"/v1/api_keys": key,
         f"/v1/api_keys/{key['id']}/roll".encode(): key,
+        b"/v1/account/webhook_keys/roll": account,
         f"/v1/events/{event['id']}/resend".encode(): event,
     }
 
@@ -460,10 +550,13 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
         client.resume_quotes()
         client.create_api_key(name="ci")
         client.roll_api_key(str(key["id"]), expires_in=3600)
+        client.roll_webhook_key()
         assert [e.id for e in client.list_events(type="deposit.reversed")] == [event["id"]]
         client.resend_event(str(event["id"]), webhook_endpoint="we_" + "03" * 16)
     assert updated.confirmation_policies[0].confirmations == "finalized"
-    policies, pause, resume, created, rolled, _, resent = service.requests
+    policies, pause, resume, created, rolled, webhook_roll, _, resent = service.requests
+    # A webhook key roll keeps the old key for the 48 hours a live roll needs, by default.
+    assert json.loads(webhook_roll.content) == {"expires_in": 172_800}
     assert json.loads(policies.content) == {
         "confirmation_policies": [
             {"chain_id": 11155111, "confirmations": "finalized"},

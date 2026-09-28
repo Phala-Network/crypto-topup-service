@@ -19,6 +19,11 @@ class AddressMismatchError(TopupError):
     """The service returned an address the product cannot derive from its pinned forwarder."""
 
 
+class UnpinnedTreasuryWarning(UserWarning):
+    """A test-mode address was checked against the service's treasury, not a pinned one. Live
+    mode refuses this: configure `treasuries` before going live."""
+
+
 class ApiError(TopupError):
     """The service answered with a documented error object or an unexpected status.
 

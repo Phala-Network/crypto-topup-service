@@ -19,12 +19,13 @@ class RollWebhookKeyRequest:
     """`POST /v1/account/webhook_keys/roll` body.
 
     Example:
-        {'expires_in': 86400}
+        {'expires_in': 172800}
 
     Attributes:
-        expires_in (int | Unset): Seconds the current key keeps signing beside the new one, up to 604800 (7 days); 0,
-            the
-            default, stops it at once.
+        expires_in (int | Unset): Seconds the current key keeps signing beside the new one: 172800 (48 hours, the
+            treasury
+            time-lock) to 604800 (7 days) in live mode, 0 to 604800 in test mode, where 0 stops it at
+            once. Default 172800.
     """
 
     expires_in: int | Unset = UNSET

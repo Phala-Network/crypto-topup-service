@@ -23,8 +23,10 @@ class ApiKeyObject:
 
     Example:
         {'created': 1790467200, 'expires_at': None, 'id': 'key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1', 'last_used':
-            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'redacted':
-            'ppay_sk_test_…Yz4x', 'secret': None, 'status': 'active', 'type': 'secret'}
+            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'permissions':
+            ['account.read', 'deposit_addresses.read', 'deposit_addresses.write', 'deposits.read', 'events.read',
+            'quotes.read', 'quotes.write', 'refunds.read'], 'redacted': 'ppay_rk_test_…Yz4x', 'status': 'active', 'type':
+            'restricted'}
 
     Attributes:
         created (int): Creation time, Unix seconds.
@@ -35,10 +37,13 @@ class ApiKeyObject:
         redacted (str): The key's prefix and last four characters, such as `ppay_sk_test_…a1B2`.
         status (str): `active`; `expiring` for a rolled key that still works until `expires_at`; `expired`;
             `revoked`.
-        type_ (str): `secret`; `restricted` keys come later.
+        type_ (str): `secret`, holding every permission, or `restricted`, holding only `permissions`.
         expires_at (int | None | Unset): When a rolled key stops working, Unix seconds.
         last_used (int | None | Unset): Last use, Unix seconds, to the minute.
-        secret (None | str | Unset): The whole key, `ppay_sk_…`, shown once. Store it in a secret manager.
+        permissions (list[str] | None | Unset): A restricted key's permissions, such as `quotes.write`; `null` for a
+            secret key.
+        secret (None | str | Unset): The whole key, `ppay_sk_…` or `ppay_rk_…`, shown once. Store it in a secret
+            manager.
     """
 
     created: int
@@ -51,6 +56,7 @@ class ApiKeyObject:
     type_: str
     expires_at: int | None | Unset = UNSET
     last_used: int | None | Unset = UNSET
+    permissions: list[str] | None | Unset = UNSET
     secret: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -83,6 +89,15 @@ class ApiKeyObject:
         else:
             last_used = self.last_used
 
+        permissions: list[str] | None | Unset
+        if isinstance(self.permissions, Unset):
+            permissions = UNSET
+        elif isinstance(self.permissions, list):
+            permissions = self.permissions
+
+        else:
+            permissions = self.permissions
+
         secret: None | str | Unset
         if isinstance(self.secret, Unset):
             secret = UNSET
@@ -107,6 +122,8 @@ class ApiKeyObject:
             field_dict["expires_at"] = expires_at
         if last_used is not UNSET:
             field_dict["last_used"] = last_used
+        if permissions is not UNSET:
+            field_dict["permissions"] = permissions
         if secret is not UNSET:
             field_dict["secret"] = secret
 
@@ -149,6 +166,23 @@ class ApiKeyObject:
 
         last_used = _parse_last_used(d.pop("last_used", UNSET))
 
+        def _parse_permissions(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                permissions_type_0 = cast(list[str], data)
+
+                return permissions_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        permissions = _parse_permissions(d.pop("permissions", UNSET))
+
         def _parse_secret(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -169,6 +203,7 @@ class ApiKeyObject:
             type_=type_,
             expires_at=expires_at,
             last_used=last_used,
+            permissions=permissions,
             secret=secret,
         )
 

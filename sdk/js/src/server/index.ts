@@ -1,8 +1,10 @@
 /**
- * Server-side helpers of `@phala/pay`. Nothing here needs or takes a secret API key: webhook
+ * Server-side helpers of `@phala/pay`. Nothing here needs or takes an API key: webhook
  * verification uses your account's public webhook key, and the address and sweep helpers run
- * offline. Call the API itself from your backend with your secret key (the Python SDK, or any
- * HTTP client with `Authorization: Bearer ppay_sk_…`); never ship that key to a browser.
+ * offline. Call the API itself from your backend with a restricted key (the Python SDK, or any
+ * HTTP client with `Authorization: Bearer ppay_rk_…`); never ship a key to a browser. Recompute
+ * every address with `verifyQuoteAddress` or `verifyDepositAddress` from the pins you configure
+ * yourself before you show it.
  */
 export {
   WebhookSignatureError,
@@ -11,11 +13,15 @@ export {
   type WebhookEvent,
 } from "./webhook.js";
 export {
+  AddressMismatchError,
   depositAddress,
   depositAddressSalt,
   forwarderAddress,
   quoteSalt,
   quoteAddress,
+  verifyDepositAddress,
+  verifyQuoteAddress,
+  type AddressPins,
   type Forwarder,
 } from "./addresses.js";
 export {

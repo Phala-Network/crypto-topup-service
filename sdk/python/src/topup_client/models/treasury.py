@@ -24,13 +24,19 @@ class Treasury:
 
         Example:
             {'address': '0x936c1991f8da9a919fa11b557a3514719f5a4504', 'canceled_at': None, 'cancellation_reason': None,
-                'chain_id': 1, 'created': 1790467200, 'effective_at': 1790467200, 'id': 'trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9',
-                'kind': 'contract', 'livemode': False, 'object': 'treasury', 'replaced_at': None, 'status': 'active'}
+                'chain_id': 1, 'created': 1790467200, 'crediting_paused': False, 'crediting_paused_by': [], 'effective_at':
+                1790467200, 'id': 'trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9', 'kind': 'contract', 'livemode': False, 'object':
+                'treasury', 'replaced_at': None, 'status': 'active'}
 
         Attributes:
             address (str): The treasury address.
             chain_id (int): EVM chain identifier.
             created (int): When it was proven, Unix seconds.
+            crediting_paused (bool): Whether crediting of deposits to forwarders over this address is paused: they stay
+                `pending` and no `deposit.credited` is sent until it resumes.
+            crediting_paused_by (list[str]): Who paused crediting: `merchant` (`POST /v1/treasuries/{id}/pause`) and, or,
+                `operator`.
+                Each lifts only its own pause.
             effective_at (int): When the treasury applies or applied, Unix seconds: at once for a chain's first treasury
                 and in test mode, 48 hours after the proof for a later live change.
             id (str): Treasury id, `trs_…`.
@@ -52,6 +58,8 @@ class Treasury:
     address: str
     chain_id: int
     created: int
+    crediting_paused: bool
+    crediting_paused_by: list[str]
     effective_at: int
     id: str
     kind: str
@@ -69,6 +77,10 @@ class Treasury:
         chain_id = self.chain_id
 
         created = self.created
+
+        crediting_paused = self.crediting_paused
+
+        crediting_paused_by = self.crediting_paused_by
 
         effective_at = self.effective_at
 
@@ -107,6 +119,8 @@ class Treasury:
                 "address": address,
                 "chain_id": chain_id,
                 "created": created,
+                "crediting_paused": crediting_paused,
+                "crediting_paused_by": crediting_paused_by,
                 "effective_at": effective_at,
                 "id": id,
                 "kind": kind,
@@ -132,6 +146,10 @@ class Treasury:
         chain_id = d.pop("chain_id")
 
         created = d.pop("created")
+
+        crediting_paused = d.pop("crediting_paused")
+
+        crediting_paused_by = cast(list[str], d.pop("crediting_paused_by"))
 
         effective_at = d.pop("effective_at")
 
@@ -176,6 +194,8 @@ class Treasury:
             address=address,
             chain_id=chain_id,
             created=created,
+            crediting_paused=crediting_paused,
+            crediting_paused_by=crediting_paused_by,
             effective_at=effective_at,
             id=id,
             kind=kind,

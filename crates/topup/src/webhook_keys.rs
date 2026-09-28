@@ -6,6 +6,12 @@
 //! keeps the previous version in `retiring_webhook_keys` for an overlap of at most 7 days, during
 //! which every delivery carries one signature per version (the Standard Webhooks multi-signature
 //! rotation) and attestation binds every version.
+//!
+//! **Trust continuity.** A merchant verifies its security notices with the key it pinned, so a
+//! leaked API key must not be able to cut that key off at once: a live roll keeps the previous
+//! version signing for at least [`MIN_LIVE_ROLL_OVERLAP`], the treasury time-lock, and the roll's
+//! own `account.updated` notice is signed by the version it retires whenever it is delivered
+//! (`events.signing_key_version`), even after the overlap.
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgConnection, PgPool};
@@ -18,6 +24,10 @@ use crate::tenancy::Scope;
 
 /// The longest overlap a roll may keep the previous key signing: 7 days, as an API key roll.
 pub const MAX_ROLL_OVERLAP: Duration = Duration::days(7);
+/// The shortest overlap of a live roll: the treasury time-lock, so a leaked key cannot stop the
+/// merchant's pinned key from verifying notices before a treasury change it made applies. Test
+/// mode may roll with no overlap.
+pub const MIN_LIVE_ROLL_OVERLAP: Duration = crate::treasuries::TIME_LOCK;
 
 /// One version of an account's key in one mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +50,22 @@ pub struct WebhookKeys {
 }
 
 impl WebhookKeys {
+    /// These keys and `version` too, when it is a valid version not already signing: the version
+    /// a roll retired, which signs the roll's notice after its overlap ended.
+    #[must_use]
+    pub fn with_version(mut self, version: i32) -> Self {
+        if let Ok(version) = u32::try_from(version)
+            && version >= 1
+            && !self.versions.iter().any(|key| key.version == version)
+        {
+            self.versions.push(KeyVersion {
+                version,
+                expires_at: None,
+            });
+        }
+        self
+    }
+
     /// The key ids of every version, in order; `None` if the stored account id cannot name a key.
     #[must_use]
     pub fn ids(&self) -> Option<Vec<WebhookKeyId>> {
@@ -53,7 +79,8 @@ impl WebhookKeys {
 /// A failure to roll a webhook key.
 #[derive(Debug, thiserror::Error)]
 pub enum WebhookKeyError {
-    /// The overlap is negative or longer than [`MAX_ROLL_OVERLAP`].
+    /// The overlap is negative, longer than [`MAX_ROLL_OVERLAP`], or, in live mode, shorter than
+    /// [`MIN_LIVE_ROLL_OVERLAP`].
     #[error("webhook key overlap is out of range")]
     InvalidExpiry,
     /// The account does not exist.
@@ -117,10 +144,22 @@ pub async fn active(
     }))
 }
 
+/// The overlaps a roll in `livemode` accepts: 48 hours to 7 days live, 0 to 7 days in test mode.
+#[must_use]
+pub fn overlap_range(livemode: bool) -> (Duration, Duration) {
+    let min = if livemode {
+        MIN_LIVE_ROLL_OVERLAP
+    } else {
+        Duration::zero()
+    };
+    (min, MAX_ROLL_OVERLAP)
+}
+
 /// Rolls the scope's webhook key: the next version signs from now on, and the current one keeps
-/// signing beside it for `expires_in` (at most 7 days), or stops at once for zero. Previous
-/// versions still in an overlap stop no later than the new one. Audited, and announced as
-/// `account.updated` in the scope's mode, signed by every key still signing.
+/// signing beside it for `expires_in` (48 hours to 7 days live; test mode also accepts zero, which
+/// stops it at once). Previous versions still in an overlap stop no later than the new one.
+/// Audited, and announced as `account.updated` in the scope's mode, signed by every key still
+/// signing and always by the version it retires.
 pub async fn roll(
     pool: &PgPool,
     routes: &RouteSet,
@@ -128,7 +167,8 @@ pub async fn roll(
     expires_in: Duration,
     actor: &Actor,
 ) -> Result<WebhookKeys, WebhookKeyError> {
-    if expires_in < Duration::zero() || expires_in > MAX_ROLL_OVERLAP {
+    let (min, max) = overlap_range(scope.livemode());
+    if expires_in < min || expires_in > max {
         return Err(WebhookKeyError::InvalidExpiry);
     }
     let mut transaction = pool.begin().await?;
@@ -201,7 +241,9 @@ pub async fn roll(
         },
     )
     .await?;
-    let event = NewOutboxEvent::new("account.updated", scope, object, actor);
+    let mut event = NewOutboxEvent::new("account.updated", scope, object, actor);
+    event.signing_key_version =
+        Some(u32::try_from(current).map_err(|error| sqlx::Error::Decode(Box::new(error)))?);
     db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
     let keys = active(&mut transaction, scope)
         .await?

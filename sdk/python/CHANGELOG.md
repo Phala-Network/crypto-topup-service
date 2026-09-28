@@ -8,6 +8,14 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Changed (breaking)
 
+- Address checks derive every address from your pins, never from the response's `treasury`: a
+  quote or deposit address network naming another treasury than your pinned one of its chain
+  raises `AddressMismatchError`. With a live key (`ppay_sk_live_`, `ppay_rk_live_`) the check is
+  mandatory and fails closed unless `account`, `forwarder`, and `treasuries` are all given; in test
+  mode an unpinned treasury falls back to the response's with an `UnpinnedTreasuryWarning`.
+- `roll_webhook_key` / `pay.account.roll_webhook_key` default to `expires_in=172800`, the shortest
+  overlap a live roll accepts (was `0`).
+
 - API conformance with Stripe (docs/design/multi-tenant.md, "API conformance"): business-state
   failures such as `deposit_not_final`, `quote_unexpected_state`, `paused`, `treasury_not_set`,
   and `*_cap_exceeded` are `400` (only `idempotency_key_in_use` is `409`); per-customer limits are
@@ -27,10 +35,9 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   client_reference_id=…)`, `pay.deposits.list(client_reference_id=…)`, `Quote`/`Deposit`
   `.client_reference_id`, `CreditedDeposit.client_reference_id`, and `topup-sdk send-test-event
   --client-reference-id`.
-- `PhalaPay(…, forwarder=(factory, implementation))` is required and a pair: every quote is
-  recomputed over its own `treasury` and every deposit address network over its own, failing
-  closed with `AddressMismatchError`; the optional `treasuries={chain_id: treasury}` pins the
-  treasury each may pay. `TopupClient(forwarder=)` takes the same pair.
+- `PhalaPay(…, forwarder=(factory, implementation))` is required and a pair, and
+  `treasuries={chain_id: treasury}` pins the treasury each address is derived from (required in
+  live mode, above). `TopupClient(forwarder=)` takes the same pair.
 - A deposit's `status` is `pending`, `credited`, `rejected`, or `reversed`, with booleans `final`
   and `swept`; `CreditedDeposit` accepts only `credited`.
 - `Quote.payment` is the shared `Payment` model (`status` `seen` or `recorded`, with `chain_id` and
@@ -39,6 +46,11 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 - Every object's `livemode` and `metadata` are required in the generated models.
 
 ### Added
+
+- Restricted keys: `TopupClient`/`PhalaPay` accept `ppay_rk_…` keys, and
+  `create_api_key(name=, permissions=[...])` / `pay.api_keys.create(permissions=)` create one.
+- `pause_treasury` / `resume_treasury` (`pay.treasuries.pause`, `.resume`): the merchant's
+  crediting pause of a treasury. `topup_sdk.UnpinnedTreasuryWarning`.
 
 - Events are snapshots with their cause: `Event.request` (`EventRequest`: the `Request-Id` and
   `Idempotency-Key` of the request that caused it, `None` for the service's workers) and

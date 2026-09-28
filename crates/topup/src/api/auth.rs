@@ -69,7 +69,7 @@ impl Merchant {
     }
 
     /// Fails with `403 permission_denied` unless the authorization table grants `permission` to
-    /// the key's kind.
+    /// the key's kind and, for a restricted key, the key was granted it.
     pub(crate) async fn require(
         &self,
         pool: &PgPool,
@@ -79,7 +79,7 @@ impl Merchant {
             KeyKind::Secret => Principal::SecretKey,
             KeyKind::Restricted => Principal::RestrictedKey,
         };
-        if tenancy::holds(pool, principal, permission).await? {
+        if self.key.granted(permission) && tenancy::holds(pool, principal, permission).await? {
             Ok(())
         } else {
             Err(ApiError::permission_denied())
@@ -87,10 +87,10 @@ impl Merchant {
     }
 }
 
-/// Authenticates a merchant request by its `Authorization: Bearer ppay_sk_…` key (design D7) and
-/// attaches its [`Merchant`], whose scope is the key's account and mode. A key that fails the
-/// checksum is refused without a database read; HTTP Basic and any other scheme are refused. A
-/// live key of an account the operator has not enabled for live mode is `403
+/// Authenticates a merchant request by its `Authorization: Bearer ppay_sk_…` or `ppay_rk_…` key
+/// (design D7) and attaches its [`Merchant`], whose scope is the key's account and mode. A key
+/// that fails the checksum is refused without a database read; HTTP Basic and any other scheme
+/// are refused. A live key of an account the operator has not enabled for live mode is `403
 /// testmode_charges_only`. The account and mode's rate limit applies to every authenticated
 /// request.
 pub async fn authenticate_merchant(

@@ -75,7 +75,7 @@ class ProductConfig:
 
     def livemode(self) -> bool:
         """The mode of the product's API key, and so of its webhooks."""
-        return self.api_key().startswith("ppay_sk_live_")
+        return self.api_key().startswith(("ppay_sk_live_", "ppay_rk_live_"))
 
     def client(self) -> TopupClient:
         # The forwarder is pinned, so every open quote's address is recomputed before it is used.

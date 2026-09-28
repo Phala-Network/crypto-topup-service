@@ -25,9 +25,10 @@ class ApiKeyList:
 
     Example:
         {'data': [{'created': 1790467200, 'expires_at': None, 'id': 'key_6a8c0e2b4d1f43a5c7e9b1d3f5a7c9e1', 'last_used':
-            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'redacted':
-            'ppay_sk_test_…Yz4x', 'secret': None, 'status': 'active', 'type': 'secret'}], 'has_more': False, 'object':
-            'list', 'url': '/v1/api_keys'}
+            1790553600, 'livemode': False, 'name': 'fulfillment worker', 'object': 'api_key', 'permissions':
+            ['account.read', 'deposit_addresses.read', 'deposit_addresses.write', 'deposits.read', 'events.read',
+            'quotes.read', 'quotes.write', 'refunds.read'], 'redacted': 'ppay_rk_test_…Yz4x', 'status': 'active', 'type':
+            'restricted'}], 'has_more': False, 'object': 'list', 'url': '/v1/api_keys'}
 
     Attributes:
         data (list[ApiKeyObject]): The mode's keys, newest first.

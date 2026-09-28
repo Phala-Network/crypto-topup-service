@@ -95,6 +95,8 @@ struct ClaimedEvent {
     request: Option<RequestRef>,
     data: Value,
     object: Option<EventObject>,
+    /// A key version that signs the event whatever its overlap: the one a roll retired.
+    signing_key_version: Option<i32>,
     attempts: i32,
     created_at: DateTime<Utc>,
     claim_until: DateTime<Utc>,
@@ -385,7 +387,7 @@ where
                       delivery.url IS NOT NULL AS notice, event.account_id, account.public_id,
                       event.livemode, event.type, event.actor, event.request_id,
                       event.idempotency_key, event.data, event.object_type,
-                      event.object_id, delivery.attempts,
+                      event.object_id, event.signing_key_version, delivery.attempts,
                       event.created, delivery.next_attempt_at
             "#,
         )
@@ -414,6 +416,7 @@ where
                     }),
                     data: row.try_get("data")?,
                     object: EventObject::from_parts(&object_type, row.try_get("object_id")?),
+                    signing_key_version: row.try_get("signing_key_version")?,
                     attempts: row.try_get("attempts")?,
                     created_at: row.try_get("created")?,
                     claim_until: row.try_get("next_attempt_at")?,
@@ -474,6 +477,10 @@ where
             let mut connection = self.pool.acquire().await?;
             crate::webhook_keys::active(&mut connection, event.scope).await?
         };
+        let keys = keys.map(|keys| match event.signing_key_version {
+            Some(version) => keys.with_version(version),
+            None => keys,
+        });
         let Some(keys) = keys.and_then(|keys| keys.ids()) else {
             return Ok(Outcome::internal("signing_failed"));
         };

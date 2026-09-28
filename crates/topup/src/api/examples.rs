@@ -31,6 +31,19 @@ const SALT: &str = "0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06
 /// When the example payment was made, Unix seconds (2026-09-28).
 const CREATED: i64 = 1_790_553_600;
 
+/// A runtime server's restricted key: quotes, deposit addresses, deposits, events, and refund
+/// reads, the set the integration guide recommends; each `write` includes its `read`.
+const RUNTIME_PERMISSIONS: [&str; 8] = [
+    "account.read",
+    "deposit_addresses.read",
+    "deposit_addresses.write",
+    "deposits.read",
+    "events.read",
+    "quotes.read",
+    "quotes.write",
+    "refunds.read",
+];
+
 /// The example of the component schema `name`, if it has one.
 pub(super) fn schema(name: &str) -> Option<Value> {
     Some(match name {
@@ -148,9 +161,14 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "object": "webhook_endpoint",
             "deleted": true,
         }),
-        "ApiKeyObject" => api_key(None),
-        "ApiKeyList" => list("/v1/api_keys", api_key(None)),
-        "CreateApiKeyRequest" => json!({"name": "fulfillment worker"}),
+        "ApiKeyObject" => api_key(),
+        "ApiKeyList" => list("/v1/api_keys", api_key()),
+        "CreateApiKeyRequest" => json!({
+            "name": "fulfillment worker",
+            "type": "restricted",
+            "permissions": ["quotes.write", "deposit_addresses.write", "deposits.read",
+                            "events.read", "refunds.read"],
+        }),
         "RollApiKeyRequest" => json!({"expires_in": 86_400}),
         "AccountObject" => json!({
             "id": ACCOUNT,
@@ -167,7 +185,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "confirmation_policies": [{"chain_id": 1, "confirmations": "12"}],
         }),
         "AccountSelfPauseRequest" => json!({"scopes": ["quotes"]}),
-        "RollWebhookKeyRequest" => json!({"expires_in": 86_400}),
+        "RollWebhookKeyRequest" => json!({"expires_in": 172_800}),
         "AttestationResponse" => json!({
             "object": "attestation",
             "account": ACCOUNT,
@@ -240,7 +258,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "restricted": false,
             "paused_scopes": [],
             "created": CREATED - 2_592_000,
-            "api_keys": [api_key(Some("ppay_sk_test_51Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv2Wx4Yz"))],
+            "api_keys": [first_key()],
         }),
         "IssueApiKeyRequest" => json!({
             "livemode": true,
@@ -260,6 +278,9 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "paused_scopes": ["quotes"],
         }),
         "AdminReasonRequest" => json!({"reason": "providers agree again; verified OPS-93"}),
+        "AdminTreasuryPauseRequest" => json!({
+            "reason": "former treasury key reported compromised by the contact; OPS-97",
+        }),
         "NudgeResponse" => json!({
             "deposit_id": DEPOSIT,
             "next_attempt_at": "2026-09-28T12:00:00Z",
@@ -455,6 +476,8 @@ fn treasury() -> Value {
         "replaced_at": null,
         "canceled_at": null,
         "cancellation_reason": null,
+        "crediting_paused": false,
+        "crediting_paused_by": [],
     })
 }
 
@@ -503,15 +526,33 @@ fn webhook_endpoint() -> Value {
     })
 }
 
-fn api_key(secret: Option<&str>) -> Value {
+/// The first secret key the operator issues with an account, with its secret.
+fn first_key() -> Value {
     json!({
         "id": API_KEY,
         "object": "api_key",
         "livemode": false,
         "type": "secret",
+        "name": "",
+        "permissions": null,
+        "secret": "ppay_sk_test_51Ab3Cd5Ef7Gh9Jk2Lm4Np6Qr8St0Uv2Wx4Yz",
+        "redacted": "ppay_sk_test_…x4Yz",
+        "status": "active",
+        "created": CREATED - 86_400,
+        "expires_at": null,
+        "last_used": null,
+    })
+}
+
+fn api_key() -> Value {
+    json!({
+        "id": API_KEY,
+        "object": "api_key",
+        "livemode": false,
+        "type": "restricted",
         "name": "fulfillment worker",
-        "secret": secret,
-        "redacted": "ppay_sk_test_…Yz4x",
+        "permissions": RUNTIME_PERMISSIONS,
+        "redacted": "ppay_rk_test_…Yz4x",
         "status": "active",
         "created": CREATED - 86_400,
         "expires_at": null,

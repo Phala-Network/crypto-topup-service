@@ -1,5 +1,6 @@
 //! Treasuries (`/v1/treasuries`, design D10): prove a treasury per chain with an EIP-4361 message,
-//! list the account's treasuries, and cancel a pending live change.
+//! list the account's treasuries, cancel a pending live change, and pause crediting of deposits to
+//! the forwarders over a treasury in an incident.
 
 use std::str::FromStr;
 
@@ -329,6 +330,99 @@ pub(crate) async fn cancel_treasury(
     Ok(Json(treasury_object(&treasury)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/treasuries/{id}/pause",
+    params(
+        ("id" = String, Path, description = "Treasury id, `trs_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    responses(
+        (status = 200, description = "OK: `crediting_paused`", body = Treasury),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "treasuries"
+)]
+/// Pauses crediting of deposits to every forwarder over the treasury's address, for an incident
+/// such as a compromised former treasury: new deposits stay `pending`, uncredited, and no
+/// `deposit.credited` is sent until you resume; nothing already credited changes. Announced as
+/// `treasury.updated`. Pausing a paused treasury returns it unchanged.
+pub(crate) async fn pause_treasury(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Treasury>> {
+    set_crediting_paused(&state, &merchant, &id, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/treasuries/{id}/resume",
+    params(
+        ("id" = String, Path, description = "Treasury id, `trs_…`"),
+        (
+            "Idempotency-Key" = Option<String>, Header,
+            description = "Up to 255 characters; for 24 hours a repeat of the same request \
+                           returns the first response, and of another request is \
+                           `400 idempotency_error`."
+        )
+    ),
+    responses(
+        (status = 200, description = "OK", body = Treasury),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 404, description = "Not Found", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "treasuries"
+)]
+/// Lifts your crediting pause of the treasury: the deposits it held are credited, each with its
+/// `deposit.credited`. An operator's pause stays in `crediting_paused_by` until the operator lifts
+/// it. Announced as `treasury.updated`.
+pub(crate) async fn resume_treasury(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    ApiPath(id): ApiPath<String>,
+) -> ApiResult<Json<Treasury>> {
+    set_crediting_paused(&state, &merchant, &id, false).await
+}
+
+async fn set_crediting_paused(
+    state: &AppState,
+    merchant: &Merchant,
+    id: &str,
+    pause: bool,
+) -> ApiResult<Json<Treasury>> {
+    merchant
+        .require(&state.pool, Permission::TreasuryWrite)
+        .await?;
+    let id = ids::parse(ids::TREASURY, id).ok_or_else(ApiError::not_found)?;
+    let treasury = treasuries::set_crediting_paused(
+        &state.pool,
+        merchant.scope,
+        id,
+        crate::pause::PauseOwner::Merchant,
+        pause,
+        &merchant.actor(),
+        if pause {
+            "crediting paused through the API"
+        } else {
+            "crediting resumed through the API"
+        },
+    )
+    .await
+    .map_err(map_error)?;
+    Ok(Json(treasury_object(&treasury)))
+}
+
 /// The API representation of a treasury.
 pub(crate) fn treasury_object(treasury: &treasuries::Treasury) -> Treasury {
     Treasury {
@@ -346,6 +440,8 @@ pub(crate) fn treasury_object(treasury: &treasuries::Treasury) -> Treasury {
         cancellation_reason: treasury
             .cancellation_reason
             .map(|reason| reason.code().to_owned()),
+        crediting_paused: !treasury.crediting_paused_by.is_empty(),
+        crediting_paused_by: treasury.crediting_paused_by.clone(),
     }
 }
 
@@ -387,7 +483,7 @@ fn parse_signature(value: &str) -> ApiResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn map_error(error: TreasuryError) -> ApiError {
+pub(crate) fn map_error(error: TreasuryError) -> ApiError {
     match error {
         TreasuryError::NotFound => ApiError::not_found(),
         TreasuryError::MessageInvalid(message) => {

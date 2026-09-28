@@ -1,17 +1,20 @@
 //! API keys (docs/design/multi-tenant.md D7): the key format, its hash, and the `api_keys`
 //! repository.
 //!
-//! A key is `ppay_sk_{live|test}_`, 43 base62 characters drawn from the OS RNG (256 bits, as 32
-//! random bytes), and a 6-character base62 CRC32 of everything before it, the shape of GitHub's
-//! token format. The checksum lets the service refuse a mistyped or made-up key without a
+//! A key is `ppay_sk_{live|test}_` (secret) or `ppay_rk_{live|test}_` (restricted), 43 base62
+//! characters drawn from the OS RNG (256 bits, as 32 random bytes), and a 6-character base62 CRC32
+//! of everything before it, the shape of GitHub's token format. The checksum lets the service refuse a mistyped or made-up key without a
 //! database read and lets secret scanners recognise a real one. Only the SHA-256 of the whole key
 //! is stored: a 256-bit random key needs no slow hash, and the lookup is by that hash, so there is
 //! no comparison to time.
 //!
 //! The operator issues an account's first secret key of each enabled mode when it creates the
 //! account (design D8); the merchant then creates, rolls, and revokes its keys with a secret key
-//! (`/v1/api_keys`). A roll keeps the old key working until an expiry of at most 7 days, Stripe's
-//! grace period. A revoke that would leave the account's mode without a non-expiring key is
+//! (`/v1/api_keys`). A secret key holds every permission; a restricted key (design PR 12, Stripe's
+//! restricted keys) holds only the permissions it was created with, which never include managing
+//! keys, treasuries, webhook endpoints, webhook keys, or account settings, so a server that runs
+//! with a restricted key cannot redirect funds or silence notices if it leaks. A roll keeps the old
+//! key working until an expiry of at most 7 days, Stripe's grace period. A revoke that would leave the account's mode without a non-expiring key is
 //! refused, so a merchant cannot lock itself out; a merchant that loses every key asks the
 //! operator, who may revoke the mode's keys and issues a recovery key. Every change is audited and
 //! is an `api_key.*` event carrying its actor.
@@ -27,7 +30,7 @@ use zeroize::Zeroizing;
 use crate::audit::{self, Actor, ActorType};
 use crate::db::Account;
 use crate::ids;
-use crate::tenancy::Scope;
+use crate::tenancy::{self, Permission, Principal, Scope};
 
 /// Base62 characters of the random part.
 const RANDOM_CHARS: usize = 43;
@@ -44,7 +47,7 @@ pub const MAX_ROLL_EXPIRY: Duration = Duration::days(7);
 pub enum KeyKind {
     /// Holds every API permission.
     Secret,
-    /// Holds the permissions it was granted (design PR 12); never issued yet.
+    /// Holds the permissions it was granted (design PR 12).
     Restricted,
 }
 
@@ -187,6 +190,8 @@ pub struct ApiKey {
     pub last_used_at: Option<DateTime<Utc>>,
     /// When the key was revoked.
     pub revoked_at: Option<DateTime<Utc>>,
+    /// A restricted key's granted permissions; `None` for a secret key.
+    pub permissions: Option<Vec<Permission>>,
 }
 
 impl ApiKey {
@@ -206,6 +211,15 @@ impl ApiKey {
     #[must_use]
     pub const fn scope(&self) -> Scope {
         Scope::new(self.account_id, self.livemode)
+    }
+
+    /// Whether the key's own grants include `permission`: always for a secret key. The
+    /// authorization table must grant it to the key's kind as well.
+    #[must_use]
+    pub fn granted(&self, permission: Permission) -> bool {
+        self.permissions
+            .as_ref()
+            .is_none_or(|granted| granted.contains(&permission))
     }
 }
 
@@ -246,6 +260,9 @@ pub enum ApiKeyError {
     /// A roll expiry outside `0..=7 days`.
     #[error("expiry must be between now and 7 days")]
     InvalidExpiry,
+    /// A restricted key's grant is empty, unknown, or not grantable to a restricted key.
+    #[error("permission {0} cannot be granted to a restricted key")]
+    PermissionNotGrantable(String),
     /// The OS RNG failed.
     #[error("entropy unavailable")]
     EntropyUnavailable,
@@ -258,7 +275,7 @@ pub enum ApiKeyError {
 macro_rules! key_columns {
     () => {
         "id, account_id, livemode, kind, name, prefix, last4, created_at, expires_at, \
-         last_used_at, revoked_at"
+         last_used_at, revoked_at, permissions"
     };
 }
 
@@ -275,6 +292,7 @@ struct KeyRow {
     expires_at: Option<DateTime<Utc>>,
     last_used_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
+    permissions: Option<sqlx::types::Json<Vec<String>>>,
 }
 
 impl TryFrom<KeyRow> for ApiKey {
@@ -295,6 +313,19 @@ impl TryFrom<KeyRow> for ApiKey {
             expires_at: row.expires_at,
             last_used_at: row.last_used_at,
             revoked_at: row.revoked_at,
+            permissions: row
+                .permissions
+                .map(|codes| {
+                    codes
+                        .iter()
+                        .map(|code| {
+                            Permission::parse(code).ok_or_else(|| {
+                                sqlx::Error::Decode(format!("unknown permission {code}").into())
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?,
         })
     }
 }
@@ -517,7 +548,7 @@ pub(crate) async fn create_in(
     if scope.livemode() && !charges_enabled {
         return Err(ApiKeyError::ChargesNotEnabled);
     }
-    let issued = insert(transaction, scope, KeyKind::Secret, name, actor).await?;
+    let issued = insert(transaction, scope, KeyKind::Secret, name, None, actor).await?;
     record(
         transaction,
         &issued.key,
@@ -530,8 +561,66 @@ pub(crate) async fn create_in(
     Ok(issued)
 }
 
-/// Rolls the scope's key `id`: a new secret key with the same name, and the old key expiring
-/// after `expires_in` (at most 7 days), or revoked at once for zero.
+/// Issues a restricted key in `scope` named `name` holding `permissions`, each a permission the
+/// authorization table grants to restricted keys; a `write` grant includes its resource's `read`.
+/// Audited and announced as `api_key.created`.
+pub async fn create_restricted(
+    pool: &PgPool,
+    scope: Scope,
+    name: &str,
+    permissions: &[Permission],
+    actor: &Actor,
+) -> Result<IssuedKey, ApiKeyError> {
+    let grantable = tenancy::grants(pool, Principal::RestrictedKey).await?;
+    let mut granted = Vec::with_capacity(permissions.len().saturating_mul(2));
+    for permission in permissions {
+        if !grantable.contains(permission) {
+            return Err(ApiKeyError::PermissionNotGrantable(
+                permission.code().to_owned(),
+            ));
+        }
+        granted.push(*permission);
+        granted.extend(permission.read_of_write());
+    }
+    if granted.is_empty() {
+        return Err(ApiKeyError::PermissionNotGrantable(String::new()));
+    }
+    granted.sort_by_key(|permission| permission.code());
+    granted.dedup();
+    let mut transaction = pool.begin().await?;
+    let charges_enabled: bool =
+        sqlx::query_scalar("SELECT charges_enabled FROM accounts WHERE id = $1 FOR SHARE")
+            .bind(scope.account_id())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ApiKeyError::NotFound)?;
+    if scope.livemode() && !charges_enabled {
+        return Err(ApiKeyError::ChargesNotEnabled);
+    }
+    let issued = insert(
+        &mut transaction,
+        scope,
+        KeyKind::Restricted,
+        name,
+        Some(&granted),
+        actor,
+    )
+    .await?;
+    record(
+        &mut transaction,
+        &issued.key,
+        None,
+        actor,
+        "api_key.created",
+        "",
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(issued)
+}
+
+/// Rolls the scope's key `id`: a new key of the same kind, name, and permissions, and the old key
+/// expiring after `expires_in` (at most 7 days), or revoked at once for zero.
 pub async fn roll(
     pool: &PgPool,
     scope: Scope,
@@ -547,7 +636,15 @@ pub async fn roll(
     if old.revoked_at.is_some() || old.expires_at.is_some() {
         return Err(ApiKeyError::Inactive);
     }
-    let issued = insert(&mut transaction, scope, old.kind, &old.name, actor).await?;
+    let issued = insert(
+        &mut transaction,
+        scope,
+        old.kind,
+        &old.name,
+        old.permissions.as_deref(),
+        actor,
+    )
+    .await?;
     let rolled = format!("rolled to {}", issued.key.public_id());
     record(
         &mut transaction,
@@ -647,12 +744,14 @@ pub async fn revoke(
     Ok(revoked)
 }
 
-/// Inserts a new key of `kind` in `scope`, inside the caller's transaction.
+/// Inserts a new key of `kind` in `scope`, inside the caller's transaction; `permissions` are a
+/// restricted key's grants and `None` for a secret key.
 async fn insert(
     transaction: &mut Transaction<'_, Postgres>,
     scope: Scope,
     kind: KeyKind,
     name: &str,
+    permissions: Option<&[Permission]>,
     actor: &Actor,
 ) -> Result<IssuedKey, ApiKeyError> {
     let secret = generate(kind, scope.livemode())?;
@@ -661,8 +760,8 @@ async fn insert(
         .ok_or(ApiKeyError::EntropyUnavailable)?;
     let row = sqlx::query_as::<_, KeyRow>(concat!(
         "INSERT INTO api_keys \
-         (id, account_id, livemode, kind, name, prefix, last4, key_hash, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ",
+         (id, account_id, livemode, kind, name, prefix, last4, key_hash, created_by, permissions) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ",
         key_columns!()
     ))
     .bind(Uuid::new_v4())
@@ -674,6 +773,14 @@ async fn insert(
     .bind(last4)
     .bind(hash(&secret).as_slice())
     .bind(event_actor(actor))
+    .bind(permissions.map(|permissions| {
+        sqlx::types::Json(
+            permissions
+                .iter()
+                .map(|permission| permission.code())
+                .collect::<Vec<_>>(),
+        )
+    }))
     .fetch_one(&mut **transaction)
     .await?;
     Ok(IssuedKey {

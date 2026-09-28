@@ -922,3 +922,271 @@ async fn requests_are_rate_limited_per_account_and_mode() -> Result<()> {
     let cleanup = database.cleanup().await;
     result.and(cleanup)
 }
+
+/// Restricted keys (design PR 12, Stripe's restricted keys): a secret key creates one with a
+/// subset of the grantable permissions, a `write` includes its `read`, and the key reaches only
+/// what it holds. No grant lets it manage keys, treasuries, webhook endpoints, webhook keys, or
+/// account settings, and it cannot create keys itself.
+#[tokio::test]
+async fn restricted_keys_hold_only_their_grants() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let limits = RateLimits {
+            live: 1_000,
+            test: 1_000,
+            test_platform: 1_000,
+        };
+        let harness = Harness::new(pool, limits)?;
+        let (account, key) = seed_test_account(pool, "restricted").await?;
+
+        // The authorization table never grants the management writes to restricted keys.
+        let held: Vec<String> = sqlx::query_scalar(
+            "SELECT permission FROM permissions WHERE principal = 'key:restricted' ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await?;
+        for management in [
+            "account.write",
+            "api_keys.write",
+            "endpoints.write",
+            "treasury.write",
+        ] {
+            ensure!(!held.iter().any(|code| code == management), "{held:?}");
+        }
+
+        let create = |body: Value| {
+            let harness = &harness;
+            let key = key.clone();
+            async move {
+                harness
+                    .merchant(Method::POST, "/v1/api_keys", Some(&body), &key, None)
+                    .await
+            }
+        };
+        for (body, param) in [
+            (
+                json!({"type": "restricted", "permissions": ["api_keys.write"]}),
+                "permissions",
+            ),
+            (
+                json!({"type": "restricted", "permissions": ["treasury.write"]}),
+                "permissions",
+            ),
+            (
+                json!({"type": "restricted", "permissions": ["endpoints.write"]}),
+                "permissions",
+            ),
+            (
+                json!({"type": "restricted", "permissions": ["account.write"]}),
+                "permissions",
+            ),
+            (
+                json!({"type": "restricted", "permissions": ["quotes.admin"]}),
+                "permissions",
+            ),
+            (
+                json!({"type": "restricted", "permissions": []}),
+                "permissions",
+            ),
+            (json!({"type": "restricted"}), "permissions"),
+            (json!({"permissions": ["quotes.read"]}), "permissions"),
+            (json!({"type": "publishable"}), "type"),
+        ] {
+            let refused = create(body.clone()).await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{body}: {}",
+                refused.body
+            );
+            ensure!(
+                refused.body["error"]["param"] == param,
+                "{body}: {}",
+                refused.body
+            );
+        }
+
+        let created = create(json!({
+            "name": "checkout server",
+            "type": "restricted",
+            "permissions": ["quotes.write", "deposit_addresses.write", "deposits.read",
+                            "events.read", "refunds.read", "account.read"],
+        }))
+        .await?;
+        ensure!(created.status == StatusCode::OK, "{}", created.body);
+        ensure!(created.body["type"] == "restricted");
+        let runtime = secret(&created.body)?;
+        ensure!(runtime.starts_with("ppay_rk_test_"));
+        ensure!(
+            api_keys::check_format(&runtime).map(|format| format.kind) == Some(KeyKind::Restricted)
+        );
+        ensure!(
+            created.body["permissions"]
+                == json!([
+                    "account.read",
+                    "deposit_addresses.read",
+                    "deposit_addresses.write",
+                    "deposits.read",
+                    "events.read",
+                    "quotes.read",
+                    "quotes.write",
+                    "refunds.read",
+                ]),
+            "{}",
+            created.body
+        );
+        let runtime_id = created.body["id"].as_str().context("id")?.to_owned();
+
+        // What the runtime key reaches.
+        for path in [
+            "/v1/account",
+            "/v1/config",
+            "/v1/quotes",
+            "/v1/deposit_addresses",
+            "/v1/deposits",
+            "/v1/refunds",
+            "/v1/events",
+        ] {
+            let allowed = harness.get(path, &runtime).await?;
+            ensure!(allowed.status == StatusCode::OK, "{path}: {}", allowed.body);
+        }
+        // What it does not: reads it was not granted, and every management write.
+        let treasury = "trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9";
+        let denied: Vec<(Method, String, Option<Value>)> = vec![
+            (Method::GET, "/v1/webhook_endpoints".to_owned(), None),
+            (Method::GET, "/v1/treasuries".to_owned(), None),
+            (Method::GET, "/v1/balance".to_owned(), None),
+            (Method::GET, "/v1/api_keys".to_owned(), None),
+            (
+                Method::POST,
+                "/v1/api_keys".to_owned(),
+                Some(json!({"name": "escalate"})),
+            ),
+            (
+                Method::POST,
+                format!("/v1/api_keys/{runtime_id}/roll"),
+                Some(json!({"expires_in": 0})),
+            ),
+            (Method::DELETE, format!("/v1/api_keys/{runtime_id}"), None),
+            (
+                Method::POST,
+                "/v1/treasuries/challenge".to_owned(),
+                Some(json!({"chain_id": 11_155_111,
+                            "address": "0x936c1991f8da9a919fa11b557a3514719f5a4504"})),
+            ),
+            (
+                Method::POST,
+                format!("/v1/treasuries/{treasury}/cancel"),
+                None,
+            ),
+            (
+                Method::POST,
+                format!("/v1/treasuries/{treasury}/pause"),
+                None,
+            ),
+            (
+                Method::POST,
+                format!("/v1/treasuries/{treasury}/resume"),
+                None,
+            ),
+            (
+                Method::POST,
+                "/v1/webhook_endpoints".to_owned(),
+                Some(json!({"url": "https://attacker.example/hook",
+                            "enabled_events": ["*"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/account/webhook_keys/roll".to_owned(),
+                Some(json!({"expires_in": 0})),
+            ),
+            (
+                Method::POST,
+                "/v1/account".to_owned(),
+                Some(json!({"confirmation_policies": []})),
+            ),
+            (
+                Method::POST,
+                "/v1/account/pause".to_owned(),
+                Some(json!({"scopes": ["quotes"]})),
+            ),
+            (
+                Method::POST,
+                "/v1/refunds".to_owned(),
+                Some(json!({"deposit": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+                            "destination_address": "0x0f45147a02e4c9d91aff20024e22095536fd5053"})),
+            ),
+        ];
+        for (method, path, body) in denied {
+            let refused = harness
+                .merchant(method.clone(), &path, body.as_ref(), &runtime, None)
+                .await?;
+            ensure!(
+                refused.status == StatusCode::FORBIDDEN
+                    && refused.body["error"]["code"] == "permission_denied",
+                "{method} {path}: {} {}",
+                refused.status,
+                refused.body
+            );
+        }
+
+        // A grantable read is reachable once granted.
+        let reader =
+            create(json!({"type": "restricted", "permissions": ["endpoints.read"]})).await?;
+        ensure!(reader.status == StatusCode::OK, "{}", reader.body);
+        let reader = secret(&reader.body)?;
+        ensure!(harness.get("/v1/webhook_endpoints", &reader).await?.status == StatusCode::OK);
+        ensure!(harness.get("/v1/quotes", &reader).await?.status == StatusCode::FORBIDDEN);
+
+        // Rolling a restricted key keeps its kind and grants; it never counts as the mode's
+        // last lasting key, so the secret key cannot be revoked in its favour.
+        let rolled = harness
+            .merchant(
+                Method::POST,
+                &format!("/v1/api_keys/{runtime_id}/roll"),
+                Some(&json!({"expires_in": 0})),
+                &key,
+                None,
+            )
+            .await?;
+        ensure!(rolled.status == StatusCode::OK, "{}", rolled.body);
+        ensure!(rolled.body["type"] == "restricted");
+        ensure!(rolled.body["permissions"] == created.body["permissions"]);
+        ensure!(secret(&rolled.body)?.starts_with("ppay_rk_test_"));
+        let secret_id = harness.get("/v1/api_keys", &key).await?.body["data"]
+            .as_array()
+            .context("data")?
+            .iter()
+            .find(|listed| listed["type"] == "secret")
+            .and_then(|listed| listed["id"].as_str())
+            .context("secret key id")?
+            .to_owned();
+        let last = harness
+            .merchant(
+                Method::DELETE,
+                &format!("/v1/api_keys/{secret_id}"),
+                None,
+                &key,
+                None,
+            )
+            .await?;
+        ensure!(
+            last.body["error"]["code"] == "last_api_key",
+            "{}",
+            last.body
+        );
+
+        let created_events = events(pool, account)
+            .await?
+            .into_iter()
+            .filter(|(kind, _, _)| kind == "api_key.created")
+            .count();
+        ensure!(created_events == 3, "{created_events}");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}

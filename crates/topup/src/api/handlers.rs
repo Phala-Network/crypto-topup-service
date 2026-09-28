@@ -18,10 +18,10 @@ use super::auth::AdminActor;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountPauseRequest, AccountResponse, AdminReasonRequest, ApiKeyObject, Contact,
-    CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, Deposit, IssueApiKeyRequest,
-    NudgeResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
-    RoutePauseResponse, UpdateAccountRequest,
+    AccountPauseRequest, AccountResponse, AdminReasonRequest, AdminTreasuryPauseRequest,
+    ApiKeyObject, Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse,
+    Deposit, IssueApiKeyRequest, NudgeResponse, PauseRequest, PauseResponse,
+    ReconciliationBlockLiftResponse, RoutePauseResponse, Treasury, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -286,6 +286,88 @@ pub(crate) async fn resume_customer(
         false,
     )
     .await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/treasuries/{treasury}/pause",
+    params(
+        ("account" = String, Path, description = "Account id, `acct_…`"),
+        ("treasury" = String, Path, description = "Treasury id, `trs_…`")
+    ),
+    request_body = AdminTreasuryPauseRequest,
+    responses((status = 200, description = "OK", body = Treasury), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Pauses crediting of deposits to every forwarder over the treasury's address, for an incident
+/// such as a compromised former treasury: deposits stay `pending` and no `deposit.credited` is
+/// sent until the operator resumes; the merchant's own resume does not lift it. Audited, and
+/// announced as `treasury.updated`.
+pub(crate) async fn pause_treasury(
+    State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
+    ApiPath((account, treasury)): ApiPath<(String, String)>,
+    ApiJson(request): ApiJson<AdminTreasuryPauseRequest>,
+) -> ApiResult<Json<Treasury>> {
+    set_treasury_crediting_paused(&state, &actor, &account, &treasury, &request, true).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/accounts/{account}/treasuries/{treasury}/resume",
+    params(
+        ("account" = String, Path, description = "Account id, `acct_…`"),
+        ("treasury" = String, Path, description = "Treasury id, `trs_…`")
+    ),
+    request_body = AdminTreasuryPauseRequest,
+    responses((status = 200, description = "OK", body = Treasury), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Lifts the operator's crediting pause of the treasury; a pause the merchant set stays. Audited,
+/// and announced as `treasury.updated`.
+pub(crate) async fn resume_treasury(
+    State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
+    ApiPath((account, treasury)): ApiPath<(String, String)>,
+    ApiJson(request): ApiJson<AdminTreasuryPauseRequest>,
+) -> ApiResult<Json<Treasury>> {
+    set_treasury_crediting_paused(&state, &actor, &account, &treasury, &request, false).await
+}
+
+async fn set_treasury_crediting_paused(
+    state: &AppState,
+    actor: &Actor,
+    account: &str,
+    treasury: &str,
+    request: &AdminTreasuryPauseRequest,
+    pause: bool,
+) -> ApiResult<Json<Treasury>> {
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::invalid_param("reason", "reason is required"));
+    }
+    let account_id = parse_account_id(account)?;
+    let id = crate::ids::parse(crate::ids::TREASURY, treasury).ok_or_else(ApiError::not_found)?;
+    let livemode: bool =
+        sqlx::query_scalar("SELECT livemode FROM treasuries WHERE id = $1 AND account_id = $2")
+            .bind(id)
+            .bind(account_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    let treasury = crate::treasuries::set_crediting_paused(
+        &state.pool,
+        Scope::new(account_id, livemode),
+        id,
+        crate::pause::PauseOwner::Operator,
+        pause,
+        actor,
+        &request.reason,
+    )
+    .await
+    .map_err(super::treasuries::map_error)?;
+    Ok(Json(super::treasuries::treasury_object(&treasury)))
 }
 
 #[utoipa::path(

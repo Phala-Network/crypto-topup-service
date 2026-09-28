@@ -8,6 +8,10 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Changed (breaking)
 
+- `quoteAddress(forwarder, quote, treasury, account)` takes the treasury explicitly, like
+  `depositAddress`; it no longer reads the quote's own `treasury`, which a compromised service
+  could set to an attacker's with that treasury's valid address.
+
 - `quoteSalt(account, clientReferenceId, quoteId)` replaces `lockSalt`: a quote's address salt is
   tagged `"quote"` (design D3; it was `"lock"`), so `quoteAddress` recomputes the service's
   addresses again.
@@ -21,6 +25,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   `CheckoutStatus` gains `reversed`, with "reversed" copy.
 
 ### Added
+
+- `verifyQuoteAddress(pins, quote)` and `verifyDepositAddress(pins, address)` in
+  `@phala/pay/server` recompute an address from `AddressPins` you configure (`account`, `factory`,
+  `implementation`, `treasuries` per chain), never from the response's treasury, and throw
+  `AddressMismatchError`; in live mode a chain without a pinned treasury fails closed, and test mode
+  falls back to the response's treasury with a console warning.
 
 - `CheckoutError.requestId` (the failed response's `Request-Id`) and, for `rate_limited`,
   `retryAfter` (its `Retry-After`, in seconds), which `createCheckout` and `<DepositAddress>` wait

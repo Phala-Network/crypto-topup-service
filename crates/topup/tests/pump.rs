@@ -171,6 +171,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     next_attempt_at: Utc::now(),
                     actor: topup::db::SYSTEM_ACTOR.to_owned(),
                     request: None,
+                    signing_key_version: None,
                 }],
                 effects: TransitionEffects {
                     mark_final: false,

@@ -226,6 +226,8 @@ fn merchant_routes() -> OpenApiRouter<AppState> {
         ))
         .routes(routes!(treasuries::get_treasury))
         .routes(routes!(treasuries::cancel_treasury))
+        .routes(routes!(treasuries::pause_treasury))
+        .routes(routes!(treasuries::resume_treasury))
         .routes(routes!(
             webhook_endpoints::list_webhook_endpoints,
             webhook_endpoints::create_webhook_endpoint
@@ -262,6 +264,8 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::resume_account))
         .routes(routes!(handlers::pause_customer))
         .routes(routes!(handlers::resume_customer))
+        .routes(routes!(handlers::pause_treasury))
+        .routes(routes!(handlers::resume_treasury))
         .routes(routes!(handlers::pause_route))
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))

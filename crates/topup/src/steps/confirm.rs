@@ -722,6 +722,7 @@ fn rejected_event(deposit: &Deposit) -> OutboxEvent {
         next_attempt_at: Utc::now(),
         actor: crate::db::SYSTEM_ACTOR.to_owned(),
         request: None,
+        signing_key_version: None,
     }
 }
 

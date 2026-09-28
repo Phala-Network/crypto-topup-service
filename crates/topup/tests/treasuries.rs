@@ -25,16 +25,21 @@ use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db;
 use topup::locks::QuoteProvider;
 use topup::locks::pricing::ValidatedQuote;
+use topup::pump::{Step as _, StepResult};
 use topup::refunds::{DestinationScreener, DestinationScreening};
 use topup::routes::RouteSet;
+use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup::treasuries::{
     CHALLENGE_TTL, ContractAnswer, ContractSignatures, EvmContractSignatures, RESCREEN_INTERVAL,
     Rescreen, TIME_LOCK, apply_due, rescreen_due,
 };
 use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::chain::evm::EvmClient;
+use topup_adapters::risk::oracle::SanctionsSource;
+use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
+use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use tower::ServiceExt;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create_in_profile, run_checked};
@@ -572,6 +577,134 @@ async fn a_daily_rescreen_pauses_quotes_and_settlement_of_an_account_with_a_sanc
             ensure!(body["paused_scopes"] == json!([]), "{body}");
             let (status, body) = fixture.quote(&fixture.live_key, 1).await?;
             ensure!(status == StatusCode::OK, "{body}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// In an incident, such as a compromised former treasury, the merchant and the operator each pause
+/// crediting of the forwarders over one treasury: their deposits stay `confirmed` (`pending` in the
+/// API) with no `deposit.credited` until both pauses are lifted, while deposits to another treasury
+/// are credited. Each change is audited and announced as `treasury.updated`.
+#[tokio::test]
+async fn crediting_pauses_per_treasury_and_resumes() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let fixture = Fixture::new(&database.app_pool, Contracts::None).await?;
+            let old = PrivateKeySigner::random();
+            let new = PrivateKeySigner::random();
+            let (_, old_treasury) = fixture.prove(&fixture.live_key, 1, &old).await?;
+            let old_id = old_treasury["id"].as_str().context("id")?.to_owned();
+            ensure!(old_treasury["crediting_paused"] == false);
+            let (_, old_quote) = fixture.quote(&fixture.live_key, 1).await?;
+            fixture.prove(&fixture.live_key, 1, &new).await?;
+            let later = Utc::now() + TIME_LOCK + Duration::hours(1);
+            ensure!(apply_due(&fixture.pool, &fixture.route_set()?, &Clear, later).await? == 1);
+            let (_, new_quote) = fixture.quote(&fixture.live_key, 1).await?;
+            ensure!(new_quote["treasury"] == format!("{:#x}", new.address()));
+            let to_old = fixture.confirmed_deposit(&old_quote, 1).await?;
+            let to_new = fixture.confirmed_deposit(&new_quote, 2).await?;
+            let step = fixture.screen_step()?;
+            let outcome = |deposit: uuid::Uuid| {
+                let step = &step;
+                let pool = &fixture.pool;
+                async move {
+                    let deposit = db::get_deposit(pool, deposit).await?.context("deposit")?;
+                    anyhow::Ok(step.run(&deposit).await)
+                }
+            };
+            let held = |result: &StepResult| {
+                result.outcome
+                    == StepOutcome::Wait {
+                        reason: WaitReason::Paused,
+                    }
+                    && result.events.is_empty()
+            };
+            ensure!(outcome(to_old).await?.outcome == StepOutcome::Advance);
+
+            // The merchant pauses the former treasury; only its forwarders are held.
+            let pause = format!("/v1/treasuries/{old_id}/pause");
+            let (status, paused) = fixture.post(&fixture.live_key, &pause, Value::Null).await?;
+            ensure!(status == StatusCode::OK, "{paused}");
+            ensure!(paused["status"] == "replaced" && paused["crediting_paused"] == true);
+            ensure!(paused["crediting_paused_by"] == json!(["merchant"]));
+            let result = outcome(to_old).await?;
+            ensure!(held(&result), "{:?}", result.outcome);
+            ensure!(result.evidence["pause_scopes"]["treasury"] == json!(["settlement"]));
+            ensure!(outcome(to_new).await?.outcome == StepOutcome::Advance);
+            let updated = fixture.event_data("treasury.updated").await?;
+            let notice = updated.last().context("treasury.updated")?;
+            ensure!(notice["object"]["crediting_paused_by"] == json!(["merchant"]));
+            ensure!(
+                notice["previous_attributes"]
+                    == json!({"crediting_paused": false, "crediting_paused_by": []}),
+                "{notice}"
+            );
+            // Pausing again changes nothing and announces nothing.
+            let notices = updated.len();
+            let (status, _) = fixture.post(&fixture.live_key, &pause, Value::Null).await?;
+            ensure!(status == StatusCode::OK);
+            ensure!(fixture.event_data("treasury.updated").await?.len() == notices);
+
+            // The operator pauses it too; the merchant's resume does not lift the operator's.
+            let account = &fixture.account.public_id;
+            let admin = |action: &str| -> Result<_> {
+                Ok(signed_request(
+                    Method::POST,
+                    &format!("/v1/admin/accounts/{account}/treasuries/{old_id}/{action}"),
+                    serde_json::to_vec(&json!({"reason": "INC-12: former treasury compromised"}))?,
+                    "admin/v1",
+                    &SigningKey::from_bytes(&ADMIN_KEY),
+                    Utc::now().timestamp(),
+                ))
+            };
+            let response = fixture.app.clone().oneshot(admin("pause")?).await?;
+            ensure!(response.status() == StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1_048_576).await?)?;
+            ensure!(
+                body["crediting_paused_by"] == json!(["merchant", "operator"]),
+                "{body}"
+            );
+            let (status, resumed) = fixture
+                .post(
+                    &fixture.live_key,
+                    &format!("/v1/treasuries/{old_id}/resume"),
+                    Value::Null,
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{resumed}");
+            ensure!(resumed["crediting_paused_by"] == json!(["operator"]));
+            ensure!(held(&outcome(to_old).await?));
+
+            // Once the operator resumes too, the held deposit is credited.
+            let response = fixture.app.clone().oneshot(admin("resume")?).await?;
+            ensure!(response.status() == StatusCode::OK);
+            let result = outcome(to_old).await?;
+            ensure!(result.outcome == StepOutcome::Advance);
+            ensure!(
+                result
+                    .events
+                    .iter()
+                    .any(|event| event.event_type == "deposit.credited")
+            );
+            let audited: Vec<(String, String)> = sqlx::query_as(
+                "SELECT actor_type, reason FROM audit \
+                 WHERE account_id = $1 AND action = 'treasury.updated' ORDER BY created_at",
+            )
+            .bind(fixture.account.id)
+            .fetch_all(&fixture.pool)
+            .await?;
+            let admin_rows = audited
+                .iter()
+                .filter(|(actor, reason)| actor == "admin" && reason.starts_with("INC-12"))
+                .count();
+            ensure!(admin_rows == 2, "{audited:?}");
+            // Another account cannot reach the treasury.
+            let other = fixture.other_account().await?;
+            let (status, _) = fixture.post(&other, &pause, Value::Null).await?;
+            ensure!(status == StatusCode::NOT_FOUND);
             Ok(())
         })
     })
@@ -1294,7 +1427,64 @@ impl Fixture {
         Ok(body)
     }
 
-    /// The account, mode, and object type of each recorded event of `event_type`.
+    /// Records a confirmed, valued deposit of 1 token to `quote`'s address, as the scanner and
+    /// the confirm step would; `number` makes its transaction unique.
+    async fn confirmed_deposit(&self, quote: &Value, number: u8) -> Result<uuid::Uuid> {
+        let address_id: uuid::Uuid =
+            sqlx::query_scalar("SELECT id FROM addresses WHERE address = $1")
+                .bind(quote["address"].as_str().context("address")?)
+                .fetch_one(&self.pool)
+                .await?;
+        let route = self.routes.first().context("route")?;
+        let deposit = db::NewDeposit {
+            chain_id: 1,
+            tx_hash: B256::repeat_byte(number),
+            log_index: 0,
+            receipt_log_index: 0,
+            tx_from: Address::ZERO,
+            tx_nonce: 0,
+            is_final: true,
+            block_number: 100,
+            block_hash: B256::repeat_byte(number.wrapping_add(1)),
+            block_time: Utc::now(),
+            address_id,
+            route: Some(route.route.clone()),
+            route_version: Some(route.version),
+            asset_contract: route.asset.contract,
+            from_address: Address::repeat_byte(0x11),
+            amount_atomic: AtomicAmount::new(U256::from(1_u64)),
+            state: topup_core::deposit::DepositState::Confirmed,
+            reason: None,
+            next_attempt_at: Utc::now(),
+        };
+        let id = topup_core::identity::deposit_id(1, deposit.tx_hash, 0);
+        ensure!(db::insert_deposit(&self.pool, &deposit).await?);
+        sqlx::query(
+            "UPDATE deposits SET valuation_at = now(), price_scaled = 100000000, \
+             price_source = 'spot', credit_minor = 100 WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// The screen step of the fixture's Ethereum route, with every payer clear.
+    fn screen_step(&self) -> Result<ScreenStep> {
+        let route = self.routes.first().context("route")?;
+        Ok(ScreenStep::new(
+            self.pool.clone(),
+            [ScreenRoute::new(
+                route.route.clone(),
+                route.version,
+                route.screening.sanctions_oracle,
+                Bounds::from(&route.screening),
+                Arc::new(ClearPayers),
+            )],
+        )?)
+    }
+
+    /// The account, mode, and object type of each recorded event of `event_type`.    /// The account, mode, and object type of each recorded event of `event_type`.
     async fn events(&self, event_type: &str) -> Result<Vec<(uuid::Uuid, bool, String)>> {
         Ok(sqlx::query_as(
             "SELECT account_id, livemode, object_type FROM events WHERE type = $1 ORDER BY created",
@@ -1431,6 +1621,20 @@ impl DestinationScreener for Unavailable {
 }
 
 /// A chain where no contract is deployed.
+/// A sanctions source that names no payer.
+struct ClearPayers;
+
+#[async_trait]
+impl SanctionsSource for ClearPayers {
+    async fn sanctions(&self, _address: Address, block_number: u64) -> SanctionsResult {
+        SanctionsResult {
+            provider_a: SanctionsAnswer::Clear,
+            provider_b: SanctionsAnswer::Clear,
+            block_number,
+        }
+    }
+}
+
 struct NoContracts;
 
 #[async_trait]

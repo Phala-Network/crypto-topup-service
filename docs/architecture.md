@@ -23,7 +23,7 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Product fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the product holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
 | Product API shape | Stripe's API conventions: top-level resources, the list object, the error object, prefixed ids, `expand[]`, the Event object, `client_secret` | Token amounts are decimal strings; §12 lists every departure |
 | Idempotent product API | `Idempotency-Key` on every `POST`, kept per account and mode with a request fingerprint and the response for 24 hours (Stripe; the IETF Idempotency-Key draft) | An API key's secret is never stored for a replay |
-| Merchant authentication | Bearer secret keys `ppay_sk_{test,live}_…`, stored as SHA-256, with GitHub's token format (prefix, random body, CRC32 checksum); Stripe's roll with an overlap of at most 7 days | Keys are created, rolled, and revoked through the API; the operator issues the first and recovery keys (design D7, D8) |
+| Merchant authentication | Bearer secret keys `ppay_sk_{test,live}_…` and restricted keys `ppay_rk_{test,live}_…`, stored as SHA-256, with GitHub's token format (prefix, random body, CRC32 checksum); Stripe's roll with an overlap of at most 7 days | Keys are created, rolled, and revoked through the API with a secret key; a restricted key holds only its granted permissions and never manages keys, treasuries, endpoints, webhook keys, or account settings; the operator issues the first and recovery keys (design D7, D8, PR 12) |
 | Admin request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | The operator's admin API only |
 | Webhooks | Standard Webhooks | — |
 | Money | Integer minor units; 8-decimal scaled prices | Precision is an application choice |
@@ -608,8 +608,11 @@ derives `settlement/{acct}/{live|test}/v{n}` on demand and zeroizes it (dstack 0
 from its domain alone; each domain has one algorithm), so the service stores no secret and the
 key is stable across releases. `accounts.webhook_key_version` holds each mode's current version;
 `POST /v1/account/webhook_keys/roll {expires_in}` bumps it and keeps the previous version signing
-beside it for at most 7 days (`retiring_webhook_keys`), the Standard Webhooks multi-signature
-rotation. The service holds no transaction key:
+beside it for at most 7 days, and in live mode at least 48 hours, the treasury time-lock
+(`retiring_webhook_keys`), the Standard Webhooks multi-signature rotation. The roll's own
+`account.updated` also carries the retiring version's signature whenever it is delivered
+(`events.signing_key_version`), so the merchant's pinned key verifies the notice of its
+replacement. The service holds no transaction key:
 it sends no transactions and pays no gas (design D2, D4).
 
 **Sweeping** is the merchant's transaction. Anyone may call the permissionless factory's
@@ -739,12 +742,13 @@ knows it. Where it departs, the last column says why.
 | Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; every object and event carries `livemode` |
 | Onboarding | Connect accounts created through the API, `stripe_dashboard.type = none` | The operator creates every account after offline due diligence; there is no dashboard (design D8) |
 
-Every merchant request carries a secret key, `Authorization: Bearer ppay_sk_{test,live}_…`
-(design D7); HTTP Basic is refused. A key whose checksum fails is refused without a database read;
+Every merchant request carries an API key, `Authorization: Bearer ppay_sk_{test,live}_…` (secret)
+or `ppay_rk_{test,live}_…` (restricted, design PR 12); HTTP Basic is refused. A key whose checksum fails is refused without a database read;
 otherwise its SHA-256 is looked up, and a revoked or unknown key is `401 api_key_invalid`, a rolled
 key past its expiry `401 api_key_expired`. The server builds the request's scope, the key's account
 and mode, from the key alone, and every query filters on both (design D13); the authorization
-table then grants the key kind's permissions. A live key of an account the operator has not
+table then grants the key kind's permissions, and a restricted key needs the permission among its
+own grants too. A live key of an account the operator has not
 enabled for live mode is `403 testmode_charges_only`. Requests are rate-limited per account and
 mode in the process, 100 per second live and 25 test, with a 500 per second test-mode ceiling
 across accounts (`429 rate_limit`, `Retry-After: 1`). Every response carries `Request-Id: req_…`,
@@ -752,9 +756,10 @@ and an event a request causes records it with the request's `Idempotency-Key`. E
 request for another account's object, or for the same account's object in the other mode,
 answers `404` as for a missing one.
 
-A secret key manages its mode's keys (`/v1/api_keys`): create, list, roll (the old key works for
-up to 7 days, or is revoked at once), and revoke, except the mode's last key that is neither
-revoked nor expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
+A secret key manages its mode's keys (`/v1/api_keys`): create (a secret key, or a restricted key
+with a subset of the grantable permissions), list, roll (the old key works for up to 7 days, or is
+revoked at once), and revoke, except the mode's last secret key that is neither revoked nor
+expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
 admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live
 mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, and lifts
@@ -769,6 +774,7 @@ GET|POST /v1/api_keys, GET|DELETE /v1/api_keys/{id}, POST /v1/api_keys/{id}/roll
 POST   /v1/treasuries/challenge {chain_id, address}               EIP-4361 message to sign (§9)
 GET|POST /v1/treasuries {chain_id, message, signature}, GET /v1/treasuries/{id}   ?chain_id&status&limit
 POST   /v1/treasuries/{id}/cancel                                 a pending live change
+POST   /v1/treasuries/{id}/pause | resume                         the merchant's crediting pause of a treasury
 GET    /v1/config                                                 assets, limits, quote terms
 POST   /v1/account {confirmation_policies}                     stricter confirmation per chain (design D1)
 POST   /v1/account/pause | resume {scopes: ["quotes"]}             the merchant's own quotes pause (design §12)
@@ -807,6 +813,7 @@ POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, reaso
 POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   recovery key
 GET    /v1/admin/deposits/{id}            the Deposit with `admin`: state, route, transitions, events
 POST   /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause | resume {scopes, livemode}
+POST   /v1/admin/accounts/{acct}/treasuries/{trs}/pause | resume {reason}   the operator's crediting pause
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/reconciliation_blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
@@ -1234,9 +1241,9 @@ which are stable across releases; a production CVM exposes no logs or shell. `to
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |
 | Compliance | Direct sanctions screening from the pilot; region and Travel Rule applicability decided in Phase 0; KYT adapter and a compliance case flow (customer information request, reviewer role, response time, disposition) before GA. Record requests follow a documented verification, approval, and delivery procedure. |
 | Fees and exposure | The merchant pays its own sweep gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sweep, and open quote exposure up to the caps. |
-| Rotation | Webhook key: the merchant rolls it (`POST /v1/account/webhook_keys/roll`); both keys sign every delivery for up to 7 days while the merchant pins the new one from attestation. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
+| Rotation | Webhook key: the merchant rolls it (`POST /v1/account/webhook_keys/roll`); both keys sign every delivery for 48 hours (live minimum) to 7 days while the merchant pins the new one from attestation, and the roll's notice is always signed by the retiring key. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, transitions, audit, and the read-only history of the retired settlement protocol (`settlements`): 7 years *(policy)*, append-only. |
-| Kill switches | Pause scopes (`quotes`, `settlement`, `refunds`) at account, customer, or route level; no pause stops a sweep, since anyone can flush a forwarder to its own treasury. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
+| Kill switches | Pause scopes (`quotes`, `settlement`, `refunds`) at account, customer, or route level, and a crediting pause per treasury (merchant or operator, each lifting only its own) that holds deposits to every forwarder over it; no pause stops a sweep, since anyone can flush a forwarder to its own treasury. Each scope's customer-facing effect is documented and shown; `settlement` stops crediting (deposits wait in `confirmed`); pausing never rolls back a credited fact. Incidents are announced on the product status page with affected routes and updates. |
 | Runbooks before pilot | API key compromise and key recovery, provider disagreement, price outage, outbox backlog (undelivered credits), restore, chain frozen, treasury change, rejected funds at treasury, deposit reversed. |
 
 ## 16. Observability and tests
