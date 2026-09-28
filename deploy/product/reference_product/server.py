@@ -266,7 +266,7 @@ class AccountApi:
                 event
                 for event in self.ledger.all_events()
                 if (event["data"].get("object") or {}).get("id") in ids
-                or (event["data"].get("object") or {}).get("account_id") == team
+                or (event["data"].get("object") or {}).get("client_reference_id") == team
             ],
         }
 
