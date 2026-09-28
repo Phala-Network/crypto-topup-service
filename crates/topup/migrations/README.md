@@ -206,3 +206,10 @@ detected restore, and the one without `unfrozen_at` is the freeze (at most one, 
 index), with the restore point and each chain's restored cursor; `restore_delivered_events` marks
 the events imported from merchants' records as delivered after the restore point. Its down
 migration drops the three tables and leaves imported events in `events`.
+
+`20261019000000_account_limits` reads the open-quote caps from `account_limits` (design §12)
+instead of the route file: `max_open_quotes`, `max_open_minor_account`, and
+`max_open_minor_customer` become nullable, a null keeping the mode's default as
+`max_active_deposit_addresses` already did, and `quotes_open_exposure_idx` indexes the open
+reserved quotes per account and mode for the exposure check. Its down migration writes the
+defaults into null caps before restoring `NOT NULL`.

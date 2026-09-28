@@ -200,8 +200,9 @@ sequenceDiagram
 
 Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead of hardcoding:
 the payable assets (chain, asset code, contract, decimals), the minimum `amount` in cents
-(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), the cap on one
-customer's open quotes in cents (`max_open_amount_per_account`, which also bounds one quote), the
+(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), your caps in the key's
+mode: open quotes (`max_open_quotes`), their credit in cents (`max_open_amount_per_account`), and
+one customer's (`max_open_amount_per_customer`, which also bounds one quote), the
 refund floor, the quote window, spread,
 and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more),
 the typical credit time (`typical_credit_seconds`, 30), and the typical finality time
@@ -1366,7 +1367,7 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 |---|---|---|
 | 400 | `parameter_missing`, `parameter_unknown`, `parameter_invalid` | Malformed input, with `param`. Do not retry unchanged. |
 | 400 | `amount_too_small`, `amount_too_large` | Below the minimum credit or deposit, or above the maximum deposit (`param: "amount"`), or above a refund's remainder (`param: "amount_atomic"`). |
-| 400 | `exposure_cap_exceeded` | Open quote exposure cap (customer, account, or platform); the message states what is left. |
+| 400 | `exposure_cap_exceeded` | A cap on your open quotes in the mode (their number, their credit, or one customer's credit); the message states what is left. |
 | 400 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
 | 400 | `treasury_not_set` | No treasury on the chain yet (§1.6). |
 | 400 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |

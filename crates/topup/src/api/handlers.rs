@@ -18,9 +18,9 @@ use super::auth::AdminActor;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountPauseRequest, AccountResponse, AdminReasonRequest, AdminTreasuryPauseRequest,
-    ApiKeyObject, Contact, CreateAccountRequest, CustomerPauseRequest, DailyReportResponse,
-    Deposit, IssueApiKeyRequest, NudgeResponse, PauseRequest, PauseResponse,
+    AccountLimits, AccountPauseRequest, AccountResponse, AdminReasonRequest,
+    AdminTreasuryPauseRequest, ApiKeyObject, Contact, CreateAccountRequest, CustomerPauseRequest,
+    DailyReportResponse, Deposit, IssueApiKeyRequest, NudgeResponse, PauseRequest, PauseResponse,
     ReconciliationBlockLiftResponse, RoutePauseResponse, Treasury, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
@@ -90,7 +90,7 @@ pub(crate) async fn create_account(
     tag = "admin"
 )]
 /// Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-/// the contact, or the cap on credit before finality. Audited, and announced to the account as `account.updated`. The operator does
+/// the contact, the cap on credit before finality, or the caps of one mode (`limits`). Audited, and announced to the account as `account.updated`. The operator does
 /// not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 pub(crate) async fn update_account(
     State(state): State<AppState>,
@@ -122,6 +122,17 @@ pub(crate) async fn update_account(
                     })
                 })
                 .transpose()?,
+            limits: request.limits.as_ref().map(|limits| {
+                (
+                    limits.livemode,
+                    crate::limits::LimitsChange {
+                        max_open_quotes: limits.max_open_quotes,
+                        max_open_amount_per_account: limits.max_open_amount_per_account,
+                        max_open_amount_per_customer: limits.max_open_amount_per_customer,
+                        max_active_deposit_addresses: limits.max_active_deposit_addresses,
+                    },
+                )
+            }),
         },
         &actor,
         &request.reason,
@@ -679,6 +690,10 @@ fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {
         paused_scopes: account.paused_scopes,
         max_unfinalized_credit: u64::try_from(account.max_unfinalized_credit)
             .map_err(|_| ApiError::internal())?,
+        limits: AccountLimits {
+            test: issued.limits[0],
+            live: issued.limits[1],
+        },
         created: account.created_at.timestamp(),
         api_keys: issued
             .api_keys

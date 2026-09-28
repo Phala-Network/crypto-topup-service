@@ -482,20 +482,6 @@ pub struct RateLockConfig {
     pub amount_decimals: u8,
     /// Maximum successful lock creations per account in one rolling minute.
     pub max_creations_per_minute: u64,
-    /// Open exposure caps.
-    pub max_open_minor: ExposureCaps,
-}
-
-/// Open rate-lock exposure caps in destination minor units.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExposureCaps {
-    /// Per-account cap.
-    pub account: u64,
-    /// Per-product cap.
-    pub product: u64,
-    /// Global cap.
-    pub global: u64,
 }
 
 /// Operational alert thresholds.
@@ -628,8 +614,6 @@ pub struct LimitsSpec {
     pub max_deposit_atomic: AtomicAmount,
     /// Minimum refundable amount in token base units.
     pub min_refund_atomic: AtomicAmount,
-    /// Open quote exposure caps in USD minor units.
-    pub max_open_minor: ExposureCaps,
     /// Minimum creditable deposit in token base units; default 0 (`min_credit_minor` governs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_deposit_atomic: Option<AtomicAmount>,
@@ -876,7 +860,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                     .quote
                     .max_creations_per_minute
                     .unwrap_or(DEFAULT_QUOTE_MAX_CREATIONS_PER_MINUTE),
-                max_open_minor: spec.limits.max_open_minor,
             },
             alerts: AlertsConfig {
                 stuck_after_s: StuckAfterConfig {
@@ -926,7 +909,6 @@ impl From<RouteFile> for RouteSpec {
                 min_credit_minor: route.screening.min_credit_minor,
                 max_deposit_atomic: route.screening.max_deposit_atomic,
                 min_refund_atomic: route.asset.min_refund_atomic,
-                max_open_minor: route.rate_lock.max_open_minor,
                 min_deposit_atomic: Some(route.screening.min_deposit_atomic),
             },
             quote: QuoteSpec {

@@ -55,11 +55,12 @@ pub(crate) async fn get_config(
         .collect::<Vec<_>>();
     let policies =
         super::account::confirmation_policies(&state.pool, merchant.scope.account_id()).await?;
-    let max_open_amount_per_account = routes
-        .iter()
-        .map(|route| route.rate_lock.max_open_minor.account)
-        .min()
-        .unwrap_or_default();
+    let limits = crate::limits::load(&mut *state.pool.acquire().await?, merchant.scope)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "account limits are unreadable");
+            ApiError::internal()
+        })?;
     let assets = routes
         .iter()
         .map(|route| {
@@ -94,7 +95,9 @@ pub(crate) async fn get_config(
         object: "config".to_owned(),
         livemode: merchant.scope.livemode(),
         currency: "usd".to_owned(),
-        max_open_amount_per_account,
+        max_open_quotes: limits.max_open_quotes,
+        max_open_amount_per_account: limits.max_open_amount_per_account,
+        max_open_amount_per_customer: limits.max_open_amount_per_customer,
         assets,
     }))
 }
@@ -680,7 +683,9 @@ fn map_error(error: RateLockError) -> ApiError {
         }
         RateLockError::RateLimited { retry_after } => ApiError::customer_quote_limit(retry_after),
         RateLockError::TreasuryNotSet => ApiError::treasury_not_set(),
-        error @ RateLockError::ExposureCap { .. } => ApiError::exposure_cap(error.to_string()),
+        error @ (RateLockError::ExposureCap { .. } | RateLockError::QuoteCountCap(_)) => {
+            ApiError::exposure_cap(error.to_string())
+        }
         RateLockError::NotFound => ApiError::not_found(),
         RateLockError::NotOpen(current) => ApiError::quote_unexpected_state(status(current)),
         RateLockError::WindowClosed => ApiError::quote_window_closed(),

@@ -335,6 +335,36 @@ async fn operator_onboards_accounts_enables_live_mode_and_recovers_keys() -> Res
         ensure!(capped.status == StatusCode::OK, "{}", capped.body);
         ensure!(capped.body["max_unfinalized_credit"] == 0);
 
+        // The operator sets the caps of one mode; the other mode keeps its defaults.
+        ensure!(capped.body["limits"]["live"]["max_open_amount_per_account"] == 5_000_000);
+        let limited = harness
+            .admin(
+                Method::POST,
+                &account_path,
+                &json!({
+                    "limits": {"livemode": false, "max_open_quotes": 5, "max_open_amount_per_customer": 900},
+                    "reason": "pilot limits approved",
+                }),
+            )
+            .await?;
+        ensure!(limited.status == StatusCode::OK, "{}", limited.body);
+        let test_limits = &limited.body["limits"]["test"];
+        ensure!(test_limits["max_open_quotes"] == 5 && test_limits["max_open_amount_per_customer"] == 900);
+        ensure!(test_limits["max_open_amount_per_account"] == 1_000_000);
+        ensure!(limited.body["limits"]["live"]["max_open_quotes"] == 1_000);
+        let config = harness.get("/v1/config", &test_key).await?;
+        ensure!(config.body["max_open_quotes"] == 5, "{}", config.body);
+        ensure!(config.body["max_open_amount_per_customer"] == 900);
+        let invalid = harness
+            .admin(
+                Method::POST,
+                &account_path,
+                &json!({"limits": {"livemode": true, "max_open_quotes": 0}, "reason": "typo"}),
+            )
+            .await?;
+        ensure!(invalid.status == StatusCode::BAD_REQUEST, "{}", invalid.body);
+        ensure!(invalid.body["error"]["param"] == "limits.max_open_quotes");
+
         // Turning live mode off stops live keys at once.
         let disabled = harness
             .admin(
@@ -385,8 +415,9 @@ async fn operator_onboards_accounts_enables_live_mode_and_recovers_keys() -> Res
             .iter()
             .filter(|(action, _)| action == "account.update")
             .count();
-        // Enabling live mode, the cap, and disabling it; the repeat is not audited.
-        ensure!(updates == 3, "the repeat is not audited: {audit:?}");
+        // Enabling live mode, the cap, the limits, and disabling it; neither the repeat nor the
+        // refused limits are audited.
+        ensure!(updates == 4, "the repeat is not audited: {audit:?}");
 
         let events = events(pool, account_id).await?;
         ensure!(

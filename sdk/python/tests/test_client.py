@@ -460,6 +460,70 @@ def test_errors_carry_the_request_id_and_doc_url() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "code", "doc_url"),
+    [
+        # Every field but `code` is optional to the SDK, `doc_url` included.
+        (
+            400,
+            {"error": {"type": "invalid_request_error", "code": "paused", "message": "paused"}},
+            "paused",
+            None,
+        ),
+        # An unknown `type` is kept as sent.
+        (
+            404,
+            {"error": {"type": "novel_error", "code": "resource_missing"}},
+            "resource_missing",
+            None,
+        ),
+        # Not the error object: a proxy's page, or JSON without it.
+        (404, "<html>Not Found</html>", "unexpected_response", None),
+        (400, {"message": "bad"}, "unexpected_response", None),
+    ],
+)
+def test_an_error_body_missing_fields_is_still_an_api_error(
+    status: int, body: object, code: str, doc_url: str | None
+) -> None:
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        if isinstance(body, str):
+            return httpx.Response(status, text=body, headers={"request-id": "req_1"})
+        return httpx.Response(status, json=body, headers={"request-id": "req_1"})
+
+    with _client(FakeService(respond)) as client, pytest.raises(ApiError) as raised:
+        client.get_refund(REFUND_ID)
+    assert (raised.value.status_code, raised.value.code) == (status, code)
+    assert raised.value.doc_url == doc_url
+    assert raised.value.request_id == "req_1"
+
+
+def test_a_gateway_error_page_is_retried() -> None:
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        if count == 1:
+            return httpx.Response(502, text="<html>Bad Gateway</html>")
+        return httpx.Response(200, json=REFUND)
+
+    service = FakeService(respond)
+    with _client(service) as client:
+        assert client.get_refund(REFUND_ID).id == REFUND_ID
+    assert len(service.requests) == 2
+
+
+def test_forwarders_filter_by_quote_and_deposit_address() -> None:
+    def respond(request: httpx.Request, count: int) -> httpx.Response:
+        return httpx.Response(
+            200, json={"object": "list", "url": "/v1/forwarders", "has_more": False, "data": []}
+        )
+
+    service = FakeService(respond)
+    with _client(service) as client:
+        assert list(client.list_forwarders(quote=QUOTE_ID)) == []
+        assert list(client.list_forwarders(deposit_address="da_" + "0d" * 16, chain_id=1)) == []
+    first, second = (dict(request.url.params) for request in service.requests)
+    assert first == {"quote": QUOTE_ID, "limit": "100"}
+    assert second == {"chain_id": "1", "deposit_address": "da_" + "0d" * 16, "limit": "100"}
+
+
 def test_a_rate_limit_is_retried_after_its_retry_after() -> None:
     slept: list[float] = []
 

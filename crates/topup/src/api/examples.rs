@@ -202,7 +202,9 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "object": "config",
             "livemode": false,
             "currency": "usd",
+            "max_open_quotes": 100,
             "max_open_amount_per_account": 1_000_000,
+            "max_open_amount_per_customer": 500_000,
             "assets": [{
                 "chain_id": 1,
                 "asset": "PHA",
@@ -258,6 +260,20 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "restricted": false,
             "paused_scopes": [],
             "max_unfinalized_credit": 100_000,
+            "limits": {
+                "live": {
+                    "max_open_quotes": 1_000,
+                    "max_open_amount_per_account": 5_000_000,
+                    "max_open_amount_per_customer": 500_000,
+                    "max_active_deposit_addresses": 100_000,
+                },
+                "test": {
+                    "max_open_quotes": 100,
+                    "max_open_amount_per_account": 1_000_000,
+                    "max_open_amount_per_customer": 500_000,
+                    "max_active_deposit_addresses": 1_000,
+                },
+            },
             "created": CREATED - 2_592_000,
             "api_keys": [first_key()],
         }),
@@ -506,6 +522,7 @@ fn deposit() -> Value {
         "deposit_address": null,
         "status": "credited",
         "final": true,
+        "final_at": CREATED + 972,
         "swept": false,
         "rejection_reason": null,
         "chain_id": 1,

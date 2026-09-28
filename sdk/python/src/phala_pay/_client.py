@@ -403,11 +403,19 @@ class Forwarders:
         self._client = client
 
     def list(
-        self, *, chain_id: int | None = None, sweepable: str | None = None
+        self,
+        *,
+        chain_id: int | None = None,
+        quote: str | None = None,
+        deposit_address: str | None = None,
+        sweepable: str | None = None,
     ) -> Iterator[Forwarder]:
-        """Yields the account's forwarders with their `(factory, salt, treasury)`; with
-        `sweepable` (a token contract), only those safe to sweep of it."""
-        return self._client.list_forwarders(chain_id=chain_id, sweepable=sweepable)
+        """Yields the account's forwarders with their `(factory, salt, treasury)`: all of them, or
+        those of one `quote` or `deposit_address`; with `sweepable` (a token contract), only those
+        safe to sweep of it."""
+        return self._client.list_forwarders(
+            chain_id=chain_id, quote=quote, deposit_address=deposit_address, sweepable=sweepable
+        )
 
 
 class Treasuries:

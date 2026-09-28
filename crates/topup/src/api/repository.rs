@@ -96,6 +96,8 @@ macro_rules! admin_account_columns {
 pub struct IssuedAccount {
     /// The account.
     pub account: AdminAccount,
+    /// Its effective caps, test mode's then live mode's.
+    pub limits: [crate::limits::Limits; 2],
     /// Keys issued by the request.
     pub api_keys: Vec<IssuedKey>,
 }
@@ -169,9 +171,11 @@ pub async fn create_account(
             .map_err(super::keys::map_error)?,
         );
     }
+    let limits = account_limits(&mut transaction, created.id).await?;
     transaction.commit().await?;
     Ok(IssuedAccount {
         account: created,
+        limits,
         api_keys: issued,
     })
 }
@@ -186,6 +190,36 @@ pub struct AccountChanges {
     pub contact: Option<Value>,
     /// Cap on unfinalized credit, in cents.
     pub max_unfinalized_credit: Option<i64>,
+    /// A change to the caps of one mode.
+    pub limits: Option<(bool, crate::limits::LimitsChange)>,
+}
+
+/// The effective caps of `account_id`, test mode's then live mode's.
+async fn account_limits(
+    connection: &mut sqlx::PgConnection,
+    account_id: Uuid,
+) -> Result<[crate::limits::Limits; 2], ApiError> {
+    let mut limits = [crate::limits::DEFAULT_TEST, crate::limits::DEFAULT_LIVE];
+    for (livemode, slot) in [false, true].into_iter().zip(limits.iter_mut()) {
+        *slot = crate::limits::load(connection, Scope::new(account_id, livemode))
+            .await
+            .map_err(limits_error)?;
+    }
+    Ok(limits)
+}
+
+fn limits_error(error: crate::limits::LimitsError) -> ApiError {
+    match error {
+        crate::limits::LimitsError::OutOfRange(field) => ApiError::invalid_param(
+            format!("limits.{field}"),
+            format!("{field} is out of range"),
+        ),
+        crate::limits::LimitsError::Invalid => {
+            tracing::error!("account_limits holds an invalid value");
+            ApiError::internal()
+        }
+        crate::limits::LimitsError::Database(error) => ApiError::from(error),
+    }
 }
 
 /// Applies `changes`, with an audit row and an `account.updated` event per enabled mode, in one
@@ -229,14 +263,24 @@ pub async fn update_account(
     .bind(changes.max_unfinalized_credit)
     .fetch_one(&mut *transaction)
     .await?;
+    let limits_before = account_limits(&mut transaction, account_id).await?;
+    if let Some((livemode, change)) = &changes.limits {
+        crate::limits::update(&mut transaction, Scope::new(account_id, *livemode), change)
+            .await
+            .map_err(limits_error)?;
+    }
+    let limits = account_limits(&mut transaction, account_id).await?;
     let unchanged = after.charges_enabled == before.charges_enabled
         && after.restricted == before.restricted
         && after.contact == before.contact
-        && after.max_unfinalized_credit == before.max_unfinalized_credit;
+        && after.max_unfinalized_credit == before.max_unfinalized_credit
+        && limits == limits_before;
     if unchanged {
+        // Nothing an operator reads changed; a row the update created holds the defaults.
         transaction.commit().await?;
         return Ok(IssuedAccount {
             account: after,
+            limits,
             api_keys: Vec::new(),
         });
     }
@@ -282,6 +326,7 @@ pub async fn update_account(
                     "restricted": before.restricted,
                     "contact": before.contact,
                     "max_unfinalized_credit": before.max_unfinalized_credit,
+                    "limits": {"test": limits_before[0], "live": limits_before[1]},
                 },
             })
             .to_string(),
@@ -297,6 +342,7 @@ pub async fn update_account(
     transaction.commit().await?;
     Ok(IssuedAccount {
         account: after,
+        limits,
         api_keys: issued,
     })
 }

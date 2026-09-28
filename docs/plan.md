@@ -23,11 +23,13 @@ its PR plan); the specification is [architecture.md](architecture.md); merchants
   (#195), API conformance with Stripe (#201), contract gas bounds (#202), launch hardening (#203:
   mandatory address pinning in live mode, restricted keys, webhook key trust continuity, crediting
   pause per treasury), ledger correctness (#204: claw-back amounts, refund lifecycle, finality
-  paging, unfinalized credit cap), and restore mode (#205).
-- **In review**: PR 11, deployment, documentation, and the demo.
+  paging, unfinalized credit cap), restore mode (#205), and PR 11 deployment, documentation, and
+  the demo (#206).
 - **Contracts**: the permissionless factory is deterministic: `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain
-  ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Not yet deployed on Sepolia or mainnet.
+  ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Deployed and verified on Sepolia; not yet on
+  mainnet. The staging finance Safe has its `CompatibilityFallbackHandler` set and passes
+  `verify-safe.sh`.
 - **Staging** (`https://pay-api-staging.phala.com`, Sepolia) ran the single-tenant service; it
   cannot run the multi-tenant schema until it is reset (below). The paths verified there on
   2026-09-27 (exact payment, underpayment, late payment, unsupported token, refunds, the demo
@@ -39,8 +41,10 @@ its PR plan); the specification is [architecture.md](architecture.md); merchants
 
 ### Deployment (HUMAN-ONLY)
 
-- [ ] Deploy the factory on Sepolia at the deterministic address above
+- [x] Deploy the factory on Sepolia at the deterministic address above
       ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Owner: deployer.
+- [x] Set the staging finance Safe's fallback handler to the `CompatibilityFallbackHandler`
+      (Sepolia transaction `0xc63baf59…0812`). Owner: Safe owners.
 - [ ] Reset staging ([deploy/README.md](../deploy/README.md), "Staging reset"), deploy the PR 11
       image, re-create the staging accounts, and run the staging paths again. Owner: staging owner.
 
