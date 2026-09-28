@@ -1129,7 +1129,7 @@ states. The service reports a deposit once it reaches the route's confirmation (
 state comes from its display-only pending view (§12): the quote's `payment` with
 `status: "seen"`. That view is not a
 credit and can disappear in a reorg, and only routed tokens
-appear in it; other tokens first show as `rejected(unsupported_asset)` once confirmed. Drive the UI
+appear in it; other tokens first show as `rejected(unsupported_asset)` once final (§13). Drive the UI
 from fetched state, never from webhook order.
 
 | UI state | Service state | Copy |
@@ -1200,12 +1200,12 @@ stops (§7, the freeze) until an operator lifts it.
 The missing-deposit log check is incremental: it resumes from a durable cursor, reads at most 64 windows of 2 000 finalized blocks per
 round, and stores its progress after every window, so a round reads only what finalized since the
 last one, and a restart or a failed round resumes where the stored progress ends until the whole
-history has been covered once. Each window is requested as the scanner requests it: for a chain in
-token mode (the default), one `eth_getLogs` for every transfer of the chain's routed tokens, kept
-locally for the chain's addresses, whatever the number of addresses ever issued; in address mode,
-one request per 1 000 addresses. So a round costs at most 64 requests per chain in token mode, and
-64 × ⌈addresses / 1 000⌉ in address mode, which is why address mode is for chains with few
-addresses. The address list itself (every address ever issued on the chain, about 100 bytes each)
+history has been covered once. Each window requests the transfers of any contract to the chain's
+issued addresses, one `eth_getLogs` per 1 000 addresses, in either backstop mode: in token mode it
+is the only read that sees tokens without a route, which it records as
+`rejected(unsupported_asset)` and reports with `TopupUnsupportedInflows`. So a round costs at most
+64 × ⌈addresses / 1 000⌉ requests per chain; a round that catches up on one 10-minute advance reads
+one window. The address list itself (every address ever issued on the chain, about 100 bytes each)
 is read from the database once per round. A round's reads run one at a time on provider A. The first round
 after a restart runs while every other task starts on the same provider, so a provider refusal
 that asks for a retry (HTTP 429, JSON-RPC `-32005`, and the other rate-limit answers alloy

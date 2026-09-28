@@ -31,7 +31,7 @@ use crate::db::{self, ApplyTransitionError, ScanAddress};
 use crate::routes::RouteSet;
 use crate::scanner::{
     ChainRoutes, FinalizedHeads, MAX_SCAN_WINDOW, ScannerError, chain_routes,
-    resolve_logs_for_reconciliation,
+    report_unsupported_inflows, resolve_logs_for_reconciliation,
 };
 
 pub use chain::ReconciliationChain;
@@ -413,10 +413,11 @@ impl Reconciler {
 
     /// Scans incrementally from a durable cursor, at most [`MAX_WINDOWS_PER_ROUND`] windows.
     ///
-    /// Each window is requested as the scanner requests it: in token mode, every transfer of the
-    /// chain's routed tokens, kept locally, one request whatever the number of addresses ever
-    /// issued; in address mode, one request per [`MAX_ADDRESSES_PER_REQUEST`] addresses. The
-    /// address list, every address ever issued on the chain, is read once per round.
+    /// Each window reads every issued address's transfers of any contract, one request per
+    /// [`MAX_ADDRESSES_PER_REQUEST`] addresses, whatever the chain's backstop mode: in token mode
+    /// this is the only read that finds transfers of unrouted tokens, which it records as
+    /// `rejected(unsupported_asset)`. The address list, every address ever issued on the chain,
+    /// is read once per round.
     ///
     /// The scan never passes the range the scanner has committed, so a transfer the scanner has
     /// not reached yet is not reported as missing, and a frozen chain's scan stops with its
@@ -456,20 +457,11 @@ impl Reconciler {
             .iter()
             .map(|address| address.address)
             .collect::<Vec<_>>();
-        let tokens = routes.tokens();
-        let recipients = physical.iter().copied().collect::<BTreeSet<_>>();
         for (from_block, to_block) in bounded_windows(start, through)? {
-            let logs = if routes.token_mode() {
-                chain
-                    .token_transfers(&tokens, &recipients, from_block, to_block)
-                    .await?
-            } else {
-                let mut logs = Vec::new();
-                for batch in physical.chunks(MAX_ADDRESSES_PER_REQUEST) {
-                    logs.extend(chain.transfer_logs_to(batch, from_block, to_block).await?);
-                }
-                logs
-            };
+            let mut logs = Vec::new();
+            for batch in physical.chunks(MAX_ADDRESSES_PER_REQUEST) {
+                logs.extend(chain.transfer_logs_to(batch, from_block, to_block).await?);
+            }
             for deposit in resolve_logs_for_reconciliation(logs, &addresses, routes)? {
                 let committed = db::commit_scan(
                     &self.pool,
@@ -483,6 +475,7 @@ impl Reconciler {
                 if committed.inserted == 0 {
                     continue;
                 }
+                report_unsupported_inflows(chain_id, committed.unsupported_inserted);
                 findings.push(Finding::new(
                     CheckName::MissingDeposit,
                     subjects([

@@ -352,7 +352,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
 | Deposit address (§1.5), active or retired, any amount of any supported token on any listed network | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`, its `chain_id`, and its `address`. |
-| Token without a route | Once confirmed, `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
+| Token without a route | Once final (about 15 minutes, up to one more reconciliation round), `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
