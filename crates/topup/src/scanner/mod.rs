@@ -810,6 +810,63 @@ mod tests {
         assert_eq!(deposit.route, None);
     }
 
+    #[test]
+    fn every_supported_asset_sent_to_one_address_selects_its_route() {
+        // A deposit address takes every token of its chain: each transfer selects the route of its
+        // token, and only a token without one is rejected.
+        let recipient = Address::from([1_u8; 20]);
+        let address = ScanAddress {
+            id: Uuid::new_v4(),
+            address: recipient,
+            created_block: 0,
+            backfilled: false,
+        };
+        let pha = Address::from([2_u8; 20]);
+        let usdc = Address::from([3_u8; 20]);
+        let mut second = test_route_file(usdc);
+        second.route = "phala-cloud-ethereum-usdc-usd".to_owned();
+        second.asset.symbol = "usdc".to_owned();
+        let chains = chain_routes(
+            &RouteSet::new(vec![test_route_file(pha), second]).expect("two assets on one chain"),
+        );
+        let routes = chains.first().expect("one chain");
+        let log = |token: Address, index: u64| TransferLog {
+            tx_hash: B256::from([3_u8; 32]),
+            receipt_log_index: index,
+            log_index: index,
+            block_number: 1,
+            block_hash: B256::from([4_u8; 32]),
+            block_time: DateTime::from_timestamp(1, 0).expect("timestamp"),
+            tx_from: Address::from([6_u8; 20]),
+            tx_nonce: 0,
+            token,
+            from: Address::from([6_u8; 20]),
+            to: recipient,
+            amount: AtomicAmount::new(U256::from(7)),
+        };
+        let deposits = resolve_logs(
+            vec![log(pha, 0), log(usdc, 1), log(Address::from([5_u8; 20]), 2)],
+            &address_index(&[address]),
+            routes,
+        )
+        .expect("resolve logs");
+        let selected: Vec<_> = deposits
+            .iter()
+            .map(|deposit| (deposit.route.as_deref(), deposit.state))
+            .collect();
+        assert_eq!(
+            selected,
+            vec![
+                (Some("phala-cloud-ethereum-pha-usd"), DepositState::Detected),
+                (
+                    Some("phala-cloud-ethereum-usdc-usd"),
+                    DepositState::Detected
+                ),
+                (None, DepositState::Rejected),
+            ]
+        );
+    }
+
     fn test_routes(token: Address) -> ChainRoutes {
         let route = test_route_file(token);
         ChainRoutes {

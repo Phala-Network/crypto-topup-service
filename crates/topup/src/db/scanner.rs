@@ -160,7 +160,8 @@ async fn insert_deposits_in(
     })
 }
 
-/// Loads every quote address for a chain, whatever its quote's status.
+/// Loads every issued address of a chain: every quote's, whatever its status, and every deposit
+/// address's network on the chain, active, retired, or superseded.
 pub async fn list_scan_addresses(
     pool: &PgPool,
     chain_id: u64,

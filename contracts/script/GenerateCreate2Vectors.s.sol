@@ -21,8 +21,6 @@ contract GenerateCreate2Vectors is Script {
         string account;
         bool livemode;
         string clientReferenceId;
-        uint256 chainId;
-        string asset;
         uint256 version;
         address treasury;
         bytes32 salt;
@@ -61,7 +59,7 @@ contract GenerateCreate2Vectors is Script {
             lockJson[i] = _lockEntryJson(locks[i], i);
         }
 
-        DepositAddressVector[3] memory depositAddresses = _depositAddressVectors(factory);
+        DepositAddressVector[4] memory depositAddresses = _depositAddressVectors(factory);
         string[] memory depositAddressJson = new string[](depositAddresses.length);
         for (uint256 i; i < depositAddresses.length; ++i) {
             depositAddressJson[i] = _depositAddressEntryJson(depositAddresses[i], i);
@@ -139,29 +137,25 @@ contract GenerateCreate2Vectors is Script {
     function _depositAddressVectors(ForwarderFactory factory)
         private
         view
-        returns (DepositAddressVector[3] memory vectors)
+        returns (DepositAddressVector[4] memory vectors)
     {
+        // The salt names no chain or asset: one address per customer on every chain whose
+        // treasury is the same, and another where the treasury differs (vectors 0 and 1).
         vectors[0] = _depositAddress(
-            factory, TREASURY, "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", true, "team-42", 1, "pha", 1
+            factory, TREASURY, "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", true, "team-42", 1
         );
         vectors[1] = _depositAddress(
-            factory,
-            OTHER_TREASURY,
-            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
-            false,
-            "team-42",
-            11_155_111,
-            "pha",
-            2
+            factory, OTHER_TREASURY, "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", true, "team-42", 1
         );
         vectors[2] = _depositAddress(
+            factory, TREASURY, "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", false, "team-42", 2
+        );
+        vectors[3] = _depositAddress(
             factory,
             TREASURY,
             "acct_ffffffffffffffffffffffffffffffff",
             true,
             unicode"客户 42 with a long reference that spans more than one 32-byte ABI word",
-            8453,
-            "usdc",
             7
         );
     }
@@ -172,21 +166,15 @@ contract GenerateCreate2Vectors is Script {
         string memory account,
         bool livemode,
         string memory clientReferenceId,
-        uint256 chainId,
-        string memory asset,
         uint256 version
     ) private view returns (DepositAddressVector memory vector) {
         bytes32 salt = keccak256(
-            abi.encode(
-                account, livemode, clientReferenceId, "deposit_address", chainId, asset, version
-            )
+            abi.encode(account, livemode, clientReferenceId, "deposit_address", version)
         );
         vector = DepositAddressVector({
             account: account,
             livemode: livemode,
             clientReferenceId: clientReferenceId,
-            chainId: chainId,
-            asset: asset,
             version: version,
             treasury: treasury,
             salt: salt,
@@ -202,8 +190,6 @@ contract GenerateCreate2Vectors is Script {
         vm.serializeString(key, "account", vector.account);
         vm.serializeBool(key, "livemode", vector.livemode);
         vm.serializeString(key, "client_reference_id", vector.clientReferenceId);
-        vm.serializeUint(key, "chain_id", vector.chainId);
-        vm.serializeString(key, "asset", vector.asset);
         vm.serializeUint(key, "version", vector.version);
         vm.serializeAddress(key, "treasury", vector.treasury);
         vm.serializeBytes32(key, "salt", vector.salt);

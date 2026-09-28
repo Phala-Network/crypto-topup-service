@@ -22,7 +22,8 @@ store sensitive information in it.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
 the factory, the implementation, the treasury, the account, and the quote id, and the deposit
-address methods recompute every active deposit address from its salt inputs; both raise
+address methods recompute every network of an active deposit address from its salt inputs; both
+raise
 `AddressMismatchError` rather than return an address the merchant did not derive.
 
 `Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
@@ -271,17 +272,14 @@ class TopupClient:
         self,
         client_reference_id: str,
         *,
-        chain_id: int,
-        asset: str,
         metadata: Metadata | None = None,
     ) -> DepositAddress:
-        """Returns the customer's active deposit address for `asset` on `chain_id`, issuing one
-        the first time. Any amount sent to it is credited at spot when it arrives. `metadata` is
-        merged into the address's, and each deposit to it starts with a copy."""
+        """Returns the customer's active deposit address, one address for every supported token on
+        every supported network (`networks`), issuing it the first time. Any amount of a supported
+        token sent to it is credited at spot when it arrives. `metadata` is merged into the
+        address's, and each deposit to it starts with a copy."""
         body = CreateDepositAddressRequest(
             client_reference_id=client_reference_id,
-            chain_id=chain_id,
-            asset=asset,
             metadata=_metadata(metadata),
         )
         address = self._call(
@@ -303,7 +301,6 @@ class TopupClient:
         *,
         client_reference_id: str | None = None,
         status: str | None = None,
-        chain_id: int | None = None,
         page_size: int = 100,
     ) -> Iterator[DepositAddress]:
         """Yields the matching deposit addresses, newest first, following every page."""
@@ -315,7 +312,6 @@ class TopupClient:
                     client=self._client,
                     client_reference_id=_unset(client_reference_id),
                     status=_unset(status),
-                    chain_id=_unset(chain_id),
                     limit=page_size,
                     starting_after=_unset(starting_after),
                 ),
@@ -450,8 +446,9 @@ class TopupClient:
         return quote
 
     def _checked_deposit_address(self, address: DepositAddress) -> DepositAddress:
-        """Raises unless an active deposit address is the one derived from the pinned forwarder.
-        A retired one may pay a treasury the account has since replaced, so it is not checked."""
+        """Raises unless every network of an active deposit address pays the pinned treasury at
+        the address derived from the pinned forwarder. A retired one may pay a treasury the
+        account has since replaced, so it is not checked."""
         if self.forwarder is None or address.status != "active":
             return address
         factory, implementation, treasury = self.forwarder
@@ -462,14 +459,16 @@ class TopupClient:
             account=self.account_id(),
             livemode=address.livemode,
             client_reference_id=address.client_reference_id,
-            chain_id=address.chain_id,
-            asset=address.asset,
             version=address.version,
         )
-        if not same_address(derived, address.address):
-            raise AddressMismatchError(
-                f"deposit address {address.id} is not one the account can derive"
-            )
+        for network in address.networks:
+            if not same_address(network.treasury, treasury) or not same_address(
+                derived, network.address
+            ):
+                raise AddressMismatchError(
+                    f"deposit address {address.id} on chain {network.chain_id} is not one the "
+                    "account can derive"
+                )
         return address
 
     def _call(self, operation: Callable[[], Response[Any]], expected: type[T]) -> T:

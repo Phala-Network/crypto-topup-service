@@ -191,6 +191,22 @@ TREASURY = "0x0000000000000000000000000000000000007EA5"
 DEPOSIT_ADDRESS_ID = "da_" + "0d" * 16
 
 
+def _network(chain_id: int, address: str, treasury: str = TREASURY) -> dict[str, object]:
+    return {
+        "chain_id": chain_id,
+        "address": address,
+        "treasury": treasury.lower(),
+        "assets": [
+            {
+                "asset": "pha",
+                "contract": "0x" + "22" * 20,
+                "decimals": 18,
+                "payment_uri": f"ethereum:0x{'22' * 20}@{chain_id}/transfer?address={address}",
+            }
+        ],
+    }
+
+
 def _deposit_address(version: int = 1, **fields: object) -> dict[str, object]:
     address = deposit_address(
         FACTORY,
@@ -199,26 +215,21 @@ def _deposit_address(version: int = 1, **fields: object) -> dict[str, object]:
         account=ACCOUNT,
         livemode=False,
         client_reference_id="team-42",
-        chain_id=11155111,
-        asset="pha",
         version=version,
-    )
+    ).lower()
     return {
         "id": DEPOSIT_ADDRESS_ID,
         "object": "deposit_address",
         "livemode": False,
         "client_reference_id": "team-42",
-        "chain_id": 11155111,
-        "asset": "pha",
-        "address": address.lower(),
-        "payment_uri": f"ethereum:0x{'22' * 20}@11155111/transfer?address={address.lower()}",
-        "treasury": TREASURY.lower(),
+        "address": address,
         "version": version,
         "salt": "0x" + "00" * 32,
         "status": "active",
         "created": 1_790_000_000,
         "retired_at": None,
         "metadata": {},
+        "networks": [_network(11155111, address), _network(84532, address)],
         **fields,
     }
 
@@ -243,7 +254,12 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
                 "has_more": False,
                 "data": [
                     _deposit_address(2),
-                    _deposit_address(1, status="retired", treasury="0x" + "99" * 20),
+                    _deposit_address(
+                        1,
+                        status="retired",
+                        address=None,
+                        networks=[_network(11155111, "0x" + "99" * 20, "0x" + "99" * 20)],
+                    ),
                 ],
             },
         )
@@ -256,18 +272,18 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
         transport=httpx.MockTransport(handler),
     ) as client:
         created = client.deposit_addresses.create(
-            client_reference_id="team-42", chain_id=11155111, asset="pha", metadata={"team": "42"}
+            client_reference_id="team-42", metadata={"team": "42"}
         )
         cleared = client.deposit_addresses.update(created.id, metadata="")
         rotated = client.deposit_addresses.rotate(created.id)
         listed = list(client.deposit_addresses.list(client_reference_id="team-42"))
     assert created.version == 1
+    assert [network.chain_id for network in created.networks] == [11155111, 84532]
+    assert created.networks[0].assets[0].asset == "pha"
     assert rotated.version == 2
     assert [address.status for address in listed] == ["active", "retired"]
     assert json.loads(seen[0].content) == {
         "client_reference_id": "team-42",
-        "chain_id": 11155111,
-        "asset": "pha",
         "metadata": {"team": "42"},
     }
     assert created.metadata.to_dict() == {"team": "42"}
@@ -276,9 +292,26 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
     assert seen[3].url.params["client_reference_id"] == "team-42"
 
 
-def test_a_deposit_address_the_account_cannot_derive_is_refused() -> None:
+@pytest.mark.parametrize(
+    "network",
+    [
+        # Another address on one chain.
+        _network(84532, "0x" + "11" * 20),
+        # A treasury other than the pinned one: the account's pin must be updated first.
+        _network(84532, "0x" + "11" * 20, "0x" + "99" * 20),
+    ],
+)
+def test_a_deposit_address_the_account_cannot_derive_is_refused(
+    network: dict[str, object],
+) -> None:
+    body = _deposit_address()
+    networks = body["networks"]
+    assert isinstance(networks, list)
+
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_deposit_address(address="0x" + "11" * 20))
+        return httpx.Response(
+            200, json={**body, "address": None, "networks": [networks[0], network]}
+        )
 
     with (
         PhalaPay(
@@ -288,7 +321,7 @@ def test_a_deposit_address_the_account_cannot_derive_is_refused() -> None:
             forwarder=(FACTORY, IMPLEMENTATION, TREASURY),
             transport=httpx.MockTransport(handler),
         ) as client,
-        pytest.raises(AddressMismatchError, match=DEPOSIT_ADDRESS_ID),
+        pytest.raises(AddressMismatchError, match="chain 84532"),
     ):
         client.deposit_addresses.retrieve(DEPOSIT_ADDRESS_ID)
 

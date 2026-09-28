@@ -17,7 +17,9 @@ export {
   depositAddressTransfer,
   parseTransferUri,
   quoteTransfer,
+  type DepositAddressAsset,
   type DepositAddressDetails,
+  type DepositAddressNetwork,
   type TokenTransfer,
   type TransferRequest,
 } from "./payment.js";

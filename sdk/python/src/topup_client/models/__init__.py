@@ -19,8 +19,10 @@ from .customer_pause_request import CustomerPauseRequest
 from .daily_report_response import DailyReportResponse
 from .deposit import Deposit
 from .deposit_address import DepositAddress
+from .deposit_address_asset import DepositAddressAsset
 from .deposit_address_list import DepositAddressList
 from .deposit_address_metadata import DepositAddressMetadata
+from .deposit_address_network import DepositAddressNetwork
 from .deposit_event_response import DepositEventResponse
 from .deposit_list import DepositList
 from .deposit_metadata import DepositMetadata
@@ -77,8 +79,10 @@ __all__ = (
     "DailyReportResponse",
     "Deposit",
     "DepositAddress",
+    "DepositAddressAsset",
     "DepositAddressList",
     "DepositAddressMetadata",
+    "DepositAddressNetwork",
     "DepositEventResponse",
     "DepositList",
     "DepositMetadata",

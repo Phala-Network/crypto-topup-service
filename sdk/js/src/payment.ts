@@ -15,18 +15,34 @@ export interface TokenTransfer {
 /** An EIP-681 ERC-20 transfer request whose amount the payer may choose. */
 export type TransferRequest = Omit<TokenTransfer, "amount"> & { amount: bigint | undefined };
 
-/**
- * The fields of a deposit address that a payer's page shows: pass them from your backend's
- * `POST /v1/deposit_addresses` response. Any amount sent is credited at the market rate.
- */
-export interface DepositAddressDetails {
-  /** The customer's deposit address. */
-  address: string;
-  chain_id: number;
+/** A token a deposit address takes on one network. */
+export interface DepositAddressAsset {
   /** The token's code, for example `pha`. */
   asset: string;
-  /** The EIP-681 transfer request to `address`, without an amount. */
+  /** The ERC-20 contract. */
+  contract: string;
+  decimals: number;
+  /** The EIP-681 transfer request of this token to the network's address, without an amount. */
   payment_uri: string;
+}
+
+/** A deposit address on one network (EVM chain), with the tokens it takes there. */
+export interface DepositAddressNetwork {
+  chain_id: number;
+  /** The address on this chain: the same on every chain whose treasury is the same. */
+  address: string;
+  assets: DepositAddressAsset[];
+}
+
+/**
+ * The fields of a deposit address that a payer's page shows: pass them from your backend's
+ * `POST /v1/deposit_addresses` response. One address takes every supported token on every
+ * supported network; any amount of a supported token sent is credited at the market rate.
+ */
+export interface DepositAddressDetails {
+  /** The address shared by every network, or `null` when a network's address differs. */
+  address: string | null;
+  networks: DepositAddressNetwork[];
 }
 
 const EIP681_TRANSFER =
@@ -77,16 +93,20 @@ export function quoteTransfer(quote: ClientQuote): TokenTransfer {
 }
 
 /**
- * Reads the token transfer from a deposit address's EIP-681 `payment_uri`, and checks that it pays
- * the deposit address on its chain and names no amount, so the QR code and the copied address
- * state the same destination.
+ * Reads the token transfer from a deposit address's EIP-681 `payment_uri` for one token on one
+ * network, and checks that it pays the network's address in that token on that chain and names no
+ * amount, so the QR code and the copied address and contract state the same destination.
  */
-export function depositAddressTransfer(details: DepositAddressDetails): TransferRequest {
-  const transfer = parseTransferUri(details.payment_uri);
+export function depositAddressTransfer(
+  network: DepositAddressNetwork,
+  asset: DepositAddressAsset,
+): TransferRequest {
+  const transfer = parseTransferUri(asset.payment_uri);
   if (
     transfer.amount !== undefined ||
-    transfer.chainId !== details.chain_id ||
-    !isAddressEqual(transfer.to, getAddress(details.address))
+    transfer.chainId !== network.chain_id ||
+    !isAddressEqual(transfer.to, getAddress(network.address)) ||
+    !isAddressEqual(transfer.token, getAddress(asset.contract))
   ) {
     throw new TypeError("payment_uri does not match the deposit address");
   }

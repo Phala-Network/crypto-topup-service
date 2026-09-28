@@ -49,9 +49,10 @@ class Deposit:
             tx_hash (str): Transaction hash.
             amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
             asset (None | str | Unset): Asset code; `null` for a token without a route.
-            deposit_address (None | str | Unset): The deposit address that received the transfer, `da_…`; `null` for a
-                quote's address.
-                Payments to a deposit address, active or retired, are credited at spot. This service
+            deposit_address (None | str | Unset): The deposit address that received the transfer, `da_…`, on `chain_id` at
+                `address`; `null`
+                for a quote's address. Payments to a deposit address, active or retired, are credited at
+                spot. This service
                 always sends it; it is optional in the schema so clients also parse responses and events
                 from servers that predate it.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.

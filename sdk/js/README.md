@@ -103,19 +103,21 @@ as usual. The QR code and manual tabs do not change.
 ### A customer's deposit address
 
 For top-ups of any amount, your backend creates the customer's persistent deposit address with
-`POST /v1/deposit_addresses` (secret key) and passes its `address`, `chain_id`, `asset`, and
-`payment_uri` to the page. `<DepositAddress>` shows the network, a QR code, and the token
-contract and address to copy, with "credited at the market rate when it arrives" copy; credit the
-customer from the `deposit.credited` webhook.
+`POST /v1/deposit_addresses` (secret key) and passes its `address` and `networks` to the page:
+one address for all supported tokens and networks. `<DepositAddress>` lets the payer pick a
+network and a token and shows a QR code of that token's transfer request, the token contract, and
+the address to copy, with "send only supported tokens" and "credited at the market rate when it
+arrives" copy; where a network's address differs (another treasury), it shows that network's own.
+Credit the customer from the `deposit.credited` webhook.
 
 ```tsx
 import { DepositAddress } from "@phala/pay/react";
 
-<DepositAddress depositAddress={{ address, chain_id, asset, payment_uri }} />;
+<DepositAddress depositAddress={{ address, networks }} chainId={84532} asset="usdc" />;
 ```
 
-`depositAddressTransfer(details)` reads and checks its amount-less EIP-681 `payment_uri` without
-React.
+`depositAddressTransfer(network, asset)` reads and checks one token's amount-less EIP-681
+`payment_uri` without React.
 
 ## Appearance
 

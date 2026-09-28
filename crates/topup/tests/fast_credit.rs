@@ -226,9 +226,9 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                 "team-da",
             )
             .await?;
+            let chains = [deposit_addresses::Chain::of(&chain.route)];
             let (retired, created) =
-                deposit_addresses::create(&chain.pool, &account, &customer, &chain.route, None)
-                    .await?;
+                deposit_addresses::create(&chain.pool, &account, &customer, &chains, None).await?;
             ensure!(created);
             let active = deposit_addresses::rotate(
                 &chain.pool,
@@ -236,17 +236,23 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                 Scope::new(account.id, false),
                 &Actor::system("test"),
                 retired.id,
-                &chain.route,
+                &chains,
             )
             .await?;
+            let [retired_network] = retired.networks.as_slice() else {
+                bail!("one network: {:?}", retired.networks);
+            };
+            let [active_network] = active.networks.as_slice() else {
+                bail!("one network: {:?}", active.networks);
+            };
 
-            let to_retired = chain.pay_to(retired.address, AMOUNT)?;
-            let to_active = chain.pay_to(active.address, AMOUNT)?;
+            let to_retired = chain.pay_to(retired_network.address, AMOUNT)?;
+            let to_active = chain.pay_to(active_network.address, AMOUNT)?;
             chain.anvil.mine(1)?;
             // The per-block scan covers deposit addresses, active and retired, like every address.
             ensure!(chain.scan().await? == 2);
             chain.settle().await?;
-            for (tx, address) in [(to_retired, &retired), (to_active, &active)] {
+            for (tx, network) in [(to_retired, retired_network), (to_active, active_network)] {
                 let deposit = chain.deposit(tx).await?;
                 ensure!(
                     deposit.state == DepositState::Credited,
@@ -254,7 +260,7 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                     deposit.state
                 );
                 ensure!(deposit.price_source.as_deref() == Some("spot"));
-                ensure!(deposit.address_id == address.address_id);
+                ensure!(deposit.address_id == network.address_id);
                 ensure!(deposit.customer_id == customer.id);
                 ensure!(deposit.account_id == account.id && !deposit.livemode);
                 ensure!(

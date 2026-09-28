@@ -1,25 +1,32 @@
 //! Deposit addresses (docs/design/multi-tenant.md "Deposit addresses"): a customer's persistent,
-//! rotatable forwarder address per chain and asset, restored per the owner's 2026-09-21
-//! requirement.
+//! rotatable forwarder address, one for every chain and every supported asset (D16, amended
+//! 2026-09-28 by the owner's decision: one address per customer, as exchanges give).
 //!
 //! A deposit address is the same forwarder a quote gets, `CREATE2` over the treasury and a salt,
-//! but its salt is derived from the customer instead of a quote
-//! ([`topup_core::address::deposit_address_salt`]), so the merchant recomputes it offline. It
-//! carries no price: any transfer to it, active or retired, is credited at spot through the quote
-//! pipeline (fast credit, reversal, events, sweeps, refunds, reconciliation), which reads the
-//! forwarder's `addresses` row and finds no quote.
+//! but its salt is derived from the customer and a version and names no chain or asset
+//! ([`topup_core::address::deposit_address_salt`]), so the merchant recomputes it offline. The
+//! factory and implementation have one address on every chain, so the forwarder is the same
+//! address on every chain whose treasury is the same address; a chain whose treasury differs has
+//! its own address, which the address's network for that chain shows.
 //!
-//! Creation is idempotent per customer, chain, asset, and mode: it returns the active address.
-//! Rotation retires it and issues the next version. Retired addresses keep being scanned and
-//! credited, and keep paying the treasury they were issued for.
+//! Each chain's forwarder is an `addresses` row owned by the deposit address (a network). It
+//! carries no price: a transfer of any supported token of the chain to it, active or retired, is
+//! credited at spot through the quote pipeline (fast credit, reversal, events, sweeps, refunds,
+//! reconciliation), which reads the forwarder's row and finds no quote; an unsupported token is
+//! rejected as for a quote.
+//!
+//! Creation is idempotent per customer and mode: it returns the active address, adding a network
+//! for every issuable chain that has none. Rotation retires the address and issues the next
+//! version on every issuable chain. Retired addresses, and networks superseded by a treasury
+//! change, keep being scanned and credited, and keep paying the treasury they were issued for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use topup_core::address::{deposit_address_salt, forwarder_address};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
@@ -35,25 +42,23 @@ use crate::tenancy::Scope;
 pub const DEFAULT_MAX_ACTIVE_LIVE: i64 = 100_000;
 /// Default cap on a test-mode account's active deposit addresses.
 pub const DEFAULT_MAX_ACTIVE_TEST: i64 = 1_000;
-/// Rotations one customer may make in a rolling hour, across chains and assets.
+/// Rotations one customer may make in a rolling hour.
 pub const MAX_ROTATIONS_PER_HOUR: i64 = 10;
 
 /// The columns of [`DepositAddressRow`]; callers append the `WHERE` clause.
 const SELECT: &str = r#"
-    SELECT deposit_address.id, deposit_address.livemode, customer.client_reference_id,
-           deposit_address.chain_id, deposit_address.asset, deposit_address.route,
-           deposit_address.version, deposit_address.status, deposit_address.created_at,
-           deposit_address.retired_at, address.id AS address_id, address.address,
-           address.treasury, address.salt, deposit_address.metadata
+    SELECT deposit_address.id, account.public_id AS account_public_id, deposit_address.livemode,
+           customer.client_reference_id, deposit_address.version, deposit_address.status,
+           deposit_address.created_at, deposit_address.retired_at, deposit_address.metadata
     FROM deposit_addresses AS deposit_address
-    JOIN addresses AS address ON address.deposit_address_id = deposit_address.id
     JOIN customers AS customer ON customer.id = deposit_address.customer_id
+    JOIN accounts AS account ON account.id = deposit_address.account_id
 "#;
 
 /// Lifecycle of a deposit address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
-    /// The address creation returns for the customer, chain, and asset.
+    /// The address creation returns for the customer.
     Active,
     /// Replaced by a newer version; payments to it are still credited.
     Retired,
@@ -78,30 +83,67 @@ impl Status {
     }
 }
 
+/// A chain a deposit address gets a forwarder on: the `CREATE2` contracts and the treasury a new
+/// forwarder there pays.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Chain {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Forwarder factory, at the same address on every chain.
+    pub factory: EvmAddress,
+    /// Forwarder implementation, at the same address on every chain.
+    pub implementation: EvmAddress,
+    /// The treasury new forwarders on the chain pay.
+    pub treasury: EvmAddress,
+}
+
+impl Chain {
+    /// The chain of `route`, with the treasury a new forwarder there pays.
+    ///
+    /// TODO(design PR 7): take the account's effective treasury for the chain instead of the
+    /// route's. When a treasury change takes effect on a chain, PR 7 must supersede that chain's
+    /// network of every deposit address of the account ([`sync_networks`] over the new treasury,
+    /// active and retired addresses alike, since both are still paid) in the same transaction
+    /// that applies the change, and announce it with `account.treasury.updated`; the address on
+    /// the other chains is unchanged. [`create`] already supersedes an active address's network
+    /// whose treasury is no longer the effective one, so a missed update is repaired on the next
+    /// creation; a superseded network keeps paying its old treasury and is still credited.
+    #[must_use]
+    pub fn of(route: &RouteFile) -> Self {
+        Self {
+            chain_id: route.chain.chain_id,
+            factory: route.chain.contracts.forwarder_factory,
+            implementation: route.chain.contracts.implementation,
+            treasury: route.chain.contracts.treasury,
+        }
+    }
+}
+
+/// A deposit address's current forwarder on one chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Network {
+    /// The forwarder's `addresses` row.
+    pub address_id: Uuid,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Forwarder address on the chain.
+    pub address: EvmAddress,
+    /// The treasury the forwarder pays, its clone argument.
+    pub treasury: EvmAddress,
+}
+
 /// A customer's deposit address.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositAddress {
     /// Deposit address identifier.
     pub id: Uuid,
-    /// The forwarder's `addresses` row.
-    pub address_id: Uuid,
     /// Mode.
     pub livemode: bool,
     /// The customer's `client_reference_id`.
     pub client_reference_id: String,
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Route asset code.
-    pub asset: String,
-    /// Route the address was issued on.
-    pub route: String,
-    /// Version among the customer's addresses for the chain and asset, from 1.
+    /// Version among the customer's addresses, from 1.
     pub version: u64,
-    /// Forwarder address.
-    pub address: EvmAddress,
-    /// The treasury the forwarder pays, its clone argument.
-    pub treasury: EvmAddress,
-    /// CREATE2 salt.
+    /// CREATE2 salt, the same on every chain.
     pub salt: B256,
     /// Lifecycle status.
     pub status: Status,
@@ -111,6 +153,9 @@ pub struct DepositAddress {
     pub retired_at: Option<DateTime<Utc>>,
     /// The merchant's metadata (`crate::api` validates it).
     pub metadata: BTreeMap<String, String>,
+    /// The current forwarder on each chain it was issued on, by chain id. Networks superseded by
+    /// a treasury change are not listed; they are still credited.
+    pub networks: Vec<Network>,
 }
 
 /// Deposit address failure mapped by the API boundary.
@@ -128,6 +173,10 @@ pub enum DepositAddressError {
     /// The customer rotated too often in the last hour.
     #[error("deposit address rotation limit exceeded")]
     RateLimited,
+    /// No chain accepts new networks (every chain of the mode is frozen or paused), so no address
+    /// can be issued.
+    #[error("no chain accepts new deposit addresses")]
+    NoChain,
     /// Request input is invalid.
     #[error("{0}")]
     InvalidInput(&'static str),
@@ -142,110 +191,92 @@ pub enum DepositAddressError {
     Database(#[from] sqlx::Error),
 }
 
-/// The treasury a new address of `route` pays.
+/// Returns `customer`'s active address, issuing one on `chains` when there is none.
 ///
-/// TODO(design PR 7): take the account's effective treasury for the chain instead of the route's.
-/// When a treasury change takes effect, PR 7 must rotate every active deposit address of the
-/// account on that chain ([`rotate`] with `Actor::system`), in the same transaction that applies
-/// the change, and announce it with `account.treasury.updated`. [`create`] already replaces an
-/// active address whose treasury is no longer the effective one, so a missed rotation is repaired
-/// on the next creation; retired addresses keep paying their old treasury.
-fn effective_treasury(route: &RouteFile) -> EvmAddress {
-    route.chain.contracts.treasury
-}
-
-/// Returns `customer`'s active address for `route`'s chain and asset, issuing one when there is
-/// none, or when the active one pays a treasury that is no longer the effective one (it is
-/// retired as by a rotation, which this creation is not refused for).
+/// An existing address gets a network on each of `chains` it has none on, and a new network on
+/// each chain whose treasury is no longer the one its network pays (the old network is
+/// superseded, and still credited). `chains` are the issuable chains of the mode; an existing
+/// address's networks on other chains are kept.
 ///
-/// `metadata`, the request's, is merged into the returned address's, as an update would: a new
-/// address starts from the one it replaces, or from none.
+/// `metadata`, the request's, is merged into the returned address's, as an update would.
 ///
 /// Returns the address and whether it was issued by this call.
 pub async fn create(
     pool: &PgPool,
     account: &Account,
     customer: &Customer,
-    route: &RouteFile,
+    chains: &[Chain],
     metadata: Option<&MetadataUpdate>,
 ) -> Result<(DepositAddress, bool), DepositAddressError> {
     if customer.account_id != account.id {
         return Err(DepositAddressError::NotFound);
     }
-    if route.livemode != customer.livemode {
-        return Err(DepositAddressError::InvalidInput(
-            "the route's mode differs from the customer's",
-        ));
-    }
     let scope = Scope::new(account.id, customer.livemode);
-    let treasury = effective_treasury(route);
     let mut transaction = pool.begin().await?;
     lock_customer(&mut transaction, customer).await?;
-    let active = find_active(
-        &mut transaction,
-        customer.id,
-        route.chain.chain_id,
-        &route.asset.symbol,
-    )
-    .await?;
     let merge = |current: BTreeMap<String, String>| match metadata {
         Some(update) => update.apply(current).map_err(DepositAddressError::Metadata),
         None => Ok(current),
     };
-    let issued = match active {
-        Some(mut active) if active.treasury == treasury => {
-            let merged = merge(active.metadata.clone())?;
-            if merged != active.metadata {
+    let active = sqlx::query_as::<_, (Uuid, i64, Json<BTreeMap<String, String>>)>(
+        "SELECT id, version, metadata FROM deposit_addresses \
+         WHERE customer_id = $1 AND status = 'active' FOR UPDATE",
+    )
+    .bind(customer.id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let (id, issued) = match active {
+        Some((id, version, Json(current))) => {
+            let merged = merge(current.clone())?;
+            if merged != current {
                 sqlx::query("UPDATE deposit_addresses SET metadata = $2 WHERE id = $1")
-                    .bind(active.id)
+                    .bind(id)
                     .bind(Json(&merged))
                     .execute(&mut *transaction)
                     .await?;
-                active.metadata = merged;
             }
-            transaction.commit().await?;
-            return Ok((active, false));
-        }
-        Some(active) => {
-            // The treasury changed: the stale address is retired, whatever the rotation limit.
-            let merged = merge(active.metadata)?;
-            retire(&mut transaction, active.id).await?;
-            let new = NewAddress {
-                account_public_id: &account.public_id,
-                customer,
-                route,
-                treasury,
-                metadata: &merged,
-            };
-            issue(&mut transaction, scope, &new).await?
+            let version =
+                u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?;
+            let salt = deposit_address_salt(
+                &account.public_id,
+                customer.livemode,
+                &customer.client_reference_id,
+                version,
+            );
+            sync_networks(&mut transaction, scope, id, salt, chains).await?;
+            (id, false)
         }
         None => {
             let merged = merge(BTreeMap::new())?;
             check_cap(&mut transaction, scope).await?;
-            let new = NewAddress {
-                account_public_id: &account.public_id,
+            let id = issue(
+                &mut transaction,
+                scope,
+                &account.public_id,
                 customer,
-                route,
-                treasury,
-                metadata: &merged,
-            };
-            issue(&mut transaction, scope, &new).await?
+                chains,
+                &merged,
+            )
+            .await?;
+            (id, true)
         }
     };
+    let address = get_in(&mut transaction, scope, id)
+        .await?
+        .ok_or(DepositAddressError::DatabaseInvariant)?;
     transaction.commit().await?;
-    Ok((issued, true))
+    Ok((address, issued))
 }
 
-/// Retires the scope's active address `id` and issues the next version for the same customer,
-/// chain, and asset on `route`, the current version of the address's route. The new version
-/// carries the retired one's metadata.
+/// Retires the scope's active address `id` and issues the next version for the same customer on
+/// `chains`, the issuable chains of the mode. The new version carries the retired one's metadata.
 pub async fn rotate(
     pool: &PgPool,
     account: &Account,
     scope: Scope,
     actor: &Actor,
     id: Uuid,
-    route: &RouteFile,
+    chains: &[Chain],
 ) -> Result<DepositAddress, DepositAddressError> {
     let mut transaction = pool.begin().await?;
     let customer = sqlx::query_as::<_, (Uuid, String, Vec<String>)>(
@@ -272,14 +303,15 @@ pub async fn rotate(
     .ok_or(DepositAddressError::NotFound)?;
     // Creations and rotations of one customer are serialized by its row lock.
     lock_customer(&mut transaction, &customer).await?;
-    let current = get_in(&mut transaction, scope, id)
-        .await?
-        .ok_or(DepositAddressError::NotFound)?;
-    if current.status == Status::Retired {
+    let current = sqlx::query_as::<_, (String, Json<BTreeMap<String, String>>)>(
+        "SELECT status, metadata FROM deposit_addresses WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let (status, Json(metadata)) = current;
+    if Status::parse(&status)? == Status::Retired {
         return Err(DepositAddressError::Retired);
-    }
-    if current.chain_id != route.chain.chain_id || current.asset != route.asset.symbol {
-        return Err(DepositAddressError::DatabaseInvariant);
     }
     let recent: i64 = sqlx::query_scalar(
         r#"
@@ -294,28 +326,32 @@ pub async fn rotate(
     if recent >= MAX_ROTATIONS_PER_HOUR {
         return Err(DepositAddressError::RateLimited);
     }
-    retire(&mut transaction, current.id).await?;
-    let new = NewAddress {
-        account_public_id: &account.public_id,
-        customer: &customer,
-        route,
-        treasury: effective_treasury(route),
-        metadata: &current.metadata,
-    };
-    let issued = issue(&mut transaction, scope, &new).await?;
+    retire(&mut transaction, id).await?;
+    let issued = issue(
+        &mut transaction,
+        scope,
+        &account.public_id,
+        &customer,
+        chains,
+        &metadata,
+    )
+    .await?;
     audit::insert(
         &mut *transaction,
         &audit::Entry {
             account_id: Some(scope.account_id()),
             actor,
             action: "deposit_address.rotate",
-            subject: &format!("deposit_address:{}", public_id(current.id)),
-            reason: &format!("API request; replaced by {}", public_id(issued.id)),
+            subject: &format!("deposit_address:{}", public_id(id)),
+            reason: &format!("API request; replaced by {}", public_id(issued)),
         },
     )
     .await?;
+    let address = get_in(&mut transaction, scope, issued)
+        .await?
+        .ok_or(DepositAddressError::DatabaseInvariant)?;
     transaction.commit().await?;
-    Ok(issued)
+    Ok(address)
 }
 
 /// The public id of a deposit address, `da_` and the hex of its id.
@@ -330,15 +366,8 @@ pub async fn get(
     scope: Scope,
     id: Uuid,
 ) -> Result<Option<DepositAddress>, DepositAddressError> {
-    let mut builder = QueryBuilder::new(SELECT);
-    push_scope(&mut builder, scope);
-    builder.push(" AND deposit_address.id = ").push_bind(id);
-    builder
-        .build_query_as::<DepositAddressRow>()
-        .fetch_optional(pool)
-        .await?
-        .map(TryInto::try_into)
-        .transpose()
+    let mut connection = pool.acquire().await?;
+    get_in(&mut connection, scope, id).await
 }
 
 /// Filters and cursor of [`list`].
@@ -348,8 +377,6 @@ pub struct ListFilter {
     pub client_reference_id: Option<String>,
     /// Only addresses in this status.
     pub status: Option<Status>,
-    /// Only this chain's addresses.
-    pub chain_id: Option<u64>,
     /// The page after this address (older), or before it (newer) when `before`.
     pub cursor: Option<Uuid>,
     /// Whether `cursor` is `ending_before`.
@@ -365,6 +392,7 @@ pub async fn list(
     scope: Scope,
     filter: &ListFilter,
 ) -> Result<(Vec<DepositAddress>, bool), DepositAddressError> {
+    let mut connection = pool.acquire().await?;
     let mut builder = QueryBuilder::new(SELECT);
     push_scope(&mut builder, scope);
     if let Some(reference) = &filter.client_reference_id {
@@ -377,13 +405,6 @@ pub async fn list(
             .push(" AND deposit_address.status = ")
             .push_bind(status.code());
     }
-    if let Some(chain_id) = filter.chain_id {
-        let chain_id =
-            i64::try_from(chain_id).map_err(|_| DepositAddressError::InvalidInput("chain_id"))?;
-        builder
-            .push(" AND deposit_address.chain_id = ")
-            .push_bind(chain_id);
-    }
     if let Some(cursor) = filter.cursor {
         let found: Option<(DateTime<Utc>, Uuid)> = sqlx::query_as(
             "SELECT created_at, id FROM deposit_addresses \
@@ -392,7 +413,7 @@ pub async fn list(
         .bind(cursor)
         .bind(scope.account_id())
         .bind(scope.livemode())
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
         let (created_at, id) = found.ok_or(DepositAddressError::NotFound)?;
         builder
@@ -414,7 +435,7 @@ pub async fn list(
     builder.push_bind(filter.limit.saturating_add(1));
     let mut rows = builder
         .build_query_as::<DepositAddressRow>()
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
     let limit =
         usize::try_from(filter.limit).map_err(|_| DepositAddressError::DatabaseInvariant)?;
@@ -423,9 +444,14 @@ pub async fn list(
     if filter.before {
         rows.reverse();
     }
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let mut networks = load_networks(&mut connection, &ids).await?;
     let addresses = rows
         .into_iter()
-        .map(TryInto::try_into)
+        .map(|row| {
+            let own = networks.remove(&row.id).unwrap_or_default();
+            row.into_address(own)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((addresses, has_more))
 }
@@ -439,47 +465,59 @@ fn push_scope(builder: &mut QueryBuilder<Postgres>, scope: Scope) {
 }
 
 async fn get_in(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     scope: Scope,
     id: Uuid,
 ) -> Result<Option<DepositAddress>, DepositAddressError> {
     let mut builder = QueryBuilder::new(SELECT);
     push_scope(&mut builder, scope);
-    builder
-        .push(" AND deposit_address.id = ")
-        .push_bind(id)
-        .push(" FOR UPDATE OF deposit_address");
-    builder
+    builder.push(" AND deposit_address.id = ").push_bind(id);
+    let Some(row) = builder
         .build_query_as::<DepositAddressRow>()
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *connection)
         .await?
-        .map(TryInto::try_into)
-        .transpose()
+    else {
+        return Ok(None);
+    };
+    let networks = load_networks(connection, &[row.id])
+        .await?
+        .remove(&row.id)
+        .unwrap_or_default();
+    row.into_address(networks).map(Some)
 }
 
-async fn find_active(
-    transaction: &mut Transaction<'_, Postgres>,
-    customer_id: Uuid,
-    chain_id: u64,
-    asset: &str,
-) -> Result<Option<DepositAddress>, DepositAddressError> {
-    let chain_id =
-        i64::try_from(chain_id).map_err(|_| DepositAddressError::InvalidInput("chain_id"))?;
-    let mut builder = QueryBuilder::new(SELECT);
-    builder
-        .push(" WHERE deposit_address.customer_id = ")
-        .push_bind(customer_id)
-        .push(" AND deposit_address.chain_id = ")
-        .push_bind(chain_id)
-        .push(" AND deposit_address.asset = ")
-        .push_bind(asset.to_owned())
-        .push(" AND deposit_address.status = 'active' FOR UPDATE OF deposit_address");
-    builder
-        .build_query_as::<DepositAddressRow>()
-        .fetch_optional(&mut **transaction)
-        .await?
-        .map(TryInto::try_into)
-        .transpose()
+/// The current networks of `ids`, by deposit address and then chain id.
+async fn load_networks(
+    connection: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, Vec<Network>>, DepositAddressError> {
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, i64, String, String)>(
+        r#"
+        SELECT deposit_address_id, id, chain_id, address, treasury
+        FROM addresses
+        WHERE deposit_address_id = ANY($1) AND superseded_at IS NULL
+        ORDER BY deposit_address_id, chain_id
+        "#,
+    )
+    .bind(ids)
+    .fetch_all(connection)
+    .await?;
+    let mut networks = BTreeMap::<Uuid, Vec<Network>>::new();
+    for (deposit_address_id, address_id, chain_id, address, treasury) in rows {
+        networks
+            .entry(deposit_address_id)
+            .or_default()
+            .push(Network {
+                address_id,
+                chain_id: u64::try_from(chain_id)
+                    .map_err(|_| DepositAddressError::DatabaseInvariant)?,
+                address: EvmAddress::from_str(&address)
+                    .map_err(|_| DepositAddressError::DatabaseInvariant)?,
+                treasury: EvmAddress::from_str(&treasury)
+                    .map_err(|_| DepositAddressError::DatabaseInvariant)?,
+            });
+    }
+    Ok(networks)
 }
 
 async fn retire(
@@ -536,122 +574,140 @@ async fn check_cap(
     Ok(())
 }
 
-/// What [`issue`] derives and stores a new address from.
-struct NewAddress<'a> {
-    account_public_id: &'a str,
-    customer: &'a Customer,
-    route: &'a RouteFile,
-    treasury: EvmAddress,
-    metadata: &'a BTreeMap<String, String>,
-}
-
+/// Inserts the customer's next version with a network on each of `chains`, and returns its id.
 async fn issue(
     transaction: &mut Transaction<'_, Postgres>,
     scope: Scope,
-    new: &NewAddress<'_>,
-) -> Result<DepositAddress, DepositAddressError> {
-    let NewAddress {
-        account_public_id,
-        customer,
-        route,
-        treasury,
-        metadata,
-    } = *new;
-    let chain_id = route.chain.chain_id;
-    let chain_id_db =
-        i64::try_from(chain_id).map_err(|_| DepositAddressError::InvalidInput("chain_id"))?;
-    let asset = &route.asset.symbol;
-    let latest: Option<i64> = sqlx::query_scalar(
-        "SELECT max(version) FROM deposit_addresses \
-         WHERE customer_id = $1 AND chain_id = $2 AND asset = $3",
-    )
-    .bind(customer.id)
-    .bind(chain_id_db)
-    .bind(asset)
-    .fetch_one(&mut **transaction)
-    .await?;
+    account_public_id: &str,
+    customer: &Customer,
+    chains: &[Chain],
+    metadata: &BTreeMap<String, String>,
+) -> Result<Uuid, DepositAddressError> {
+    if chains.is_empty() {
+        return Err(DepositAddressError::NoChain);
+    }
+    let latest: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM deposit_addresses WHERE customer_id = $1")
+            .bind(customer.id)
+            .fetch_one(&mut **transaction)
+            .await?;
     let version = latest
         .unwrap_or(0)
         .checked_add(1)
         .ok_or(DepositAddressError::DatabaseInvariant)?;
     let version_u64 = u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?;
-    let salt = deposit_address_salt(
-        account_public_id,
-        scope.livemode(),
-        &customer.client_reference_id,
-        chain_id,
-        asset,
-        version_u64,
-    );
-    let address = forwarder_address(
-        route.chain.contracts.forwarder_factory,
-        route.chain.contracts.implementation,
-        treasury,
-        salt,
-    );
     let id = Uuid::new_v4();
-    let address_id = Uuid::new_v4();
-    let created_at: DateTime<Utc> = sqlx::query_scalar(
+    sqlx::query(
         r#"
-        INSERT INTO deposit_addresses
-            (id, account_id, livemode, customer_id, chain_id, asset, route, version, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING created_at
+        INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(id)
     .bind(scope.account_id())
     .bind(scope.livemode())
     .bind(customer.id)
-    .bind(chain_id_db)
-    .bind(asset)
-    .bind(&route.route)
     .bind(version)
     .bind(Json(metadata))
-    .fetch_one(&mut **transaction)
-    .await?;
-    // A newly derived address cannot hold earlier payments to this salt and treasury unless
-    // someone precomputed it, and such a payment would only ever reach the treasury; as for quote
-    // addresses, the scanner covers it from the chain's committed cursor.
-    sqlx::query(
-        r#"
-        INSERT INTO addresses (
-            id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address,
-            created_block
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $4), 0)
-        )
-        "#,
-    )
-    .bind(address_id)
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(chain_id_db)
-    .bind(id)
-    .bind(format!("{salt:#x}"))
-    .bind(format!("{treasury:#x}"))
-    .bind(format!("{address:#x}"))
     .execute(&mut **transaction)
     .await?;
-    Ok(DepositAddress {
-        id,
-        address_id,
-        livemode: scope.livemode(),
-        client_reference_id: customer.client_reference_id.clone(),
-        chain_id,
-        asset: asset.clone(),
-        route: route.route.clone(),
-        version: version_u64,
-        address,
-        treasury,
-        salt,
-        status: Status::Active,
-        created_at,
-        retired_at: None,
-        metadata: metadata.clone(),
-    })
+    let salt = deposit_address_salt(
+        account_public_id,
+        scope.livemode(),
+        &customer.client_reference_id,
+        version_u64,
+    );
+    sync_networks(transaction, scope, id, salt, chains).await?;
+    Ok(id)
+}
+
+/// Gives deposit address `id` (of `salt`) a current network on each of `chains` over the chain's
+/// treasury: a chain without one gets one, and a chain whose network pays another treasury has it
+/// superseded (still watched and credited) by one over the new treasury. A network superseded
+/// earlier is made current again when its treasury is the chain's again. Networks on chains not
+/// in `chains` are left as they are.
+pub async fn sync_networks(
+    transaction: &mut Transaction<'_, Postgres>,
+    scope: Scope,
+    id: Uuid,
+    salt: B256,
+    chains: &[Chain],
+) -> Result<(), DepositAddressError> {
+    let mut seen = BTreeSet::new();
+    for chain in chains {
+        if !seen.insert(chain.chain_id) {
+            return Err(DepositAddressError::DatabaseInvariant);
+        }
+        let chain_id = i64::try_from(chain.chain_id)
+            .map_err(|_| DepositAddressError::InvalidInput("chain_id"))?;
+        let address = forwarder_address(chain.factory, chain.implementation, chain.treasury, salt);
+        let address_hex = format!("{address:#x}");
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT address FROM addresses \
+             WHERE deposit_address_id = $1 AND chain_id = $2 AND superseded_at IS NULL \
+             FOR UPDATE",
+        )
+        .bind(id)
+        .bind(chain_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        match current {
+            Some(current) if current == address_hex => continue,
+            Some(_) => {
+                sqlx::query(
+                    "UPDATE addresses SET superseded_at = now() \
+                     WHERE deposit_address_id = $1 AND chain_id = $2 AND superseded_at IS NULL",
+                )
+                .bind(id)
+                .bind(chain_id)
+                .execute(&mut **transaction)
+                .await?;
+            }
+            None => {}
+        }
+        // The chain's treasury may be one an earlier network of this address paid: that forwarder
+        // is the chain's current one again.
+        let restored = sqlx::query(
+            "UPDATE addresses SET superseded_at = NULL \
+             WHERE deposit_address_id = $1 AND chain_id = $2 AND address = $3",
+        )
+        .bind(id)
+        .bind(chain_id)
+        .bind(&address_hex)
+        .execute(&mut **transaction)
+        .await?
+        .rows_affected();
+        if restored > 0 {
+            continue;
+        }
+        // A newly derived forwarder cannot hold earlier payments to this salt and treasury unless
+        // someone sent to the address before its network existed (on a chain added later, or
+        // before a treasury change); as for quote addresses, the scanner covers it from the
+        // chain's committed cursor.
+        sqlx::query(
+            r#"
+            INSERT INTO addresses (
+                id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address,
+                created_block
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $4), 0)
+            )
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .bind(chain_id)
+        .bind(id)
+        .bind(format!("{salt:#x}"))
+        .bind(format!("{:#x}", chain.treasury))
+        .bind(&address_hex)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn lock_customer(
@@ -678,45 +734,36 @@ async fn lock_customer(
 #[derive(FromRow)]
 struct DepositAddressRow {
     id: Uuid,
+    account_public_id: String,
     livemode: bool,
     client_reference_id: String,
-    chain_id: i64,
-    asset: String,
-    route: String,
     version: i64,
     status: String,
     created_at: DateTime<Utc>,
     retired_at: Option<DateTime<Utc>>,
-    address_id: Uuid,
-    address: String,
-    treasury: String,
-    salt: String,
     metadata: Json<BTreeMap<String, String>>,
 }
 
-impl TryFrom<DepositAddressRow> for DepositAddress {
-    type Error = DepositAddressError;
-
-    fn try_from(row: DepositAddressRow) -> Result<Self, Self::Error> {
-        let invariant = |_| DepositAddressError::DatabaseInvariant;
-        Ok(Self {
-            id: row.id,
-            address_id: row.address_id,
-            livemode: row.livemode,
-            client_reference_id: row.client_reference_id,
-            chain_id: u64::try_from(row.chain_id).map_err(invariant)?,
-            asset: row.asset,
-            route: row.route,
-            version: u64::try_from(row.version).map_err(invariant)?,
-            address: EvmAddress::from_str(&row.address)
-                .map_err(|_| DepositAddressError::DatabaseInvariant)?,
-            treasury: EvmAddress::from_str(&row.treasury)
-                .map_err(|_| DepositAddressError::DatabaseInvariant)?,
-            salt: B256::from_str(&row.salt).map_err(|_| DepositAddressError::DatabaseInvariant)?,
-            status: Status::parse(&row.status)?,
-            created_at: row.created_at,
-            retired_at: row.retired_at,
-            metadata: row.metadata.0,
+impl DepositAddressRow {
+    fn into_address(self, networks: Vec<Network>) -> Result<DepositAddress, DepositAddressError> {
+        let version =
+            u64::try_from(self.version).map_err(|_| DepositAddressError::DatabaseInvariant)?;
+        Ok(DepositAddress {
+            id: self.id,
+            salt: deposit_address_salt(
+                &self.account_public_id,
+                self.livemode,
+                &self.client_reference_id,
+                version,
+            ),
+            livemode: self.livemode,
+            client_reference_id: self.client_reference_id,
+            version,
+            status: Status::parse(&self.status)?,
+            created_at: self.created_at,
+            retired_at: self.retired_at,
+            metadata: self.metadata.0,
+            networks,
         })
     }
 }

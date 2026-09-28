@@ -155,10 +155,13 @@ class Deposits:
 
 
 class DepositAddresses:
-    """A customer's persistent deposit address per chain and asset: show it like a bank account
-    number; any amount sent to it is credited at the market rate when it arrives.
+    """A customer's persistent deposit address: one address for every supported token on every
+    supported network. Show it like a bank account number; any amount of a supported token sent
+    to it is credited at the market rate when it arrives. `networks` lists each chain's address
+    (the same wherever the treasury is the same; `address` is it when all agree) and tokens.
 
-    `topup_sdk.deposit_address(...)` recomputes any version offline from its salt inputs.
+    `topup_sdk.deposit_address(...)` recomputes any version offline from its salt inputs and a
+    network's treasury.
     """
 
     def __init__(self, client: TopupClient) -> None:
@@ -168,16 +171,12 @@ class DepositAddresses:
         self,
         *,
         client_reference_id: str,
-        chain_id: int,
-        asset: str,
         metadata: Metadata | None = None,
     ) -> DepositAddress:
-        """Returns the customer's active address for `asset` on `chain_id`; the same call keeps
-        returning it until it is rotated. `metadata` is merged into the address's; each deposit
-        to it starts with a copy, and a rotation carries it to the next address."""
-        return self._client.create_deposit_address(
-            client_reference_id, chain_id=chain_id, asset=asset, metadata=metadata
-        )
+        """Returns the customer's active address; the same call keeps returning it until it is
+        rotated, and adds a network supported since. `metadata` is merged into the address's;
+        each deposit to it starts with a copy, and a rotation carries it to the next address."""
+        return self._client.create_deposit_address(client_reference_id, metadata=metadata)
 
     def update(
         self, deposit_address_id: str, *, metadata: Metadata | None = None
@@ -193,18 +192,18 @@ class DepositAddresses:
         *,
         client_reference_id: str | None = None,
         status: str | None = None,
-        chain_id: int | None = None,
     ) -> Iterator[DepositAddress]:
         """Yields every matching deposit address, newest first, fetching pages as it goes."""
         return self._client.list_deposit_addresses(
-            client_reference_id=client_reference_id, status=status, chain_id=chain_id
+            client_reference_id=client_reference_id, status=status
         )
 
     def rotate(
         self, deposit_address_id: str, *, idempotency_key: str | None = None
     ) -> DepositAddress:
-        """Retires the address and returns the customer's new one; the retired address is still
-        credited, so stop showing it rather than telling the customer it is invalid."""
+        """Retires the address and returns the customer's new one, a new address on every
+        network; the retired address is still credited, so stop showing it rather than telling
+        the customer it is invalid."""
         return self._client.rotate_deposit_address(
             deposit_address_id, idempotency_key=idempotency_key
         )

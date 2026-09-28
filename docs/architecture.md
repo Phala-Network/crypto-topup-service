@@ -43,8 +43,9 @@ amount, a single-use address, and a countdown, then pays. This is the checkout m
 Commerce and BitPay. A payment that does not match its quote (late, wrong amount, second
 payment) is still credited, at the price observed when it is confirmed. A **deposit address**
 (§9, [design §5a](design/multi-tenant.md#5a-deposit-addresses-d16)) is the customer's
-persistent, rotatable address per chain and asset, like the stable bank-transfer details of
-Stripe's customer balance: any amount sent to it, active or retired, is credited at spot.
+persistent, rotatable address, one for every supported token on every supported chain, like the
+stable bank-transfer details of Stripe's customer balance: any amount of a supported token sent to
+it, active or retired, is credited at spot.
 
 Customer contract: *tokens are converted to non-transferable Phala Cloud USD credit at the
 published rate observed when the deposit is confirmed on Ethereum; the USD value is fixed
@@ -137,9 +138,10 @@ contract ForwarderFactory {                            // no roles, no admin, no
 - `salt = keccak256(abi.encode(account, account_id, "lock", quote_id))`, where `account` is the
   merchant's `acct_…` id, `account_id` its customer's identifier, and `quote_id` the
   service-assigned `qt_…` id. A deposit address's salt is `keccak256(abi.encode(account,
-  livemode, client_reference_id, "deposit_address", chain_id, asset, version))`, types `(string,
-  bool, string, string, uint256, string, uint256)` (§9). The merchant holds every input,
-  including the treasury, so it recomputes an address before showing it.
+  livemode, client_reference_id, "deposit_address", version))`, types `(string, bool, string,
+  string, uint256)` (§9): it names no chain or asset, so the address is the same on every chain
+  whose treasury is the same address. The merchant holds every input, including the treasury, so
+  it recomputes an address before showing it.
 - One factory per chain, deployed by anyone through the deterministic deployment proxy with the
   fixed salt `keccak256("phala-pay.ForwarderFactory.v2")`: no constructor arguments, so the same
   factory and implementation addresses on every chain. Each route records `forwarder_factory`,
@@ -229,11 +231,13 @@ customers     id, account_id, livemode, client_reference_id, paused_scopes text[
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
               credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
               metadata jsonb
-deposit_addresses  id (da_ + hex), account_id, livemode, customer_id, chain_id, asset, route,
-              version, status (active|retired), created_at, retired_at, metadata jsonb
-              -- one active per (customer, chain, asset); versions count from 1 (§9)
-addresses     id, account_id, livemode, chain_id, quote_id UNIQUE | deposit_address_id UNIQUE
+deposit_addresses  id (da_ + hex), account_id, livemode, customer_id, version,
+              status (active|retired), created_at, retired_at, metadata jsonb
+              -- one active per customer; versions count from 1 (§9)
+addresses     id, account_id, livemode, chain_id, quote_id UNIQUE | deposit_address_id
               (exactly one), salt, treasury, address,
+              superseded_at                       -- a deposit address network replaced after a
+                                                  -- treasury change; one current per chain
               deployed_block                      -- finalized ForwarderCreated for the pair
               UNIQUE (chain_id, address)          -- treasury: the forwarder's clone argument
 cursors       chain_id PK, scanned_block, scanned_block_time,       -- finalized backstop
@@ -382,7 +386,9 @@ per block time.
 
 **Per-block scan** (every route; each new head): fetch `Transfer` logs to **every issued address**
 in `(max(finalized cursor, fast cursor), latest]`, at most one 2 000-block window below `latest`,
-in one request whatever the number of addresses or accounts:
+in one request whatever the number of addresses or accounts. A chain's issued addresses are all its
+`addresses` rows: every quote's, and every customer's deposit address on that chain, active,
+retired, or superseded by a treasury change (§9):
 
 - `asset.backstop: token` (the default; for tokens with few transfers per block, such as PHA): every
   `Transfer` of the chain's routed token contracts, no recipient filter, kept locally when the
@@ -506,18 +512,24 @@ Invoice model, enabled from the pilot, with this service's exception profile:
   answer. A deposit address (below) carries no price.
 
 **Deposit addresses** ([design §5a](design/multi-tenant.md#5a-deposit-addresses-d16), restored
-per the owner's 2026-09-21 requirement). `POST /v1/deposit_addresses {client_reference_id,
-chain_id, asset}` returns the customer's active address for that chain and asset, issuing version
-1 the first time; `POST /v1/deposit_addresses/{id}/rotate` retires it and issues the next version.
-The forwarder is an `addresses` row owned by the deposit address, bound to the treasury effective
-at issue; every transfer to it, active or retired, is a deposit valued at spot and runs the same
-states, events, sweeps, refunds, and reconciliation as a quote payment, with `quote: null` and
-`deposit_address` set. Creation replaces an active address whose treasury is no longer the
-effective one, and a treasury change (design PR 7) rotates every active address of the account
-on the chain; retired addresses keep paying their old treasury. Active addresses are capped per
-account and mode (`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000
-test; `409 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
-(`429 rate_limit`), and none is issued while `quotes` is paused.
+per the owner's 2026-09-21 requirement; one address per customer across every chain and asset
+per the owner's 2026-09-28 decision). `POST /v1/deposit_addresses {client_reference_id}` returns
+the customer's active address, issuing version 1 the first time, with its `networks`: for each
+chain of the mode with a current route, the address there, the treasury it pays, and the tokens
+it takes, each with an amount-less EIP-681 `payment_uri`; the top-level `address` is set when
+every network shares one. `POST /v1/deposit_addresses/{id}/rotate` retires it and issues the next
+version on every chain. Each network is an `addresses` row owned by the deposit address, bound to
+its chain's treasury effective at issue; every transfer of a supported token to it, active or
+retired, is a deposit valued at spot and runs the same states, events, sweeps, refunds, and
+reconciliation as a quote payment, with `quote: null` and `deposit_address` set; an unsupported
+token is rejected. Creation adds a network on a chain supported since and supersedes a network
+whose treasury is no longer the effective one; a treasury change (design PR 7) does the same for
+the chain's network of every address of the account. Superseded networks and retired versions
+stay watched and keep paying their old treasury. Active addresses are capped per account and mode
+(`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000 test;
+`409 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
+(`429 rate_limit`), none is issued while `quotes` is paused, and a frozen chain gets no new
+network.
 
 ## 10. Signing and sweeping
 
@@ -662,8 +674,8 @@ POST   /v1/quotes {account_id, amount, currency, chain_id, asset, metadata?} sin
 GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
 POST   /v1/quotes/{id} {metadata}                                 update metadata, in any status
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
-POST   /v1/deposit_addresses {client_reference_id, chain_id, asset, metadata?}  the customer's active address, issued once (§9)
-GET    /v1/deposit_addresses?client_reference_id&status&chain_id&limit&starting_after&ending_before
+POST   /v1/deposit_addresses {client_reference_id, metadata?}  the customer's active address on every network, issued once (§9)
+GET    /v1/deposit_addresses?client_reference_id&status&limit&starting_after&ending_before
 GET    /v1/deposit_addresses/{id}
 POST   /v1/deposit_addresses/{id} {metadata}                      update metadata, active or retired
 POST   /v1/deposit_addresses/{id}/rotate                          retire it and return the next version
@@ -869,10 +881,13 @@ from fetched state, never from webhook order.
   and copy-amount buttons for wallets and exchanges that do not read the URI.
 - When a quote's `expires_at` has passed, hide its QR code and address and show "Payment
   window closed. A payment sent in time is still credited at the quoted price." Offer a re-quote; the quote stays `open` until chain-time expiry (§9).
-- Deposit address page: the network, the token contract, the address with a copy button, and a
-  QR of its EIP-681 URI (token, no amount), with "Send any amount of PHA on Ethereum only. It is
-  credited at the market rate when it arrives, usually in about 30 seconds." After a rotation,
-  stop showing the retired address; a payment to it is still credited.
+- Deposit address page: "One address for all supported tokens and networks; send only supported
+  tokens." The payer picks a network and a token; the page shows that network, the token contract,
+  the address with a copy button, and a QR of that token's EIP-681 URI (no amount), with "Send
+  only PHA, USDC on Ethereum, Base. Any amount is credited at the market rate when it arrives,
+  usually in about 30 seconds." Where a network's address differs (another treasury), show each
+  network's own address. After a rotation, stop showing the retired address; a payment to it is
+  still credited.
 - Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
   are not credited." Support handles such a payment with the
   [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).
@@ -1040,7 +1055,7 @@ the verified report data is this hash zero-padded to 64 bytes, and then pin
 
 | Topic | Rule |
 |---|---|
-| Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's persistent address per chain and asset, rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
+| Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's one persistent address for every supported token on every chain (the same wherever the treasury is the same), rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
 | Refunds | Only a final deposit is refunded (`409 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the workspace closed. A credited deposit is refunded only on the product's request, for a credit the product did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The user requests a refund with a destination address they control (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
 | Workspace closure | Unused credit and in-flight deposits follow the product's closure policy; the old address stays monitored, and later funds are held for refund: the product holds a `deposit.credited` for a closed workspace instead of crediting it and requests its refund (§11); the service has no closure check of its own. |

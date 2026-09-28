@@ -1,7 +1,8 @@
-//! Deposit addresses on PostgreSQL (docs/design/multi-tenant.md "Deposit addresses"): creation
-//! is idempotent per customer, chain, asset, and mode; rotation retires and issues; the address
-//! is the one the merchant recomputes; caps, the rotation limit, and tenancy hold; a deposit to
-//! one names it.
+//! Deposit addresses on PostgreSQL (docs/design/multi-tenant.md "Deposit addresses"): one
+//! address per customer and mode for every supported token on every supported chain; creation is
+//! idempotent; rotation retires and issues on every chain; a chain whose treasury differs has its
+//! own address; the address is the one the merchant recomputes; caps, the rotation limit, and
+//! tenancy hold; a deposit to one names it.
 
 mod support;
 
@@ -32,57 +33,79 @@ use support::seed::{self, NewAccount};
 use support::{TEST_ORIGIN, merchant_request, public_key_base64, with_database};
 
 const TEST_CHAIN: u64 = 11_155_111;
+/// A second live chain (OP Mainnet) beside Ethereum's chain 1.
+const OTHER_CHAIN: u64 = 10;
+const USDC: &str = "0x00000000000000000000000000000000000000c1";
 
 #[tokio::test]
-async fn create_is_idempotent_per_customer_chain_asset_and_mode() -> Result<()> {
+async fn one_address_for_every_asset_and_chain_is_idempotent_per_customer_and_mode() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let first = fixture.create(&fixture.live_key, "team-42", 1).await?;
+            let first = fixture.create(&fixture.live_key, "team-42").await?;
             ensure!(first["object"] == "deposit_address" && first["status"] == "active");
             ensure!(first["livemode"] == true && first["client_reference_id"] == "team-42");
-            ensure!(first["chain_id"] == 1 && first["asset"] == "pha");
             ensure!(first["version"] == 1 && first["retired_at"].is_null());
             let id = first["id"].as_str().context("id")?;
             ensure!(id.starts_with("da_") && id.len() == 35);
-            // EIP-681 without an amount: the payer chooses it.
+            // The same address on both live chains, whose treasury is the same.
+            let address = first["address"].as_str().context("shared address")?;
+            ensure!(chain_ids(&first) == vec![1, OTHER_CHAIN], "{first}");
+            for network in networks(&first)? {
+                ensure!(network["address"] == address);
+                ensure!(network["treasury"] == format!("{:#x}", fixture.account_treasury()));
+            }
+            // Chain 1 takes both of its tokens, each with an EIP-681 URI without an amount.
+            let ethereum = &networks(&first)?[0];
+            let assets = ethereum["assets"].as_array().context("assets")?;
+            ensure!(assets.len() == 2, "{ethereum}");
+            let pha = assets
+                .iter()
+                .find(|asset| asset["asset"] == "pha")
+                .context("pha")?;
+            ensure!(pha["contract"] == format!("{:#x}", fixture.live_route.asset.contract));
+            ensure!(pha["decimals"] == 18);
             ensure!(
-                first["payment_uri"]
+                pha["payment_uri"]
                     == format!(
-                        "ethereum:{:#x}@1/transfer?address={}",
-                        fixture.live_route.asset.contract,
-                        first["address"].as_str().context("address")?
+                        "ethereum:{:#x}@1/transfer?address={address}",
+                        fixture.live_route.asset.contract
                     )
             );
+            let usdc = assets
+                .iter()
+                .find(|asset| asset["asset"] == "usdc")
+                .context("usdc")?;
+            ensure!(usdc["payment_uri"] == format!("ethereum:{USDC}@1/transfer?address={address}"));
+            ensure!(networks(&first)?[1]["assets"].as_array().map(Vec::len) == Some(1));
 
             // The same request returns the same address, without an idempotency key.
-            let again = fixture.create(&fixture.live_key, "team-42", 1).await?;
+            let again = fixture.create(&fixture.live_key, "team-42").await?;
             ensure!(again == first, "{again} != {first}");
             // Another customer, and the same customer in test mode, get their own.
-            let other = fixture.create(&fixture.live_key, "team-43", 1).await?;
+            let other = fixture.create(&fixture.live_key, "team-43").await?;
             ensure!(other["address"] != first["address"]);
-            let test = fixture
-                .create(&fixture.test_key, "team-42", TEST_CHAIN)
-                .await?;
+            let test = fixture.create(&fixture.test_key, "team-42").await?;
             ensure!(test["livemode"] == false && test["address"] != first["address"]);
-            // No test route on the live chain, and no live route on the test chain.
-            let (status, body) = fixture
-                .request(
-                    Method::POST,
-                    "/v1/deposit_addresses",
-                    &fixture.test_key,
-                    json!({"client_reference_id": "team-42", "chain_id": 1, "asset": "pha"}),
-                )
-                .await?;
-            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
-            ensure!(body["error"]["param"] == "asset");
+            // Test mode lists only the test chain.
+            ensure!(chain_ids(&test) == vec![TEST_CHAIN], "{test}");
+            // The request names no chain or asset.
             let (status, body) = fixture
                 .request(
                     Method::POST,
                     "/v1/deposit_addresses",
                     &fixture.live_key,
-                    json!({"client_reference_id": "", "chain_id": 1, "asset": "pha"}),
+                    json!({"client_reference_id": "team-42", "chain_id": 1, "asset": "pha"}),
+                )
+                .await?;
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
+            let (status, body) = fixture
+                .request(
+                    Method::POST,
+                    "/v1/deposit_addresses",
+                    &fixture.live_key,
+                    json!({"client_reference_id": ""}),
                 )
                 .await?;
             ensure!(status == StatusCode::BAD_REQUEST, "{body}");
@@ -92,14 +115,22 @@ async fn create_is_idempotent_per_customer_chain_asset_and_mode() -> Result<()> 
                 .fetch_one(pool)
                 .await?;
             ensure!(count == 3);
-            // New addresses are scanned from the chain's committed cursor, like a quote's.
+            // One forwarder row per address and chain, in that chain's issued-address set.
             let owners: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM addresses \
                  WHERE deposit_address_id IS NOT NULL AND quote_id IS NULL",
             )
             .fetch_one(pool)
             .await?;
-            ensure!(owners == 3);
+            ensure!(owners == 5);
+            for chain_id in [1, OTHER_CHAIN] {
+                let watched = db::list_scan_addresses(pool, chain_id).await?;
+                ensure!(
+                    watched
+                        .iter()
+                        .any(|watched| format!("{:#x}", watched.address) == address)
+                );
+            }
             Ok(())
         })
     })
@@ -111,21 +142,14 @@ async fn the_address_is_the_one_the_merchant_recomputes() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let fixture = Fixture::new(&database.app_pool).await?;
-            let created = fixture.create(&fixture.live_key, "客户 42", 1).await?;
+            let created = fixture.create(&fixture.live_key, "客户 42").await?;
             let rotated = fixture.rotate(&fixture.live_key, &created).await?;
             for (object, version) in [(&created, 1), (&rotated, 2)] {
                 ensure!(object["version"] == version);
-                let salt = deposit_address_salt(
-                    &fixture.account.public_id,
-                    true,
-                    "客户 42",
-                    1,
-                    "pha",
-                    version,
-                );
+                let salt =
+                    deposit_address_salt(&fixture.account.public_id, true, "客户 42", version);
                 ensure!(object["salt"] == format!("{salt:#x}"));
                 let contracts = &fixture.live_route.chain.contracts;
-                ensure!(object["treasury"] == format!("{:#x}", contracts.treasury));
                 let address = forwarder_address(
                     contracts.forwarder_factory,
                     contracts.implementation,
@@ -133,6 +157,9 @@ async fn the_address_is_the_one_the_merchant_recomputes() -> Result<()> {
                     salt,
                 );
                 ensure!(object["address"] == format!("{address:#x}"));
+                for network in networks(object)? {
+                    ensure!(network["address"] == format!("{address:#x}"));
+                }
             }
             Ok(())
         })
@@ -141,16 +168,20 @@ async fn the_address_is_the_one_the_merchant_recomputes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rotate_retires_the_address_and_issues_the_next_version() -> Result<()> {
+async fn rotate_retires_the_address_and_issues_the_next_version_on_every_chain() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let first = fixture.create(&fixture.live_key, "team-42", 1).await?;
+            let first = fixture.create(&fixture.live_key, "team-42").await?;
             let first_id = first["id"].as_str().context("id")?;
             let second = fixture.rotate(&fixture.live_key, &first).await?;
             ensure!(second["status"] == "active" && second["version"] == 2);
             ensure!(second["id"] != first["id"] && second["address"] != first["address"]);
+            ensure!(chain_ids(&second) == chain_ids(&first));
+            for (old, new) in networks(&first)?.iter().zip(networks(&second)?) {
+                ensure!(old["address"] != new["address"]);
+            }
 
             let (status, retired) = fixture
                 .request(
@@ -162,9 +193,19 @@ async fn rotate_retires_the_address_and_issues_the_next_version() -> Result<()> 
                 .await?;
             ensure!(status == StatusCode::OK);
             ensure!(retired["status"] == "retired" && retired["retired_at"].is_i64());
-            ensure!(retired["address"] == first["address"]);
+            ensure!(retired["networks"] == first["networks"]);
+            // Retired addresses stay in every chain's issued-address set, which the scanner reads.
+            for chain_id in [1, OTHER_CHAIN] {
+                let watched = db::list_scan_addresses(pool, chain_id).await?;
+                for object in [&first, &second] {
+                    ensure!(watched.iter().any(|watched| {
+                        Some(format!("{:#x}", watched.address).as_str())
+                            == object["address"].as_str()
+                    }));
+                }
+            }
             // Creation now returns the new address.
-            ensure!(fixture.create(&fixture.live_key, "team-42", 1).await? == second);
+            ensure!(fixture.create(&fixture.live_key, "team-42").await? == second);
             // A retired address cannot be rotated again.
             let (status, body) = fixture
                 .request(
@@ -186,7 +227,7 @@ async fn rotate_retires_the_address_and_issues_the_next_version() -> Result<()> 
             ensure!(audited == 1);
 
             // Lists filter by customer and status, newest first.
-            fixture.create(&fixture.live_key, "team-43", 1).await?;
+            fixture.create(&fixture.live_key, "team-43").await?;
             let (_, list) = fixture
                 .request(
                     Method::GET,
@@ -198,6 +239,7 @@ async fn rotate_retires_the_address_and_issues_the_next_version() -> Result<()> 
             ensure!(list["object"] == "list" && list["has_more"] == false);
             let data = list["data"].as_array().context("data")?;
             ensure!(data.len() == 2 && data[0]["id"] == second["id"], "{list}");
+            ensure!(data[1]["networks"] == first["networks"], "{list}");
             let (_, list) = fixture
                 .request(
                     Method::GET,
@@ -240,7 +282,7 @@ async fn other_accounts_and_modes_see_no_deposit_address() -> Result<()> {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let created = fixture.create(&fixture.live_key, "team-42", 1).await?;
+            let created = fixture.create(&fixture.live_key, "team-42").await?;
             let id = created["id"].as_str().context("id")?;
             let stranger = seed::create_account(pool, &NewAccount::named("stranger")).await?;
             let stranger_key = seed::create_api_key(pool, stranger.id, true).await?;
@@ -267,7 +309,7 @@ async fn other_accounts_and_modes_see_no_deposit_address() -> Result<()> {
                 ensure!(status == StatusCode::BAD_REQUEST);
             }
             // The same client_reference_id at another account is another customer.
-            let theirs = fixture.create(&stranger_key, "team-42", 1).await?;
+            let theirs = fixture.create(&stranger_key, "team-42").await?;
             ensure!(theirs["address"] != created["address"]);
             Ok(())
         })
@@ -289,25 +331,23 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
             .bind(fixture.account.id)
             .execute(pool)
             .await?;
-            let first = fixture.create(&fixture.live_key, "team-1", 1).await?;
-            fixture.create(&fixture.live_key, "team-2", 1).await?;
+            let first = fixture.create(&fixture.live_key, "team-1").await?;
+            fixture.create(&fixture.live_key, "team-2").await?;
             let (status, body) = fixture
                 .request(
                     Method::POST,
                     "/v1/deposit_addresses",
                     &fixture.live_key,
-                    json!({"client_reference_id": "team-3", "chain_id": 1, "asset": "pha"}),
+                    json!({"client_reference_id": "team-3"}),
                 )
                 .await?;
             ensure!(status == StatusCode::CONFLICT, "{body}");
             ensure!(body["error"]["code"] == "deposit_address_cap_exceeded");
             // At the cap, existing addresses are still returned and rotated: rotation keeps the
             // count of active addresses.
-            ensure!(fixture.create(&fixture.live_key, "team-1", 1).await? == first);
+            ensure!(fixture.create(&fixture.live_key, "team-1").await? == first);
             // Test mode has its own default cap.
-            fixture
-                .create(&fixture.test_key, "team-3", TEST_CHAIN)
-                .await?;
+            fixture.create(&fixture.test_key, "team-3").await?;
 
             let mut current = first;
             for _ in 0..MAX_ROTATIONS_PER_HOUR {
@@ -325,7 +365,7 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
             ensure!(status == StatusCode::TOO_MANY_REQUESTS, "{body}");
             ensure!(body["error"]["code"] == "rate_limit");
             // Another customer's rotations are not limited by this one's.
-            let second = fixture.create(&fixture.live_key, "team-2", 1).await?;
+            let second = fixture.create(&fixture.live_key, "team-2").await?;
             fixture.rotate(&fixture.live_key, &second).await?;
 
             // A `quotes` pause stops new addresses; reads keep working.
@@ -336,7 +376,7 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
                     Method::POST,
                     "/v1/deposit_addresses",
                     &fixture.live_key,
-                    json!({"client_reference_id": "team-1", "chain_id": 1, "asset": "pha"}),
+                    json!({"client_reference_id": "team-1"}),
                 )
                 .await?;
             ensure!(status == StatusCode::CONFLICT && body["error"]["code"] == "paused");
@@ -356,6 +396,40 @@ async fn caps_rotation_limit_and_pauses_bound_issuance() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_frozen_chain_gets_no_new_network() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let existing = fixture.create(&fixture.live_key, "team-1").await?;
+            freeze(pool, OTHER_CHAIN).await?;
+            // An existing address keeps its network on the frozen chain.
+            ensure!(fixture.create(&fixture.live_key, "team-1").await? == existing);
+            // A new one, or a rotation, is issued on the other chains only.
+            let new = fixture.create(&fixture.live_key, "team-2").await?;
+            ensure!(chain_ids(&new) == vec![1], "{new}");
+            let rotated = fixture.rotate(&fixture.live_key, &existing).await?;
+            ensure!(chain_ids(&rotated) == vec![1], "{rotated}");
+            // With every chain frozen, nothing new is issued.
+            freeze(pool, 1).await?;
+            let (status, body) = fixture
+                .request(
+                    Method::POST,
+                    "/v1/deposit_addresses",
+                    &fixture.live_key,
+                    json!({"client_reference_id": "team-3"}),
+                )
+                .await?;
+            ensure!(status == StatusCode::CONFLICT, "{body}");
+            ensure!(body["error"]["code"] == "chain_frozen");
+            ensure!(fixture.create(&fixture.live_key, "team-2").await? == new);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn metadata_is_set_merged_carried_by_rotation_and_scoped() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
@@ -366,8 +440,7 @@ async fn metadata_is_set_merged_carried_by_rotation_and_scoped() -> Result<()> {
                     Method::POST,
                     "/v1/deposit_addresses",
                     &fixture.live_key,
-                    json!({"client_reference_id": "team-42", "chain_id": 1, "asset": "pha",
-                           "metadata": metadata}),
+                    json!({"client_reference_id": "team-42", "metadata": metadata}),
                 )
             };
             let (status, first) = create(json!({"team": "42", "plan": "pro"})).await?;
@@ -429,34 +502,60 @@ async fn metadata_is_set_merged_carried_by_rotation_and_scoped() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_changed_treasury_replaces_the_active_address_on_creation() -> Result<()> {
+async fn a_changed_treasury_on_one_chain_changes_only_that_chains_address() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let old = fixture.create(&fixture.live_key, "team-42", 1).await?;
-            let mut route = fixture.live_route.clone();
-            route.chain.contracts.treasury = Address::repeat_byte(0x7e);
-            let changed = Fixture {
-                app: app(pool, vec![route.clone(), fixture.test_route.clone()])?,
-                live_route: route,
-                ..fixture
+            let old = fixture.create(&fixture.live_key, "team-42").await?;
+            let shared = old["address"]
+                .as_str()
+                .context("shared address")?
+                .to_owned();
+            let new_treasury = Address::repeat_byte(0x7e);
+            let mut other = fixture.other_route.clone();
+            other.chain.contracts.treasury = new_treasury;
+            let changed = fixture.with_routes(vec![
+                fixture.live_route.clone(),
+                fixture.usdc_route.clone(),
+                other,
+                fixture.test_route.clone(),
+            ])?;
+            let new = changed.create(&changed.live_key, "team-42").await?;
+            // The same deposit address and version; only chain 10's network changed.
+            ensure!(new["id"] == old["id"] && new["version"] == 1);
+            ensure!(new["address"].is_null(), "{new}");
+            let [ethereum, optimism] = networks(&new)? else {
+                anyhow::bail!("two networks: {new}");
             };
-            let new = changed.create(&changed.live_key, "team-42", 1).await?;
-            ensure!(new["version"] == 2 && new["address"] != old["address"]);
-            ensure!(new["treasury"] == format!("{:#x}", Address::repeat_byte(0x7e)));
-            let old_id = old["id"].as_str().context("id")?;
-            let (_, old) = changed
-                .request(
-                    Method::GET,
-                    &format!("/v1/deposit_addresses/{old_id}"),
-                    &changed.live_key,
-                    Value::Null,
-                )
-                .await?;
-            // The retired address keeps the treasury it was issued for.
-            ensure!(old["status"] == "retired");
-            ensure!(old["treasury"] == format!("{:#x}", changed.account_treasury()));
+            ensure!(ethereum["address"] == shared.as_str());
+            ensure!(optimism["address"] != shared.as_str());
+            ensure!(optimism["treasury"] == format!("{new_treasury:#x}"));
+            let salt = deposit_address_salt(&fixture.account.public_id, true, "team-42", 1);
+            let contracts = &fixture.other_route.chain.contracts;
+            let expected = forwarder_address(
+                contracts.forwarder_factory,
+                contracts.implementation,
+                new_treasury,
+                salt,
+            );
+            ensure!(optimism["address"] == format!("{expected:#x}"));
+            // The old chain-10 forwarder is superseded, still watched, and still pays the old
+            // treasury.
+            let superseded: (String, bool) = sqlx::query_as(
+                "SELECT treasury, superseded_at IS NOT NULL FROM addresses \
+                 WHERE chain_id = $1 AND address = $2",
+            )
+            .bind(i64::try_from(OTHER_CHAIN)?)
+            .bind(&shared)
+            .fetch_one(pool)
+            .await?;
+            ensure!(superseded == (format!("{:#x}", fixture.account_treasury()), true));
+            let watched = db::list_scan_addresses(pool, OTHER_CHAIN).await?;
+            ensure!(watched.len() == 2, "{watched:?}");
+            // Changing the treasury back makes the first forwarder current again.
+            let back = fixture.create(&fixture.live_key, "team-42").await?;
+            ensure!(back == old, "{back} != {old}");
             Ok(())
         })
     })
@@ -464,14 +563,37 @@ async fn a_changed_treasury_replaces_the_active_address_on_creation() -> Result<
 }
 
 #[tokio::test]
-async fn deposits_to_active_and_retired_addresses_name_the_deposit_address() -> Result<()> {
+async fn a_chain_added_later_gets_the_same_address_on_the_next_creation() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let first = fixture.create(&fixture.live_key, "team-42", 1).await?;
+            let ethereum_only = fixture
+                .with_routes(vec![fixture.live_route.clone(), fixture.test_route.clone()])?;
+            let before = ethereum_only
+                .create(&ethereum_only.live_key, "team-42")
+                .await?;
+            ensure!(chain_ids(&before) == vec![1], "{before}");
+            let after = fixture.create(&fixture.live_key, "team-42").await?;
+            ensure!(after["id"] == before["id"]);
+            ensure!(chain_ids(&after) == vec![1, OTHER_CHAIN], "{after}");
+            ensure!(after["address"] == before["address"]);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn deposits_to_active_and_retired_addresses_on_any_chain_name_the_deposit_address()
+-> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let first = fixture.create(&fixture.live_key, "team-42").await?;
             let second = fixture.rotate(&fixture.live_key, &first).await?;
-            for (number, object) in [(1_u8, &first), (2, &second)] {
+            for (number, object, chain_id) in [(1_u8, &first, 1), (2, &second, OTHER_CHAIN)] {
                 // Each deposit starts with a copy of its address's metadata.
                 let id = object["id"].as_str().context("id")?;
                 let (status, _) = fixture
@@ -488,17 +610,19 @@ async fn deposits_to_active_and_retired_addresses_name_the_deposit_address() -> 
                     object["id"].as_str().context("id")?,
                 )
                 .context("da id")?;
-                let address_id: Uuid =
-                    sqlx::query_scalar("SELECT id FROM addresses WHERE deposit_address_id = $1")
-                        .bind(da)
-                        .fetch_one(pool)
-                        .await?;
+                let address_id: Uuid = sqlx::query_scalar(
+                    "SELECT id FROM addresses WHERE deposit_address_id = $1 AND chain_id = $2",
+                )
+                .bind(da)
+                .bind(i64::try_from(chain_id)?)
+                .fetch_one(pool)
+                .await?;
                 let tx_hash = B256::repeat_byte(number);
                 ensure!(
                     db::insert_deposit(
                         pool,
                         &NewDeposit {
-                            chain_id: 1,
+                            chain_id,
                             tx_hash,
                             receipt_log_index: 0,
                             log_index: 0,
@@ -521,7 +645,8 @@ async fn deposits_to_active_and_retired_addresses_name_the_deposit_address() -> 
                     )
                     .await?
                 );
-                let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit_id(1, tx_hash, 0));
+                let deposit =
+                    topup::ids::format(topup::ids::DEPOSIT, deposit_id(chain_id, tx_hash, 0));
                 let (status, body) = fixture
                     .request(
                         Method::GET,
@@ -532,6 +657,7 @@ async fn deposits_to_active_and_retired_addresses_name_the_deposit_address() -> 
                     .await?;
                 ensure!(status == StatusCode::OK, "{body}");
                 ensure!(body["deposit_address"] == object["id"] && body["quote"].is_null());
+                ensure!(body["chain_id"] == chain_id && body["address"] == object["address"]);
                 ensure!(
                     body["metadata"] == json!({"version": number.to_string()}),
                     "{body}"
@@ -578,10 +704,13 @@ async fn deposits_to_active_and_retired_addresses_name_the_deposit_address() -> 
 
 struct Fixture {
     app: Router,
+    pool: sqlx::PgPool,
     account: db::Account,
     live_key: String,
     test_key: String,
     live_route: RouteFile,
+    usdc_route: RouteFile,
+    other_route: RouteFile,
     test_route: RouteFile,
 }
 
@@ -601,13 +730,56 @@ impl Fixture {
                 .replace("chain_id: 1", &format!("chain_id: {TEST_CHAIN}"))
                 .replace("livemode: true", "livemode: false"),
         )?;
+        let usdc_route: RouteFile = serde_saphyr::from_str(
+            &include_str!("fixtures/phala-cloud-pha.yaml")
+                .replace(
+                    "route: phala-cloud-ethereum-pha-usd",
+                    "route: phala-cloud-ethereum-usdc-usd",
+                )
+                .replace("symbol: pha", "symbol: usdc")
+                .replace("0x6c5bA91642F10282b576d91922Ae6448C9d52f4E", USDC),
+        )?;
+        let other_route: RouteFile = serde_saphyr::from_str(
+            &include_str!("fixtures/phala-cloud-pha.yaml")
+                .replace(
+                    "route: phala-cloud-ethereum-pha-usd",
+                    "route: phala-cloud-optimism-pha-usd",
+                )
+                .replace("chain_id: 1", &format!("chain_id: {OTHER_CHAIN}")),
+        )?;
         Ok(Self {
-            app: app(pool, vec![live_route.clone(), test_route.clone()])?,
+            app: app(
+                pool,
+                vec![
+                    live_route.clone(),
+                    usdc_route.clone(),
+                    other_route.clone(),
+                    test_route.clone(),
+                ],
+            )?,
+            pool: pool.clone(),
             account,
             live_key,
             test_key,
             live_route,
+            usdc_route,
+            other_route,
             test_route,
+        })
+    }
+
+    /// The same account and keys served with other routes.
+    fn with_routes(&self, routes: Vec<RouteFile>) -> Result<Self> {
+        Ok(Self {
+            app: app(&self.pool, routes)?,
+            pool: self.pool.clone(),
+            account: self.account.clone(),
+            live_key: self.live_key.clone(),
+            test_key: self.test_key.clone(),
+            live_route: self.live_route.clone(),
+            usdc_route: self.usdc_route.clone(),
+            other_route: self.other_route.clone(),
+            test_route: self.test_route.clone(),
         })
     }
 
@@ -637,13 +809,13 @@ impl Fixture {
         Ok((status, serde_json::from_slice(&bytes)?))
     }
 
-    async fn create(&self, key: &str, customer: &str, chain_id: u64) -> Result<Value> {
+    async fn create(&self, key: &str, customer: &str) -> Result<Value> {
         let (status, body) = self
             .request(
                 Method::POST,
                 "/v1/deposit_addresses",
                 key,
-                json!({"client_reference_id": customer, "chain_id": chain_id, "asset": "pha"}),
+                json!({"client_reference_id": customer}),
             )
             .await?;
         ensure!(status == StatusCode::OK, "{status}: {body}");
@@ -683,4 +855,35 @@ fn app(pool: &sqlx::PgPool, routes: Vec<RouteFile>) -> Result<Router> {
         refund_screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
     })
     .0)
+}
+
+fn networks(object: &Value) -> Result<&[Value]> {
+    Ok(object["networks"]
+        .as_array()
+        .context("networks")?
+        .as_slice())
+}
+
+fn chain_ids(object: &Value) -> Vec<u64> {
+    object["networks"]
+        .as_array()
+        .map(|networks| {
+            networks
+                .iter()
+                .filter_map(|network| network["chain_id"].as_u64())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn freeze(pool: &sqlx::PgPool, chain_id: u64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO reconciliation_blocks (block_key, scope, chain_id, check_name, reason) \
+         VALUES ($1, 'chain', $2, 'address_derivation', 'test freeze')",
+    )
+    .bind(format!("chain:{chain_id}"))
+    .bind(i64::try_from(chain_id)?)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

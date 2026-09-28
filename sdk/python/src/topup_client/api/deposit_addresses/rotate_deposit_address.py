@@ -85,8 +85,8 @@ def sync_detailed(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[DepositAddress | ErrorResponse]:
-    """Retires an active deposit address and returns the customer's new one for the same chain and
-    asset. Payments to the retired address are still credited at spot; stop showing it.
+    """Retires an active deposit address and returns the customer's new one, a new address on every
+    network. Payments to the retired address are still credited at spot; stop showing it.
 
     Args:
         id (str):
@@ -118,8 +118,8 @@ def sync(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> DepositAddress | ErrorResponse | None:
-    """Retires an active deposit address and returns the customer's new one for the same chain and
-    asset. Payments to the retired address are still credited at spot; stop showing it.
+    """Retires an active deposit address and returns the customer's new one, a new address on every
+    network. Payments to the retired address are still credited at spot; stop showing it.
 
     Args:
         id (str):
@@ -146,8 +146,8 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[DepositAddress | ErrorResponse]:
-    """Retires an active deposit address and returns the customer's new one for the same chain and
-    asset. Payments to the retired address are still credited at spot; stop showing it.
+    """Retires an active deposit address and returns the customer's new one, a new address on every
+    network. Payments to the retired address are still credited at spot; stop showing it.
 
     Args:
         id (str):
@@ -177,8 +177,8 @@ async def asyncio(
     client: AuthenticatedClient,
     idempotency_key: None | str | Unset = UNSET,
 ) -> DepositAddress | ErrorResponse | None:
-    """Retires an active deposit address and returns the customer's new one for the same chain and
-    asset. Payments to the retired address are still credited at spot; stop showing it.
+    """Retires an active deposit address and returns the customer's new one, a new address on every
+    network. Payments to the retired address are still credited at spot; stop showing it.
 
     Args:
         id (str):

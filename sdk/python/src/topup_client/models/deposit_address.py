@@ -13,6 +13,7 @@ from typing import cast
 
 if TYPE_CHECKING:
     from ..models.deposit_address_metadata import DepositAddressMetadata
+    from ..models.deposit_address_network import DepositAddressNetwork
 
 
 T = TypeVar("T", bound="DepositAddress")
@@ -20,14 +21,12 @@ T = TypeVar("T", bound="DepositAddress")
 
 @_attrs_define
 class DepositAddress:
-    """A customer's persistent deposit address for one chain and asset, like a bank-transfer virtual
-    account: any amount sent to it is credited to the customer at the market (spot) price when it
-    arrives. Rotation retires it and issues a new one; a retired address is still credited.
+    """A customer's persistent deposit address, like a bank-transfer virtual account: one address for
+    every supported token on every supported network. Any amount of a supported token sent to it
+    is credited to the customer at the market (spot) price when it arrives. Rotation retires it and
+    issues a new one on every network; a retired address is still credited.
 
         Attributes:
-            address (str): The forwarder address to pay.
-            asset (str): Asset code.
-            chain_id (int): EVM chain identifier.
             client_reference_id (str): Your identifier of the customer.
             created (int): Creation time, Unix seconds.
             id (str): `da_` id.
@@ -35,45 +34,41 @@ class DepositAddress:
             metadata (DepositAddressMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
                 when none.
                 Each deposit to the address starts with a copy.
+            networks (list[DepositAddressNetwork]): The address on each supported network of the mode it was issued on, by
+                `chain_id`, with
+                the tokens it takes there.
             object_ (str): Always `deposit_address`.
-            payment_uri (str): EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the
-                payer chooses it.
-            salt (str): CREATE2 salt, 32 bytes of hex.
+            salt (str): CREATE2 salt, 32 bytes of hex; the same on every network.
             status (str): `active`, or `retired` by a rotation; payments to either are credited.
-            treasury (str): The treasury the forwarder pays, fixed when the address was issued.
-            version (int): The address's version among the customer's addresses for this chain and asset, from 1.
-                The salt is `keccak256(abi.encode(account, livemode, client_reference_id,
-                "deposit_address", chain_id, asset, version))`, with the types `(string, bool, string,
-                string, uint256, string, uint256)` and `account` your `acct_` id; the address is the
-                factory's `CREATE2` over the treasury and that salt.
+            version (int): The address's version among the customer's addresses, from 1. The salt is
+                `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`,
+                with the types `(string, bool, string, string, uint256)` and `account` your `acct_` id; it
+                names no chain or asset. On each network the address is the factory's `CREATE2` over that
+                network's treasury and the salt.
+            address (None | str | Unset): The address shared by every network, when all of `networks` have the same one;
+                `null`
+                when a network's treasury differs, and so its address (see `networks`), or when there is
+                no network.
             retired_at (int | None | Unset): Retirement time, Unix seconds; `null` while active.
     """
 
-    address: str
-    asset: str
-    chain_id: int
     client_reference_id: str
     created: int
     id: str
     livemode: bool
     metadata: DepositAddressMetadata
+    networks: list[DepositAddressNetwork]
     object_: str
-    payment_uri: str
     salt: str
     status: str
-    treasury: str
     version: int
+    address: None | str | Unset = UNSET
     retired_at: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.deposit_address_metadata import DepositAddressMetadata  # noqa: PLC0415
-
-        address = self.address
-
-        asset = self.asset
-
-        chain_id = self.chain_id
+        from ..models.deposit_address_network import DepositAddressNetwork  # noqa: PLC0415
 
         client_reference_id = self.client_reference_id
 
@@ -85,17 +80,24 @@ class DepositAddress:
 
         metadata = self.metadata.to_dict()
 
-        object_ = self.object_
+        networks = []
+        for networks_item_data in self.networks:
+            networks_item = networks_item_data.to_dict()
+            networks.append(networks_item)
 
-        payment_uri = self.payment_uri
+        object_ = self.object_
 
         salt = self.salt
 
         status = self.status
 
-        treasury = self.treasury
-
         version = self.version
+
+        address: None | str | Unset
+        if isinstance(self.address, Unset):
+            address = UNSET
+        else:
+            address = self.address
 
         retired_at: int | None | Unset
         if isinstance(self.retired_at, Unset):
@@ -107,22 +109,20 @@ class DepositAddress:
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "address": address,
-                "asset": asset,
-                "chain_id": chain_id,
                 "client_reference_id": client_reference_id,
                 "created": created,
                 "id": id,
                 "livemode": livemode,
                 "metadata": metadata,
+                "networks": networks,
                 "object": object_,
-                "payment_uri": payment_uri,
                 "salt": salt,
                 "status": status,
-                "treasury": treasury,
                 "version": version,
             }
         )
+        if address is not UNSET:
+            field_dict["address"] = address
         if retired_at is not UNSET:
             field_dict["retired_at"] = retired_at
 
@@ -131,14 +131,9 @@ class DepositAddress:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.deposit_address_metadata import DepositAddressMetadata  # noqa: PLC0415
+        from ..models.deposit_address_network import DepositAddressNetwork  # noqa: PLC0415
 
         d = dict(src_dict)
-        address = d.pop("address")
-
-        asset = d.pop("asset")
-
-        chain_id = d.pop("chain_id")
-
         client_reference_id = d.pop("client_reference_id")
 
         created = d.pop("created")
@@ -149,17 +144,29 @@ class DepositAddress:
 
         metadata = DepositAddressMetadata.from_dict(d.pop("metadata"))
 
-        object_ = d.pop("object")
+        networks = []
+        _networks = d.pop("networks")
+        for networks_item_data in _networks:
+            networks_item = DepositAddressNetwork.from_dict(networks_item_data)
 
-        payment_uri = d.pop("payment_uri")
+            networks.append(networks_item)
+
+        object_ = d.pop("object")
 
         salt = d.pop("salt")
 
         status = d.pop("status")
 
-        treasury = d.pop("treasury")
-
         version = d.pop("version")
+
+        def _parse_address(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        address = _parse_address(d.pop("address", UNSET))
 
         def _parse_retired_at(data: object) -> int | None | Unset:
             if data is None:
@@ -171,20 +178,17 @@ class DepositAddress:
         retired_at = _parse_retired_at(d.pop("retired_at", UNSET))
 
         deposit_address = cls(
-            address=address,
-            asset=asset,
-            chain_id=chain_id,
             client_reference_id=client_reference_id,
             created=created,
             id=id,
             livemode=livemode,
             metadata=metadata,
+            networks=networks,
             object_=object_,
-            payment_uri=payment_uri,
             salt=salt,
             status=status,
-            treasury=treasury,
             version=version,
+            address=address,
             retired_at=retired_at,
         )
 

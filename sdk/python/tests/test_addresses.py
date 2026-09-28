@@ -37,7 +37,7 @@ def test_lock_salt_and_address_match_the_contract_vectors(vector: dict[str, Any]
 @pytest.mark.parametrize(
     "vector",
     VECTORS["deposit_address"],
-    ids=lambda vector: f"{vector['chain_id']}-v{vector['version']}",
+    ids=lambda vector: f"{vector['treasury'][:8]}-{vector['livemode']}-v{vector['version']}",
 )
 def test_deposit_address_salt_and_address_match_the_contract_vectors(
     vector: dict[str, Any],
@@ -46,8 +46,6 @@ def test_deposit_address_salt_and_address_match_the_contract_vectors(
         "account": vector["account"],
         "livemode": vector["livemode"],
         "client_reference_id": vector["client_reference_id"],
-        "chain_id": vector["chain_id"],
-        "asset": vector["asset"],
         "version": vector["version"],
     }
     assert "0x" + deposit_address_salt(**inputs).hex() == vector["salt"]
@@ -55,6 +53,18 @@ def test_deposit_address_salt_and_address_match_the_contract_vectors(
         VECTORS["factory"], VECTORS["implementation"], vector["treasury"], **inputs
     )
     assert address == vector["predicted_address"]
+
+
+def test_one_salt_gives_one_address_per_treasury() -> None:
+    # The salt names no chain: the same inputs under the same treasury give one address on every
+    # chain, and under another treasury another address.
+    same_salt = [
+        vector
+        for vector in VECTORS["deposit_address"]
+        if vector["salt"] == VECTORS["deposit_address"][0]["salt"]
+    ]
+    assert len({vector["treasury"] for vector in same_salt}) == 2
+    assert len({vector["predicted_address"] for vector in same_salt}) == 2
 
 
 @pytest.mark.parametrize("vector", VECTORS["forwarders"], ids=lambda vector: vector["salt"][:10])

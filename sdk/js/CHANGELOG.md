@@ -8,10 +8,12 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ### Added
 
-- `<DepositAddress depositAddress>` (`@phala/pay/react`): a customer's persistent deposit address
-  with its network, a QR code of the EIP-681 request, the token contract and address to copy, and
-  "any amount, credited at the market rate when it arrives" copy. `depositAddressTransfer(details)`
-  reads and checks a deposit address's amount-less `payment_uri`, and `parseTransferUri(uri)` is
+- `<DepositAddress depositAddress chainId? asset?>` (`@phala/pay/react`): a customer's persistent
+  deposit address, one address for all supported tokens and networks. The payer picks a network
+  and a token; it shows a QR code of that token's EIP-681 request, the token contract and address
+  to copy (each network's own address where they differ), and "send only supported tokens; any
+  amount, credited at the market rate when it arrives" copy. `depositAddressTransfer(network,
+  asset)` reads and checks one token's amount-less `payment_uri`, and `parseTransferUri(uri)` is
   the EIP-681 ERC-20 transfer parser `quoteTransfer` uses.
 
 - `<Checkout walletClient>` and `payWithWallet(walletClient, quote)`: pay with the page's own viem

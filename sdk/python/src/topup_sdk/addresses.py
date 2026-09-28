@@ -50,18 +50,14 @@ def deposit_address_salt(
     *,
     livemode: bool,
     client_reference_id: str,
-    chain_id: int,
-    asset: str,
     version: int,
 ) -> bytes:
-    """keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
-    asset, version)), with the types (string, bool, string, string, uint256, string, uint256): the
-    salt of a customer's deposit address, where `account` is your `acct_` id and `version` the
-    address's `version`."""
+    """keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version)),
+    with the types (string, bool, string, string, uint256): the salt of a customer's deposit
+    address, where `account` is your `acct_` id and `version` the address's `version`. It names no
+    chain or asset: the address is the same on every chain whose treasury is the same."""
     return keccak256(
-        _abi_encode(
-            account, livemode, client_reference_id, "deposit_address", chain_id, asset, version
-        )
+        _abi_encode(account, livemode, client_reference_id, "deposit_address", version)
     )
 
 
@@ -73,18 +69,15 @@ def deposit_address(
     account: str,
     livemode: bool,
     client_reference_id: str,
-    chain_id: int,
-    asset: str,
     version: int,
 ) -> str:
-    """Recomputes a deposit address offline from the pinned forwarder, the treasury it was
-    issued for, and its salt inputs; every version a customer was ever given can be derived."""
+    """Recomputes a deposit address offline from the pinned forwarder, the treasury of the
+    network (chain) it pays, and its salt inputs; every version a customer was ever given can be
+    derived. Pass each network's `treasury`: a chain whose treasury differs has its own address."""
     salt = deposit_address_salt(
         account,
         livemode=livemode,
         client_reference_id=client_reference_id,
-        chain_id=chain_id,
-        asset=asset,
         version=version,
     )
     return forwarder_address(factory, implementation, treasury, salt)
