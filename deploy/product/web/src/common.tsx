@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Info } from "lucide-react";
 import { useEffect, type ComponentProps, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -7,7 +7,24 @@ import { ApiError, type Account } from "./api.js";
 import { short } from "./format.js";
 
 /** An inline text link, in the page's text colour. */
-export const LINK = "font-medium underline underline-offset-4 hover:text-muted-foreground";
+export const LINK = "font-medium underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground";
+
+/**
+ * The visitor's wallet helpers (./testTokens), loaded on first use: they carry the chain and wallet
+ * libraries, which the page's first paint does not need.
+ */
+export function wallet() {
+  return import("./testTokens.js");
+}
+
+/** The SDK's components, loaded when a payment starts: they carry the chain and wallet libraries. */
+export function loadSdk() {
+  return import("@phala/pay/react");
+}
+
+/** The primary action: Phala's lime, used for this and little else. */
+export const BRAND_BUTTON =
+  "h-11 w-full rounded-lg bg-brand text-[0.9375rem] font-semibold text-brand-foreground shadow-[inset_0_-1px_0_rgb(0_0_0/0.12)] hover:bg-brand/85 dark:shadow-none";
 
 export function ExplorerLink({
   account,
@@ -35,9 +52,30 @@ export function ExplorerLink({
   );
 }
 
+/** An explanation behind a small info icon: the page shows one short line, the tooltip the rest. */
+export function InfoTip({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          className={cn(
+            "inline-flex size-4 shrink-0 translate-y-[0.1875rem] items-center justify-center rounded-full align-baseline text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+            className,
+          )}
+        >
+          <Info className="size-3.5" aria-hidden="true" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm leading-relaxed text-pretty">{children}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 /** A list of labelled values, such as a timeline step's details. */
 export function Details({ className, ...props }: ComponentProps<"dl">) {
-  return <dl className={cn("grid gap-1.5 rounded-lg bg-muted/60 p-3 text-xs", className)} {...props} />;
+  return <dl className={cn("grid gap-1.5 rounded-lg bg-muted p-3 text-xs", className)} {...props} />;
 }
 
 export function Detail({ label, className, ...props }: ComponentProps<"dd"> & { label: ReactNode }) {
@@ -49,43 +87,52 @@ export function Detail({ label, className, ...props }: ComponentProps<"dd"> & { 
   );
 }
 
-/** A part of a card below a divider; next to the timeline, the first one needs none. */
+/** A titled part of a panel. */
 export function Subsection({
   title,
   id,
+  aside,
   children,
+  className,
 }: {
   title: string;
   id: string;
+  aside?: ReactNode;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <section
-      className="flex flex-col gap-2 border-t pt-4 text-xs @4xl:first:border-t-0 @4xl:first:pt-0"
-      aria-labelledby={id}
-    >
-      <h4 id={id} className="text-sm font-medium">
-        {title}
-      </h4>
+    <section className={cn("flex min-w-0 flex-col gap-3 text-xs", className)} aria-labelledby={id}>
+      <div className="flex items-center gap-2">
+        <h3 id={id} className="text-[0.8125rem] font-medium">
+          {title}
+        </h3>
+        {aside}
+      </div>
       {children}
     </section>
   );
 }
 
-/** A part of a card below a divider, collapsed until opened: secondary detail. */
+/** Secondary detail, collapsed until opened. */
 export function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
   return (
-    <details className="group/disclosure border-t pt-4 text-xs @4xl:first:border-t-0 @4xl:first:pt-0">
-      <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-medium [&::-webkit-details-marker]:hidden">
+    <details className="group/disclosure text-xs">
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded-sm text-[0.8125rem] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
         <ChevronRight
-          className="size-4 shrink-0 transition-transform group-open/disclosure:rotate-90"
+          className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/disclosure:rotate-90 motion-reduce:transition-none"
           aria-hidden="true"
         />
         {summary}
       </summary>
-      <div className="mt-2 flex flex-col gap-2">{children}</div>
+      <div className="mt-3 flex flex-col gap-2">{children}</div>
     </details>
   );
+}
+
+/** A panel's message while it has nothing to show. */
+export function Empty({ children }: { children: ReactNode }) {
+  return <p className="rounded-lg bg-muted px-4 py-5 text-xs text-muted-foreground">{children}</p>;
 }
 
 const TONES: Record<string, "success" | "danger"> = {
@@ -116,6 +163,11 @@ export function describe(error: unknown): string {
     return error.code === "rate_limited" ? "too many requests, try again in a minute" : error.code;
   }
   return "network error";
+}
+
+export function errorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message.split("\n")[0] : undefined;
+  return message ?? fallback;
 }
 
 /** Calls `callback` now and every `interval` ms while `enabled`. */

@@ -1,0 +1,449 @@
+import { Cpu, ShieldCheck, Terminal, Wallet } from "lucide-react";
+import type { ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
+import type { Account, DepositAddressResponse, Selection, Timeline, Trust } from "./api.js";
+import { Detail, Details, Empty, ExplorerLink, InfoTip, LINK, StatusBadge, Subsection } from "./common.js";
+import { AreaLabel } from "./Product.js";
+import { Refunds } from "./Refunds.js";
+import { day, dollars, short, signedDollars, statusLabel, time, tokens } from "./format.js";
+import { Sweeps } from "./Sweeps.js";
+import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
+
+/**
+ * What the merchant's backend sees while its customer pays: the payment's live steps, then its
+ * payments, refunds, sweeps, API requests, and the service's attestation. A console in either
+ * theme, apart from the product's own surface.
+ */
+export function Backend({
+  account,
+  selected,
+  timeline,
+  trust,
+  address,
+  onSelect,
+  onChanged,
+}: {
+  account: Account | null;
+  selected: Selection | null;
+  timeline: Timeline | null;
+  trust: Trust | null;
+  address: DepositAddressResponse | null;
+  onSelect: (selection: Selection) => void;
+  onChanged: () => void;
+}) {
+  const live = timeline?.steps.some((step) => step.state === "current") ?? selected !== null;
+  const order = timeline?.quote?.metadata["order_id"];
+  const deposit = timeline?.deposit ?? null;
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
+      <aside
+        aria-label="Behind the scenes"
+        className="dark console @container/console flex min-w-0 flex-col overflow-hidden rounded-2xl border shadow-[0_12px_40px_-12px_rgb(0_0_0/0.35)]"
+      >
+        <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-5 py-3.5">
+          <span className="flex items-center gap-2 font-mono text-[0.6875rem] tracking-wide uppercase">
+            <span className="relative flex size-2" aria-hidden="true">
+              {live && <span className="absolute inset-0 rounded-full bg-brand/60 motion-safe:animate-ping" />}
+              <span className={cn("relative size-2 rounded-full", live ? "bg-brand" : "bg-muted-foreground/50")} />
+            </span>
+            {selected === null ? "Idle" : live ? "Live" : "Done"}
+          </span>
+          <h2 className="text-[0.8125rem] font-medium">Event stream</h2>
+          {selected !== null && (
+            <span className="ml-auto flex items-center gap-3 font-mono text-[0.6875rem] text-muted-foreground">
+              {order !== undefined && (
+                <span className="flex items-center gap-1.5">
+                  <span>
+                    Order <span className="text-foreground">{order}</span>
+                  </span>
+                  <InfoTip label="About the order id">
+                    The product's order id, in the quote's metadata; it arrives with the deposit.credited event. The
+                    checkout shows the quote only if the service's address is the one the product's SDK recomputed
+                    from its pins.
+                  </InfoTip>
+                </span>
+              )}
+              <span title={selected.id}>{short(selected.id)}</span>
+            </span>
+          )}
+        </header>
+        <div className="px-3 py-3" aria-live="off">
+          <EventStream timeline={timeline} loading={selected?.id ?? null} account={account} />
+        </div>
+        <Tabs defaultValue="payments" className="gap-0 border-t">
+          <TabsList
+            variant="line"
+            aria-label="Backend"
+            className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-4 py-0 sm:gap-5 sm:px-5"
+          >
+            <Tab value="payments" count={account?.payments.length}>
+              Payments
+            </Tab>
+            <Tab value="refunds" count={timeline?.refunds.length}>
+              Refunds
+            </Tab>
+            <Tab value="sweeps">Sweeps</Tab>
+            <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
+              API
+            </Tab>
+            <Tab value="trust">
+              Trust
+              {trust?.attestation.binding_verified === true && (
+                <ShieldCheck className="size-3.5 text-success" aria-label="attestation verified" />
+              )}
+            </Tab>
+          </TabsList>
+          <TabsContent value="payments" className="p-5">
+            <PaymentsTab account={account} selected={selected} address={address} onSelect={onSelect} />
+          </TabsContent>
+          <TabsContent value="refunds" className="p-5">
+            {timeline === null || deposit === null || account === null ? (
+              <Empty>Follow a payment with a deposit to see its ledger and refunds.</Empty>
+            ) : (
+              <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+                {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
+                <Refunds timeline={timeline} deposit={deposit} account={account} onChanged={onChanged} />
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="sweeps" className="p-5">
+            {account === null ? <p className="text-xs text-muted-foreground">Loading…</p> : <Sweeps account={account} />}
+          </TabsContent>
+          <TabsContent value="api" className="p-5">
+            {timeline === null ? (
+              <Empty>Follow a payment to see its webhooks and the product's API requests.</Empty>
+            ) : (
+              <div className="flex flex-col gap-8">
+                <EventsLog events={timeline.events} />
+                <Requests exchanges={timeline.api} title="API requests" id="api-title" />
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="trust" className="p-5">
+            <TrustDetails trust={trust} account={account} />
+          </TabsContent>
+        </Tabs>
+      </aside>
+    </div>
+  );
+}
+
+function Tab({ value, count, children }: { value: string; count?: number | undefined; children: ReactNode }) {
+  return (
+    <TabsTrigger value={value} className="h-full flex-none px-0 text-[0.8125rem] after:bottom-[-1px]!">
+      {children}
+      {count !== undefined && count > 0 && (
+        <span className="rounded-full bg-muted px-1.5 font-mono text-[0.625rem] text-muted-foreground tabular-nums">
+          {count}
+        </span>
+      )}
+    </TabsTrigger>
+  );
+}
+
+function PaymentsTab({
+  account,
+  selected,
+  address,
+  onSelect,
+}: {
+  account: Account | null;
+  selected: Selection | null;
+  address: DepositAddressResponse | null;
+  onSelect: (selection: Selection) => void;
+}) {
+  const symbol = account?.token.symbol ?? "PHA";
+  return (
+    <div className="flex flex-col gap-8">
+      <section aria-label="Payments" className="flex min-w-0 flex-col text-xs">
+        {account === null || account.payments.length === 0 ? (
+          <Empty>No top-ups yet.</Empty>
+        ) : (
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead scope="col">Date</TableHead>
+                <TableHead scope="col">Method</TableHead>
+                <TableHead scope="col">{symbol}</TableHead>
+                <TableHead scope="col">Transaction</TableHead>
+                <TableHead scope="col">Status</TableHead>
+                <TableHead scope="col">Credited</TableHead>
+                <TableHead scope="col">Refunded</TableHead>
+                <TableHead scope="col">Nets to</TableHead>
+                <TableHead scope="col">
+                  <span className="sr-only">Follow</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody className="tabular-nums">
+              {account.payments.map((row) => {
+                const selection: Selection = row.id.startsWith("dep_")
+                  ? { kind: "deposit", id: row.id }
+                  : { kind: "quote", id: row.id };
+                const isSelected = selected?.id === row.id || selected?.id === row.quote;
+                return (
+                  <TableRow
+                    key={row.id}
+                    data-testid="payment"
+                    data-kind={row.kind}
+                    data-state={isSelected ? "selected" : undefined}
+                    aria-selected={isSelected}
+                  >
+                    <TableCell className="text-muted-foreground" title={time(row.created)}>
+                      {day(row.created)}
+                    </TableCell>
+                    <TableCell>{row.kind === "quote" ? "Quote" : "Deposit address"}</TableCell>
+                    <TableCell>{tokens(row.amount_atomic, symbol)}</TableCell>
+                    <TableCell>
+                      {row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <StatusBadge status={row.status}>{statusLabel(row.status)}</StatusBadge>
+                        {row.final && <Badge variant="outline">final</Badge>}
+                        {row.swept && <StatusBadge status="swept">swept</StatusBadge>}
+                      </div>
+                    </TableCell>
+                    <TableCell>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</TableCell>
+                    <TableCell>
+                      {row.amount_refunded_atomic === "0" ? "—" : tokens(row.amount_refunded_atomic, symbol)}
+                    </TableCell>
+                    <TableCell className="font-medium">{row.net === null ? "—" : dollars(row.net)}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => onSelect(selection)}
+                        aria-label={`Follow ${row.id}`}
+                      >
+                        {isSelected ? "Following" : "Follow"}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </section>
+      <div className={cn("grid gap-8", address !== null && "@4xl/console:grid-cols-2")}>
+        <Subsection title="How this balance adds up" id="balance-lines-title">
+          {account === null || account.ledger.length === 0 ? (
+            <Empty>Nothing credited yet.</Empty>
+          ) : (
+            <Table className="text-xs">
+              <TableHeader>
+                <TableRow>
+                  <TableHead scope="col">When</TableHead>
+                  <TableHead scope="col">Deposit</TableHead>
+                  <TableHead scope="col">Event</TableHead>
+                  <TableHead scope="col" className="text-right">
+                    Amount
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody className="tabular-nums">
+                {account.ledger.map((line) => (
+                  <TableRow key={`${line.deposit}-${line.reason}-${line.at}`} data-testid="ledger-line">
+                    <TableCell className="text-muted-foreground" title={time(line.at)}>
+                      {day(line.at)}
+                    </TableCell>
+                    <TableCell className="font-mono" title={line.deposit}>
+                      {short(line.deposit)}
+                    </TableCell>
+                    <TableCell className="font-mono text-brand">{line.reason}</TableCell>
+                    <TableCell className={cn("text-right", line.amount < 0 ? "text-destructive" : "text-success")}>
+                      {signedDollars(line.amount)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </Subsection>
+        {account !== null && address !== null && (
+          <AddressView account={account} address={address} selected={selected} onSelect={onSelect} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The deposit address as the product sees it: checked against its pins, and its payments. */
+function AddressView({
+  account,
+  address,
+  selected,
+  onSelect,
+}: {
+  account: Account;
+  address: DepositAddressResponse;
+  selected: Selection | null;
+  onSelect: (selection: Selection) => void;
+}) {
+  const view = address.deposit_address;
+  return (
+    <Subsection
+      title="Deposit address"
+      id="address-title"
+      aside={
+        address.verified ? (
+          <Badge className="bg-success/15 text-success" data-testid="deposit-address-verified">
+            <ShieldCheck aria-hidden="true" />
+            Verified
+            <InfoTip label="About the address check" className="translate-y-0 text-success">
+              The product's SDK recomputed {view.address === null ? "every network's address" : "this address"} from
+              its pinned account, factory, implementation, and treasury before showing it.
+            </InfoTip>
+          </Badge>
+        ) : (
+          <Badge variant="destructive">Not verified</Badge>
+        )
+      }
+    >
+      <Details>
+        {view.address !== null ? (
+          <Detail label="Address (every network)" className="font-mono" data-testid="deposit-address">
+            {view.address}
+          </Detail>
+        ) : (
+          view.networks.map((network) => (
+            <Detail key={network.chain_id} label={`Chain ${network.chain_id}`} className="font-mono">
+              {network.address}
+            </Detail>
+          ))
+        )}
+        <Detail label="Networks">
+          {view.networks
+            .map(
+              (network) =>
+                `${network.chain_id === account.network.chain_id ? account.network.name : `Chain ${network.chain_id}`}: ${network.assets.map((asset) => asset.asset.toUpperCase()).join(", ")}`,
+            )
+            .join(" · ")}
+        </Detail>
+        <Detail label="Metadata" className="font-mono">
+          {JSON.stringify(view.metadata)}
+        </Detail>
+      </Details>
+      {view.payments.length === 0 ? (
+        <Empty>No payments yet. Send any amount of {account.token.symbol} to the address.</Empty>
+      ) : (
+        <ul className="flex flex-col divide-y rounded-lg border" aria-label="Payments the product sees" aria-live="polite">
+          {view.payments.map((payment) => {
+            const isSelected = selected?.id === payment.deposit;
+            return (
+              <li key={payment.deposit} data-testid="address-payment" className="flex items-center gap-3 px-3 py-2">
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium tabular-nums">{tokens(payment.amount_atomic, account.token.symbol)}</span>{" "}
+                  <span className="text-muted-foreground">
+                    {payment.status === "seen"
+                      ? `received, ${payment.confirmations ?? 0} confirmation${payment.confirmations === 1 ? "" : "s"}`
+                      : "recorded as a deposit"}
+                  </span>{" "}
+                  · <ExplorerLink account={account} kind="tx" value={payment.tx_hash} />
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => onSelect({ kind: "deposit", id: payment.deposit })}
+                >
+                  {isSelected ? "Following" : "Follow"}
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Subsection>
+  );
+}
+
+function TrustDetails({ trust, account }: { trust: Trust | null; account: Account | null }) {
+  const attestation = trust?.attestation;
+  const evidence = trust?.tls_evidence;
+  return (
+    <div className="flex flex-col gap-6 text-xs">
+      <div className="flex flex-wrap items-center gap-3">
+        <h3 className="text-[0.8125rem] font-medium">Why you can trust Phala Pay</h3>
+        {attestation?.binding_verified === true && (
+          <Badge className="bg-success/15 text-success">Attestation verified</Badge>
+        )}
+        <span className="ml-auto flex gap-4">
+          <a className={LINK} href={trust?.verify_docs} target="_blank" rel="noreferrer">
+            Attestation guide
+          </a>
+          <a className={LINK} href={trust?.dstack_verifier} target="_blank" rel="noreferrer">
+            dstack verifier
+          </a>
+        </span>
+      </div>
+      <div className="grid gap-3 @4xl/console:grid-cols-3">
+        <TrustItem icon={<ShieldCheck />} title="Attestation">
+          {attestation === undefined ? (
+            <p className="text-muted-foreground">Loading…</p>
+          ) : attestation.binding_verified ? (
+            <p className="text-muted-foreground">
+              <span className="font-medium text-success">Verified</span> for a fresh nonce: the TDX quote's report data
+              binds this account's webhook key{" "}
+              <code className="text-foreground" title={attestation.webhook_public_key}>
+                {short(attestation.webhook_public_key ?? "")}
+              </code>{" "}
+              that signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
+            </p>
+          ) : (
+            <p className="text-destructive">The attestation did not bind its keys.</p>
+          )}
+        </TrustItem>
+        <TrustItem icon={<Cpu />} title="Application">
+          {evidence == null ? (
+            <p className="text-muted-foreground">TLS evidence unavailable.</p>
+          ) : (
+            <dl className="flex flex-col gap-2">
+              <div>
+                <dt className="text-muted-foreground">App id</dt>
+                <dd className="font-mono break-all">{evidence.app_id}</dd>
+              </div>
+              {evidence.compose_hash !== undefined && (
+                <div>
+                  <dt className="text-muted-foreground">Compose hash</dt>
+                  <dd className="font-mono" title={evidence.compose_hash}>
+                    {short(evidence.compose_hash)}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          )}
+          <p className="text-muted-foreground">From the TLS certificate evidence quote (at issuance).</p>
+        </TrustItem>
+        <TrustItem icon={<Wallet />} title="Non-custodial">
+          <p className="text-muted-foreground">
+            Every address pays only the merchant's treasury, fixed in the address. Phala Pay holds no funds and sends
+            no transactions: the merchant sweeps and refunds itself.
+          </p>
+          <p className="text-muted-foreground">
+            Network: {account?.network.name ?? "Sepolia"} {account?.network.testnet === false ? "" : "testnet"}
+          </p>
+        </TrustItem>
+      </div>
+    </div>
+  );
+}
+
+function TrustItem({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-2 rounded-lg bg-card p-4" aria-label={title}>
+      <h4 className="flex items-center gap-2 text-[0.8125rem] font-medium [&_svg]:size-4 [&_svg]:text-muted-foreground">
+        {icon}
+        {title}
+      </h4>
+      {children}
+    </section>
+  );
+}

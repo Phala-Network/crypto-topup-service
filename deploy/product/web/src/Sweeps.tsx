@@ -2,10 +2,9 @@ import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getSweeps, type Account, type Sweeps as SweepsView } from "./api.js";
-import { Detail, Details, ExplorerLink, LINK, downloadJson, usePolling } from "./common.js";
+import { Detail, Details, Disclosure, Empty, ExplorerLink, InfoTip, downloadJson, errorMessage, usePolling, wallet } from "./common.js";
 import { time, tokens } from "./format.js";
-import { DeveloperView } from "./Timeline.js";
-import { errorMessage, sendCall } from "./testTokens.js";
+import { Requests } from "./Timeline.js";
 
 /**
  * Sweeping is the merchant's own transaction (design D4): Phala Pay never sweeps and holds no
@@ -24,20 +23,26 @@ export function Sweeps({ account }: { account: Account }) {
   const symbol = account.token.symbol;
   const flush = view?.flush[0];
   return (
-    <div className="@container flex flex-col gap-4 text-xs">
-      <p className="max-w-5xl text-muted-foreground">
-        Payments stay in their forwarder addresses until the merchant sweeps them. Phala Pay never
-        sweeps: the merchant signs <code>factory.flush(treasury, salts, token)</code> from its own
-        wallet, or from its Safe through the Transaction Builder, and pays the gas. Each forwarder
-        can pay only the treasury fixed in its address, so anyone may send the call. The service
-        marks deposits swept from the finalized <code>Flushed</code> events.
+    <div className="@container flex flex-col gap-5 text-xs">
+      <p className="flex items-center gap-1.5 text-muted-foreground">
+        <span>
+          Phala Pay never sweeps: the merchant signs <code>factory.flush(treasury, salts, token)</code> and pays the
+          gas.
+        </span>
+        <InfoTip label="About sweeps">
+          Payments stay in their forwarder addresses until the merchant sweeps them, from its own wallet or from its
+          Safe through the Transaction Builder. Each forwarder can pay only the treasury fixed in its address, so
+          anyone may send the call. The service marks deposits swept from the finalized Flushed events.
+        </InfoTip>
       </p>
       {view === null ? (
-        <p className="text-muted-foreground">Loading…</p>
+        <p className="text-muted-foreground" aria-busy="true">
+          Loading…
+        </p>
       ) : (
         <div className="grid gap-6 @4xl:grid-cols-2 @4xl:gap-8">
-          <div className="flex min-w-0 flex-col gap-3">
-            <Details data-testid="unswept">
+          <div className="flex min-w-0 flex-col gap-4">
+            <Details data-testid="unswept" className="tabular-nums">
               <Detail label="Unswept">{tokens(view.unswept_atomic, symbol)}</Detail>
               <Detail label="Final, sweepable">
                 {tokens(view.final_unswept_atomic, symbol)} in {view.sweepable_forwarders} forwarder
@@ -50,30 +55,29 @@ export function Sweeps({ account }: { account: Account }) {
               </Detail>
             </Details>
             {flush === undefined ? (
-              <p>Nothing to sweep: no final unswept balance.</p>
+              <p className="text-muted-foreground">Nothing to sweep: no final unswept balance.</p>
             ) : (
               <div className="flex flex-col gap-3">
-                <details>
-                  <summary className={`cursor-pointer ${LINK}`}>
-                    The flush the SDK built ({view.flush.length} call{view.flush.length === 1 ? "" : "s"})
-                  </summary>
-                  <pre className="mt-2 max-h-60 overflow-auto rounded-lg bg-muted/60 p-3 font-mono text-xs">
+                <Disclosure summary={`The flush the SDK built (${view.flush.length} call${view.flush.length === 1 ? "" : "s"})`}>
+                  <pre className="max-h-60 overflow-auto rounded-lg bg-muted p-3 font-mono text-[0.6875rem] leading-relaxed">
                     {JSON.stringify(view.flush, null, 2)}
                   </pre>
-                </details>
+                </Disclosure>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
                     disabled={state.pending}
                     onClick={() => {
                       setState({ pending: true, text: null });
-                      sendCall(account.network.chain_id, flush).then(
-                        (hash) => {
-                          setState({ pending: false, text: `Flush sent: ${hash}. It is indexed once final.` });
-                        },
-                        (error: unknown) =>
-                          setState({ pending: false, text: errorMessage(error, "The wallet did not send it.") }),
-                      );
+                      wallet()
+                        .then(({ sendCall }) => sendCall(account.network.chain_id, flush))
+                        .then(
+                          (hash) => {
+                            setState({ pending: false, text: `Flush sent: ${hash}. It is indexed once final.` });
+                          },
+                          (error: unknown) =>
+                            setState({ pending: false, text: errorMessage(error, "The wallet did not send it.") }),
+                        );
                     }}
                   >
                     {state.pending ? "Confirm in your wallet…" : "Sign the flush from my wallet"}
@@ -93,9 +97,9 @@ export function Sweeps({ account }: { account: Account }) {
             )}
           </div>
           <div className="flex min-w-0 flex-col gap-3">
-            <h4 className="text-sm font-medium">Finalized sweeps</h4>
+            <h3 className="text-[0.8125rem] font-medium">Finalized sweeps</h3>
             {view.sweeps.length === 0 ? (
-              <p className="text-muted-foreground">None yet.</p>
+              <Empty>None yet.</Empty>
             ) : (
               <Table className="text-xs">
                 <TableHeader>
@@ -122,7 +126,7 @@ export function Sweeps({ account }: { account: Account }) {
                 </TableBody>
               </Table>
             )}
-            <DeveloperView exchanges={view.api} title="Developer view: GET /v1/balance, /v1/forwarders, /v1/sweeps" />
+            <Requests exchanges={view.api} title="API requests" id="sweeps-api-title" />
           </div>
         </div>
       )}

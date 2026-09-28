@@ -1,7 +1,5 @@
-import { ChevronRight, Circle, CircleCheck, CircleX, LoaderCircle } from "lucide-react";
-import type { ReactNode } from "react";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { useId, useState } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type {
@@ -14,9 +12,8 @@ import type {
   Timeline,
   WebhookEvent,
 } from "./api.js";
-import { Detail, Details, Disclosure, ExplorerLink, Subsection } from "./common.js";
-import { dollars, duration, short, signedDollars, time, tokens } from "./format.js";
-import { Refunds } from "./Refunds.js";
+import { Detail, Details, Empty, ExplorerLink, InfoTip, Subsection } from "./common.js";
+import { clock, dollars, duration, short, signedDollars, time, tokens } from "./format.js";
 
 // Each step's title, what it waits for, and the time it usually takes: the hints are expectations,
 // every time shown next to them is real (the chain's block time, the service's timestamps, or when
@@ -68,112 +65,152 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
 // A quote's steps, shown before there is a payment to follow.
 const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "webhook_received", "final", "swept"];
 
-export function BehindTheScenes({
+/**
+ * The payment's steps as a compact live log: one line per step, with its status and its real
+ * time; each line opens to what it waits for and its data.
+ */
+export function EventStream({
   timeline,
   loading,
   account,
-  onChanged,
 }: {
   timeline: Timeline | null;
   loading: string | null;
   account: Account | null;
-  onChanged: () => void;
 }) {
-  // On wide screens it stays in view next to the payment, and scrolls on its own.
+  if (loading === null) {
+    return (
+      <div className="flex flex-col gap-3">
+        <p className="px-2 text-xs text-muted-foreground">Start a payment to follow it here, live, with real data only.</p>
+        <ol className="flex flex-col" aria-label="The steps of a payment">
+          {PREVIEW.map((key) => (
+            <StreamStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} account={account} />
+          ))}
+        </ol>
+      </div>
+    );
+  }
+  if (timeline === null) {
+    return (
+      <ol className="flex flex-col" aria-label={`Loading ${short(loading)}`} aria-busy="true">
+        {PREVIEW.map((key) => (
+          <li key={key} className="grid h-9 grid-cols-[4rem_1rem_minmax(0,1fr)] items-center gap-3 px-2">
+            <span className="h-2 w-12 rounded-full bg-muted motion-safe:animate-pulse" />
+            <span className="size-2.5 justify-self-center rounded-full bg-muted motion-safe:animate-pulse" />
+            <span className="h-2.5 w-40 rounded-full bg-muted motion-safe:animate-pulse" />
+          </li>
+        ))}
+      </ol>
+    );
+  }
   return (
-    <Card
-      role="complementary"
-      aria-labelledby="scenes-title"
-      className="min-w-0 xl:sticky xl:top-20 xl:max-h-[calc(100svh-6rem)] xl:overflow-y-auto"
-    >
-      <CardHeader>
-        <CardTitle>
-          <h3 id="scenes-title">Behind the scenes</h3>
-        </CardTitle>
-        {loading !== null && (
-          <CardAction>
-            <Badge className="bg-success/15 text-success uppercase" aria-hidden="true">
-              Live
-            </Badge>
-          </CardAction>
-        )}
-      </CardHeader>
-      <CardContent className="@container">
-        {loading === null ? (
-          <div className="flex flex-col gap-5">
-            <p className="max-w-prose text-muted-foreground">
-              Create a quote, or pay to your deposit address, to follow the payment through the chain,
-              the service, and this console's webhook handler, with real data only.
-            </p>
-            <ol className="hidden max-w-2xl flex-col lg:flex" aria-label="The steps of a payment">
-              {PREVIEW.map((key) => (
-                <TimelineStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} account={account} />
-              ))}
-            </ol>
-          </div>
-        ) : timeline === null ? (
-          <p className="text-muted-foreground">Loading {short(loading)}…</p>
-        ) : (
-          <div className="grid gap-6 @4xl:grid-cols-2 @4xl:gap-8">
-            <ol className="flex min-w-0 flex-col" aria-label="Payment timeline">
-              {timeline.steps.map((step) => (
-                <TimelineStep key={step.key} step={step} sent={timeline.sent?.at ?? null} account={account} />
-              ))}
-            </ol>
-            <div className="flex min-w-0 flex-col gap-4">
-              {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
-              <EventsLog events={timeline.events} />
-              {timeline.deposit !== null && account !== null && (
-                <Refunds timeline={timeline} deposit={timeline.deposit} account={account} onChanged={onChanged} />
-              )}
-              <DeveloperView exchanges={timeline.api} />
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <ol className="flex flex-col" aria-label="Payment timeline">
+      {timeline.steps.map((step) => (
+        <StreamStep key={step.key} step={step} sent={timeline.sent?.at ?? null} account={account} />
+      ))}
+    </ol>
   );
 }
 
-const STEP_ICONS: Record<Step["state"], ReactNode> = {
-  complete: <CircleCheck className="size-4.5 text-success" aria-hidden="true" />,
-  current: <LoaderCircle className="size-4.5 animate-spin text-foreground" aria-hidden="true" />,
-  upcoming: <Circle className="size-4.5 text-muted-foreground/60" aria-hidden="true" />,
-  failed: <CircleX className="size-4.5 text-destructive" aria-hidden="true" />,
-};
+function StepDot({ state }: { state: Step["state"] }) {
+  if (state === "current") {
+    return (
+      <span className="relative flex size-4 items-center justify-center" aria-hidden="true">
+        <span className="absolute size-4 rounded-full bg-brand/30 motion-safe:animate-ping" />
+        <span className="relative size-2.5 rounded-full bg-brand shadow-[0_0_12px_var(--brand)]" />
+      </span>
+    );
+  }
+  return (
+    <span
+      className={cn(
+        "flex size-4 items-center justify-center rounded-full transition-colors duration-500 motion-reduce:transition-none",
+        state === "complete" && "bg-foreground/90 text-background",
+        state === "failed" && "bg-destructive text-background",
+        state === "upcoming" && "border border-dashed border-foreground/25",
+      )}
+      aria-hidden="true"
+    >
+      {state === "complete" && <Check className="size-2.5" strokeWidth={3.5} />}
+      {state === "failed" && <X className="size-2.5" strokeWidth={3.5} />}
+    </span>
+  );
+}
 
-function TimelineStep({ step, sent, account }: { step: Step; sent: number | null; account: Account | null }) {
+function StreamStep({ step, sent, account }: { step: Step; sent: number | null; account: Account | null }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
   const copy = STEP_COPY[step.key];
-  const after = step.at !== null && sent !== null && step.key !== "sent" && step.key !== "quote_created";
+  // Seconds since the payment was sent, for the steps after it.
+  const elapsed =
+    step.at !== null && sent !== null && step.key !== "sent" && step.key !== "quote_created" ? step.at - sent : null;
+  const failed = step.state === "failed" && copy.failed !== undefined;
   return (
     <li
-      className="group relative grid grid-cols-[1.125rem_minmax(0,1fr)] gap-3 pb-5 last:pb-0"
+      className="group/step relative"
       data-step={step.key}
       data-state={step.state}
       aria-current={step.state === "current" ? "step" : undefined}
     >
-      <span className="absolute top-6 bottom-1 left-2 w-0.5 rounded-full bg-border group-last:hidden" aria-hidden="true" />
-      <span className="mt-px bg-card">{STEP_ICONS[step.state]}</span>
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <div className="flex items-baseline justify-between gap-2">
-          <span className={cn("font-medium", step.state === "upcoming" && "text-muted-foreground")}>
+      {/* The rail between this step's dot and the next one's. */}
+      <span
+        className="absolute top-7 bottom-[-0.375rem] left-[calc(5.5rem-0.5px)] w-px bg-border group-last/step:hidden"
+        aria-hidden="true"
+      />
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(!open)}
+        className="relative grid min-h-9 w-full grid-cols-[4rem_1rem_minmax(0,1fr)] items-center gap-3 rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+      >
+        <span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+          {step.at !== null ? (
+            <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
+          ) : (
+            <span className="text-muted-foreground/40" aria-hidden="true">
+              --:--:--
+            </span>
+          )}
+        </span>
+        <StepDot state={step.state} />
+        <span className="flex min-w-0 items-center gap-2.5">
+          <span
+            className={cn(
+              "min-w-0 text-[0.8125rem] text-pretty",
+              step.state === "upcoming" && "text-muted-foreground",
+              step.state === "current" && "font-medium text-brand",
+              step.state === "failed" && "text-destructive",
+            )}
+          >
             {copy.title}
+            <span className="sr-only">, {stateLabel(step.state)}</span>
           </span>
-          <span className="shrink-0 text-xs text-muted-foreground">{stateLabel(step.state)}</span>
-        </div>
+          {elapsed !== null && (
+            <span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+              +{duration(elapsed)}
+            </span>
+          )}
+          <ChevronDown
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 motion-reduce:transition-none",
+              open && "rotate-180 opacity-100",
+            )}
+            aria-hidden="true"
+          />
+        </span>
+      </button>
+      {failed && <p className="pb-1 pl-[6.75rem] text-xs text-destructive">{copy.failed}</p>}
+      <div id={id} hidden={!open} className="flex flex-col gap-2 pr-2 pb-3 pl-[6.75rem] text-xs">
+        <p className="text-muted-foreground text-pretty">{copy.hint}</p>
         {step.at !== null && (
-          <div className="text-xs" data-testid="step-time">
+          <p className="font-mono text-[0.6875rem]" data-testid="step-time">
             {time(step.at)}
-            {after && <span className="text-muted-foreground"> · {duration(step.at - sent)} after sending</span>}
-          </div>
-        )}
-        {step.state === "failed" && copy.failed !== undefined ? (
-          <div className="text-xs text-destructive">{copy.failed}</div>
-        ) : (
-          step.state !== "complete" && <div className="text-xs text-muted-foreground">{copy.hint}</div>
+            {elapsed !== null && <span className="text-muted-foreground"> · {duration(elapsed)} after sending</span>}
+          </p>
         )}
         {step.details.length > 0 && (
-          <Details className="mt-2">
+          <Details>
             {step.details.map((detail) => (
               <Detail key={detail.label} label={detail.label}>
                 <DetailValue detail={detail} account={account} />
@@ -198,28 +235,35 @@ function DetailValue({ detail, account }: { detail: StepDetail; account: Account
     return <>{time(value)}</>;
   }
   if (kind === "usd" && typeof value === "number") {
-    return <>{dollars(value)}</>;
+    return <span className="tabular-nums">{dollars(value)}</span>;
   }
   if (kind === "usd_delta" && typeof value === "number") {
-    return <span className="text-success">{signedDollars(value)}</span>;
+    return <span className="text-success tabular-nums">{signedDollars(value)}</span>;
   }
   if (kind === "atomic" && typeof value === "string") {
-    return <>{tokens(value, account?.token.symbol ?? "")}</>;
+    return <span className="tabular-nums">{tokens(value, account?.token.symbol ?? "")}</span>;
   }
   return <span className={detail.mono === true ? "font-mono" : undefined}>{String(value)}</span>;
 }
 
-function LedgerPanel({ ledger }: { ledger: LedgerView }) {
+export function LedgerPanel({ ledger }: { ledger: LedgerView }) {
   const product = ledger.product;
   return (
-    <Subsection title="Ledger" id="ledger-title">
+    <Subsection
+      title="Ledger"
+      id="ledger-title"
+      aside={
+        <InfoTip label="About the balance rule">
+          Every deposit.* event carries those cumulative amounts, so the result does not depend on the order events
+          arrive in.
+        </InfoTip>
+      }
+    >
       <p className="text-muted-foreground">
-        The balance rule: while <code>credited</code> or <code>reversed</code>, a deposit nets to{" "}
-        <code>amount − amount_refunded − amount_reversed</code>, and to 0 otherwise. Every{" "}
-        <code>deposit.*</code> event carries those cumulative amounts, so the result does not depend
-        on the order events arrive in.
+        While <code>credited</code> or <code>reversed</code>, a deposit nets to{" "}
+        <code>amount − amount_refunded − amount_reversed</code>; otherwise to 0.
       </p>
-      <Details data-testid="ledger">
+      <Details data-testid="ledger" className="font-mono tabular-nums">
         <Detail label="Status">{ledger.status}</Detail>
         <Detail label="amount">{ledger.amount === null ? "—" : dollars(ledger.amount)}</Detail>
         <Detail label="amount_refunded">−{dollars(ledger.amount_refunded)}</Detail>
@@ -241,11 +285,11 @@ function LedgerPanel({ ledger }: { ledger: LedgerView }) {
   );
 }
 
-function EventsLog({ events }: { events: WebhookEvent[] }) {
+export function EventsLog({ events }: { events: WebhookEvent[] }) {
   return (
     <Subsection title="Webhook events received" id="events-title">
       {events.length === 0 ? (
-        <p className="text-muted-foreground">None yet.</p>
+        <Empty>None yet.</Empty>
       ) : (
         <Table className="text-xs">
           <TableHeader>
@@ -259,13 +303,11 @@ function EventsLog({ events }: { events: WebhookEvent[] }) {
           <TableBody>
             {events.map((event) => (
               <TableRow key={event.id} data-testid="webhook-event">
-                <TableCell>
-                  <code>{event.type}</code>
-                </TableCell>
-                <TableCell className="font-mono" title={event.id}>
+                <TableCell className="font-mono text-brand">{event.type}</TableCell>
+                <TableCell className="font-mono text-muted-foreground" title={event.id}>
                   {short(event.id)}
                 </TableCell>
-                <TableCell>{time(event.received_at)}</TableCell>
+                <TableCell className="font-mono tabular-nums">{time(event.received_at)}</TableCell>
                 <TableCell className="text-success">{event.verified ? "Verified" : "—"}</TableCell>
               </TableRow>
             ))}
@@ -276,31 +318,45 @@ function EventsLog({ events }: { events: WebhookEvent[] }) {
   );
 }
 
-export function DeveloperView({ exchanges, title }: { exchanges: ApiExchange[]; title?: string }) {
+/** The product's API requests: sent from its server with its restricted key, never the browser. */
+export function Requests({ exchanges, title, id }: { exchanges: ApiExchange[]; title: string; id: string }) {
   return (
-    <Disclosure summary={`${title ?? "Developer view: the product's API requests"} (${exchanges.length})`}>
-      <p className="text-muted-foreground">
-        Sent from the product's server with its restricted API key; the browser never holds it.
-      </p>
-      {exchanges.map((exchange, index) => (
-        <details key={`${exchange.method}-${exchange.url}-${index}`} className="group/exchange">
-          <summary className="flex cursor-pointer list-none items-center gap-1 [&::-webkit-details-marker]:hidden">
-            <ChevronRight
-              className="size-3.5 shrink-0 transition-transform group-open/exchange:rotate-90"
-              aria-hidden="true"
-            />
-            <code className="wrap-anywhere">
-              {exchange.method} {new URL(exchange.url).pathname}
-              {new URL(exchange.url).search}
-            </code>{" "}
-            <span className={exchange.status < 400 ? "text-success" : "text-destructive"}>{exchange.status}</span>
-          </summary>
-          <pre className="mt-2 max-h-80 overflow-auto rounded-lg bg-muted/60 p-3 font-mono text-xs">
-            {JSON.stringify({ request: exchange.request, response: exchange.response }, null, 2)}
-          </pre>
-        </details>
-      ))}
-    </Disclosure>
+    <Subsection
+      title={`${title} (${exchanges.length})`}
+      id={id}
+      aside={
+        <InfoTip label="About these requests">
+          Sent from the product's server with its restricted API key; the browser never holds it.
+        </InfoTip>
+      }
+    >
+      {exchanges.length === 0 ? (
+        <Empty>None yet.</Empty>
+      ) : (
+        <ul className="flex flex-col divide-y rounded-lg border">
+          {exchanges.map((exchange, index) => (
+            <li key={`${exchange.method}-${exchange.url}-${index}`}>
+              <details className="group/exchange">
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-mono outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                  <ChevronRight
+                    className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/exchange:rotate-90 motion-reduce:transition-none"
+                    aria-hidden="true"
+                  />
+                  <code className="min-w-0 flex-1 wrap-anywhere">
+                    <span className="text-muted-foreground">{exchange.method}</span> {new URL(exchange.url).pathname}
+                    {new URL(exchange.url).search}
+                  </code>
+                  <span className={exchange.status < 400 ? "text-success" : "text-destructive"}>{exchange.status}</span>
+                </summary>
+                <pre className="max-h-80 overflow-auto border-t bg-muted p-3 font-mono text-[0.6875rem] leading-relaxed">
+                  {JSON.stringify({ request: exchange.request, response: exchange.response }, null, 2)}
+                </pre>
+              </details>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Subsection>
   );
 }
 

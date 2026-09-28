@@ -688,8 +688,11 @@ The product also serves the public **Phala Pay website** ([pay.phala.com](https:
 one page at exactly `PRODUCT_PUBLIC_URL/`, its hashed assets at `/assets/`, and the demo's JSON
 API at `/api/` ([product/web](product/web), built into the image; served by
 [reference_product/demo.py](product/reference_product/demo.py) from the files present at startup,
-by exact name). The page is a short introduction, the live demo, and the key properties. The demo
-is a cloud console's billing page with both ways to collect a payment: a **quote** (a locked price and an exact amount, paid through
+by exact name). The page is a short headline, the live demo, and the key properties. The demo
+sets the product beside its backend (stacked on narrow screens): first, what the customer sees (a cloud console's
+billing page, framed as the merchant's app); then what the merchant's backend sees (the
+payment's live event stream, then tabs for payments, refunds, sweeps, API requests and webhooks,
+and the attestation). The billing page has both ways to collect a payment: a **quote** (a locked price and an exact amount, paid through
 `@phala/pay`'s `<Checkout expectedAddress>`) and the visitor's single **deposit address** (every
 token on every network, any amount credited at spot, its payments read by the browser with the
 address's `client_secret`). An order id set as `metadata` arrives in the `deposit.credited` event.
