@@ -284,11 +284,10 @@ class FakeTopup:
 
     def attestation(self, nonce: str) -> dict[str, Any]:
         public = self.key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-        report = attestation_report_data(bytes.fromhex(nonce), public, [])
+        report = attestation_report_data(bytes.fromhex(nonce), public)
         return {
             "keyid": "settlement/v1",
             "settlement_pubkey": public.hex(),
-            "operators": [],
             "report_data": report.hex(),
             "quote": "00" * 1024,
         }

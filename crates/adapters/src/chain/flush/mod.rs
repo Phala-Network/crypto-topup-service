@@ -1,4 +1,4 @@
-//! ABI boundary for forwarder-factory flush operations.
+//! ABI boundary of the forwarder factory: views, the public `flush` call, and its events.
 
 use alloy_primitives::{Address, B256, Bytes, LogData, U256};
 use alloy_sol_types::{SolCall, SolEvent, sol};
@@ -9,6 +9,11 @@ sol! {
     function flush(address treasury, bytes32[] salts, address token) external;
     function implementation() external view returns (address);
     function factory() external view returns (address);
+    event ForwarderCreated(
+        bytes32 indexed salt,
+        address indexed forwarder,
+        address indexed treasury
+    );
     event Flushed(
         bytes32 indexed salt,
         address indexed forwarder,
@@ -22,6 +27,17 @@ sol! {
         address indexed token,
         bytes reason
     );
+}
+
+/// A decoded `ForwarderFactory.ForwarderCreated` event: a forwarder clone was deployed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedForwarderCreated {
+    /// CREATE2 salt identifying the forwarder.
+    pub salt: B256,
+    /// Deployed forwarder address.
+    pub forwarder: Address,
+    /// Treasury the forwarder pays, its only immutable argument.
+    pub treasury: Address,
 }
 
 /// A decoded `ForwarderFactory.Flushed` event.
@@ -50,6 +66,59 @@ pub struct DecodedFlushFailed {
     pub token: Address,
     /// Revert data, truncated by the factory to 256 bytes.
     pub reason: Bytes,
+}
+
+/// One event of the factory, whoever called it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactoryEvent {
+    /// A forwarder was deployed.
+    ForwarderCreated(DecodedForwarderCreated),
+    /// A forwarder paid its treasury.
+    Flushed(DecodedFlushed),
+    /// A forwarder's transfer failed and the batch moved on.
+    FlushFailed(DecodedFlushFailed),
+}
+
+impl FactoryEvent {
+    /// Decodes one factory log by its signature topic.
+    pub fn decode(log: &LogData) -> Result<Self, alloy_sol_types::Error> {
+        match log.topics().first() {
+            Some(&ForwarderCreated::SIGNATURE_HASH) => {
+                ForwarderCreated::decode_log_data_validate(log).map(|event| {
+                    Self::ForwarderCreated(DecodedForwarderCreated {
+                        salt: event.salt,
+                        forwarder: event.forwarder,
+                        treasury: event.treasury,
+                    })
+                })
+            }
+            Some(&Flushed::SIGNATURE_HASH) => decode_flushed(log).map(Self::Flushed),
+            Some(&FlushFailed::SIGNATURE_HASH) => decode_flush_failed(log).map(Self::FlushFailed),
+            _ => Err(alloy_sol_types::Error::custom(
+                "log is not a ForwarderFactory event",
+            )),
+        }
+    }
+
+    /// The forwarder the event is about.
+    #[must_use]
+    pub const fn forwarder(&self) -> Address {
+        match self {
+            Self::ForwarderCreated(event) => event.forwarder,
+            Self::Flushed(event) => event.forwarder,
+            Self::FlushFailed(event) => event.forwarder,
+        }
+    }
+}
+
+/// The signature topics of every factory event, for one log filter.
+#[must_use]
+pub const fn factory_event_signatures() -> [B256; 3] {
+    [
+        ForwarderCreated::SIGNATURE_HASH,
+        Flushed::SIGNATURE_HASH,
+        FlushFailed::SIGNATURE_HASH,
+    ]
 }
 
 /// Encodes an ERC-20 `balanceOf` call.
@@ -116,12 +185,6 @@ pub fn decode_flushed(log: &LogData) -> Result<DecodedFlushed, alloy_sol_types::
     })
 }
 
-/// Returns the first topic of `ForwarderFactory.Flushed`.
-#[must_use]
-pub const fn flushed_signature() -> B256 {
-    Flushed::SIGNATURE_HASH
-}
-
 /// Decodes a `ForwarderFactory.FlushFailed` log.
 pub fn decode_flush_failed(log: &LogData) -> Result<DecodedFlushFailed, alloy_sol_types::Error> {
     FlushFailed::decode_log_data_validate(log).map(|event| DecodedFlushFailed {
@@ -130,12 +193,6 @@ pub fn decode_flush_failed(log: &LogData) -> Result<DecodedFlushFailed, alloy_so
         token: event.token,
         reason: event.reason,
     })
-}
-
-/// Returns the first topic of `ForwarderFactory.FlushFailed`.
-#[must_use]
-pub const fn flush_failed_signature() -> B256 {
-    FlushFailed::SIGNATURE_HASH
 }
 
 #[cfg(test)]
@@ -176,6 +233,25 @@ mod tests {
                 treasury,
                 amount: U256::from(42_u8),
             }
+        );
+
+        let created = ForwarderCreated {
+            salt,
+            forwarder,
+            treasury,
+        }
+        .encode_log_data();
+        let log = LogData::new(created.topics().to_vec(), created.data.clone())
+            .expect("generated event topics are valid");
+        let decoded = FactoryEvent::decode(&log).expect("event should decode");
+        assert_eq!(decoded.forwarder(), forwarder);
+        assert_eq!(
+            decoded,
+            FactoryEvent::ForwarderCreated(DecodedForwarderCreated {
+                salt,
+                forwarder,
+                treasury,
+            })
         );
 
         let failed = FlushFailed {

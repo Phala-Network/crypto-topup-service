@@ -18,9 +18,8 @@
 #    recreated. Then it seals the secrets (the owner's `envs update`), and PostgreSQL initializes
 #    from the provably empty prefix.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
-#    attestation endpoint answers through the simulator and binds the flusher operator (matching
-#    `topup attest --route`), the flusher operator is funded (the factory is permissionless),
-#    Sentry reporting is off with the empty DSN, and WAL
+#    attestation endpoint answers through the simulator and binds the settlement key (matching
+#    `topup attest`), Sentry reporting is off with the empty DSN, and WAL
 #    archiving writes a fresh backup marker; the derived key and database credentials are mode 0600
 #    files owned by PostgreSQL and in no container environment.
 # 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
@@ -369,7 +368,7 @@ dc logs --no-color topup 2>&1 | grep -F '"error reporting configured"' |
     grep -qF '"sentry_enabled":false' || die "topup did not start with Sentry reporting off"
 echo "ok: topup runs with Sentry reporting off (empty SENTRY_DSN)"
 
-# The owner learns the flusher operator only from /v1/attestation: production has no logs or SSH.
+# The owner learns the settlement key only from /v1/attestation: production has no logs or SSH.
 nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 attestation=$(product_python - "$nonce" <<'PY'
 import json, sys, httpx
@@ -380,24 +379,16 @@ body = httpx.get("http://topup:8080/v1/attestation", params={"nonce": nonce.hex(
 verify_attestation_binding(AttestationResponse.from_dict(body), nonce)
 assert body["keyid"] == "settlement/v1", body["keyid"]
 assert len(body["quote"]) > 0, "empty quote"
-operators = body["operators"]
-assert [(o["chain_id"], o["operator_key_version"], o["keyid"]) for o in operators] == [(11155111, 1, "operator/v1")], operators
-print(json.dumps({key: body[key] for key in ("settlement_pubkey", "operators", "report_data")}))
+assert "operators" not in body, "the service sends no transactions, so it attests no operator"
+print(json.dumps({key: body[key] for key in ("settlement_pubkey", "report_data")}))
 PY
 )
-echo "ok: GET /v1/attestation binds the nonce, settlement key, and flusher operator (simulator quote)"
-cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" \
-    --route /etc/topup/routes/phala-cloud-sepolia-pha.yaml |
-    jq -c '{settlement_pubkey, operators, report_data}')
+echo "ok: GET /v1/attestation binds the nonce and settlement key (simulator quote)"
+cli_attestation=$(dc exec -T topup topup attest --nonce "$nonce" |
+    jq -c '{settlement_pubkey, report_data}')
 [[ "$(jq -S . <<<"$cli_attestation")" == "$(jq -S . <<<"$attestation")" ]] ||
-    die "topup attest --route and GET /v1/attestation disagree"
-echo "ok: topup attest --route reports the same operators and report_data"
-
-operator=$(jq -er '.operators[0].address' <<<"$attestation")
-# The factory is permissionless: the flusher needs no role, only gas.
-cast send "$operator" --value 1ether --rpc-url "$rpc_url" --private-key "$ANVIL_PRIVATE_KEY" \
-    >/dev/null
-echo "ok: funded the attested flusher operator $operator"
+    die "topup attest and GET /v1/attestation disagree"
+echo "ok: topup attest reports the same settlement key and report_data"
 
 marker_fresh() {
     local marker

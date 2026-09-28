@@ -1,16 +1,14 @@
 //! dstack attestation primitives.
 
-use std::num::NonZeroU32;
 use std::time::Duration;
 
-use alloy_primitives::Address;
 use dstack_sdk::dstack_client::DstackClient;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
-use topup_core::{Ed25519PublicKey, SETTLEMENT_KEY_DOMAIN, Signer as _};
+use topup_core::{Ed25519PublicKey, SETTLEMENT_KEY_DOMAIN};
 use zeroize::Zeroize as _;
 
-use crate::signer::dstack::{DerivedKey, DstackSigner, KeyAlgorithm};
+use crate::signer::dstack::{DerivedKey, KeyAlgorithm};
 use crate::signer::settlement_public_key;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -26,45 +24,11 @@ pub struct AttestationInfo {
     pub app_compose: Option<String>,
 }
 
-/// The operator key a chain's flusher signs with: `operator/v{key_version}`.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct OperatorKey {
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// The chain's configured `operator_key_version`.
-    pub key_version: NonZeroU32,
-}
-
-/// A flusher operator identity bound into the report data.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AttestedOperator {
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Derivation version of the operator key.
-    pub key_version: NonZeroU32,
-    /// Address of the derived secp256k1 operator key.
-    pub address: Address,
-}
-
-impl AttestedOperator {
-    /// Returns the 32-byte report-data record `chain_id (u64 BE) ‖ key_version (u32 BE) ‖ address`.
-    #[must_use]
-    pub fn record(&self) -> [u8; 32] {
-        let mut record = [0_u8; 32];
-        record[..8].copy_from_slice(&self.chain_id.to_be_bytes());
-        record[8..12].copy_from_slice(&self.key_version.get().to_be_bytes());
-        record[12..].copy_from_slice(self.address.as_slice());
-        record
-    }
-}
-
-/// An attestation binding a nonce to the settlement public key and the flusher operators.
+/// An attestation binding a nonce to the settlement public key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttestationBundle {
     /// Settlement public key bound into the report data.
     pub settlement_public_key: Ed25519PublicKey,
-    /// Flusher operators bound into the report data, in ascending chain order.
-    pub operators: Vec<AttestedOperator>,
     /// SHA-256 commitment passed as dstack report data.
     pub report_data: [u8; 32],
     /// Versioned dstack attestation bytes. On TDX this contains the quote and event log.
@@ -79,33 +43,17 @@ pub enum AttestationError {
     /// The settlement key returned by dstack was malformed.
     #[error("dstack returned an invalid settlement key")]
     InvalidSettlementKey,
-    /// An operator key could not be derived.
-    #[error("an operator key could not be derived")]
-    OperatorKeyUnavailable,
     /// The dstack attestation or information call failed or timed out.
     #[error("dstack attestation is unavailable")]
     DstackUnavailable,
 }
 
-/// Computes `sha256(nonce ‖ settlement_public_key ‖ record_1 ‖ … ‖ record_n)`.
-///
-/// Each operator contributes its fixed-width [`AttestedOperator::record`], in ascending
-/// `(chain_id, key_version, address)` order whatever the order of `operators`. Without operators
-/// this is the original `sha256(nonce ‖ settlement_public_key)`.
+/// Computes `sha256(nonce ‖ settlement_public_key)`.
 #[must_use]
-pub fn report_data(
-    nonce: &[u8],
-    settlement_public_key: &Ed25519PublicKey,
-    operators: &[AttestedOperator],
-) -> [u8; 32] {
-    let mut operators = operators.to_vec();
-    operators.sort_unstable();
+pub fn report_data(nonce: &[u8], settlement_public_key: &Ed25519PublicKey) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(nonce);
     hasher.update(settlement_public_key.0);
-    for operator in &operators {
-        hasher.update(operator.record());
-    }
     hasher.finalize().into()
 }
 
@@ -159,35 +107,8 @@ impl DstackAttestor {
         }
     }
 
-    /// Derives the settlement key and each operator key, binds them to `nonce`, and returns
-    /// dstack evidence.
-    ///
-    /// Operator addresses come from the same `operator/v{n}` derivation the flusher signs with.
-    pub async fn attest(
-        &self,
-        nonce: &[u8],
-        operator_keys: &[OperatorKey],
-    ) -> Result<AttestationBundle, AttestationError> {
-        let mut operators = Vec::with_capacity(operator_keys.len());
-        for key in operator_keys {
-            let signer = match &self.endpoint {
-                Some(endpoint) => DstackSigner::with_endpoint_and_timeout(endpoint, self.timeout),
-                None => DstackSigner::with_timeout(self.timeout),
-            };
-            let address = signer
-                .with_operator_key_version(key.key_version)
-                .operator_address()
-                .await
-                .map_err(|_| AttestationError::OperatorKeyUnavailable)?;
-            operators.push(AttestedOperator {
-                chain_id: key.chain_id,
-                key_version: key.key_version,
-                address,
-            });
-        }
-        operators.sort_unstable();
-        operators.dedup();
-
+    /// Derives the settlement key, binds it to `nonce`, and returns dstack evidence.
+    pub async fn attest(&self, nonce: &[u8]) -> Result<AttestationBundle, AttestationError> {
         let client = DstackClient::new(self.endpoint.as_deref());
         let mut key_response = timeout(
             self.timeout,
@@ -207,7 +128,7 @@ impl DstackAttestor {
         let settlement_public_key = settlement_public_key(&key.secret);
         drop(key);
 
-        let report_data = report_data(nonce, &settlement_public_key, &operators);
+        let report_data = report_data(nonce, &settlement_public_key);
         let response = timeout(self.timeout, client.attest(report_data.to_vec()))
             .await
             .map_err(|_| AttestationError::DstackUnavailable)?
@@ -226,7 +147,6 @@ impl DstackAttestor {
 
         Ok(AttestationBundle {
             settlement_public_key,
-            operators,
             report_data,
             quote,
             info: AttestationInfo {
@@ -240,55 +160,16 @@ impl DstackAttestor {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-
-    use alloy_primitives::Address;
     use topup_core::Ed25519PublicKey;
 
-    use super::{AttestedOperator, report_data};
-
-    fn nonce() -> Vec<u8> {
-        hex::decode("000102030405060708090a0b0c0d0e0f").expect("valid vector")
-    }
+    use super::report_data;
 
     #[test]
-    fn report_data_without_operators_matches_the_original_vector() {
+    fn report_data_matches_the_published_vector() {
+        let nonce = hex::decode("000102030405060708090a0b0c0d0e0f").expect("valid vector");
         assert_eq!(
-            hex::encode(report_data(&nonce(), &Ed25519PublicKey([0x42; 32]), &[])),
+            hex::encode(report_data(&nonce, &Ed25519PublicKey([0x42; 32]))),
             "58c4e8b13ba082a25854a52564151194a7ec3221acc8aa8884f2aba2dda1037f"
-        );
-    }
-
-    #[test]
-    fn report_data_binds_operators_in_canonical_order() {
-        let sepolia = AttestedOperator {
-            chain_id: 11_155_111,
-            key_version: NonZeroU32::MIN,
-            address: Address::repeat_byte(0x22),
-        };
-        let mainnet = AttestedOperator {
-            chain_id: 1,
-            key_version: NonZeroU32::new(2).expect("two is non-zero"),
-            address: Address::repeat_byte(0x11),
-        };
-        let expected = "c30486f4d5a70ddf9a44157ce18f8c1e37a9479f15c02b80c4e373dc639fa9ea";
-        let key = Ed25519PublicKey([0x42; 32]);
-
-        assert_eq!(
-            hex::encode(mainnet.record()),
-            concat!(
-                "0000000000000001",
-                "00000002",
-                "1111111111111111111111111111111111111111"
-            )
-        );
-        assert_eq!(
-            hex::encode(report_data(&nonce(), &key, &[mainnet, sepolia])),
-            expected
-        );
-        assert_eq!(
-            hex::encode(report_data(&nonce(), &key, &[sepolia, mainnet])),
-            expected
         );
     }
 }

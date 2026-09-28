@@ -2,13 +2,13 @@
 
 **Trigger:** `TopupUnsupportedInflows` (tag `chain_id`, field `count`: finalized transfers of an
 unrouted token to our addresses), Finance seeing treasury inflow tied to rejected deposits, or
-rejected holdings that disagree with the flushes.
+rejected holdings that disagree with the sweeps.
 
 **Impact:** rejected deposits are never credited. Rejections of the route's token
-(`below_minimum`, `out_of_bounds`, `out_of_range`, `sanctioned`, `product_refused`) are swept to
-the treasury with everything else; an unsupported token stays in its forwarder, because the
-flusher sweeps only routed tokens. The case may be a reporting question, a refundable customer
-case, or a custody mismatch.
+(`below_minimum`, `out_of_bounds`, `out_of_range`, `sanctioned`, `product_refused`) reach the
+treasury with everything else when the merchant sweeps the forwarder; an unsupported token stays
+in its forwarder until someone flushes that token. The case may be a reporting question, a
+refundable customer case, or a custody mismatch.
 
 ## First steps
 
@@ -26,16 +26,17 @@ case, or a custody mismatch.
 
 - Expected rejection and a matching flush: custody is correct; classify refund eligibility
   (architecture §15).
-- A route-token rejection with no matching flush: [flush reverted or bisected](flush-reverted-or-bisected.md).
-- Treasury inflow differs from the `Flushed` events: critical reconciliation incident; pause
-  `flush` and consider revoking the operator ([operator key compromise](operator-key-compromise.md)).
+- A route-token rejection with no matching flush: the forwarder has not been swept yet, or its
+  flush failed (`FlushFailed`); the merchant sweeps ([deploy/README.md, "Sweeping"](../README.md#sweeping)).
+- Treasury inflow differs from the `Flushed` events: critical reconciliation incident; see
+  [chain frozen](chain-frozen.md) for `custody_balance`.
 - Sanctioned funds: Compliance owns the disposition; no refund until it is recorded.
 
 ## Fix
 
 Eligible deposits go through [refund execution](refund-execution.md). Returning an unsupported
-token first needs a separately reviewed Safe flush of that token, as in
-[wrong-network deposit](wrong-network-deposit.md) step 3.
+token first needs a flush of that token (the factory's `flush(treasury, salts, token)`, which
+anyone may call), as in [wrong-network deposit](wrong-network-deposit.md) step 3.
 
 ## Done when
 

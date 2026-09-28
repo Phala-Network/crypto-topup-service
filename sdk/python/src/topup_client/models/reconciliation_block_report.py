@@ -22,12 +22,13 @@ class ReconciliationBlockReport:
     """A persistent reconciliation block (architecture §13).
 
     Attributes:
-        block_key (str): Block identifier, `chain:{chain_id}` or `address:{address_id}`.
+        block_key (str): Block identifier, `chain:{chain_id}`.
         chain_id (int): EVM chain identifier.
         check (str): Check that wrote the block, such as `address_derivation`.
         created_at (datetime.datetime): When the block was written.
         reason (str): Why the check blocked.
-        scope (str): `chain` (the chain is frozen) or `address` (the address is left out of flush planning).
+        scope (str): `chain`: the chain is frozen. No check writes the `address` scope any more; it excluded an
+            address from the removed operator flusher.
         address_id (None | Unset | UUID): Blocked address for an `address` block.
     """
 

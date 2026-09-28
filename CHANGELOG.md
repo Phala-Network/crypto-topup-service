@@ -37,6 +37,23 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking:** the service sends no transactions (docs/design/multi-tenant.md §5, §13, PR 4).
+  Anyone, usually the merchant with its own wallet or Safe, sweeps forwarders with the
+  permissionless factory's `flush(treasury, salts, token)` and pays the gas. The finalized scanner
+  indexes the factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events for the account's
+  own `(address, treasury)` pairs, whoever sent them, and a final credited deposit becomes `swept`
+  once a finalized `Flushed` event follows it. A `FlushFailed` target keeps its balance and its
+  deposits stay `credited`. Reconciliation compares every active forwarder's finalized balance
+  with its deposits minus its finalized sweeps; a mismatch freezes crediting on the chain
+  (`409 chain_frozen`) until the operator lifts it.
+- **Breaking:** attestation binds only the settlement key: `GET /v1/attestation` drops
+  `operators`, `report_data` is `sha256(nonce ‖ settlement_pubkey)`, and `topup attest` drops
+  `--route` and `--operator-key-version` and its `operators`, `operator_keyid`, and
+  `operator_address` fields.
+- **Breaking:** route files drop `chain.operator_key_version`, `chain.flush`,
+  `limits.min_flush_atomic`, and `alerts.stuck_after_s.credited` (a credited deposit waits for
+  its merchant's sweep); the pause scope `flush` is gone. The daily report drops `flush_planning`,
+  and its `unflushed_balance_atomic` is deposits not reversed minus finalized `Flushed` amounts.
 - **Breaking:** one squashed database migration builds the multi-tenant schema on an empty
   database; staging is reset (HUMAN-ONLY, deploy/README.md "Staging reset") and nothing is
   migrated. Route files drop `product` and require `livemode`, checked against the chain.
@@ -81,30 +98,6 @@ webhook receivers must ignore unknown fields. The format follows
   event is due changes nothing. The product-signed support lookup
   (`GET /v1/products/{p}/deposits?tx_hash=|address=|lock_ref=`) lists each deposit's webhook
   `events` (`id`, `event_type`, `created_at`, `delivered_at`).
-
-- `GET /v1/attestation` returns `operators`: for each configured chain, the flusher operator
-  (`chain_id`, `operator_key_version` from the chain's current routes, `keyid` `operator/v{n}`,
-  `address`) that needs `OPERATOR_ROLE` on the factory and native gas. `report_data` now binds
-  them: `sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)`, one 32-byte record per
-  operator in list (ascending `chain_id`) order: `chain_id` (u64 big-endian),
-  `operator_key_version` (u32 big-endian), and the 20 address bytes (architecture §14). With no
-  operators the value is unchanged; a verifier that hashes only `nonce ‖ settlement_pubkey` must
-  append the records. `operators` is optional in the schema so clients also parse responses from
-  servers that predate it. `topup attest --route FILE` prints the same `operators` and
-  `report_data` for those routes.
-
-- `POST /v1/admin/products {slug, public_key, webhook_url}` (administrative API) issues a
-  product with an `audit` row (`product.issue`); it replaces direct database registration. The
-  key id and settlement URL still come only from the attested route, whose slug must be loaded.
-  The same values return the same product with `200`; different values for an issued slug are
-  `409 conflict`.
-
-- `GET /v1/admin/report/daily` reports why sweeping or reconciliation stopped, which
-  production otherwise shows only in logs: each route's `flush_planning` (`at`, `outcome`
-  `planned`, `idle`, `operator_not_authorized`, `failed`, or `send_failed`, and the redacted
-  `error`) from its latest scheduled planning run, and the report-level `reconciliation` (`at`
-  and `failed_checks`, each with `check` and `error`) from the latest round. Both describe the
-  serving process and are absent until its first run; both are optional in the schema.
 
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
   destination minor units (#94). The field is optional in the schema so clients also parse reports
@@ -163,10 +156,6 @@ webhook receivers must ignore unknown fields. The format follows
   address on chains that have one, and a product's key id is `{product}/v1`. `finality`,
   `destination.product_kid`, and `rate_lock.enabled` are removed; the `quotes` pause scope stops
   quote creation. Staging's route moves to version 2.
-- The flusher broadcasts every signed sweep (first send, rebroadcast, replacement) to all of the
-  chain's configured RPC providers and succeeds when any accepts it, so one rate-limited provider
-  no longer blocks sweeps. When every provider refuses, the daily report's `flush_planning.error`
-  reads `every provider failed to broadcast the transaction: …` with each provider's refusal.
 - A new quote's `amount_atomic` (and its `payment_uri`) is rounded up to the route's
   `quote.amount_decimals` token decimals, default 4, so the payer is asked for `273.9185` PHA
   rather than 18 decimals. The rounding overpays by less than one unit of the last decimal; the

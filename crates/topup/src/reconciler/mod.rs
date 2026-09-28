@@ -8,11 +8,11 @@ mod chain;
 mod store;
 mod types;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
@@ -28,12 +28,8 @@ use crate::scanner::{
     ChainRoutes, MAX_SCAN_WINDOW, ScannerError, chain_routes, resolve_logs_for_reconciliation,
 };
 
-use store::CustodyCursor;
-
 pub use chain::ReconciliationChain;
-pub use store::{
-    LeaseOwnerLock, blocked_addresses, chain_is_blocked, frozen_chains, hold_lease_owner_lock,
-};
+pub use store::{LeaseOwnerLock, chain_is_blocked, frozen_chains, hold_lease_owner_lock};
 pub use types::{CheckName, Finding, ReconciliationReport};
 
 /// Maximum `eth_getLogs` windows one incremental scan advances per chain and round.
@@ -174,8 +170,9 @@ impl Reconciler {
 
     /// Runs one check without persisting its findings.
     ///
-    /// Safe repairs still apply: `missing_deposit` and `missing_flush_link` write the ledger
-    /// exactly as a full round does.
+    /// Safe repairs and freezes still apply: `missing_deposit` and `missing_flush_link` write the
+    /// ledger, and `address_derivation` and `custody_balance` freeze a chain, exactly as a full
+    /// round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
         let mut findings = Vec::new();
         self.run_check(check, &mut FinalizedHeads::new(), &mut findings)
@@ -263,15 +260,16 @@ impl Reconciler {
         }
     }
 
-    /// Verifies every stored salt with the on-chain factory and freezes mismatching chains.
+    /// Verifies every stored `(salt, treasury)` with the on-chain factory and freezes mismatching
+    /// chains.
     async fn address_derivation(
         &self,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let mut failure = None;
-        for (chain_id, factory, treasury) in self.chain_factories()? {
+        for (chain_id, factory) in self.chain_factories()? {
             if let Err(error) = self
-                .address_derivation_for_chain(chain_id, factory, treasury, findings)
+                .address_derivation_for_chain(chain_id, factory, findings)
                 .await
             {
                 tracing::error!(chain_id, %error, "address derivation check failed for chain");
@@ -285,44 +283,52 @@ impl Reconciler {
         &self,
         chain_id: u64,
         factory: Address,
-        treasury: Address,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
         let chain = self.chain(chain_id)?;
-        let addresses = db::list_chain_addresses(&self.pool, chain_id).await?;
-        let salts = addresses
-            .iter()
-            .map(|address| address.salt)
-            .collect::<Vec<_>>();
-        let derived = chain.factory_addresses(factory, treasury, &salts).await?;
-        if derived.len() != addresses.len() {
-            return Err(ReconciliationError::Invariant(
-                "addressOf response length did not match address count",
-            ));
+        let mut by_treasury = BTreeMap::<Address, Vec<db::Address>>::new();
+        for address in db::list_chain_addresses(&self.pool, chain_id).await? {
+            by_treasury
+                .entry(address.treasury)
+                .or_default()
+                .push(address);
         }
-        for (stored, observed) in addresses.iter().zip(derived) {
-            if stored.address == observed {
-                continue;
+        for (treasury, addresses) in by_treasury {
+            let salts = addresses
+                .iter()
+                .map(|address| address.salt)
+                .collect::<Vec<_>>();
+            let derived = chain.factory_addresses(factory, treasury, &salts).await?;
+            if derived.len() != addresses.len() {
+                return Err(ReconciliationError::Invariant(
+                    "addressOf response length did not match address count",
+                ));
             }
-            store::block_chain(
-                &self.pool,
-                chain_id,
-                CheckName::AddressDerivation.code(),
-                "factory addressOf(treasury, salt) disagrees with stored address",
-            )
-            .await?;
-            findings.push(Finding::new(
-                CheckName::AddressDerivation,
-                subjects([
-                    ("chain_id", chain_id.to_string()),
-                    ("address_id", stored.id.to_string()),
-                    ("salt", format!("{:#x}", stored.salt)),
-                ]),
-                json!({"address": format!("{observed:#x}")}),
-                json!({"address": format!("{:#x}", stored.address)}),
-                false,
-                false,
-            )?);
+            for (stored, observed) in addresses.iter().zip(derived) {
+                if stored.address == observed {
+                    continue;
+                }
+                store::block_chain(
+                    &self.pool,
+                    chain_id,
+                    CheckName::AddressDerivation.code(),
+                    "factory addressOf(treasury, salt) disagrees with stored address",
+                )
+                .await?;
+                findings.push(Finding::new(
+                    CheckName::AddressDerivation,
+                    subjects([
+                        ("chain_id", chain_id.to_string()),
+                        ("address_id", stored.id.to_string()),
+                        ("salt", format!("{:#x}", stored.salt)),
+                        ("treasury", format!("{treasury:#x}")),
+                    ]),
+                    json!({"address": format!("{observed:#x}")}),
+                    json!({"address": format!("{:#x}", stored.address)}),
+                    false,
+                    false,
+                )?);
+            }
         }
         Ok(())
     }
@@ -426,7 +432,7 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Recomputes stored credit and blocks flushing for every mismatching address.
+    /// Recomputes stored credit and reports every mismatching deposit.
     async fn credit_recomputation(
         &self,
         findings: &mut Vec<Finding>,
@@ -537,14 +543,6 @@ impl Reconciler {
         if expected == stored.value() {
             return Ok(None);
         }
-        store::block_address(
-            &self.pool,
-            deposit.chain_id,
-            deposit.address_id,
-            CheckName::CreditRecomputation.code(),
-            "stored credit disagrees with deterministic recomputation",
-        )
-        .await?;
         Ok(Some(Finding::new(
             CheckName::CreditRecomputation,
             deposit_subjects(),
@@ -555,30 +553,30 @@ impl Reconciler {
         )?))
     }
 
-    /// Replays confirmed flush linkage with the same atomic rule the flusher uses.
+    /// Sweeps every final credited deposit that an indexed finalized `Flushed` event after it
+    /// covers, with the rule the scanner and the finality watch apply.
     async fn missing_flush_links(
         &self,
         findings: &mut Vec<Finding>,
     ) -> Result<(), ReconciliationError> {
-        for flush_id in store::linkable_flushes(&self.pool).await? {
-            for deposit_id in db::link_confirmed_flush(&self.pool, flush_id).await? {
-                findings.push(Finding::new(
-                    CheckName::MissingFlushLink,
-                    subjects([
-                        ("deposit_id", deposit_id.to_string()),
-                        ("flush_id", flush_id.to_string()),
-                    ]),
-                    json!({"flush_id": flush_id}),
-                    json!({"flush_id": null}),
-                    true,
-                    false,
-                )?);
-            }
+        let mut transaction = self.pool.begin().await?;
+        let swept = db::mark_swept(&mut transaction, None, &[]).await?;
+        transaction.commit().await?;
+        for deposit_id in swept {
+            findings.push(Finding::new(
+                CheckName::MissingFlushLink,
+                subjects([("deposit_id", deposit_id.to_string())]),
+                json!({"state": "swept"}),
+                json!({"state": "credited"}),
+                true,
+                false,
+            )?);
         }
         Ok(())
     }
 
-    /// Compares finalized custody state with the durable ledger at the same block.
+    /// Checks, per forwarder, that its finalized balance is its deposits minus its sweeps, and
+    /// freezes the chain on any mismatch (design §13).
     async fn custody_balances(
         &self,
         heads: &mut FinalizedHeads,
@@ -599,6 +597,14 @@ impl Reconciler {
         failure.map_or(Ok(()), Err)
     }
 
+    /// Compares, at one finalized block, every active forwarder's balance of the route's token
+    /// with its deposits minus its finalized `Flushed` amounts.
+    ///
+    /// The block is the lower of the finalized head and the scanner cursor, below which every
+    /// transfer and every factory event of a watched address is indexed. Anyone can flush a
+    /// forwarder at any time, and only finalized events are indexed, so both sides describe the
+    /// same finalized state; a mismatch means the ledger is wrong, and crediting on the chain
+    /// stops until an operator lifts the freeze.
     async fn custody_for_route(
         &self,
         route: &RouteFile,
@@ -609,113 +615,48 @@ impl Reconciler {
         let token = route.asset.contract;
         let chain = Arc::clone(self.chain(chain_id)?);
         let finalized = self.finalized(heads, chain_id).await?;
-        let addresses = db::list_scan_addresses(&self.pool, chain_id).await?;
-
-        // Flushes not yet confirmed may already have moved funds at the finalized block.
-        let in_flight = store::in_flight_flush_addresses(&self.pool, chain_id, token).await?;
-        let checked = addresses
-            .iter()
-            .filter(|address| !in_flight.contains(&address.id))
-            .collect::<Vec<_>>();
-        let physical = checked
-            .iter()
-            .map(|address| address.address)
-            .collect::<Vec<_>>();
-        let balances = if physical.is_empty() {
-            Vec::new()
-        } else {
-            chain.token_balances(token, &physical, finalized).await?
+        let Some(scanned) = db::get_cursor(&self.pool, chain_id).await? else {
+            return Ok(());
         };
-        if balances.len() != checked.len() {
+        let block = finalized.min(scanned);
+        let ledgers = store::forwarder_ledgers(&self.pool, chain_id, token, block).await?;
+        if ledgers.is_empty() {
+            return Ok(());
+        }
+        let physical = ledgers
+            .iter()
+            .map(|ledger| ledger.address)
+            .collect::<Vec<_>>();
+        let balances = chain.token_balances(token, &physical, block).await?;
+        if balances.len() != ledgers.len() {
             return Err(ReconciliationError::Invariant(
                 "balance response length did not match address count",
             ));
         }
-        let totals = store::address_totals(&self.pool, chain_id, token, finalized)
-            .await?
-            .into_iter()
-            .map(|(id, deposits, flushed)| (id, (deposits, flushed)))
-            .collect::<BTreeMap<_, _>>();
-        for (address, observed) in checked.iter().zip(balances) {
-            let (deposits, flushed) =
-                totals
-                    .get(&address.id)
-                    .ok_or(ReconciliationError::Invariant(
-                        "address accounting total is missing",
-                    ))?;
-            if deposits.checked_sub(*flushed) == Some(observed) {
+        for (ledger, observed) in ledgers.iter().zip(balances) {
+            if ledger.deposits.checked_sub(ledger.flushed) == Some(observed) {
                 continue;
             }
+            store::block_chain(
+                &self.pool,
+                chain_id,
+                CheckName::CustodyBalance.code(),
+                "a forwarder balance disagrees with its deposits minus its sweeps",
+            )
+            .await?;
             findings.push(Finding::new(
                 CheckName::CustodyBalance,
                 subjects([
                     ("chain_id", chain_id.to_string()),
-                    ("address_id", address.id.to_string()),
+                    ("address_id", ledger.address_id.to_string()),
                     ("token", format!("{token:#x}")),
+                    ("block", block.to_string()),
                 ]),
                 json!({
-                    "deposits_atomic": deposits.to_string(),
-                    "flushed_atomic": flushed.to_string(),
+                    "deposits_atomic": ledger.deposits.to_string(),
+                    "flushed_atomic": ledger.flushed.to_string(),
                 }),
                 json!({"balance_atomic": observed.to_string()}),
-                false,
-                false,
-            )?);
-        }
-
-        // Only transfers from our forwarders count as inflow: the treasury also receives finance
-        // top-ups and other funds that no `Flushed` event accounts for, so comparing its total
-        // inflow would alert on every such transfer.
-        let factory = route.chain.contracts.forwarder_factory;
-        let treasury = route.chain.contracts.treasury;
-        let cursor = store::custody_cursor(&self.pool, chain_id, factory, token).await?;
-        let Some(start) = cursor
-            .map(|cursor| cursor.next_block)
-            .or_else(|| first_created_block(&addresses))
-        else {
-            return Ok(());
-        };
-        let forwarders = addresses
-            .iter()
-            .map(|address| address.address)
-            .collect::<BTreeSet<_>>();
-        // Each window's totals are stored before the next is read, so a round that stops early
-        // keeps its progress and the next round resumes after the last stored window.
-        let mut cursor = cursor;
-        let mut totals = cursor.unwrap_or(CustodyCursor {
-            next_block: start,
-            flushed_event_total: U256::ZERO,
-            treasury_inflow_total: U256::ZERO,
-        });
-        for (from_block, to_block) in bounded_windows(start, finalized)? {
-            let flushed = chain
-                .flushed_total(factory, treasury, token, from_block, to_block)
-                .await?;
-            let inflow =
-                treasury_inflow(&chain, treasury, token, &forwarders, from_block, to_block).await?;
-            totals = CustodyCursor {
-                next_block: next_block(to_block)?,
-                flushed_event_total: checked_add(totals.flushed_event_total, flushed)?,
-                treasury_inflow_total: checked_add(totals.treasury_inflow_total, inflow)?,
-            };
-            if !store::advance_custody_cursor(&self.pool, chain_id, factory, token, cursor, totals)
-                .await?
-            {
-                tracing::debug!(chain_id, "custody cursor advanced concurrently");
-                return Ok(());
-            }
-            cursor = Some(totals);
-        }
-        if totals.treasury_inflow_total != totals.flushed_event_total {
-            findings.push(Finding::new(
-                CheckName::CustodyBalance,
-                subjects([
-                    ("chain_id", chain_id.to_string()),
-                    ("treasury", format!("{treasury:#x}")),
-                    ("token", format!("{token:#x}")),
-                ]),
-                json!({"flushed_event_total": totals.flushed_event_total.to_string()}),
-                json!({"treasury_inflow_total": totals.treasury_inflow_total.to_string()}),
                 false,
                 false,
             )?);
@@ -756,27 +697,22 @@ impl Reconciler {
         self.routes.current().collect()
     }
 
-    /// Returns each chain's factory and treasury. Until addresses record their own treasury,
-    /// every route of a chain must share both.
-    fn chain_factories(&self) -> Result<Vec<(u64, Address, Address)>, ReconciliationError> {
+    /// Returns each chain's factory; every route of a chain must name the same one.
+    fn chain_factories(&self) -> Result<Vec<(u64, Address)>, ReconciliationError> {
         let mut factories = BTreeMap::new();
         for route in self.routes.routes() {
-            let contracts = &route.chain.contracts;
-            let pair = (contracts.forwarder_factory, contracts.treasury);
-            match factories.insert(route.chain.chain_id, pair) {
-                Some(existing) if existing != pair => {
+            let factory = route.chain.contracts.forwarder_factory;
+            match factories.insert(route.chain.chain_id, factory) {
+                Some(existing) if existing != factory => {
                     return Err(ReconciliationError::Configuration(format!(
-                        "routes disagree on factory or treasury for chain {}",
+                        "routes disagree on the factory for chain {}",
                         route.chain.chain_id
                     )));
                 }
                 Some(_) | None => {}
             }
         }
-        Ok(factories
-            .into_iter()
-            .map(|(chain_id, (factory, treasury))| (chain_id, factory, treasury))
-            .collect())
+        Ok(factories.into_iter().collect())
     }
 }
 
@@ -845,35 +781,9 @@ fn next_block(block: u64) -> Result<u64, ReconciliationError> {
     ))
 }
 
-fn checked_add(left: U256, right: U256) -> Result<U256, ReconciliationError> {
-    left.checked_add(right)
-        .ok_or(ReconciliationError::Invariant(
-            "custody total overflowed U256",
-        ))
-}
-
 fn subjects<const N: usize>(pairs: [(&str, String); N]) -> BTreeMap<String, String> {
     pairs
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value))
         .collect()
-}
-
-/// Sums finalized token transfers from our forwarders to the treasury in one window.
-async fn treasury_inflow(
-    chain: &Arc<dyn ReconciliationChain>,
-    treasury: Address,
-    token: Address,
-    forwarders: &BTreeSet<Address>,
-    from_block: u64,
-    to_block: u64,
-) -> Result<U256, ReconciliationError> {
-    let logs = chain
-        .transfer_logs_to(std::slice::from_ref(&treasury), from_block, to_block)
-        .await?;
-    logs.iter()
-        .filter(|log| log.token == token && log.to == treasury && forwarders.contains(&log.from))
-        .try_fold(U256::ZERO, |total, log| {
-            checked_add(total, log.amount.value())
-        })
 }

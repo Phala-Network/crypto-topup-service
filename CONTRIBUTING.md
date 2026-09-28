@@ -29,7 +29,7 @@ Foundry. There, database and Anvil tests fail instead of skipping: the test help
 ## Branches and pull requests
 
 Create one branch per change from `main`, named `<type>/<slug>` after the Conventional Commits
-type, for example `fix/flusher-stall`. Keep the pull request scoped to that change and cite the
+type, for example `fix/scanner-stall`. Keep the pull request scoped to that change and cite the
 sections of `docs/architecture.md` it implements.
 
 ## Lint policy

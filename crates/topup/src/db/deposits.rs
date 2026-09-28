@@ -79,8 +79,6 @@ pub struct Deposit {
     pub credit_minor: Option<MinorAmount>,
     /// Stored quote evidence.
     pub quote: Option<Value>,
-    /// Confirmed flush covering this deposit.
-    pub flush_id: Option<Uuid>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
     /// Last row update time.
@@ -276,7 +274,6 @@ struct DepositRecord {
     price_source: Option<String>,
     credit_minor: Option<String>,
     quote: Option<Value>,
-    flush_id: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -320,7 +317,6 @@ impl TryFrom<DepositRecord> for Deposit {
             price_source: record.price_source,
             credit_minor: parse_optional_minor_decimal(record.credit_minor.as_deref())?,
             quote: record.quote,
-            flush_id: record.flush_id,
             created_at: record.created_at,
             updated_at: record.updated_at,
         })
@@ -397,63 +393,7 @@ pub(crate) async fn insert_deposit_in(
     )
     .execute(&mut **transaction)
     .await?;
-    let inserted = result.rows_affected() == 1;
-    if inserted {
-        link_deposit_to_flush(transaction, id).await?;
-    }
-    Ok(inserted)
-}
-
-/// Links a final deposit to the first confirmed flush after its log position, moving it from
-/// `credited` to `swept` (architecture §7). Flushes are confirmed only at `finalized`, and the
-/// deposit must be final and not reversed, so the swept accounting never depends on an
-/// unfinalized sweep or a moved transfer. Runs when a deposit is recorded and when it becomes
-/// final; a confirmed flush links the deposits before it itself.
-pub(crate) async fn link_deposit_to_flush(
-    transaction: &mut Transaction<'_, Postgres>,
-    deposit_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    let evidence = serde_json::json!({"outcome": "advance", "source": "confirmed_flush"});
-    sqlx::query(
-        r#"
-        WITH candidate AS (
-            SELECT f.flush_id
-            FROM deposits d
-            JOIN flushed f ON f.address_id = d.address_id
-            JOIN flushes x ON x.id = f.flush_id
-            WHERE d.id = $1
-              AND x.status = 'confirmed'
-              AND d.final_at IS NOT NULL
-              AND d.state <> 'reversed'
-              AND d.asset_contract = x.token
-              AND (d.block_number, d.log_index) < (f.block_number, f.log_index)
-            ORDER BY f.block_number, f.log_index, f.flush_id
-            LIMIT 1
-        ), previous AS (
-            SELECT id, state FROM deposits WHERE id = $1 FOR UPDATE
-        ), updated AS (
-            UPDATE deposits d
-            SET flush_id = candidate.flush_id,
-                state = CASE WHEN d.state = 'credited' THEN 'swept' ELSE d.state END,
-                attempt = CASE WHEN d.state = 'credited' THEN 0 ELSE d.attempt END,
-                lease_token = CASE WHEN d.state = 'credited' THEN NULL ELSE d.lease_token END,
-                lease_until = CASE WHEN d.state = 'credited' THEN NULL ELSE d.lease_until END,
-                updated_at = now()
-            FROM candidate, previous
-            WHERE d.id = previous.id AND d.flush_id IS NULL
-            RETURNING d.id, previous.state
-        )
-        INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
-        SELECT gen_random_uuid(), id, 'credited', 'swept', 0, $2
-        FROM updated
-        WHERE state = 'credited'
-        "#,
-    )
-    .bind(deposit_id)
-    .bind(evidence)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 /// Fetches a deposit by its deterministic identifier.
@@ -468,7 +408,7 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
             from_address, amount_atomic::text AS "amount_atomic!", tx_from,
             tx_nonce::text AS tx_nonce, final_at, state, reason, attempt, next_attempt_at,
             lease_token, lease_until, valuation_at, price_scaled::text AS price_scaled,
-            price_source, credit_minor::text AS credit_minor, quote, flush_id, created_at, updated_at
+            price_source, credit_minor::text AS credit_minor, quote, created_at, updated_at
         FROM deposits
         WHERE id = $1
         "#,
@@ -513,7 +453,7 @@ pub async fn claim_deposit(
             deposit.tx_nonce::text AS tx_nonce, deposit.final_at, deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,
             deposit.lease_token, deposit.lease_until, deposit.valuation_at,
             deposit.price_scaled::text AS price_scaled, deposit.price_source,
-            deposit.credit_minor::text AS credit_minor, deposit.quote, deposit.flush_id,
+            deposit.credit_minor::text AS credit_minor, deposit.quote,
             deposit.created_at, deposit.updated_at
         "#,
         lease_token
@@ -680,9 +620,9 @@ pub async fn apply_transition(
         super::outbox::enqueue_in(transaction, event).await?;
     }
 
-    if writes.effects.mark_final {
-        link_deposit_to_flush(transaction, deposit_id).await?;
-    }
+    // A deposit that is final when it is credited, or credited when it becomes final, is swept
+    // at once by a finalized `Flushed` event already indexed after it.
+    super::mark_swept(transaction, Some(deposit_id), &[]).await?;
 
     Ok(ApplyTransitionResult::Applied)
 }

@@ -66,6 +66,16 @@ impl RecordingReader {
 }
 
 impl ChainReader for RecordingReader {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        Ok(Vec::new())
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         Ok(FinalizedHead {
             number: self.finalized,
@@ -138,6 +148,16 @@ impl BackfillReader {
 }
 
 impl ChainReader for BackfillReader {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        Ok(Vec::new())
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         Ok(FinalizedHead {
             number: 4_000,

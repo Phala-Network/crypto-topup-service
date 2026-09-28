@@ -54,7 +54,9 @@ const STEP_COPY: Record<StepKey, { title: string; current: string; failed?: stri
   },
   swept: {
     title: "Swept to the treasury Safe",
-    current: "Swept with the next scheduled flush (every six hours, when gas allows).",
+    current:
+      "Waiting for the merchant to sweep: anyone may call the factory's flush, and the service " +
+      "marks the deposit swept once that flush is finalized.",
   },
 };
 

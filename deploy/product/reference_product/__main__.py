@@ -48,7 +48,7 @@ def main() -> int:
         "--min-atomic",
         type=int,
         default=0,
-        help="refuse to pay fewer atomic units (the route's min_flush_atomic)",
+        help="refuse to pay fewer atomic units",
     )
     deposit.add_argument(
         "--until",

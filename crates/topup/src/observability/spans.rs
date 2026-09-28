@@ -47,19 +47,6 @@ pub fn outbox_delivery_span(
     )
 }
 
-/// Creates the required span for one flusher action.
-#[must_use]
-pub fn flush_action_span(chain: u64, route: &str, state: &str, attempt: u32) -> Span {
-    tracing::info_span!(
-        "flush.action",
-        chain_id = chain,
-        route,
-        state,
-        attempt,
-        deposit_id = field::Empty,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use tracing_test::traced_test;
@@ -107,7 +94,6 @@ mod tests {
             price_source: None,
             credit_minor: None,
             quote: None,
-            flush_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

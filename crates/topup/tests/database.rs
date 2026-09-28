@@ -15,8 +15,7 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use topup::db::{
-    self, ApplyTransitionResult, EventObject, FlushedEvent, NewDeposit, NewFlush, OutboxEvent,
-    TransitionUpdate,
+    self, ApplyTransitionResult, EventObject, NewDeposit, OutboxEvent, TransitionUpdate,
 };
 use topup::reconciler::{CheckName, Reconciler, ReconciliationChain, ReconciliationError};
 use topup::{heartbeat, restore};
@@ -53,19 +52,19 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
     .await
 }
 
-/// The schema is one migration that builds every table on an empty database: staging is reset
-/// rather than migrated (design §14, §16 PR 13).
+/// The schema starts from one squashed migration that builds every table on an empty database:
+/// staging is reset rather than migrated (design §14, §16 PR 11). Later migrations are additive.
 #[tokio::test]
 async fn one_migration_builds_the_schema_on_an_empty_database() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
-            let migrations = db::MIGRATOR
+            let first = db::MIGRATOR
                 .iter()
-                .filter(|migration| migration.migration_type.is_up_migration())
-                .count();
+                .find(|migration| migration.migration_type.is_up_migration())
+                .map(|migration| migration.version);
             ensure!(
-                migrations == 1,
-                "expected one squashed migration, found {migrations}"
+                first == Some(20_261_004_000_000),
+                "expected the squashed migration first, found {first:?}"
             );
             // `with_database` migrated a database created empty; every documented table exists
             // and nothing else does.
@@ -420,17 +419,6 @@ impl ReconciliationChain for UnavailableChain {
         Self::error()
     }
 
-    async fn flushed_total(
-        &self,
-        _factory: Address,
-        _treasury: Address,
-        _token: Address,
-        _from_block: u64,
-        _to_block: u64,
-    ) -> Result<U256, ReconciliationError> {
-        Self::error()
-    }
-
     async fn factory_addresses(
         &self,
         _factory: Address,
@@ -603,12 +591,10 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("reconciliation_findings", &["SELECT", "INSERT"]),
     ("heartbeat", &["SELECT", "INSERT"]),
     ("reconciliation_blocks", &["SELECT", "INSERT", "DELETE"]),
+    ("flushed", &["SELECT", "INSERT"]),
+    ("flush_failures", &["SELECT", "INSERT"]),
     (
         "reconciliation_deposit_cursors",
-        &["SELECT", "INSERT", "UPDATE"],
-    ),
-    (
-        "reconciliation_custody_cursors",
         &["SELECT", "INSERT", "UPDATE"],
     ),
     ("_sqlx_migrations", &["SELECT"]),
@@ -633,9 +619,6 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("addresses", OPERATIONAL),
     ("cursors", OPERATIONAL),
     ("pending_transfers", OPERATIONAL),
-    ("flushes", OPERATIONAL),
-    ("flushed", OPERATIONAL),
-    ("flush_exclusions", OPERATIONAL),
     ("deposits", OPERATIONAL),
     ("refunds", OPERATIONAL),
     ("refund_payment_claims", OPERATIONAL),
@@ -1094,69 +1077,6 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                     .fetch_all(&context.app_pool)
                     .await?;
             ensure!(objects == [id]);
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn flush_and_flushed_uniqueness_allow_independent_operators_and_addresses() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let first = seed_account(&context.app_pool, 70).await?;
-            let second = seed_account(&context.app_pool, 71).await?;
-            let flush = NewFlush {
-                id: Uuid::new_v4(),
-                chain_id: 1,
-                token: evm_address(70),
-                operator: evm_address(71),
-                nonce: 7,
-                tx_hash: None,
-                block_number: None,
-                status: "planned".to_owned(),
-                receipt: None,
-            };
-            db::insert_flush(&context.app_pool, &flush).await?;
-            assert_unique(
-                db::insert_flush(
-                    &context.app_pool,
-                    &NewFlush {
-                        id: Uuid::new_v4(),
-                        ..flush.clone()
-                    },
-                )
-                .await
-                .err(),
-            )?;
-            db::insert_flush(
-                &context.app_pool,
-                &NewFlush {
-                    id: Uuid::new_v4(),
-                    operator: evm_address(72),
-                    ..flush.clone()
-                },
-            )
-            .await?;
-
-            let event = FlushedEvent {
-                flush_id: flush.id,
-                address_id: first.address_id,
-                amount_atomic: atomic(1_000),
-                block_number: 100,
-                log_index: 4,
-            };
-            db::insert_flushed(&context.app_pool, &event).await?;
-            assert_unique(db::insert_flushed(&context.app_pool, &event).await.err())?;
-            db::insert_flushed(
-                &context.app_pool,
-                &FlushedEvent {
-                    address_id: second.address_id,
-                    log_index: 5,
-                    ..event
-                },
-            )
-            .await?;
             Ok(())
         })
     })

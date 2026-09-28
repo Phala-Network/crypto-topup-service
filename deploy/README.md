@@ -122,8 +122,7 @@ every deploy, and uploads the rendered compose and the verification as the run's
 ([CONTRACTS.md](CONTRACTS.md#mainnet)) and a reviewed route PR putting the mainnet route into the
 compose (Deploy refuses a `production` compose with any route off chain 1). After the first
 deploy, in order: seal the secrets; [verify the attestation](#attestation-ingress-and-egress);
-grant and fund the [flusher operator](#flusher-operator); [issue the product's
-account](#account-credentials); and have Finance, Risk, and Operations approve the pilot limits
+[issue the product's account](#account-credentials); and have Finance, Risk, and Operations approve the pilot limits
 (route bounds, lock-exposure caps, product-side caps; architecture §17) and a passed restore drill
 ([RESTORE.md](RESTORE.md)) before the product enables deposits.
 
@@ -272,7 +271,6 @@ The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a ma
   | `topup-finality-watch` | each poll of the finality watch, every minute | 5 min |
   | `topup-reconciler` | `ok` after a complete round, `error` after failed checks, every 10 min | 10 min |
   | `topup-backup` | `ok` while the WAL-G success marker is at most 120 s old, else `error`; 3 errors open an issue | 2 min |
-  | `topup-flush-<route>` | on the route's `flush.schedule` (UTC): `ok` after planning, `error` when planning failed | 15 min |
 
 - **Uptime**: `/healthz` of each Environment ([One-time setup](#one-time-setup-human-only-repository-owner)).
 - **Egress**: `topup` sends HTTPS to the DSN's ingest host.
@@ -306,7 +304,7 @@ the restore-check variant `topup` on 8081 and no ingress. Never treat a hash fro
 [render-app-compose.sh](render-app-compose.sh) as the deployed one; the Phala CLI builds the
 app-compose itself.
 
-The settlement key and flusher operators come only from the public, nonce-bound attestation:
+The settlement key comes only from the public, nonce-bound attestation:
 
 ```sh
 export NONCE="$(openssl rand -hex 32)"
@@ -321,8 +319,7 @@ jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" 
   and .details.report_data == $report_data + ("0" * 64)' public-verification.json
 ```
 
-Then check that `report_data` binds the nonce, the `settlement/v1` key, and every operator with
-the Python SDK's `topup_sdk.verify_attestation_binding(response, nonce)` (architecture §14
+Then check that `report_data` binds the nonce and the `settlement/v1` key with the Python SDK's `topup_sdk.verify_attestation_binding(response, nonce)` (architecture §14
 defines the construction; `TopupClient.attestation` runs it on every fetch).
 
 **Ingress**: the attested compose must publish only `dstack-ingress` on 443; confirm `/openapi.json`
@@ -334,23 +331,23 @@ authority; dstack has no hostname allow-list): restrict outbound traffic to the 
 the price sources, the object storage host, the product's webhook host, the Sentry ingest
 host, DNS, and the Phala/dstack platform endpoints, and record the rules.
 
-### Flusher operator
+### Sweeping
 
-`operators` in the attestation lists, per chain, the key the flusher signs `flush` with
-(`chain_id`, `operator_key_version`, `keyid`, `address`). The factory is permissionless, so the
-operator needs no role, only native gas. With an address from a verified response:
+The service sends no transactions and holds no key that can move funds (design §5). A forwarder
+pays only the treasury its address commits to, and anyone can call the factory's public
+`flush(treasury, salts, token)`: the account's owner sweeps with its own wallet or Safe and pays
+the gas (for staging, the treasury Safe's owners). Until the SDK sweep builder (design PR 10)
+builds the call or a Safe Transaction Builder batch, it can be sent with `cast`, where `SALTS`
+lists the quote salts (`0x…`, comma-separated) of the addresses to sweep:
 
 ```sh
-export OPERATOR_ADDRESS="$(jq -er --argjson chain "$CHAIN_ID" \
-  '.operators[] | select(.chain_id == $chain) | .address' public-attestation.json)"
+cast send "$FACTORY" 'flush(address,bytes32[],address)' "$TREASURY" "[$SALTS]" "$TOKEN" \
+  --rpc-url "$RPC_URL" --account "$SWEEPER"
 ```
 
-**HUMAN-ONLY:** fund the address ([gas refill](runbooks/gas-refill.md)).
-
-Rotating the operator: bump `operator_key_version` in a new version of every current route on the
-chain and Deploy `upgrade`; read the new address from a fresh verified attestation and fund it
-(in-flight flushes of the old operator keep confirming). The flusher and operator keys are removed
-by [design PR 4](../docs/design/multi-tenant.md#16-plan).
+The finalized scanner indexes the factory's `Flushed` and `FlushFailed` events for the account's
+addresses and marks their final credited deposits `swept` about 15 minutes later; a target whose
+transfer failed stays unswept and is recorded in `flush_failures`.
 
 ## Account credentials
 
@@ -465,16 +462,15 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer ETH_PASSWORD=~/staging/payer.password
    PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product deposit \
      --config driver.json --driver-seed-file ~/staging/driver.seed \
-     --amount-minor <cents> --min-atomic 20000000000000000000000
+     --amount-minor <cents>
    ```
 
    The driver recomputes the lock address before paying and exits 0 once the product has
    recorded exactly one credit and the verified `deposit.credited` webhook (about 30 seconds after
-   paying, at the route's default confirmation of two blocks). The flusher sweeps only forwarders holding at least `min_flush_atomic`
-   (20000 test PHA), so `--min-atomic` refuses a smaller quote and prints the `--amount-minor`
-   needed; the quote must also fit the 500000-cent per-deposit and per-account caps (PHA below
-   about $0.24). `--until swept --timeout 25200` also waits for the next sweep (schedule
-   `0 */6 * * *` UTC).
+   paying, at the route's default confirmation of two blocks). `--min-atomic` refuses a quote
+   below that many atomic units and prints the `--amount-minor` needed; the quote must also fit
+   the 500000-cent per-deposit and per-account caps (PHA below about $0.24). `--until swept`
+   also waits until someone [sweeps](#sweeping) the forwarder and the sweep is finalized.
 
 `make cvm-rehearsal` runs this product CVM locally, with one deposit.
 

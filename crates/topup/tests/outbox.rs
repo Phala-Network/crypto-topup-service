@@ -31,9 +31,7 @@ use topup::routes::RouteSet;
 use topup_core::deposit::DepositState;
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
-use topup_core::{
-    Ed25519PublicKey, Ed25519Signature, SignedTx, Signer as CoreSigner, SignerError, TxRequest,
-};
+use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer as CoreSigner, SignerError};
 use uuid::Uuid;
 
 use support::TestDatabase;
@@ -55,16 +53,8 @@ impl TestSigner {
 }
 
 impl CoreSigner for TestSigner {
-    async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
-        Err(SignerError::SigningFailed)
-    }
-
     async fn sign_settlement(&self, content: &[u8]) -> Result<Ed25519Signature, SignerError> {
         Ok(Ed25519Signature(self.0.sign(content).to_bytes()))
-    }
-
-    async fn operator_address(&self) -> Result<alloy_primitives::Address, SignerError> {
-        Err(SignerError::KeyUnavailable)
     }
 
     async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {

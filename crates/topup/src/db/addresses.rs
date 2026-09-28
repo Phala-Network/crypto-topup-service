@@ -37,20 +37,6 @@ struct AddressRecord {
     address: String,
 }
 
-pub(crate) struct AddressWithPauseScopes {
-    pub(crate) address: Address,
-    pub(crate) customer_scopes: Vec<String>,
-    pub(crate) account_scopes: Vec<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct AddressWithPauseScopesRecord {
-    #[sqlx(flatten)]
-    address: AddressRecord,
-    customer_scopes: Vec<String>,
-    account_scopes: Vec<String>,
-}
-
 impl TryFrom<AddressRecord> for Address {
     type Error = sqlx::Error;
 
@@ -102,45 +88,4 @@ pub async fn list_chain_addresses(
     .fetch_all(pool)
     .await?;
     records.into_iter().map(TryInto::try_into).collect()
-}
-
-pub(crate) async fn list_chain_addresses_with_pause_scopes(
-    pool: &PgPool,
-    chain_id: u64,
-) -> Result<Vec<AddressWithPauseScopes>, sqlx::Error> {
-    let chain_id = to_i64(chain_id, "addresses.chain_id")?;
-    let records = sqlx::query_as::<_, AddressWithPauseScopesRecord>(
-        r#"
-        SELECT
-            address.id,
-            address.account_id,
-            address.livemode,
-            address.chain_id,
-            address.quote_id,
-            address.salt,
-            address.treasury,
-            address.address,
-            customer.paused_scopes AS customer_scopes,
-            account.paused_scopes AS account_scopes
-        FROM addresses AS address
-        JOIN quotes AS quote ON quote.id = address.quote_id
-        JOIN customers AS customer ON customer.id = quote.customer_id
-        JOIN accounts AS account ON account.id = address.account_id
-        WHERE address.chain_id = $1
-        ORDER BY address.address, address.id
-        "#,
-    )
-    .bind(chain_id)
-    .fetch_all(pool)
-    .await?;
-    records
-        .into_iter()
-        .map(|record| {
-            Ok(AddressWithPauseScopes {
-                address: record.address.try_into()?,
-                customer_scopes: record.customer_scopes,
-                account_scopes: record.account_scopes,
-            })
-        })
-        .collect()
 }

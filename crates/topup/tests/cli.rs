@@ -270,104 +270,45 @@ fn dev_attestation_prints_the_required_json_shape() {
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
     let object = value.as_object().expect("attestation should be an object");
 
-    assert_eq!(object.len(), 9);
+    assert_eq!(object.len(), 6);
     assert_eq!(value["keyid"], "settlement/v1");
-    assert_eq!(value["operators"], serde_json::json!([]));
     assert_eq!(value["settlement_pubkey"].as_str().map(str::len), Some(64));
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["quote"], "");
     assert_eq!(value["app_id"], "");
     assert_eq!(value["compose_hash"], "");
-    assert_eq!(value["operator_keyid"], "operator/v1");
-    assert_eq!(value["operator_address"].as_str().map(str::len), Some(42));
 }
 
 #[cfg(feature = "dev-signer")]
 #[test]
-fn dev_attestation_reports_the_requested_operator_key_version() {
-    let attest = |version: &str| {
-        let output = topup(&[
-            "attest",
-            "--nonce",
-            "00",
-            "--dev",
-            "--operator-key-version",
-            version,
-        ]);
-        assert!(output.status.success(), "version {version} should attest");
-        serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .expect("attestation should be JSON")
-    };
-    let v1 = attest("1");
-    let v2 = attest("2");
+fn dev_attestation_binds_the_nonce_and_settlement_key_like_the_api() {
+    use topup_adapters::attestation::report_data;
 
-    assert_eq!(v2["operator_keyid"], "operator/v2");
-    assert_ne!(v1["operator_address"], v2["operator_address"]);
-    assert_eq!(v1["settlement_pubkey"], v2["settlement_pubkey"]);
-
-    let zero = topup(&[
-        "attest",
-        "--nonce",
-        "00",
-        "--dev",
-        "--operator-key-version",
-        "0",
-    ]);
-    assert!(!zero.status.success());
-}
-
-#[cfg(feature = "dev-signer")]
-#[test]
-fn dev_attestation_binds_the_route_operators_like_the_api() {
-    use topup_adapters::attestation::{AttestedOperator, report_data};
-
-    let route = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/phala-cloud-pha.yaml"
-    );
-    let output = topup(&["attest", "--nonce", "00010203", "--dev", "--route", route]);
+    let output = topup(&["attest", "--nonce", "00010203", "--dev"]);
     assert!(output.status.success());
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("attestation should be JSON");
-
-    // The fixture route runs on chain 1 with operator key version 1, the default preview.
-    let address = value["operator_address"]
-        .as_str()
-        .expect("operator address");
-    assert_eq!(
-        value["operators"],
-        serde_json::json!([{
-            "chain_id": 1,
-            "operator_key_version": 1,
-            "keyid": "operator/v1",
-            "address": address,
-        }])
-    );
     let settlement = topup_core::Ed25519PublicKey(
         hex::decode(value["settlement_pubkey"].as_str().expect("settlement key"))
             .expect("hex settlement key")
             .try_into()
             .expect("32-byte settlement key"),
     );
-    let operator = AttestedOperator {
-        chain_id: 1,
-        key_version: std::num::NonZeroU32::MIN,
-        address: address.parse().expect("operator address parses"),
-    };
     assert_eq!(
         value["report_data"],
-        hex::encode(report_data(&[0, 1, 2, 3], &settlement, &[operator]))
+        hex::encode(report_data(&[0, 1, 2, 3], &settlement))
     );
 
-    let invalid = topup(&[
+    // The operator key is gone with the flusher; its options are no longer accepted.
+    let removed = topup(&[
         "attest",
         "--nonce",
         "00",
         "--dev",
-        "--route",
-        "/nonexistent",
+        "--operator-key-version",
+        "1",
     ]);
-    assert!(!invalid.status.success());
+    assert!(!removed.status.success());
 }
 
 #[test]

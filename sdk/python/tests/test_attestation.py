@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
-
 import httpx
 import pytest
 
-from topup_client.models import AttestationResponse, OperatorIdentity
+from topup_client.models import AttestationResponse
 from topup_sdk import (
     AttestationError,
     RequestSigner,
@@ -16,25 +14,15 @@ from topup_sdk import (
 
 NONCE = bytes(range(16))
 SETTLEMENT = bytes([0x42] * 32)
-# The known vector of `report_data_binds_operators_in_canonical_order` in
+# The known vector of `report_data_matches_the_published_vector` in
 # crates/adapters/src/attestation.rs.
-OPERATORS = [
-    {"chain_id": 1, "operator_key_version": 2, "keyid": "operator/v2", "address": "0x" + "11" * 20},
-    {
-        "chain_id": 11_155_111,
-        "operator_key_version": 1,
-        "keyid": "operator/v1",
-        "address": "0x" + "22" * 20,
-    },
-]
-REPORT_DATA = "c30486f4d5a70ddf9a44157ce18f8c1e37a9479f15c02b80c4e373dc639fa9ea"
+REPORT_DATA = "58c4e8b13ba082a25854a52564151194a7ec3221acc8aa8884f2aba2dda1037f"
 
 
 def _response(**overrides: object) -> dict[str, object]:
     body: dict[str, object] = {
         "keyid": "settlement/v1",
         "settlement_pubkey": SETTLEMENT.hex(),
-        "operators": OPERATORS,
         "report_data": REPORT_DATA,
         "quote": "",
     }
@@ -43,25 +31,16 @@ def _response(**overrides: object) -> dict[str, object]:
 
 
 def test_report_data_matches_the_rust_vector() -> None:
-    operators = [OperatorIdentity.from_dict(operator) for operator in OPERATORS]
-    assert attestation_report_data(NONCE, SETTLEMENT, operators).hex() == REPORT_DATA
-
-
-def test_a_response_without_operators_uses_the_original_binding() -> None:
-    body = _response(report_data=hashlib.sha256(NONCE + SETTLEMENT).hexdigest())
-    del body["operators"]
-    verify_attestation_binding(AttestationResponse.from_dict(body), NONCE)
+    assert attestation_report_data(NONCE, SETTLEMENT).hex() == REPORT_DATA
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"operators": [OPERATORS[0], {**OPERATORS[1], "address": "0x" + "33" * 20}]},
-        {"operators": OPERATORS[:1]},
-        {"operators": list(reversed(OPERATORS))},
-        {"operators": [OPERATORS[0], {**OPERATORS[1], "keyid": "operator/v2"}]},
-        {"operators": [OPERATORS[0], {**OPERATORS[1], "address": "0x" + "2" * 40 + "A"}]},
         {"settlement_pubkey": "43" * 32},
+        {"settlement_pubkey": "42" * 31},
+        {"report_data": "00" * 32},
+        {"report_data": "not hex"},
     ],
 )
 def test_bindings_that_do_not_match_are_rejected(overrides: dict[str, object]) -> None:
@@ -70,7 +49,7 @@ def test_bindings_that_do_not_match_are_rejected(overrides: dict[str, object]) -
 
 
 def test_client_attestation_verifies_the_binding() -> None:
-    bodies = [_response(), _response(operators=OPERATORS[1:])]
+    bodies = [_response(), _response(settlement_pubkey="43" * 32)]
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.params["nonce"] == NONCE.hex()
@@ -81,10 +60,6 @@ def test_client_attestation_verifies_the_binding() -> None:
         "http://service.test:8080", signer, transport=httpx.MockTransport(respond)
     ) as client:
         evidence = client.attestation(NONCE)
-        assert isinstance(evidence.operators, list)
-        assert [operator.address for operator in evidence.operators] == [
-            OPERATORS[0]["address"],
-            OPERATORS[1]["address"],
-        ]
+        assert evidence.settlement_pubkey == SETTLEMENT.hex()
         with pytest.raises(AttestationError):
             client.attestation(NONCE)

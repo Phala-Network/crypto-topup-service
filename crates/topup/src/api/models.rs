@@ -558,7 +558,8 @@ pub struct RouteDailyReport {
     pub treasury_balance_atomic: Option<String>,
     /// Balance source or explicit reason the treasury balance is unavailable.
     pub treasury_balance_note: String,
-    /// Sum of deposits not linked to a confirmed flush.
+    /// Deposits not reversed minus finalized `Flushed` amounts: what the route's forwarders
+    /// still hold for their merchants to sweep.
     pub unflushed_balance_atomic: String,
     /// Sum of unconsumed rate-lock token amounts.
     pub open_rate_lock_exposure_atomic: String,
@@ -574,33 +575,6 @@ pub struct RouteDailyReport {
     pub refunds_by_status: std::collections::BTreeMap<String, u64>,
     /// Maximum age in seconds keyed by current deposit state.
     pub age_in_state_max_seconds: std::collections::BTreeMap<String, u64>,
-    /// Latest scheduled flush planning run of this route in the serving process; absent for
-    /// unrouted assets and until the first run after a restart.
-    pub flush_planning: Option<FlushPlanningReport>,
-}
-
-/// Outcome of one scheduled flush planning run.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct FlushPlanningReport {
-    /// When the run finished.
-    pub at: DateTime<Utc>,
-    /// `planned`; `idle` when no address met the flush policy, a flush was already in flight, or
-    /// reconciliation froze the chain; `operator_not_authorized` when the operator was not known
-    /// to hold `OPERATOR_ROLE`; `failed`; or `send_failed` when planning succeeded but sending or
-    /// maintaining a flush afterwards failed.
-    pub outcome: String,
-    /// Error of a failed run, without provider URLs.
-    pub error: Option<String>,
-}
-
-impl From<crate::observability::FlushPlanningStatus> for FlushPlanningReport {
-    fn from(status: crate::observability::FlushPlanningStatus) -> Self {
-        Self {
-            at: status.at,
-            outcome: status.outcome.code().to_owned(),
-            error: status.error,
-        }
-    }
 }
 
 /// Latest reconciliation round of the serving process.
@@ -615,9 +589,10 @@ pub struct ReconciliationRoundReport {
 /// A persistent reconciliation block (architecture §13).
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ReconciliationBlockReport {
-    /// Block identifier, `chain:{chain_id}` or `address:{address_id}`.
+    /// Block identifier, `chain:{chain_id}`.
     pub block_key: String,
-    /// `chain` (the chain is frozen) or `address` (the address is left out of flush planning).
+    /// `chain`: the chain is frozen. No check writes the `address` scope any more; it excluded an
+    /// address from the removed operator flusher.
     pub scope: String,
     /// EVM chain identifier.
     pub chain_id: u64,
@@ -690,46 +665,15 @@ pub struct AttestationQuery {
     pub nonce: String,
 }
 
-/// TDX evidence binding a nonce to the settlement public key and the flusher operators.
+/// TDX evidence binding a nonce to the settlement public key.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AttestationResponse {
     /// Settlement key identifier.
     pub keyid: String,
     /// Raw ed25519 settlement public key as lowercase hexadecimal.
     pub settlement_pubkey: String,
-    /// Flusher operator of each configured chain, in ascending `chain_id` order. This service
-    /// always sends it; it is optional in the schema so clients also parse responses from servers
-    /// that predate it, whose report data binds no operators (an absent list reads as empty).
-    #[schema(required = false)]
-    pub operators: Vec<OperatorIdentity>,
-    /// `sha256(nonce ‖ settlement_pubkey ‖ record_1 ‖ … ‖ record_n)` as lowercase hexadecimal,
-    /// with one 32-byte record per operator in list order: `chain_id` (u64 big-endian),
-    /// `operator_key_version` (u32 big-endian), and the 20 address bytes.
+    /// `sha256(nonce ‖ settlement_pubkey)` as lowercase hexadecimal.
     pub report_data: String,
     /// Versioned dstack attestation bytes as lowercase hexadecimal.
     pub quote: String,
-}
-
-/// The key a chain's flusher signs `flush` transactions with; it needs `OPERATOR_ROLE` and gas.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct OperatorIdentity {
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// The chain's configured operator key derivation version.
-    pub operator_key_version: u32,
-    /// Operator key identifier, `operator/v{operator_key_version}`.
-    pub keyid: String,
-    /// Operator address as lowercase `0x`-prefixed hexadecimal.
-    pub address: String,
-}
-
-impl From<&topup_adapters::attestation::AttestedOperator> for OperatorIdentity {
-    fn from(operator: &topup_adapters::attestation::AttestedOperator) -> Self {
-        Self {
-            chain_id: operator.chain_id,
-            operator_key_version: operator.key_version.get(),
-            keyid: topup_core::operator_key_domain(operator.key_version),
-            address: format!("{:#x}", operator.address),
-        }
-    }
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, chain_id, tx_hash, receipt_log_index, log_index, block_number, block_hash,\n            block_time, address_id, account_id, livemode, customer_id, route, route_version,\n            asset_contract,\n            from_address, amount_atomic::text AS \"amount_atomic!\", tx_from,\n            tx_nonce::text AS tx_nonce, final_at, state, reason, attempt, next_attempt_at,\n            lease_token, lease_until, valuation_at, price_scaled::text AS price_scaled,\n            price_source, credit_minor::text AS credit_minor, quote, flush_id, created_at, updated_at\n        FROM deposits\n        WHERE id = $1\n        ",
+  "query": "\n        WITH candidate AS (\n            SELECT id\n            FROM deposits\n            WHERE state NOT IN ('swept', 'rejected', 'reversed')\n              AND next_attempt_at <= now()\n              AND (lease_until IS NULL OR lease_until <= now())\n            ORDER BY next_attempt_at, created_at, id\n            FOR UPDATE SKIP LOCKED\n            LIMIT 1\n        )\n        UPDATE deposits AS deposit\n        SET lease_token = $1,\n            lease_until = now() + interval '5 minutes',\n            updated_at = now()\n        FROM candidate\n        WHERE deposit.id = candidate.id\n        RETURNING\n            deposit.id, deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index,\n            deposit.log_index, deposit.block_number, deposit.block_hash, deposit.block_time,\n            deposit.address_id, deposit.account_id, deposit.livemode, deposit.customer_id,\n            deposit.route, deposit.route_version,\n            deposit.asset_contract, deposit.from_address,\n            deposit.amount_atomic::text AS \"amount_atomic!\", deposit.tx_from,\n            deposit.tx_nonce::text AS tx_nonce, deposit.final_at, deposit.state, deposit.reason, deposit.attempt, deposit.next_attempt_at,\n            deposit.lease_token, deposit.lease_until, deposit.valuation_at,\n            deposit.price_scaled::text AS price_scaled, deposit.price_source,\n            deposit.credit_minor::text AS credit_minor, deposit.quote,\n            deposit.created_at, deposit.updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -326,17 +326,6 @@
       },
       {
         "ordinal": 31,
-        "name": "flush_id",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "deposits",
-            "name": "flush_id"
-          }
-        }
-      },
-      {
-        "ordinal": 32,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -347,7 +336,7 @@
         }
       },
       {
-        "ordinal": 33,
+        "ordinal": 32,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -395,10 +384,9 @@
       true,
       null,
       true,
-      true,
       false,
       false
     ]
   },
-  "hash": "73a09adfa0667abf2699d0098aedfd50d0b6279d2a1d2d14546b45e4aef3fc60"
+  "hash": "a09b5c1731fc3f38a7ef32d6b75a71a6e70951ba450c95476bef7d90011f69c1"
 }

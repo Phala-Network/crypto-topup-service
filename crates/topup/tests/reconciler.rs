@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::db::{self, Deposit, FlushedEvent, NewDeposit, NewFlush};
+use topup::db::{self, Deposit, NewDeposit};
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::reconciler::{
     CheckName, Reconciler, ReconciliationChain, ReconciliationError, ReconciliationReport,
@@ -48,8 +48,7 @@ struct MockChain {
     logs: Mutex<Vec<TransferLog>>,
     log_requests: Mutex<Vec<(u64, u64)>>,
     balances: Mutex<BTreeMap<Address, U256>>,
-    balance_blocks: Mutex<Vec<u64>>,
-    flushed_events: Mutex<Vec<(u64, U256)>>,
+    balance_reads: Mutex<Vec<(u64, Vec<Address>)>>,
     derived: Mutex<BTreeMap<B256, Address>>,
 }
 
@@ -117,29 +116,15 @@ impl ReconciliationChain for MockChain {
         addresses: &[Address],
         block: u64,
     ) -> Result<Vec<U256>, ReconciliationError> {
-        self.balance_blocks.lock().unwrap().push(block);
+        self.balance_reads
+            .lock()
+            .unwrap()
+            .push((block, addresses.to_vec()));
         let balances = self.balances.lock().unwrap();
         Ok(addresses
             .iter()
             .map(|address| balances.get(address).copied().unwrap_or(U256::ZERO))
             .collect())
-    }
-
-    async fn flushed_total(
-        &self,
-        _factory: Address,
-        _treasury: Address,
-        _token: Address,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<U256, ReconciliationError> {
-        Ok(self
-            .flushed_events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(block, _)| *block >= from_block && *block <= to_block)
-            .fold(U256::ZERO, |total, (_, amount)| total + *amount))
     }
 
     async fn factory_addresses(
@@ -166,7 +151,7 @@ struct Seed {
 }
 
 #[tokio::test]
-async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -> Result<()> {
+async fn repairs_missing_deposits_incrementally_and_sweeps_with_audit() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 1).await?;
@@ -214,14 +199,14 @@ async fn repairs_missing_deposits_incrementally_and_links_flushes_with_audit() -
             DepositSeed::new(21, DepositState::Credited).block(4),
         )
         .await?;
-        let flush_id = seed_confirmed_flush(&pool, &route, &seed, 101, 1, 1_500).await?;
+        // Indexed without the sweep, as by a scanner that stopped between the two writes.
+        seed_flushed(&pool, &route, &seed, 101, 1, 1_500).await?;
         let report = reconciler.run_once().await?;
         ensure!(report.succeeded());
         ensure!(report.findings.iter().any(|finding| {
             finding.check == CheckName::MissingFlushLink && finding.repair_applied
         }));
-        let linked = deposit(&pool, linked_id).await?;
-        ensure!(linked.flush_id == Some(flush_id) && linked.state == DepositState::Swept);
+        ensure!(deposit(&pool, linked_id).await?.state == DepositState::Swept);
         ensure!(
             reconciler
                 .check(CheckName::MissingFlushLink)
@@ -291,54 +276,6 @@ async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
         let missing = reconciler.check(CheckName::MissingDeposit).await?;
         ensure!(missing.len() == 1 && missing[0].repair_applied);
         ensure!(chain.log_requests.lock().unwrap().last() == Some(&(7, 9)));
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-async fn flush_linkage_keeps_a_state_advanced_after_the_scan() -> Result<()> {
-    with_database(|pool| async move {
-        let route = route()?;
-        let seed = seed_identity(&pool, &route, 2).await?;
-        let deposit_id = seed_deposit(
-            &pool,
-            &route,
-            &seed,
-            DepositSeed::new(22, DepositState::Confirmed),
-        )
-        .await?;
-        let flush_id = seed_confirmed_flush(&pool, &route, &seed, 101, 1, 1_000).await?;
-        let reconciler = Arc::new(reconciler(
-            &pool,
-            route,
-            Arc::new(MockChain::at(0)),
-        )?);
-
-        // The screen step commits `confirmed → credited` while linkage is waiting on the row.
-        let mut advance = pool.begin().await?;
-        sqlx::query("UPDATE deposits SET state = 'credited' WHERE id = $1")
-            .bind(deposit_id)
-            .execute(&mut *advance)
-            .await?;
-        let linking = tokio::spawn({
-            let reconciler = Arc::clone(&reconciler);
-            async move { reconciler.check(CheckName::MissingFlushLink).await }
-        });
-        tokio::time::sleep(StdDuration::from_millis(300)).await;
-        advance.commit().await?;
-        let findings = tokio::time::timeout(StdDuration::from_secs(5), linking).await???;
-        ensure!(findings.len() == 1 && findings[0].repair_applied);
-
-        let linked = deposit(&pool, deposit_id).await?;
-        ensure!(linked.state == DepositState::Swept && linked.flush_id == Some(flush_id));
-        let swept: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM transitions WHERE deposit_id = $1 AND from_state = 'credited' AND to_state = 'swept'",
-        )
-        .bind(deposit_id)
-        .fetch_one(&pool)
-        .await?;
-        ensure!(swept == 1);
         Ok(())
     })
     .await
@@ -447,6 +384,7 @@ async fn checks_are_independent_and_a_failed_round_recovers() -> Result<()> {
             .bind(historical_id)
             .execute(&pool)
             .await?;
+        scanned_through(&pool, 150).await?;
         let chain = Arc::new(MockChain::at(150));
         chain.derive(&[&seed]);
         chain.fail_derivation.store(true, Ordering::SeqCst);
@@ -477,151 +415,116 @@ async fn checks_are_independent_and_a_failed_round_recovers() -> Result<()> {
 }
 
 #[tokio::test]
-async fn custody_balances_use_the_finalized_block_and_incremental_totals() -> Result<()> {
+async fn custody_is_checked_per_forwarder_at_the_indexed_finalized_block() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
-        let custody = seed_identity(&pool, &route, 71).await?;
-        let flushing = seed_identity(&pool, &route, 72).await?;
+        let token = route.asset.contract;
+        let swept = seed_identity(&pool, &route, 71).await?;
+        let unsettled = seed_identity(&pool, &route, 72).await?;
+        let idle = seed_identity(&pool, &route, 73).await?;
         seed_deposit(
             &pool,
             &route,
-            &custody,
+            &swept,
             DepositSeed::new(71, DepositState::Swept)
                 .block(100)
                 .amount(1_000),
         )
         .await?;
-        // Still inside the finality window at block 150.
+        // Above the checked block: neither its balance nor its deposit counts yet.
         seed_deposit(
             &pool,
             &route,
-            &custody,
+            &swept,
             DepositSeed::new(72, DepositState::Detected)
-                .block(200)
+                .block(145)
                 .amount(500),
         )
         .await?;
-        seed_confirmed_flush(&pool, &route, &custody, 120, 3, 400).await?;
-        seed_deposit(
+        seed_flushed(&pool, &route, &swept, 120, 3, 400).await?;
+        // A reversed deposit is not in the balance.
+        let reversed = seed_deposit(
             &pool,
             &route,
-            &flushing,
-            DepositSeed::new(73, DepositState::Credited).amount(700),
+            &swept,
+            DepositSeed::new(74, DepositState::Credited)
+                .block(110)
+                .amount(9),
         )
         .await?;
-        db::insert_flush(
+        sqlx::query("UPDATE deposits SET state = 'reversed', final_at = NULL WHERE id = $1")
+            .bind(reversed)
+            .execute(&pool)
+            .await?;
+        // The finality watch has not settled this deposit, so its forwarder waits a round.
+        let pending = seed_deposit(
             &pool,
-            &NewFlush {
-                id: Uuid::new_v4(),
-                chain_id: CHAIN_ID,
-                token: route.asset.contract,
-                operator: Address::from([22; 20]),
-                nonce: 9,
-                tx_hash: Some(B256::from([24; 32])),
-                block_number: None,
-                status: "sent".to_owned(),
-                receipt: Some(json!({"plan": [{"address_id": flushing.address_id}]})),
-            },
+            &route,
+            &unsettled,
+            DepositSeed::new(73, DepositState::Credited)
+                .block(100)
+                .amount(700),
         )
         .await?;
+        sqlx::query("UPDATE deposits SET final_at = NULL WHERE id = $1")
+            .bind(pending)
+            .execute(&pool)
+            .await?;
 
-        let treasury = route.chain.contracts.treasury;
         let chain = Arc::new(MockChain::at(150));
-        chain.derive(&[&custody, &flushing]);
+        chain.derive(&[&swept, &unsettled, &idle]);
         chain
             .balances
             .lock()
             .unwrap()
-            .insert(custody.address, U256::from(600_u64));
-        chain
-            .flushed_events
-            .lock()
-            .unwrap()
-            .push((120, U256::from(400_u64)));
-        {
-            let mut logs = chain.logs.lock().unwrap();
-            logs.push(transfer(
-                81,
-                3,
-                120,
-                route.asset.contract,
-                custody.address,
-                treasury,
-                400,
-            ));
-            // Finance top-ups to the treasury are not flush inflows.
-            logs.push(transfer(
-                82,
-                0,
-                130,
-                route.asset.contract,
-                Address::from([90; 20]),
-                treasury,
-                999,
-            ));
-        }
+            .insert(swept.address, U256::from(600_u64));
         let reconciler = reconciler(&pool, route.clone(), chain.clone())?;
 
+        // Nothing is compared before the scanner has indexed a range.
         ensure!(
             reconciler
                 .check(CheckName::CustodyBalance)
                 .await?
                 .is_empty()
         );
-        ensure!(chain.balance_blocks.lock().unwrap().as_slice() == [150]);
+        ensure!(chain.balance_reads.lock().unwrap().is_empty());
+
+        // The scanner lags the finalized head: the check reads at the scanner's block, where every
+        // transfer and factory event is indexed, and only forwarders with settled activity.
+        scanned_through(&pool, 140).await?;
         ensure!(
             reconciler
                 .check(CheckName::CustodyBalance)
+                .await?
+                .is_empty()
+        );
+        ensure!(chain.balance_reads.lock().unwrap().as_slice() == [(140, vec![swept.address])]);
+        ensure!(
+            frozen_chains(&pool, &*route_set(route.clone())?)
                 .await?
                 .is_empty()
         );
 
-        chain.finalized.store(300, Ordering::SeqCst);
+        // A forwarder holding more than its deposits minus its sweeps freezes the chain.
         chain
             .balances
             .lock()
             .unwrap()
-            .insert(custody.address, U256::from(1_100_u64));
-        chain
-            .flushed_events
-            .lock()
-            .unwrap()
-            .push((250, U256::from(50_u64)));
-        let requests_before = chain.log_requests.lock().unwrap().len();
+            .insert(swept.address, U256::from(601_u64));
         let findings = reconciler.check(CheckName::CustodyBalance).await?;
         ensure!(findings.len() == 1, "unexpected findings: {findings:?}");
-        ensure!(findings[0].expected["flushed_event_total"] == json!("450"));
-        ensure!(findings[0].observed["treasury_inflow_total"] == json!("400"));
-        let requests = chain.log_requests.lock().unwrap().clone();
-        ensure!(requests[requests_before..] == [(151, 300)]);
-        Ok(())
-    })
-    .await
-}
-
-#[tokio::test]
-async fn custody_progress_survives_a_round_that_stops_mid_range() -> Result<()> {
-    with_database(|pool| async move {
-        let route = route()?;
-        let seed = seed_identity(&pool, &route, 81).await?;
-        let chain = Arc::new(MockChain::at(2_500));
-        chain.derive(&[&seed]);
-        *chain.fail_logs_from.lock().unwrap() = Some(2_000);
-        let reconciler = reconciler(&pool, route, chain.clone())?;
-
-        ensure!(reconciler.check(CheckName::CustodyBalance).await.is_err());
-        ensure!(chain.log_requests.lock().unwrap().as_slice() == [(0, 1_999), (2_000, 2_500)]);
-
-        // The next round resumes after the window the failed round stored.
-        *chain.fail_logs_from.lock().unwrap() = None;
-        chain.log_requests.lock().unwrap().clear();
-        ensure!(
-            reconciler
-                .check(CheckName::CustodyBalance)
-                .await?
-                .is_empty()
-        );
-        ensure!(chain.log_requests.lock().unwrap().as_slice() == [(2_000, 2_500)]);
+        ensure!(findings[0].subjects["address_id"] == swept.address_id.to_string());
+        ensure!(findings[0].subjects["token"] == format!("{token:#x}"));
+        ensure!(findings[0].expected["deposits_atomic"] == json!("1000"));
+        ensure!(findings[0].expected["flushed_atomic"] == json!("400"));
+        ensure!(findings[0].observed["balance_atomic"] == json!("601"));
+        ensure!(frozen_chains(&pool, &*route_set(route)?).await? == BTreeSet::from([CHAIN_ID]));
+        let block: String = sqlx::query_scalar(
+            "SELECT check_name FROM reconciliation_blocks WHERE block_key = 'chain:31337'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        ensure!(block == "custody_balance");
         Ok(())
     })
     .await
@@ -643,7 +546,12 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         ];
         let token = route.asset.contract;
         let seed = seed_identity(&pool, &route, 91).await?;
+        let later_seed = seed_identity(&pool, &route, 94).await?;
         node.derived.lock().unwrap().insert(seed.salt, seed.address);
+        node.derived
+            .lock()
+            .unwrap()
+            .insert(later_seed.salt, later_seed.address);
         let recorded = transfer(
             91,
             91,
@@ -684,6 +592,10 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         ensure!(report.succeeded(), "{:?}", report.check_errors);
         drop(before_restart);
 
+        // The finality watch settled the repaired deposit.
+        sqlx::query("UPDATE deposits SET final_at = now() WHERE final_at IS NULL")
+            .execute(&pool)
+            .await?;
         // While the service was down the chain moved on: one more transfer the scanner missed, and
         // a balance that no longer matches the ledger.
         let later = transfer(
@@ -692,14 +604,14 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
             250,
             token,
             Address::from([203; 20]),
-            seed.address,
+            later_seed.address,
             200,
         );
         node.logs.lock().unwrap().push(later);
         node.balances
             .lock()
             .unwrap()
-            .insert(seed.address, U256::from(1_701_u64));
+            .insert(seed.address, U256::from(1_501_u64));
         node.finalized.store(300, Ordering::SeqCst);
         scanned_through(&pool, 300).await?;
         node.limit.store(3, Ordering::SeqCst);
@@ -720,7 +632,7 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         }));
         ensure!(report.findings.iter().any(|finding| {
             finding.check == CheckName::CustodyBalance
-                && finding.observed["balance_atomic"] == json!("1701")
+                && finding.observed["balance_atomic"] == json!("1501")
         }));
         let deposit_cursor: i64 = sqlx::query_scalar(
             "SELECT next_block FROM reconciliation_deposit_cursors WHERE chain_id = $1",
@@ -728,13 +640,7 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         .bind(i64::try_from(CHAIN_ID)?)
         .fetch_one(&pool)
         .await?;
-        let custody_cursor: i64 = sqlx::query_scalar(
-            "SELECT next_block FROM reconciliation_custody_cursors WHERE chain_id = $1",
-        )
-        .bind(i64::try_from(CHAIN_ID)?)
-        .fetch_one(&pool)
-        .await?;
-        ensure!(deposit_cursor == 301 && custody_cursor == 301);
+        ensure!(deposit_cursor == 301);
         Ok(())
     })
     .await
@@ -979,7 +885,7 @@ fn rpc_log(log: &TransferLog) -> Value {
 }
 
 #[tokio::test]
-async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> Result<()> {
+async fn only_chain_checks_freeze_and_findings_are_idempotent() -> Result<()> {
     with_database(|pool| async move {
         let route = route()?;
         let seed = seed_identity(&pool, &route, 91).await?;
@@ -996,11 +902,6 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             .lock()
             .unwrap()
             .insert(seed.salt, Address::from([99; 20]));
-        chain
-            .flushed_events
-            .lock()
-            .unwrap()
-            .push((0, U256::from(7_u8)));
         let reconciler = Reconciler::with_dependencies(
             pool.clone(),
             route_set(route)?,
@@ -1008,11 +909,6 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
         );
         let first = reconciler.run_once().await?;
         ensure!(has_check(&first, CheckName::CreditRecomputation));
-        ensure!(first.findings.iter().any(|finding| {
-            finding.check == CheckName::CustodyBalance
-                && finding.subjects.contains_key("treasury")
-                && finding.expected["flushed_event_total"] == json!("7")
-        }));
         ensure!(has_check(&first, CheckName::AddressDerivation));
         ensure!(!first.incomplete);
         let count_after_first =
@@ -1039,7 +935,8 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             sqlx::query_scalar("SELECT scope FROM reconciliation_blocks ORDER BY scope")
                 .fetch_all(&pool)
                 .await?;
-        ensure!(scopes == ["address", "chain"]);
+        // A credit mismatch is reported; only a chain check freezes, as nothing is sent.
+        ensure!(scopes == ["chain"]);
 
         // Lifting is manual: a lifted block whose mismatch still reproduces is written again by
         // the next round.
@@ -1051,7 +948,8 @@ async fn mismatches_block_only_required_scopes_and_findings_are_idempotent() -> 
             sqlx::query_scalar("SELECT scope FROM reconciliation_blocks ORDER BY scope")
                 .fetch_all(&pool)
                 .await?;
-        ensure!(scopes == ["address", "chain"]);
+        // A credit mismatch is reported; only a chain check freezes, as nothing is sent.
+        ensure!(scopes == ["chain"]);
         Ok(())
     })
     .await
@@ -1070,6 +968,16 @@ impl Step for AdvanceStep {
 struct UnreachableReader;
 
 impl ChainReader for UnreachableReader {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        Err(ChainError::ProviderUnhealthy)
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         Err(ChainError::ProviderUnhealthy)
     }
@@ -1174,8 +1082,13 @@ async fn application_role_cannot_rewrite_findings_or_blocks() -> Result<()> {
             ("reconciliation_blocks", "TRUNCATE", false),
             ("reconciliation_deposit_cursors", "UPDATE", true),
             ("reconciliation_deposit_cursors", "DELETE", false),
-            ("reconciliation_custody_cursors", "UPDATE", true),
-            ("reconciliation_custody_cursors", "DELETE", false),
+            // Finalized chain facts are recorded once and never rewritten.
+            ("flushed", "INSERT", true),
+            ("flushed", "UPDATE", false),
+            ("flushed", "DELETE", false),
+            ("flush_failures", "INSERT", true),
+            ("flush_failures", "UPDATE", false),
+            ("flush_failures", "DELETE", false),
         ];
         for (table, privilege, expected) in checks {
             let granted: bool =
@@ -1522,42 +1435,34 @@ async fn seed_deposit(
     Ok(id)
 }
 
-async fn seed_confirmed_flush(
+/// Records a finalized `Flushed` event for the seed's forwarder, as the scanner indexes one.
+async fn seed_flushed(
     pool: &PgPool,
     route: &RouteFile,
     seed: &Seed,
     block_number: u64,
     log_index: u64,
     amount: u64,
-) -> Result<Uuid> {
-    let flush_id = Uuid::new_v4();
-    db::insert_flush(
-        pool,
-        &NewFlush {
-            id: flush_id,
-            chain_id: route.chain.chain_id,
-            token: route.asset.contract,
-            operator: Address::from([22; 20]),
-            nonce: block_number,
-            tx_hash: Some(B256::from([23; 32])),
-            block_number: Some(block_number),
-            status: "confirmed".to_owned(),
-            receipt: Some(json!({})),
-        },
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO flushed
+            (chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
+             block_number, block_hash)
+        SELECT chain_id, $2, $3, id, $4, treasury, $5::text::numeric, $6, $7
+        FROM addresses WHERE id = $1
+        "#,
     )
+    .bind(seed.address_id)
+    .bind(format!("{:#x}", B256::from([23; 32])))
+    .bind(i64::try_from(log_index)?)
+    .bind(format!("{:#x}", route.asset.contract))
+    .bind(amount.to_string())
+    .bind(i64::try_from(block_number)?)
+    .bind(format!("{:#x}", B256::from([24; 32])))
+    .execute(pool)
     .await?;
-    db::insert_flushed(
-        pool,
-        &FlushedEvent {
-            flush_id,
-            address_id: seed.address_id,
-            amount_atomic: AtomicAmount::new(U256::from(amount)),
-            block_number,
-            log_index,
-        },
-    )
-    .await?;
-    Ok(flush_id)
+    Ok(())
 }
 
 fn route_set(route: RouteFile) -> Result<Arc<topup::routes::RouteSet>> {

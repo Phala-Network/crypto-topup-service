@@ -41,11 +41,8 @@ impl SignedWebhook {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use topup_core::{
-        Ed25519PublicKey, Ed25519Signature, SignedTx, Signer, SignerError, TxRequest,
-    };
+    use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer, SignerError};
 
     use uuid::Uuid;
 
@@ -54,16 +51,8 @@ mod tests {
     struct FixedSigner(SigningKey);
 
     impl Signer for FixedSigner {
-        async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
-            Err(SignerError::SigningFailed)
-        }
-
         async fn sign_settlement(&self, content: &[u8]) -> Result<Ed25519Signature, SignerError> {
             Ok(Ed25519Signature(self.0.sign(content).to_bytes()))
-        }
-
-        async fn operator_address(&self) -> Result<Address, SignerError> {
-            Err(SignerError::KeyUnavailable)
         }
 
         async fn settlement_public_key(&self) -> Result<Ed25519PublicKey, SignerError> {

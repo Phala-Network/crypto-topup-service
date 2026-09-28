@@ -1218,11 +1218,24 @@ pub async fn daily_report(
 
     for row in sqlx::query(
         r#"
-        SELECT COALESCE(route, 'unrouted:' || chain_id::text || ':' || asset_contract) AS report_key,
-               COALESCE(sum(amount_atomic), 0)::text AS amount
-        FROM deposits
-        WHERE flush_id IS NULL AND state <> 'reversed'
-        GROUP BY report_key
+        WITH held AS (
+            SELECT COALESCE(route, 'unrouted:' || chain_id::text || ':' || asset_contract)
+                       AS report_key,
+                   chain_id, asset_contract, sum(amount_atomic) AS deposited
+            FROM deposits
+            WHERE state <> 'reversed'
+            GROUP BY report_key, chain_id, asset_contract
+        ), swept AS (
+            SELECT chain_id, token, sum(amount_atomic) AS flushed
+            FROM flushed
+            GROUP BY chain_id, token
+        )
+        SELECT held.report_key,
+               GREATEST(sum(held.deposited - COALESCE(swept.flushed, 0)), 0)::text AS amount
+        FROM held
+        LEFT JOIN swept
+            ON swept.chain_id = held.chain_id AND swept.token = held.asset_contract
+        GROUP BY held.report_key
         "#,
     )
     .fetch_all(pool)
@@ -1427,7 +1440,6 @@ fn empty_route_report(route: &RouteFile) -> RouteDailyReport {
             "swept",
             "rejected",
         ]),
-        flush_planning: None,
     }
 }
 
@@ -1459,7 +1471,6 @@ fn empty_unrouted_report(route: String, chain_id: u64, asset_contract: String) -
             "swept",
             "rejected",
         ]),
-        flush_planning: None,
     }
 }
 

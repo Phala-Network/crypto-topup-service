@@ -87,11 +87,11 @@ async fn postgres_pump_persists_screening_transitions_pauses_and_outbox() -> Res
             let resumed = step.run(&clear).await;
             ensure!(resumed.outcome == StepOutcome::Advance);
 
-            set_route_pauses(&context.app_pool, &["flush"]).await?;
+            set_route_pauses(&context.app_pool, &["refunds"]).await?;
             let unrelated_pause = step.run(&clear).await;
             ensure!(unrelated_pause.outcome == StepOutcome::Advance);
             ensure!(
-                unrelated_pause.evidence["pause_scopes"]["route"] == serde_json::json!(["flush"])
+                unrelated_pause.evidence["pause_scopes"]["route"] == serde_json::json!(["refunds"])
             );
             set_route_pauses(&context.app_pool, &[]).await?;
 

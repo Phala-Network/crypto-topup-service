@@ -1,7 +1,6 @@
 //! The EVM JSON-RPC client shared by every consumer of one (chain, provider), and the
 //! finalized-log reader built on it.
 
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::future::{Future, IntoFuture};
@@ -9,14 +8,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::chain::flush::{
-    ContractAddressGetter, DecodedFlushed, addressOfCall, balanceOfCall,
-    decode_contract_address_getter, decode_flushed, encode_address_of, encode_balance_of,
-    encode_contract_address_getter, flushed_signature,
+    ContractAddressGetter, FactoryEvent, addressOfCall, balanceOfCall,
+    decode_contract_address_getter, encode_address_of, encode_balance_of,
+    encode_contract_address_getter, factory_event_signatures,
 };
 use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::{Address, B256, Bytes, U256};
-use alloy::providers::bindings::IMulticall3::getEthBalanceCall;
 use alloy::providers::{CallItem, MULTICALL3_ADDRESS, MulticallError, Provider, RootProvider};
 use alloy::rpc::types::{
     Filter, Log, Topic, TransactionInput, TransactionReceipt, TransactionRequest,
@@ -25,7 +23,6 @@ use alloy::sol;
 use alloy::sol_types::{SolCall, SolEvent};
 use alloy::transports::TransportError;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 use tokio::time::timeout;
 use topup_core::money::AtomicAmount;
 use topup_core::route::{ChainHeads, Confirmations};
@@ -109,6 +106,21 @@ pub struct FinalizedHead {
     pub time: DateTime<Utc>,
 }
 
+/// One `ForwarderFactory` event about a tracked forwarder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FactoryLog {
+    /// Transaction hash containing the event.
+    pub tx_hash: B256,
+    /// Log index within the block.
+    pub log_index: u64,
+    /// Block number.
+    pub block_number: u64,
+    /// Block hash.
+    pub block_hash: B256,
+    /// The decoded event.
+    pub event: FactoryEvent,
+}
+
 /// Failure while reading or validating EVM chain data.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainError {
@@ -121,9 +133,6 @@ pub enum ChainError {
     /// The provider transport failed without exposing its configured URL.
     #[error("{0}")]
     Transport(RedactedTransportError),
-    /// `eth_estimateGas` reported that execution reverts, a deterministic outcome.
-    #[error("{0}")]
-    EstimationRevert(RedactedTransportError),
     /// The provider answered with a value that could not be encoded, decoded, or used.
     #[error("{0}")]
     InvalidResponse(String),
@@ -162,42 +171,15 @@ pub enum ChainError {
     /// transaction's receipt; the read is retried.
     #[error("chain reorganized during {0}")]
     Reorganized(&'static str),
-    /// Every provider a signed transaction was broadcast to failed; one error per provider, in
-    /// configuration order.
-    #[error("every provider failed to broadcast the transaction: {}", join_errors(.0))]
-    BroadcastFailed(Vec<ChainError>),
-}
-
-fn join_errors(errors: &[ChainError]) -> String {
-    errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 impl ChainError {
-    /// Returns whether this error is a deterministic estimate execution revert.
-    #[must_use]
-    pub const fn is_estimation_revert(&self) -> bool {
-        matches!(self, Self::EstimationRevert(_))
-    }
-
     /// Returns whether the provider refused the request for now, so it may be retried after a
     /// backoff; see [`RedactedTransportError::is_rate_limited`].
     #[must_use]
     pub const fn is_rate_limited(&self) -> bool {
         matches!(self, Self::Transport(error) if error.is_rate_limited())
     }
-}
-
-/// One fee suggestion for an EIP-1559 transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FeeQuote {
-    /// Maximum total fee per gas unit.
-    pub max_fee_per_gas: u128,
-    /// Maximum priority fee per gas unit.
-    pub max_priority_fee_per_gas: u128,
 }
 
 /// Chain reads required by the scanner, the confirm step, and the finality watch.
@@ -211,6 +193,17 @@ pub trait ChainReader: Send + Sync {
         &self,
         confirmations: Confirmations,
     ) -> impl Future<Output = Result<ChainHeads, ChainError>> + Send;
+
+    /// Returns the factory's `ForwarderCreated`, `Flushed`, and `FlushFailed` events about any
+    /// supplied forwarder in the inclusive block range. Anyone can call the factory, so the caller
+    /// decides which of them concern its own `(forwarder, treasury)` pairs.
+    fn factory_logs(
+        &self,
+        factory: Address,
+        forwarders: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> impl Future<Output = Result<Vec<FactoryLog>, ChainError>> + Send;
 
     /// Returns ERC-20 transfers to any supplied recipient in the inclusive block range.
     fn transfer_logs_to(
@@ -308,8 +301,8 @@ pub const MULTICALL_CHUNK: usize = 200;
 
 /// Alloy HTTP client for one RPC provider of one chain, shared by every consumer.
 ///
-/// Errors carry the provider label, never the URL. Methods used by the flusher, reconciler,
-/// refunds, sanctions screening and startup checks are bounded by the request timeout; the
+/// Errors carry the provider label, never the URL. Methods used by the reconciler, refunds,
+/// sanctions screening and startup checks are bounded by the request timeout; the
 /// finalized-log reads behind [`FinalizedReader`] are not, as the scanner and confirm step
 /// bound them themselves.
 pub struct EvmClient {
@@ -394,8 +387,8 @@ impl EvmClient {
     ///
     /// These reads never use JSON-RPC batches or one request per item: public providers throttle
     /// batches far below their single-request limits (Tenderly's public Sepolia gateway refuses
-    /// any batch of more than five `eth_call`s with `429 rate limit exceeded`, which stalled flush
-    /// planning and failed reconciliation once a chain had six addresses), and one request per
+    /// any batch of more than five `eth_call`s with `429 rate limit exceeded`, which failed
+    /// reconciliation once a chain had six addresses), and one request per
     /// address grows with every address ever issued.
     async fn aggregate<D: SolCall + 'static>(
         &self,
@@ -443,21 +436,6 @@ impl EvmClient {
             .map(|address| CallItem::<balanceOfCall>::new(token, encode_balance_of(*address)))
             .collect();
         self.aggregate("balanceOf multicall", calls, block.into())
-            .await
-    }
-
-    /// Reads latest native balances through Multicall3 `getEthBalance`.
-    pub async fn native_balances(&self, addresses: &[Address]) -> Result<Vec<U256>, ChainError> {
-        let calls = addresses
-            .iter()
-            .map(|address| {
-                CallItem::<getEthBalanceCall>::new(
-                    MULTICALL3,
-                    getEthBalanceCall { addr: *address }.abi_encode().into(),
-                )
-            })
-            .collect();
-        self.aggregate("getEthBalance multicall", calls, BlockId::latest())
             .await
     }
 
@@ -522,56 +500,6 @@ impl EvmClient {
         })
     }
 
-    /// Estimates gas for a call from `from`, distinguishing execution reverts.
-    pub async fn estimate_gas(
-        &self,
-        from: Address,
-        to: Address,
-        input: Bytes,
-    ) -> Result<u64, ChainError> {
-        let tx = TransactionRequest::default()
-            .from(from)
-            .to(to)
-            .input(TransactionInput::new(input));
-        let operation = "eth_estimateGas";
-        self.within(operation, self.provider.estimate_gas(tx))
-            .await?
-            .map_err(|error| {
-                if error
-                    .as_error_resp()
-                    .is_some_and(|payload| is_execution_revert(payload.code, &payload.message))
-                {
-                    ChainError::EstimationRevert(self.endpoint.rpc_error(operation, &error))
-                } else {
-                    self.transport(operation, &error)
-                }
-            })
-    }
-
-    /// Returns the account's nonce including pending transactions.
-    pub async fn pending_nonce(&self, account: Address) -> Result<u64, ChainError> {
-        self.bounded(
-            "pending nonce",
-            self.provider.get_transaction_count(account).pending(),
-        )
-        .await
-    }
-
-    /// Returns the account's nonce at the latest block.
-    pub async fn confirmed_nonce(&self, account: Address) -> Result<u64, ChainError> {
-        self.bounded(
-            "confirmed nonce",
-            self.provider.get_transaction_count(account).latest(),
-        )
-        .await
-    }
-
-    /// Returns the latest block number.
-    pub async fn latest_block(&self) -> Result<u64, ChainError> {
-        self.bounded("latest block", self.provider.get_block_number())
-            .await
-    }
-
     /// Returns the finalized block number, or `None` when the node has none.
     pub async fn finalized_block(&self) -> Result<Option<u64>, ChainError> {
         self.bounded(
@@ -580,36 +508,6 @@ impl EvmClient {
                 .get_block_number_by_id(BlockId::Number(BlockNumberOrTag::Finalized)),
         )
         .await
-    }
-
-    /// Returns an EIP-1559 fee suggestion.
-    pub async fn fee_quote(&self) -> Result<FeeQuote, ChainError> {
-        let estimate = self
-            .bounded("fee estimate", self.provider.estimate_eip1559_fees())
-            .await?;
-        Ok(FeeQuote {
-            max_fee_per_gas: estimate.max_fee_per_gas,
-            max_priority_fee_per_gas: estimate.max_priority_fee_per_gas,
-        })
-    }
-
-    /// Broadcasts a signed EIP-2718 transaction; a node that already knows it is success.
-    pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, ChainError> {
-        let operation = "send raw transaction";
-        match self
-            .within(operation, self.provider.send_raw_transaction(raw))
-            .await?
-        {
-            Ok(pending) => Ok(*pending.tx_hash()),
-            Err(error)
-                if error
-                    .as_error_resp()
-                    .is_some_and(|payload| is_already_known(&payload.message)) =>
-            {
-                Ok(alloy::primitives::keccak256(raw))
-            }
-            Err(error) => Err(self.transport(operation, &error)),
-        }
     }
 
     /// Reads a transaction receipt by hash.
@@ -621,42 +519,6 @@ impl EvmClient {
         .await
     }
 
-    /// Reads one block with full transactions as raw JSON.
-    pub async fn block_with_transactions(&self, number: u64) -> Result<Value, ChainError> {
-        self.bounded(
-            "block recovery",
-            self.provider.raw_request(
-                Cow::Borrowed("eth_getBlockByNumber"),
-                (format!("0x{number:x}"), true),
-            ),
-        )
-        .await
-    }
-
-    /// Returns the factory's `Flushed` events for `token` in one inclusive block window.
-    pub async fn flushed_events(
-        &self,
-        factory: Address,
-        token: Address,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<DecodedFlushed>, ChainError> {
-        let filter = Filter::new()
-            .address(factory)
-            .from_block(from_block)
-            .to_block(to_block)
-            .event_signature(flushed_signature())
-            .topic3(token);
-        self.bounded("Flushed log fetch", self.provider.get_logs(&filter))
-            .await?
-            .iter()
-            .map(|log| {
-                decode_flushed(log.data())
-                    .map_err(|error| ChainError::InvalidResponse(error.to_string()))
-            })
-            .collect()
-    }
-
     /// Returns the provider's current `latest` block number. Used only by the display-only head
     /// scan; nothing that affects money reads above `finalized`.
     pub async fn latest_head(&self) -> Result<u64, ChainError> {
@@ -665,24 +527,6 @@ impl EvmClient {
             .await
             .map_err(|error| self.transport("latest head fetch", &error))
     }
-}
-
-fn is_already_known(message: &str) -> bool {
-    let lowercase = message.to_ascii_lowercase();
-    lowercase.contains("already known")
-        || lowercase.contains("known transaction")
-        || lowercase.contains("transaction already imported")
-}
-
-/// geth, erigon, and Nethermind report a revert as JSON-RPC error 3; geth answers a revert without
-/// return data with its default code and the bare `execution reverted` message. Anything else,
-/// including an HTTP error whose JSON-RPC body merely mentions a revert, stays transient.
-fn is_execution_revert(code: i64, message: &str) -> bool {
-    code == 3
-        || message
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("execution reverted")
 }
 
 /// Chain-log reader for one consumer of a shared [`EvmClient`].
@@ -962,6 +806,32 @@ impl FinalizedReader {
             .await
     }
 
+    async fn factory_logs_request(
+        &self,
+        factory: Address,
+        forwarders: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<FactoryLog>, ChainError> {
+        let forwarders = forwarders
+            .iter()
+            .copied()
+            .fold(Topic::default(), Topic::extend);
+        let filter = Filter::new()
+            .address(factory)
+            .from_block(from_block)
+            .to_block(to_block)
+            .event_signature(factory_event_signatures().to_vec())
+            .topic2(forwarders);
+        let logs = self
+            .client
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| self.client.transport("factory log fetch", &error))?;
+        logs.iter().map(decode_factory_log).collect()
+    }
+
     async fn tagged_block_number(
         &self,
         tag: BlockNumberOrTag,
@@ -1032,6 +902,26 @@ fn decode_transfer_log(log: &Log) -> Result<Option<DecodedTransfer>, ChainError>
     }))
 }
 
+fn decode_factory_log(log: &Log) -> Result<FactoryLog, ChainError> {
+    let event = FactoryEvent::decode(log.data())
+        .map_err(|error| ChainError::InvalidResponse(format!("factory event: {error}")))?;
+    Ok(FactoryLog {
+        tx_hash: log
+            .transaction_hash
+            .ok_or(ChainError::MissingField("log.transaction_hash"))?,
+        log_index: log
+            .log_index
+            .ok_or(ChainError::MissingField("log.log_index"))?,
+        block_number: log
+            .block_number
+            .ok_or(ChainError::MissingField("log.block_number"))?,
+        block_hash: log
+            .block_hash
+            .ok_or(ChainError::MissingField("log.block_hash"))?,
+        event,
+    })
+}
+
 /// Whether `log` is an ERC-20 `Transfer` event: the signature topic and the ERC-20 layout.
 fn is_transfer(log: &Log) -> bool {
     log.topics().first() == Some(&Transfer::SIGNATURE_HASH)
@@ -1100,6 +990,34 @@ impl ChainReader for FinalizedReader {
     ) -> Result<Vec<TransferLog>, ChainError> {
         self.transfer_logs(&[], addresses, from_block, to_block)
             .await
+    }
+
+    async fn factory_logs(
+        &self,
+        factory: Address,
+        forwarders: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<FactoryLog>, ChainError> {
+        if from_block > to_block {
+            return Err(ChainError::InvalidRange {
+                from_block,
+                to_block,
+            });
+        }
+        let mut logs = Vec::new();
+        if forwarders.is_empty() {
+            return Ok(logs);
+        }
+        for (window_from, window_to) in block_windows(from_block, to_block)? {
+            for batch in forwarders.chunks(MAX_ADDRESSES_PER_REQUEST) {
+                logs.extend(
+                    self.factory_logs_request(factory, batch, window_from, window_to)
+                        .await?,
+                );
+            }
+        }
+        Ok(logs)
     }
 
     async fn receipt_transfer(
@@ -1187,6 +1105,8 @@ fn block_windows(from_block: u64, to_block: u64) -> Result<Vec<(u64, u64)>, Chai
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
 
     #[test]
@@ -1382,14 +1302,12 @@ mod tests {
         let tokens = client
             .token_balances(Address::ZERO, &addresses, BlockNumberOrTag::Number(7))
             .await;
-        let natives = client.native_balances(&addresses[..6]).await;
         let derived = client
             .factory_addresses(Address::ZERO, Address::ZERO, &salts)
             .await;
         server.abort();
 
         assert_eq!(tokens.expect("token balances"), vec![U256::from(1); count]);
-        assert_eq!(natives.expect("native balances"), vec![U256::from(1); 6]);
         assert_eq!(
             derived.expect("derived addresses"),
             vec![Address::with_last_byte(1); 6]
@@ -1405,7 +1323,6 @@ mod tests {
             vec![
                 (Value::from("0x7"), MULTICALL_CHUNK),
                 (Value::from("0x7"), 1),
-                (Value::from("latest"), 6),
                 (Value::from("latest"), 6),
             ]
         );
@@ -1423,93 +1340,50 @@ mod tests {
         }
     }
 
-    async fn estimate(status: u16, error: &'static str) -> ChainError {
+    async fn finalized_block_error(status: u16, error: &'static str) -> ChainError {
         let (client, server) = mock_node(status, error).await;
-        let result = client
-            .estimate_gas(Address::ZERO, Address::ZERO, Bytes::new())
-            .await;
+        let result = client.finalized_block().await;
         server.abort();
-        let error = result.expect_err("node rejects the estimate");
+        let error = result.expect_err("node rejects the request");
         assert_redacted(&error, &client);
         error
     }
 
     #[tokio::test]
     async fn node_rejection_reason_reaches_the_operator_without_the_url() {
-        let (client, server) = mock_node(
-            200,
-            r#"{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 5"}"#,
-        )
-        .await;
-
-        let error = client
-            .send_raw_transaction(&[0x02])
-            .await
-            .expect_err("node rejects the transaction");
-        server.abort();
-
+        let error =
+            finalized_block_error(200, r#"{"code":-32000,"message":"header not found"}"#).await;
         let display = error.to_string();
         assert!(
             display.contains(
-                "send raw transaction failed for provider `provider-a` \
-                 (JSON-RPC error -32000: nonce too low: next nonce 7, tx nonce 5)"
+                "finalized block failed for provider `provider-a` \
+                 (JSON-RPC error -32000: header not found)"
             ),
             "{display}"
         );
-        assert_redacted(&error, &client);
     }
 
     // alloy 2 surfaces a JSON-RPC error body on a non-2xx response as that JSON-RPC error, not as
     // an HTTP error, so the classification must rest on the payload alone.
     #[tokio::test]
-    async fn http_errors_with_a_json_rpc_body_are_transient_estimate_failures() {
-        let error = estimate(
-            502,
-            r#"{"code":-32603,"message":"upstream failed while tracing a revert"}"#,
-        )
-        .await;
+    async fn http_errors_with_a_json_rpc_body_keep_their_rate_limit_class() {
+        let error =
+            finalized_block_error(502, r#"{"code":-32603,"message":"upstream failed"}"#).await;
         assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
         assert!(!error.is_rate_limited(), "{error:?}");
-        assert!(
-            error.to_string().contains(
-                "eth_estimateGas failed for provider `provider-a` \
-                 (JSON-RPC error -32603: upstream failed while tracing a revert)"
-            ),
-            "{error}"
-        );
 
-        let error = estimate(
-            429,
-            r#"{"code":-32005,"message":"request rate exceeded; retry after revert window"}"#,
-        )
-        .await;
+        let error =
+            finalized_block_error(429, r#"{"code":-32005,"message":"request rate exceeded"}"#)
+                .await;
         assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
         // Tenderly's public gateway refuses excess requests this way; callers may back off.
         assert!(error.is_rate_limited(), "{error:?}");
         assert!(
             error.to_string().contains(
-                "eth_estimateGas failed for provider `provider-a` \
-                 (JSON-RPC error -32005: request rate exceeded; retry after revert window)"
+                "finalized block failed for provider `provider-a` \
+                 (JSON-RPC error -32005: request rate exceeded)"
             ),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn execution_reverts_are_deterministic_estimate_failures() {
-        // geth, erigon, and Nethermind with revert data; geth without it.
-        for body in [
-            r#"{"code":3,"message":"execution reverted: nothing to flush","data":"0x08c379a0"}"#,
-            r#"{"code":-32000,"message":"execution reverted"}"#,
-        ] {
-            let error = estimate(200, body).await;
-            assert!(error.is_estimation_revert(), "{error:?}");
-            assert!(
-                error
-                    .to_string()
-                    .contains("eth_estimateGas failed for provider `provider-a` (JSON-RPC error"),
-                "{error}"
-            );
-        }
     }
 }

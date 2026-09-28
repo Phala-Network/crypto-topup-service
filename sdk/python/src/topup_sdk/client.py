@@ -234,12 +234,11 @@ class TopupClient:
         )
 
     def attestation(self, nonce: bytes) -> AttestationResponse:
-        """Fetches attestation evidence binding `nonce` to the settlement key and operators.
+        """Fetches attestation evidence binding `nonce` to the settlement key.
 
-        Raises `AttestationError` unless `report_data` binds `nonce`, `settlement_pubkey`, and
-        every entry of `operators`. Verify the quote with the dstack verifier
-        (`deploy/dstack-verifier.sh`), including that its report data is `report_data` zero-padded
-        to 64 bytes, before pinning the key or trusting an operator.
+        Raises `AttestationError` unless `report_data` binds `nonce` and `settlement_pubkey`.
+        Verify the quote with the dstack verifier (`deploy/dstack-verifier.sh`), including that
+        its report data is `report_data` zero-padded to 64 bytes, before pinning the key.
         """
         response = self._call(
             lambda: get_attestation.sync_detailed(client=self._client, nonce=nonce.hex()),

@@ -4,7 +4,7 @@ mod route;
 
 use std::collections::HashMap;
 use std::future::{Future, IntoFuture as _};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,18 +23,18 @@ use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
 use topup::routes::RouteSet;
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::ScreenStep;
+use topup_adapters::attestation::DstackAttestor;
 #[cfg(feature = "dev-signer")]
 use topup_adapters::attestation::report_data;
-use topup_adapters::attestation::{AttestedOperator, DstackAttestor};
 #[cfg(feature = "dev-signer")]
 use topup_adapters::signer::DevSigner;
 use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::{
-    DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, SETTLEMENT_KEY_DOMAIN, Signer as _, operator_key_domain,
-};
+#[cfg(feature = "dev-signer")]
+use topup_core::Signer as _;
+use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, SETTLEMENT_KEY_DOMAIN};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use uuid::Uuid;
 
@@ -110,13 +110,6 @@ struct ReconcileArgs {
 struct AttestArgs {
     #[arg(long, value_name = "HEX")]
     nonce: String,
-    /// Operator key derivation version to report, as set by the chain's `operator_key_version`.
-    #[arg(long, value_name = "N", default_value_t = NonZeroU32::MIN)]
-    operator_key_version: NonZeroU32,
-    /// Route file whose chain operator is listed in `operators` and bound into the report data,
-    /// as `GET /v1/attestation` does; repeat for every enabled route version.
-    #[arg(long = "route", value_name = "FILE")]
-    routes: Vec<PathBuf>,
     #[cfg(feature = "dev-signer")]
     #[arg(long, help = "Use development keys without a hardware quote")]
     dev: bool,
@@ -460,71 +453,33 @@ fn write_restore_report(path: &Path, report: &serde_json::Value) -> std::io::Res
 
 async fn attest(args: &AttestArgs) -> Result<(), &'static str> {
     let nonce = parse_nonce(&args.nonce)?;
-    let version = args.operator_key_version;
-    let operator_keys = if args.routes.is_empty() {
-        Vec::new()
-    } else {
-        load_routes(&args.routes)
-            .and_then(|routes| routes.operator_keys().map_err(anyhow::Error::msg))
-            .map_err(|error| {
-                tracing::error!(%error, "invalid route configuration");
-                "failed to load the route configuration"
-            })?
-    };
 
     #[cfg(feature = "dev-signer")]
     if args.dev {
-        let seed = SecretKey32::new([1; 32]);
-        let signer = DevSigner::derive(&seed, version);
+        let signer = DevSigner::derive(&SecretKey32::new([1; 32]));
         let public_key = signer
             .settlement_public_key()
             .await
             .map_err(|_| "development settlement key is invalid")?;
-        let operator = signer
-            .operator_address()
-            .await
-            .map_err(|_| "development operator key is invalid")?;
-        let mut operators = Vec::with_capacity(operator_keys.len());
-        for key in &operator_keys {
-            operators.push(AttestedOperator {
-                chain_id: key.chain_id,
-                key_version: key.key_version,
-                address: DevSigner::derive(&seed, key.key_version)
-                    .operator_address()
-                    .await
-                    .map_err(|_| "development operator key is invalid")?,
-            });
-        }
         return print_attestation(
             &public_key.0,
-            &operators,
-            &report_data(&nonce, &public_key, &operators),
+            &report_data(&nonce, &public_key),
             &[],
             &[],
             &[],
-            version,
-            operator,
         );
     }
 
     let evidence = DstackAttestor::new()
-        .attest(&nonce, &operator_keys)
+        .attest(&nonce)
         .await
         .map_err(|_| "failed to collect dstack attestation")?;
-    let operator = DstackSigner::new()
-        .with_operator_key_version(version)
-        .operator_address()
-        .await
-        .map_err(|_| "failed to derive the dstack operator key")?;
     print_attestation(
         &evidence.settlement_public_key.0,
-        &evidence.operators,
         &evidence.report_data,
         &evidence.quote,
         &evidence.info.app_id,
         &evidence.info.compose_hash,
-        version,
-        operator,
     )
 }
 
@@ -538,31 +493,20 @@ fn parse_nonce(value: &str) -> Result<Vec<u8>, &'static str> {
     hex::decode(value).map_err(|_| "nonce must be valid hexadecimal")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn print_attestation(
     settlement_public_key: &[u8; 32],
-    operators: &[AttestedOperator],
     report_data: &[u8; 32],
     quote: &[u8],
     app_id: &[u8],
     compose_hash: &[u8],
-    operator_key_version: NonZeroU32,
-    operator: alloy_primitives::Address,
 ) -> Result<(), &'static str> {
-    let operators = operators
-        .iter()
-        .map(topup::api::models::OperatorIdentity::from)
-        .collect::<Vec<_>>();
     let output = json!({
         "keyid": SETTLEMENT_KEY_DOMAIN,
         "settlement_pubkey": hex::encode(settlement_public_key),
-        "operators": operators,
         "report_data": hex::encode(report_data),
         "quote": hex::encode(quote),
         "app_id": if app_id.is_empty() { String::new() } else { format!("0x{}", hex::encode(app_id)) },
         "compose_hash": if compose_hash.is_empty() { String::new() } else { format!("0x{}", hex::encode(compose_hash)) },
-        "operator_keyid": operator_key_domain(operator_key_version),
-        "operator_address": format!("{operator:#x}"),
     });
     let encoded = serde_json::to_string(&output).map_err(|_| "failed to encode attestation")?;
     println!("{encoded}");
@@ -611,19 +555,17 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         return serve_read_only(args.bind, state).await;
     }
     // Architecture §4: before the database is touched, every provider must show the route's
-    // factory, implementation, and treasury, so nothing issues addresses or moves funds otherwise.
+    // factory, implementation, and treasury, so nothing issues addresses otherwise.
     topup::contracts::verify_routes(&routes)
         .await
         .map_err(anyhow::Error::msg)
         .context("on-chain contract check failed")?;
     let routes = Arc::new(routes);
     let scanner_count = routes.chain_ids().count();
-    let route_count = routes.routes().len();
     let connection_count = u32::try_from(PUMPS)
         .ok()
         .zip(u32::try_from(scanner_count).ok())
-        .zip(u32::try_from(route_count).ok())
-        .and_then(|((pumps, scanners), routes)| pumps.checked_add(scanners)?.checked_add(routes))
+        .and_then(|(pumps, scanners)| pumps.checked_add(scanners))
         // The outbox renders an event's object on a second connection while it holds the claim.
         .and_then(|count| count.checked_add(4))
         .context("route count is too large")?;
@@ -633,7 +575,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
-    let signer = spawn_signer(None).context("failed to start signer actor")?;
+    let signer = spawn_signer().context("failed to start signer actor")?;
     let delivery_worker = topup::outbox::DeliveryWorker::new(
         pool.clone(),
         Arc::clone(&routes),
@@ -647,20 +589,14 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     for chain_id in frozen {
         tracing::error!(
             chain_id,
-            "reconciliation froze configured chain; its scanner, pumps, flusher, and \
-             address issuance stay paused until the block is removed"
+            "reconciliation froze configured chain; its scanner, pumps, finality watch, and \
+             quote creation stay paused until the block is lifted"
         );
     }
     let reconciler = Arc::new(
         topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::clone(&routes))
             .context("failed to configure reconciler")?,
     );
-    let flusher_tasks =
-        topup::flusher::runtime::configure_tasks(pool.clone(), &routes, |version| {
-            spawn_signer(Some(version))
-        })
-        .map_err(anyhow::Error::msg)
-        .context("invalid flusher runtime configuration")?;
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("failed to bind API listener on {}", args.bind))?;
@@ -671,7 +607,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let steps = Arc::new(StepSet::new(
         Box::new(confirm_step),
         Box::new(screen_step),
-        Box::new(topup::flusher::SweepStep),
+        Box::new(topup::steps::sweep::SweepStep),
     ));
     let pump = Pump::new(pool.clone(), Arc::<StepSet>::clone(&steps), pump_config)
         .context("invalid pump configuration")?;
@@ -748,11 +684,6 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     tasks.spawn("webhook delivery worker", |cancellation| async move {
         delivery_worker.run(cancellation).await;
     });
-    for task in flusher_tasks {
-        tasks.spawn(format!("flusher {}", task.instance()), |cancellation| {
-            task.run(cancellation)
-        });
-    }
     tasks.spawn("reconciler", |cancellation| async move {
         reconciler
             .run_loop(RECONCILIATION_INTERVAL, cancellation)
@@ -820,7 +751,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
 
 /// Serves only the read API of a database restored from backup (`deploy/RESTORE.md`), so the
 /// operator can verify it through the product-signed lookups: no lease-owner lock, scanner, pump,
-/// flusher, webhook delivery, reconciler, or signer runs, and every non-GET request is refused.
+/// webhook delivery, reconciler, or signer runs, and every non-GET request is refused.
 async fn serve_read_only(
     bind: std::net::SocketAddr,
     state: topup::api::AppState,
@@ -1076,13 +1007,9 @@ const SIGNER_QUEUE: NonZeroUsize =
 /// Maximum duration of one dstack signing request.
 const SIGNER_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Starts a dstack signer actor, deriving `operator/v{n}` when an operator key version is given.
-fn spawn_signer(operator_key_version: Option<NonZeroU32>) -> std::io::Result<SignerHandle> {
-    let signer = match operator_key_version {
-        Some(version) => DstackSigner::new().with_operator_key_version(version),
-        None => DstackSigner::new(),
-    };
-    SignerHandle::spawn(signer, SIGNER_QUEUE, SIGNER_TIMEOUT)
+/// Starts the dstack settlement signer actor.
+fn spawn_signer() -> std::io::Result<SignerHandle> {
+    SignerHandle::spawn(DstackSigner::new(), SIGNER_QUEUE, SIGNER_TIMEOUT)
 }
 
 fn parse_event_id(value: &str) -> Result<Uuid, String> {

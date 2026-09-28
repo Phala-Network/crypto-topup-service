@@ -162,7 +162,10 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
             Some("detected" | "confirmed") => "provider-disagreement.md",
             _ => "README.md#alert-and-symptom-index",
         },
-        "TopupReconciliationMismatch" if tag("check") == Some("address_derivation") => {
+        // Both checks freeze the chain they fail on.
+        "TopupReconciliationMismatch"
+            if matches!(tag("check"), Some("address_derivation" | "custody_balance")) =>
+        {
             "chain-frozen.md"
         }
         "TopupReconciliationMismatch" => "reconciliation-mismatch.md",
@@ -170,11 +173,6 @@ fn runbook(alert: &str, tags: &BTreeMap<String, String>) -> &'static str {
         "TopupLockExposureNearCap" => "lock-exposure-near-cap.md",
         "TopupUnsupportedInflows" => "rejected-funds-at-treasury.md",
         "TopupDepositReversed" | "TopupDepositPendingAfterReorg" => "deposit-reversed.md",
-        "TopupOperatorGasReserveLow" => "gas-refill.md",
-        "OperatorRoleMissing" | "MissingConsumedReceipt" => "operator-key-compromise.md",
-        "Reverted" | "IsolatedAddress" | "PlanningExcluded" | "FeeCapReached" => {
-            "flush-reverted-or-bisected.md"
-        }
         _ => "README.md#alert-and-symptom-index",
     }
 }
@@ -275,15 +273,6 @@ impl CronMonitor {
             },
             minutes,
         )
-    }
-
-    /// Flush planning on the route's UTC crontab; `None` for a schedule Sentry cannot express.
-    #[must_use]
-    pub fn flush_planning(route: &str, crontab: &str) -> Option<Self> {
-        let schedule = MonitorSchedule::from_crontab(crontab).ok()?;
-        let mut monitor = Self::new(format!("topup-flush-{route}"), schedule, 15);
-        monitor.config.timezone = Some("UTC".to_owned());
-        Some(monitor)
     }
 
     fn heartbeat(slug: String, margin_minutes: u64) -> Self {
@@ -512,13 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn flush_monitor_uses_the_route_crontab_or_none() {
-        let monitor = CronMonitor::flush_planning("route-a", "0 */6 * * *").expect("valid crontab");
-        assert_eq!(monitor.slug(), "topup-flush-route-a");
-        assert!(CronMonitor::flush_planning("route-a", "0 0 */6 * * *").is_none());
-    }
-
-    #[test]
     fn every_runbook_link_names_a_committed_runbook() {
         let runbooks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/runbooks");
         let tags = |pairs: &[(&str, &str)]| {
@@ -530,18 +512,23 @@ mod tests {
         for (alert, pairs) in [
             ("TopupDepositStateAgeExceeded", &[("state", "detected")][..]),
             ("TopupDepositStateAgeExceeded", &[("state", "confirmed")]),
-            ("TopupDepositStateAgeExceeded", &[("state", "credited")]),
             (
                 "TopupReconciliationMismatch",
                 &[("check", "address_derivation")],
             ),
+            (
+                "TopupReconciliationMismatch",
+                &[("check", "custody_balance")],
+            ),
+            (
+                "TopupReconciliationMismatch",
+                &[("check", "credit_recomputation")],
+            ),
             ("TopupLockExpiryFailing", &[]),
             ("TopupLockExposureNearCap", &[]),
             ("TopupUnsupportedInflows", &[]),
-            ("TopupOperatorGasReserveLow", &[]),
-            ("OperatorRoleMissing", &[]),
-            ("Reverted", &[]),
-            ("NativeBalance", &[]),
+            ("TopupDepositReversed", &[]),
+            ("UnknownAlert", &[]),
         ] {
             let path = runbook(alert, &tags(pairs));
             let file = path.split_once('#').map_or(path, |(file, _)| file);

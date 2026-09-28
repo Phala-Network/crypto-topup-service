@@ -17,7 +17,6 @@ pub mod audit;
 pub mod contracts;
 pub mod db;
 pub mod finality;
-pub mod flusher;
 pub mod heartbeat;
 pub mod ids;
 pub mod jitter;

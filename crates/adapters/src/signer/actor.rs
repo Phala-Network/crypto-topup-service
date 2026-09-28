@@ -5,12 +5,11 @@ use std::num::NonZeroUsize;
 use std::thread;
 use std::time::Duration;
 
-use alloy_primitives::Address;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
 use tokio::time::timeout;
-use topup_core::{Ed25519PublicKey, Ed25519Signature, SignedTx, Signer, SignerError, TxRequest};
+use topup_core::{Ed25519PublicKey, Ed25519Signature, Signer, SignerError};
 
 /// Cloneable signer proxy backed by a dedicated thread-local actor.
 #[derive(Clone)]
@@ -70,19 +69,9 @@ impl SignerHandle {
 }
 
 impl Signer for SignerHandle {
-    async fn sign_operator_tx(&self, tx: TxRequest) -> Result<SignedTx, SignerError> {
-        self.request(|reply| Request::SignOperatorTx { tx, reply })
-            .await
-    }
-
     async fn sign_settlement(&self, payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
         let payload = payload.to_vec();
         self.request(|reply| Request::SignSettlement { payload, reply })
-            .await
-    }
-
-    async fn operator_address(&self) -> Result<Address, SignerError> {
-        self.request(|reply| Request::OperatorAddress { reply })
             .await
     }
 
@@ -93,16 +82,9 @@ impl Signer for SignerHandle {
 }
 
 enum Request {
-    SignOperatorTx {
-        tx: TxRequest,
-        reply: oneshot::Sender<Result<SignedTx, SignerError>>,
-    },
     SignSettlement {
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<Ed25519Signature, SignerError>>,
-    },
-    OperatorAddress {
-        reply: oneshot::Sender<Result<Address, SignerError>>,
     },
     SettlementPublicKey {
         reply: oneshot::Sender<Result<Ed25519PublicKey, SignerError>>,
@@ -115,14 +97,8 @@ where
 {
     while let Some(request) = receiver.recv().await {
         match request {
-            Request::SignOperatorTx { tx, reply } => {
-                let _ = reply.send(signer.sign_operator_tx(tx).await);
-            }
             Request::SignSettlement { payload, reply } => {
                 let _ = reply.send(signer.sign_settlement(&payload).await);
-            }
-            Request::OperatorAddress { reply } => {
-                let _ = reply.send(signer.operator_address().await);
             }
             Request::SettlementPublicKey { reply } => {
                 let _ = reply.send(signer.settlement_public_key().await);
@@ -136,18 +112,15 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
-    use alloy_primitives::Address;
     use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
-    use topup_core::{
-        Ed25519PublicKey, Ed25519Signature, SecretKey32, SignedTx, Signer, SignerError, TxRequest,
-    };
+    use topup_core::{Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError};
 
     use super::SignerHandle;
     use crate::signer::dev::DevSigner;
 
     #[tokio::test]
     async fn round_trips_a_settlement_signature() {
-        let signer = DevSigner::new(SecretKey32::new([1; 32]), SecretKey32::new([2; 32]));
+        let signer = DevSigner::new(SecretKey32::new([2; 32]));
         let handle = SignerHandle::spawn(
             signer,
             NonZeroUsize::new(4).expect("queue capacity is non-zero"),
@@ -178,16 +151,8 @@ mod tests {
     }
 
     impl Signer for FailingSigner {
-        async fn sign_operator_tx(&self, _tx: TxRequest) -> Result<SignedTx, SignerError> {
-            Err(SignerError::SigningFailed)
-        }
-
         async fn sign_settlement(&self, _payload: &[u8]) -> Result<Ed25519Signature, SignerError> {
             tokio::time::sleep(self.delay).await;
-            Err(SignerError::SigningFailed)
-        }
-
-        async fn operator_address(&self) -> Result<Address, SignerError> {
             Err(SignerError::SigningFailed)
         }
 
