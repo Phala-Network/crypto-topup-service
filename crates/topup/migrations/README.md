@@ -125,7 +125,9 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `transitions`, `audit`, `reconciliation_findings`, `heartbeat`, `events` | `SELECT`, `INSERT` (append-only) |
 | `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
 | `reconciliation_blocks`, `deposit_address_client_secrets` | `SELECT`, `INSERT`, `DELETE` |
-| `reconciliation_deposit_cursors` | `SELECT`, `INSERT`, `UPDATE` |
+| `reconciliation_deposit_cursors`, `restores` | `SELECT`, `INSERT`, `UPDATE` |
+| `restore_timeline` | `SELECT`, `UPDATE` |
+| `restore_delivered_events` | `SELECT`, `INSERT` |
 | `_sqlx_migrations`, `permissions` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
@@ -196,3 +198,11 @@ pending refund's named log, block-wide until now, is cleared so any matching log
 index extended to `(chain_id, block_number, id)`; and adds `accounts.max_unfinalized_credit`
 (cents, default 100 000) with an index of credited deposits not final. Its down migration returns
 refunds failed as dropped or never seen to `pending`.
+
+`20261018000000_restore_mode` adds restore mode (architecture §14, design §13):
+`restore_timeline` holds the PostgreSQL timeline the service last acknowledged (first the one the
+migration runs on), so `topup run` finds a restore by a newer timeline; `restores` holds each
+detected restore, and the one without `unfrozen_at` is the freeze (at most one, a partial unique
+index), with the restore point and each chain's restored cursor; `restore_delivered_events` marks
+the events imported from merchants' records as delivered after the restore point. Its down
+migration drops the three tables and leaves imported events in `events`.

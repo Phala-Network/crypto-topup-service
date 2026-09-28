@@ -30,6 +30,9 @@ pub struct RestoreExpectations {
 pub struct RestoreReport {
     /// Overall result: `ok` or `incomplete`.
     pub status: &'static str,
+    /// The restore the check recorded, which keeps the service frozen after the upgrade to the
+    /// service compose until the operator reconciles and unfreezes it (`crate::restore_mode`).
+    pub restore_id: String,
     /// Reasons that prevent resuming service traffic.
     pub failures: Vec<String>,
     /// Newest successful SQLx migration found in the restored database.
@@ -77,8 +80,9 @@ pub struct PostRestoreReconciliation {
     pub findings: Vec<Finding>,
 }
 
-/// Validates migration state, WAL application, externally anchored RPO, and table counts, then runs
-/// the §13 post-restore reconciliation through [`Reconciler::post_restore_once`].
+/// Records the restore, which freezes the service (`crate::restore_mode`), validates migration
+/// state, WAL application, externally anchored RPO, and table counts, then runs the §13
+/// post-restore reconciliation through [`Reconciler::post_restore_once`].
 ///
 /// The service, heartbeat, and backup processes must remain stopped while this runs: the
 /// post-restore round holds the lease-owner lock and may repair the restored ledger. It asks the
@@ -89,6 +93,9 @@ pub async fn check(
     reconciler: &Reconciler,
 ) -> Result<RestoreReport, String> {
     let latest_migration = check_migrations(pool).await?;
+    let restore = crate::restore_mode::freeze_after_restore(pool)
+        .await
+        .map_err(|_| "failed to record the restore and freeze the service".to_owned())?;
 
     let wal = sqlx::query(
         "SELECT pg_is_in_recovery() AS in_recovery, \
@@ -183,6 +190,7 @@ pub async fn check(
 
     Ok(RestoreReport {
         status,
+        restore_id: restore.id.to_string(),
         failures,
         latest_migration,
         in_recovery,

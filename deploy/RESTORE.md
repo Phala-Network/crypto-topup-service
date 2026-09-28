@@ -2,8 +2,14 @@
 
 Trigger: PostgreSQL loss or corruption, a failed database volume, or a restore drill. Targets: RPO
 at most one minute, RTO at most one hour (architecture §14). While the database is unavailable
-the API and processing stop for every route; deposit addresses stay derivable from product data
-and need no restore.
+the API and processing stop for every route.
+
+Restoring the database does not restore the business: the changes after the restore point are
+lost, among them key revocations, treasury cancellations, endpoint deletions, deposit addresses
+given to customers, and events merchants received. So a restored service starts **frozen**:
+reads and `/healthz` work, merchant writes answer `503 service_restoring` with `Retry-After`, and
+nothing credits, settles, or delivers an event until the operator has reconciled and unfrozen it
+([Reconciliation after a restore](runbooks/restore.md)).
 
 A restore is a bootstrap from backup (the pattern of CloudNativePG's `bootstrap.recovery`): a new
 instance of the same dstack app boots with an empty volume, and PostgreSQL itself fetches the
@@ -57,15 +63,18 @@ differences, so a verification instance has its own compose hash:
 
 - `TOPUP_RESTORE_FROM_BACKUP=on`: a base backup is required (an empty prefix fails), archiving is
   off, and `backup` idles, so nothing writes to or deletes from the prefix.
-- `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET` and `HEAD` (anything else `503`),
-  runs no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
+- `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET`, `HEAD`, and the operator's
+  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`), runs
+  no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
   `heartbeat` exits.
 - No `dstack-ingress`: `topup` is published on 8081 instead
   ([why](#addressing-the-restore-check-instance)), and its origin is that gateway URL.
 
 After PostgreSQL promotes (its health check passes only out of recovery; the start period is the
-one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: migration checksums,
-WAL state, row counts, then a full reconciliation round on the restored ledger alone: the
+one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: it records the restore,
+which freezes the service (the report's `restore_id`; the freeze is a row of the database, so it
+holds after the upgrade to the service compose), then checks migration checksums, WAL state, row
+counts, and runs a full reconciliation round on the restored ledger alone: the
 service's record is authoritative for its credits, so nothing asks the product anything and the
 restore does not depend on the product being reachable. The read-only `topup` serves the report
 on `/healthz`:
@@ -78,12 +87,21 @@ on `/healthz`:
 `incomplete` and is listed in `failures`; a check that could not run reports `failed`. Other
 reconciliation findings and `failed_checks` are reported but do not gate resume.
 
-**Credits inside the RPO window.** A deposit credited in the last minute before the loss is
-rebuilt from the chain and credited again after resume. Its `deposit.credited` carries the same
-event id and deposit id, so the product ignores the repeat. A lock-priced deposit gets the same
-amount; a spot-priced one is re-priced, and if the amount differs the product keeps its first
-credit and reports the difference. After resume, ask the product for those reports and record each
-deposit and both amounts in the incident.
+**Changes inside the RPO window.** A deposit credited in the last minute before the loss is
+rebuilt from the chain by the rescan and credited again after the unfreeze, with the same deposit
+id and `deposit.credited` event id; a lock-priced deposit gets the same amount, a spot-priced one
+is re-valued. Before the unfreeze the operator imports the events each merchant received after the
+restore point, as delivered: the rebuilt deposit then finds its event recorded and nothing is sent
+again with another body, and `GET /v1/admin/restore` flags a re-valued amount that differs from
+the delivered one. The same reconciliation revokes again the keys, cancels again the treasury
+changes, pauses or resumes treasury crediting again, and deletes again the endpoints that the
+restore brought back, and re-issues the deposit
+addresses given out after the restore point, identically ([runbook](runbooks/restore.md)).
+
+A service that booted straight from backup into the service compose (an empty volume, so the
+PostgreSQL entrypoint restored it, without the restore-check variant) is frozen as well: every
+promotion out of archive recovery starts a new PostgreSQL timeline, and `topup run` freezes when
+the timeline is newer than the one it acknowledged.
 
 **Sentry during a real restore.** The replacement runs no loop and reports as
 `<environment>-restore`, so every Crons monitor of the environment misses its check-ins and the
@@ -209,7 +227,8 @@ live_isolated() {
 
 ### Resume
 
-Real restore only, after a human review of the report, row counts, and incident markers. Delete
+Real restore only, after a human review of the report, row counts, and incident markers, and
+after steps 1 to 5 of the [reconciliation](runbooks/restore.md) (they run on this instance). Delete
 the failed instance, so only one instance holds the keys and archives into the prefix, and have
 the product hold its calls ([incident communication](runbooks/incident-communication.md)). Then
 render the service variant (`deploy/render-compose.sh`, no flag) with the Environment's settings
@@ -226,8 +245,12 @@ certificate; update a CAA record that pins the old ACME account. Require:
 - a `base_…` backup newer than the switch is listed and new segments of the promoted timeline
   appear under `wal_005/` (`backup` takes that base backup at once; until then the new timeline
   cannot be restored);
-- a verified attestation and an `ok` check-in of `topup-backup`. Only then unmute the monitors
-  and let the product resume, once health and reconciliation stay clean.
+- a verified attestation and an `ok` check-in of `topup-backup`. Only then unmute the monitors.
+
+The service comes up frozen: merchant writes answer `503 service_restoring`, and the scanner
+rescans each chain from its restored cursor while nothing is credited or delivered. Finish the
+[reconciliation](runbooks/restore.md) (steps 6 to 8): wait for the rescan, unfreeze with the
+admin API (audited), and let the product resume once health and reconciliation stay clean.
 
 If the restored state is wrong, keep the instance isolated: return traffic to the prior CVM only
 if it is authoritative, otherwise restore again from an older verified backup and repeat the check.
@@ -265,7 +288,15 @@ local object storage: `controlled` forces a WAL switch and requires the last mar
 wrong key fails the restore command (`126`), then boot the whole restore-check variant on an empty
 volume with read-only credentials and require promotion with archiving off, an `ok` report with a
 complete reconciliation, `503` on writes, the RPO and an RTO of at most 3600 seconds, and an
-unchanged object listing. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
+unchanged object listing. `controlled` also runs the business-consistency scenario: after the last
+archived WAL, and before PostgreSQL is killed (a clean shutdown would archive them), the source
+revokes an API key, rotates a customer's deposit address, and records a
+delivered `deposit.credited`, and those writes are lost with the source. The drill requires that
+the replacement is frozen (merchant writes `503 service_restoring`, `GET /v1/admin/restore`
+`frozen`), that the lost key works until the operator revokes it again by prefix and then answers
+`401`, that the lost address is re-issued with the same address and `da_` id, that the delivered
+event is imported exactly as delivered with no delivery while a different body is refused as a
+`mismatch` and changes nothing, and that the unfreeze is refused while no chain is rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
 it every Monday at 03:17 UTC and on demand; the CI `deployment` job runs the bounded WAL-G and
 bootstrap tests on pull requests and pushes to `main`.
 

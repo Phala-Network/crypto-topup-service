@@ -280,6 +280,63 @@
         ],
         "type": "object"
       },
+      "ChainRescan": {
+        "description": "One chain's rescan since the restore.",
+        "properties": {
+          "blocked": {
+            "description": "Whether a reconciliation block freezes the chain: its scanner is paused, so it is left out\nof the rescan, and it credits nothing until the block is lifted.",
+            "type": "boolean"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "complete": {
+            "description": "Whether the chain is rescanned: finalized past the moment the restore was detected, with\nevery issued address backfilled.",
+            "type": "boolean"
+          },
+          "pending_backfills": {
+            "description": "Issued addresses of the chain whose history the scanner has not read yet, such as\nre-issued deposit addresses.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "restored_block": {
+            "description": "The chain's scanned block when the restore was detected.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scanned_block": {
+            "description": "The chain's scanned block now.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scanned_block_time": {
+            "description": "Block time of the finalized head the scanner last committed through, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chain_id",
+          "pending_backfills",
+          "blocked",
+          "complete"
+        ],
+        "type": "object"
+      },
       "Contact": {
         "additionalProperties": false,
         "description": "The merchant's contact recorded at onboarding (design D8): the operator's channel for the key\nhand-over, recovery, incidents, and restores, and the only personal data kept.",
@@ -475,6 +532,115 @@
           "reconciliation_blocks",
           "failing_for_hours",
           "failing_webhook_endpoints"
+        ],
+        "type": "object"
+      },
+      "DeletedWebhookEndpoint": {
+        "description": "A deleted webhook endpoint.",
+        "example": {
+          "deleted": true,
+          "id": "we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1",
+          "object": "webhook_endpoint"
+        },
+        "properties": {
+          "deleted": {
+            "description": "Always `true`.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Endpoint id, `we_…`.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Always `webhook_endpoint`.",
+            "enum": [
+              "webhook_endpoint"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "deleted"
+        ],
+        "type": "object"
+      },
+      "DeliveredEventFinding": {
+        "description": "An imported event whose deposit is not re-derived yet, or whose amounts differ.",
+        "properties": {
+          "delivered_amount": {
+            "description": "Delivered `amount`, the credit in minor units.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivered_amount_atomic": {
+            "description": "Delivered `amount_atomic`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deposit": {
+            "description": "The deposit, `dep_…`.",
+            "type": "string"
+          },
+          "event": {
+            "description": "Event id, `evt_…`.",
+            "type": "string"
+          },
+          "ledger_amount": {
+            "description": "The ledger's credit in minor units.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ledger_amount_atomic": {
+            "description": "The ledger's `amount_atomic`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`pending` (the rescan has not re-derived or valued the deposit yet) or `mismatch` (the\nledger's token amount or credit differs from what the merchant received; the delivered\nevent is kept and never sent again).",
+            "type": "string"
+          },
+          "type": {
+            "description": "Event type.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event",
+          "type",
+          "deposit",
+          "status"
+        ],
+        "type": "object"
+      },
+      "DeliveredEvents": {
+        "description": "Delivered events imported for the restore.",
+        "properties": {
+          "findings": {
+            "description": "Each imported event whose deposit the ledger does not hold as delivered yet.",
+            "items": {
+              "$ref": "#/components/schemas/DeliveredEventFinding"
+            },
+            "type": "array"
+          },
+          "imported": {
+            "description": "How many were imported.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported",
+          "findings"
         ],
         "type": "object"
       },
@@ -724,6 +890,204 @@
         ],
         "type": "object"
       },
+      "DepositAddress": {
+        "description": "A customer's persistent deposit address, like a bank-transfer virtual account: one address for\nevery supported token on every supported network. Any amount of a supported token sent to it\nis credited to the customer at the market (spot) price when it arrives. Rotation retires it and\nissues a new one on every network; a retired address is still credited.",
+        "example": {
+          "address": "0x0f45147a02e4c9d91aff20024e22095536fd5053",
+          "client_reference_id": "team-42",
+          "client_secret": "da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+          "created": 1790553600,
+          "id": "da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3",
+          "livemode": false,
+          "metadata": {
+            "plan": "pro"
+          },
+          "networks": [
+            {
+              "address": "0x0f45147a02e4c9d91aff20024e22095536fd5053",
+              "assets": [
+                {
+                  "asset": "PHA",
+                  "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                  "decimals": 18,
+                  "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x0f45147a02e4c9d91aff20024e22095536fd5053"
+                }
+              ],
+              "chain_id": 1,
+              "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
+            }
+          ],
+          "object": "deposit_address",
+          "payments": [],
+          "retired_at": null,
+          "salt": "0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52",
+          "status": "active",
+          "version": 1
+        },
+        "properties": {
+          "address": {
+            "description": "The address shared by every network, when all of `networks` have the same one; `null`\nwhen a network's treasury differs, and so its address (see `networks`), or when there is\nno network.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_reference_id": {
+            "description": "Your identifier of the customer.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "Lets the customer's page read the address's public view, `ClientDepositAddress`, from\n`GET /v1/deposit_addresses/{id}?client_secret=…` without an API key, to show a payment as\nsoon as it is seen. Returned only by `POST /v1/deposit_addresses` and `…/rotate`, each\ntime a new one; only its hash is stored, and the newest 10 of an address stay valid. Give\nit only to the customer's page, and do not log it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Creation time, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "`da_` id.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "Whether the address is in live mode.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.\nEach deposit to the address starts with a copy.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "networks": {
+            "description": "The address on each supported network of the mode it was issued on, by `chain_id`, with\nthe tokens it takes there.",
+            "items": {
+              "$ref": "#/components/schemas/DepositAddressNetwork"
+            },
+            "type": "array"
+          },
+          "object": {
+            "description": "Always `deposit_address`.",
+            "enum": [
+              "deposit_address"
+            ],
+            "type": "string"
+          },
+          "payments": {
+            "description": "Payments to the address in the last 24 hours, newest first, at most 10, as a quote's\n`payment`: `seen` in a block within about a block time of arriving, then `recorded` as a\ndeposit. Display only; credit from `deposit.credited`.",
+            "items": {
+              "$ref": "#/components/schemas/Payment"
+            },
+            "type": "array"
+          },
+          "retired_at": {
+            "description": "Retirement time, Unix seconds; `null` while active.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "salt": {
+            "description": "CREATE2 salt, 32 bytes of hex; the same on every network.",
+            "type": "string"
+          },
+          "status": {
+            "description": "`active`, or `retired` by a rotation; payments to either are credited.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The address's version among the customer's addresses, from 1. The salt is\n`keccak256(abi.encode(account, livemode, client_reference_id, \"deposit_address\", version))`,\nwith the types `(string, bool, string, string, uint256)` and `account` your `acct_` id; it\nnames no chain or asset. On each network the address is the factory's `CREATE2` over that\nnetwork's treasury and the salt.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "client_reference_id",
+          "version",
+          "salt",
+          "status",
+          "created",
+          "metadata",
+          "networks",
+          "payments"
+        ],
+        "type": "object"
+      },
+      "DepositAddressAsset": {
+        "description": "A token a deposit address takes on one network.",
+        "properties": {
+          "asset": {
+            "description": "Asset code, such as `pha`.",
+            "type": "string"
+          },
+          "contract": {
+            "description": "ERC-20 contract address.",
+            "type": "string"
+          },
+          "decimals": {
+            "description": "ERC-20 decimal count.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "payment_uri": {
+            "description": "EIP-681 ERC-20 transfer URI carrying the token, chain, and address, and no amount: the\npayer chooses it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "contract",
+          "decimals",
+          "payment_uri"
+        ],
+        "type": "object"
+      },
+      "DepositAddressNetwork": {
+        "description": "A deposit address on one network (EVM chain).",
+        "properties": {
+          "address": {
+            "description": "The forwarder address to pay on this chain.",
+            "type": "string"
+          },
+          "assets": {
+            "description": "The supported tokens on this chain; any other token sent to the address is not credited.",
+            "items": {
+              "$ref": "#/components/schemas/DepositAddressAsset"
+            },
+            "type": "array"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "treasury": {
+            "description": "The treasury the forwarder pays. The address is the same on every network whose treasury\nis the same address.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "address",
+          "treasury",
+          "assets"
+        ],
+        "type": "object"
+      },
       "DepositAdmin": {
         "description": "The operator's view of a deposit's internals (`GET /v1/admin/deposits/{id}`), returned as the\n`admin` field of the deposit; never present in a merchant response or an event.",
         "properties": {
@@ -970,6 +1334,24 @@
         ],
         "type": "string"
       },
+      "EventImport": {
+        "description": "What importing one delivered event did.",
+        "properties": {
+          "id": {
+            "description": "Event id, `evt_…`.",
+            "type": "string"
+          },
+          "result": {
+            "description": "`imported` (stored as delivered, with no delivery), `matches` (recorded already with the\nsame `data`), or `mismatch` (recorded already with other `data`, which is kept).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "result"
+        ],
+        "type": "object"
+      },
       "ExpandableQuote": {
         "description": "A quote id, or the quote with `expand[]`.",
         "oneOf": [
@@ -1157,6 +1539,112 @@
         ],
         "type": "object"
       },
+      "Payment": {
+        "description": "A payment observed at a quote's address or a deposit address. Display only: while `status` is\n`seen` it may still disappear in a reorg, and nothing has been credited.",
+        "properties": {
+          "amount_atomic": {
+            "description": "Token amount in base units, as a decimal string.",
+            "type": "string"
+          },
+          "asset": {
+            "description": "Asset code; `null` for a token without a route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmations": {
+            "description": "Blocks on top of and including the transfer's block at the last head scan; `seen` only.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "deposit": {
+            "description": "`dep_` id the deposit has, or will have once recorded.",
+            "type": "string"
+          },
+          "estimated_final_at": {
+            "description": "Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "matches_quote": {
+            "description": "On a quote: whether the payment is the quote's asset, in time, and within tolerance, so\nit is credited at the quoted price (otherwise at spot). `null` on a deposit address, whose\npayments are all credited at spot.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "`seen` (in a block, not recorded as a deposit yet) or `recorded` (recorded as a deposit at\nthe route's confirmation; follow it as `deposit`). New values may be added.",
+            "type": "string"
+          },
+          "tx_hash": {
+            "description": "Canonical transaction hash.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "chain_id",
+          "tx_hash",
+          "amount_atomic",
+          "deposit"
+        ],
+        "type": "object"
+      },
+      "ReceivedTreasury": {
+        "description": "A treasury object as the merchant received it; other fields are ignored.",
+        "properties": {
+          "address": {
+            "description": "The received `address`.",
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "The received `chain_id`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "crediting_paused_by": {
+            "description": "The received `crediting_paused_by`; only its `merchant` entry is compared, the operator\nre-applies its own pauses.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Treasury id, `trs_…`.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The received `status`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "chain_id",
+          "address"
+        ],
+        "type": "object"
+      },
       "ReconciliationBlockLiftResponse": {
         "description": "A lifted reconciliation block.",
         "example": {
@@ -1248,6 +1736,610 @@
         "required": [
           "at",
           "failed_checks"
+        ],
+        "type": "object"
+      },
+      "RestoreApiKeyRevokeRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/api_keys/revoke` body: a key the merchant revoked after the restore\npoint, named by its id or by its prefix and last four characters.",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "last4": "9Yz2",
+          "prefix": "ppay_sk_live_",
+          "reason": "revoked by the merchant at 10:02 PDT, after the restore point; INC-12"
+        },
+        "properties": {
+          "account": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The key's id, `key_…`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last4": {
+            "description": "The key's last four characters, with `prefix`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prefix": {
+            "description": "The key's prefix, such as `ppay_sk_live_`, with `last4`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes: the merchant's record of the revocation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreDepositAddressRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/deposit_addresses` body: a deposit address the merchant holds, given\nout after the restore point.",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "address": "0x0f45147a02e4c9d91aff20024e22095536fd5053",
+          "client_reference_id": "team-42",
+          "id": "da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3",
+          "livemode": false,
+          "reason": "issued after the restore point, from the merchant's records; INC-12"
+        },
+        "properties": {
+          "account": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "address": {
+            "description": "The address the merchant holds (the top-level `address` or a network's); the version is\nfound by deriving the customer's versions over the account's current treasuries.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_reference_id": {
+            "description": "The customer's `client_reference_id`.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The `da_` id the merchant holds, kept for the re-issued address.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "livemode": {
+            "description": "The mode.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The address's `version`; with `address`, both must agree.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "livemode",
+          "client_reference_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreDepositAddressResponse": {
+        "description": "`POST /v1/admin/restore/deposit_addresses` response.",
+        "example": {
+          "deposit_address": {
+            "address": "0x0f45147a02e4c9d91aff20024e22095536fd5053",
+            "client_reference_id": "team-42",
+            "client_secret": "da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071",
+            "created": 1790553600,
+            "id": "da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3",
+            "livemode": false,
+            "metadata": {
+              "plan": "pro"
+            },
+            "networks": [
+              {
+                "address": "0x0f45147a02e4c9d91aff20024e22095536fd5053",
+                "assets": [
+                  {
+                    "asset": "PHA",
+                    "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                    "decimals": 18,
+                    "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x0f45147a02e4c9d91aff20024e22095536fd5053"
+                  }
+                ],
+                "chain_id": 1,
+                "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
+              }
+            ],
+            "object": "deposit_address",
+            "payments": [],
+            "retired_at": null,
+            "salt": "0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52",
+            "status": "active",
+            "version": 1
+          },
+          "reissued": true
+        },
+        "properties": {
+          "deposit_address": {
+            "$ref": "#/components/schemas/DepositAddress",
+            "description": "The deposit address."
+          },
+          "reissued": {
+            "description": "Whether the address was issued now; `false` when the customer already had this version.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reissued",
+          "deposit_address"
+        ],
+        "type": "object"
+      },
+      "RestoreEventsImportRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/events` body: `deposit.credited`, `deposit.rejected`, and\n`deposit.reversed` events the merchant received after the restore point, as delivered.",
+        "example": {
+          "events": [
+            {
+              "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+              "created": 1790553600,
+              "data": {
+                "object": {
+                  "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
+                  "amount": 2500,
+                  "amount_atomic": "202510000000000000000",
+                  "amount_refunded": 0,
+                  "amount_refunded_atomic": "0",
+                  "amount_reversed": 0,
+                  "asset": "PHA",
+                  "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                  "block_number": 21000000,
+                  "chain_id": 1,
+                  "client_reference_id": "team-42",
+                  "created": 1790553624,
+                  "currency": "usd",
+                  "deposit_address": null,
+                  "exchange_rate": "0.12345679",
+                  "final": true,
+                  "from_address": "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a",
+                  "id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+                  "livemode": false,
+                  "log_index": 212,
+                  "metadata": {
+                    "order_id": "ord_1001"
+                  },
+                  "object": "deposit",
+                  "price_source": "quote",
+                  "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+                  "refunded": false,
+                  "rejection_reason": null,
+                  "status": "credited",
+                  "swept": false,
+                  "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
+                  "valued_at": 1790553630
+                }
+              },
+              "id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
+              "livemode": false,
+              "object": "event",
+              "type": "deposit.credited"
+            }
+          ],
+          "reason": "delivered after the restore point, from the merchant's receiver; INC-12"
+        },
+        "properties": {
+          "events": {
+            "description": "Up to 100 event objects exactly as delivered.",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreEventsImportResponse": {
+        "description": "`POST /v1/admin/restore/events` response.",
+        "example": {
+          "data": [
+            {
+              "id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
+              "result": "imported"
+            }
+          ],
+          "object": "list"
+        },
+        "properties": {
+          "data": {
+            "description": "One result per event, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/EventImport"
+            },
+            "type": "array"
+          },
+          "object": {
+            "description": "Always `list`.",
+            "enum": [
+              "list"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "data"
+        ],
+        "type": "object"
+      },
+      "RestoreObject": {
+        "description": "A restore from backup the service detected.",
+        "example": {
+          "detected_at": 1790555400,
+          "detected_by": "restore_check",
+          "id": "0b8e2f4a-6c1d-4e3b-9a5f-7d2c4e6a8b1f",
+          "object": "restore",
+          "restore_point": 1790555340,
+          "restored_cursors": {
+            "1": 23401200
+          },
+          "timeline_id": 2,
+          "unfreeze_reason": null,
+          "unfrozen_at": null,
+          "unfrozen_by": null
+        },
+        "properties": {
+          "detected_at": {
+            "description": "When the service found the restore and froze, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "detected_by": {
+            "description": "`restore_check` (recorded after a restore on boot of the restore-check variant) or\n`timeline` (`topup run` found a PostgreSQL timeline newer than the acknowledged one).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Restore id, a UUID.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Always `restore`.",
+            "enum": [
+              "restore"
+            ],
+            "type": "string"
+          },
+          "restore_point": {
+            "description": "Newest heartbeat in the restored database, Unix seconds: changes after it may be lost.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "restored_cursors": {
+            "additionalProperties": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "Each chain's scanned block when the restore was detected, by chain id: where the rescan\nstarts, and where a re-issued deposit address is backfilled from.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "timeline_id": {
+            "description": "The PostgreSQL timeline the restore promoted to.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "unfreeze_reason": {
+            "description": "Why, with the operator's checklist.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unfrozen_at": {
+            "description": "When the operator unfroze the service, Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "unfrozen_by": {
+            "description": "Who unfroze it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "detected_at",
+          "detected_by",
+          "timeline_id",
+          "restored_cursors"
+        ],
+        "type": "object"
+      },
+      "RestoreStatus": {
+        "description": "`GET /v1/admin/restore`: the restore freeze and the reconciliation before unfreezing\n(`deploy/RESTORE.md`).",
+        "example": {
+          "delivered_events": {
+            "findings": [
+              {
+                "delivered_amount": "2500",
+                "delivered_amount_atomic": "202510000000000000000",
+                "deposit": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+                "event": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
+                "ledger_amount": null,
+                "ledger_amount_atomic": null,
+                "status": "pending",
+                "type": "deposit.credited"
+              }
+            ],
+            "imported": 1
+          },
+          "frozen": true,
+          "object": "restore_status",
+          "rescan": [
+            {
+              "blocked": false,
+              "chain_id": 1,
+              "complete": true,
+              "pending_backfills": 0,
+              "restored_block": 23401200,
+              "scanned_block": 23401917,
+              "scanned_block_time": 1790557200
+            }
+          ],
+          "restore": {
+            "detected_at": 1790555400,
+            "detected_by": "restore_check",
+            "id": "0b8e2f4a-6c1d-4e3b-9a5f-7d2c4e6a8b1f",
+            "object": "restore",
+            "restore_point": 1790555340,
+            "restored_cursors": {
+              "1": 23401200
+            },
+            "timeline_id": 2,
+            "unfreeze_reason": null,
+            "unfrozen_at": null,
+            "unfrozen_by": null
+          }
+        },
+        "properties": {
+          "delivered_events": {
+            "$ref": "#/components/schemas/DeliveredEvents",
+            "description": "Delivered events imported from merchants' records, compared with the ledger."
+          },
+          "frozen": {
+            "description": "Whether the service is frozen after a restore from backup: merchant writes answer\n`503 service_restoring`, and nothing credits, settles, expires a quote, applies a treasury\nchange, verifies a refund, or delivers an event.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `restore_status`.",
+            "enum": [
+              "restore_status"
+            ],
+            "type": "string"
+          },
+          "rescan": {
+            "description": "The rescan of each configured chain since that restore; the freeze lifts only once every\nchain is `complete`.",
+            "items": {
+              "$ref": "#/components/schemas/ChainRescan"
+            },
+            "type": "array"
+          },
+          "restore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RestoreObject",
+                "description": "The most recent restore; `null` when the database was never restored."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "object",
+          "frozen",
+          "rescan",
+          "delivered_events"
+        ],
+        "type": "object"
+      },
+      "RestoreTreasuryVerifyRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/treasuries/verify` body: the treasuries of the merchant's latest\n`treasury` events, as received.",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "livemode": true,
+          "reapply": true,
+          "reason": "the merchant's treasury events since the restore point; INC-12",
+          "treasuries": [
+            {
+              "address": "0x936c1991f8da9a919fa11b557a3514719f5a4504",
+              "chain_id": 1,
+              "crediting_paused_by": [],
+              "id": "trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9",
+              "status": "canceled"
+            }
+          ]
+        },
+        "properties": {
+          "account": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "The mode.",
+            "type": "boolean"
+          },
+          "reapply": {
+            "description": "Apply again what the restore undid: cancel each pending treasury the merchant received as\n`canceled`, and pause or resume crediting as the merchant's `crediting_paused_by` shows.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          },
+          "treasuries": {
+            "description": "Each treasury's latest object the merchant received (an event's `data.object`), one per\ntreasury; at most 100.",
+            "items": {
+              "$ref": "#/components/schemas/ReceivedTreasury"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "account",
+          "livemode",
+          "treasuries",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreTreasuryVerifyResponse": {
+        "description": "`POST /v1/admin/restore/treasuries/verify` response.",
+        "example": {
+          "data": [
+            {
+              "crediting": "matches",
+              "id": "trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9",
+              "received_status": "canceled",
+              "result": "canceled",
+              "status": "canceled"
+            }
+          ],
+          "object": "list"
+        },
+        "properties": {
+          "data": {
+            "description": "One result per received treasury, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/TreasuryVerification"
+            },
+            "type": "array"
+          },
+          "object": {
+            "description": "Always `list`.",
+            "enum": [
+              "list"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "data"
+        ],
+        "type": "object"
+      },
+      "RestoreUnfreezeRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/unfreeze` body: the operator's reason and checklist.",
+        "example": {
+          "delivered_events_imported": true,
+          "deposit_addresses_reissued": true,
+          "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
+          "security_changes_reapplied": true
+        },
+        "properties": {
+          "delivered_events_imported": {
+            "description": "Every event delivered after the restore point was imported; must be `true`.",
+            "type": "boolean"
+          },
+          "deposit_addresses_reissued": {
+            "description": "Every deposit address given out after the restore point was re-issued; must be `true`.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes: the incident and its sign-off.",
+            "type": "string"
+          },
+          "security_changes_reapplied": {
+            "description": "Every contact confirmed the key revocations, treasury cancellations, and endpoint\ndeletions made after the restore point, and each was applied again; must be `true`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reason",
+          "security_changes_reapplied",
+          "deposit_addresses_reissued",
+          "delivered_events_imported"
+        ],
+        "type": "object"
+      },
+      "RestoreWebhookEndpointDeleteRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/webhook_endpoints/delete` body: an endpoint the merchant deleted\nafter the restore point.",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "id": "we_9e1c3a5b7d2f40c6e8a0b2d4f6a8c0e1",
+          "livemode": true,
+          "reason": "deleted by the merchant after the restore point; INC-12"
+        },
+        "properties": {
+          "account": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Endpoint id, `we_…`.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "The mode.",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "livemode",
+          "id",
+          "reason"
         ],
         "type": "object"
       },
@@ -1480,6 +2572,43 @@
           "created",
           "crediting_paused",
           "crediting_paused_by"
+        ],
+        "type": "object"
+      },
+      "TreasuryVerification": {
+        "description": "A received treasury compared with the restored one.",
+        "properties": {
+          "crediting": {
+            "description": "The merchant's crediting pause, when `crediting_paused_by` was sent: `matches`; `paused` or\n`resumed` (applied again now); `pause_lost` or `resume_lost` (without `reapply`); `missing`;\nor `differs` (another chain or address).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Treasury id, `trs_…`.",
+            "type": "string"
+          },
+          "received_status": {
+            "description": "The status the merchant received.",
+            "type": "string"
+          },
+          "result": {
+            "description": "`matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,\nthe restore undid it: cancel it with `reapply`); `missing` (created after the\nrestore point: the merchant creates it again after the unfreeze); or `differs` (another\nstatus, chain, or address; a change that applied after the restore point applies again).",
+            "type": "string"
+          },
+          "status": {
+            "description": "The restored treasury's status now; `null` when it is missing.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "received_status",
+          "result"
         ],
         "type": "object"
       },
@@ -2996,6 +4125,718 @@
           }
         ],
         "summary": "Platform health: per-route deposit, refund, and exposure metrics, reconciliation, and the\nwebhook endpoints failing for longer than `failing_for_hours`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore": {
+      "get": {
+        "operationId": "get_restore",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreStatus"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Whether the service is frozen after a restore from backup, the latest restore, each chain's\nrescan since it, and the delivered events imported for it compared with the ledger.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/api_keys/revoke": {
+      "post": {
+        "operationId": "revoke_api_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreApiKeyRevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyObject"
+                }
+              }
+            },
+            "description": "OK: revoked, or already revoked",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: no or both selectors, several keys match (name it by `id`), or `last_api_key` (issue a recovery key with `revoke_existing`); or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no key of the account matches",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Revokes again a key the merchant revoked after the restore point, which the restore made\nvalid again: by its `id`, or by its `prefix` and `last4` as the merchant's records show it.\nAnnounced as `api_key.revoked`. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/deposit_addresses": {
+      "post": {
+        "operationId": "reissue_deposit_address",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreDepositAddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreDepositAddressResponse"
+                }
+              }
+            },
+            "description": "OK: re-issued, or the customer's existing version",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Re-issues a deposit address the merchant gave a customer after the restore point, from the\nmerchant's record of its address or version: the salt is derived from the account, mode,\ncustomer, and version, so it is the same address, backfilled from the restored cursor so the\nrescan credits payments made to it since. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/events": {
+      "post": {
+        "operationId": "import_events",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreEventsImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreEventsImportResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no account has an event's `account`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Imports the deposit events a merchant received after the restore point, exactly as delivered:\neach is stored as the event it is, with no delivery, so when the rescan re-derives the deposit\nits event is recorded already and nothing is sent again with another body. An event recorded\nalready keeps its stored snapshot; a different delivered body is reported as `mismatch`.\nAudited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/treasuries/verify": {
+      "post": {
+        "operationId": "verify_treasuries",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreTreasuryVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreTreasuryVerifyResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,\nwith `reapply`, cancels again each pending change the merchant canceled after the restore point\n(while frozen no treasury change applies, so none takes effect first) and pauses or resumes\ncrediting again as the merchant last did. Audited, each change announced as `treasury.*`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/unfreeze": {
+      "post": {
+        "operationId": "unfreeze",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreUnfreezeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreObject"
+                }
+              }
+            },
+            "description": "OK: unfrozen",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: a checklist item is not `true`, `restore_not_frozen`, or `restore_rescan_incomplete`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Lifts the freeze after a restore once every chain is rescanned and the operator confirms the\nchecklist: crediting, settlement, quote expiry, treasury changes, refund verification, and\nevent delivery resume, and merchants can write again. The reason and checklist are recorded\nin the restore and in `audit`.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/webhook_endpoints/delete": {
+      "post": {
+        "operationId": "delete_webhook_endpoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreWebhookEndpointDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedWebhookEndpoint"
+                }
+              }
+            },
+            "description": "OK: deleted",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no endpoint of the account and mode, or deleted already",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Deletes again an endpoint the merchant deleted after the restore point, before deliveries\nresume, announced as `webhook_endpoint.deleted`. Audited.",
         "tags": [
           "admin"
         ]

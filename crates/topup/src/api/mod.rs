@@ -22,6 +22,7 @@ mod pending;
 mod quotes;
 mod rate_limit;
 mod repository;
+mod restore;
 mod sweeps;
 mod treasuries;
 mod webhook_endpoints;
@@ -272,6 +273,13 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::daily_report))
         .routes(routes!(handlers::metrics))
+        .routes(routes!(restore::get_restore))
+        .routes(routes!(restore::revoke_api_key))
+        .routes(routes!(restore::verify_treasuries))
+        .routes(routes!(restore::delete_webhook_endpoint))
+        .routes(routes!(restore::reissue_deposit_address))
+        .routes(routes!(restore::import_events))
+        .routes(routes!(restore::unfreeze))
 }
 
 /// utoipa's merchant and admin documents, before [`openapi`] finishes them.
@@ -304,6 +312,12 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
+        ))
+        // Outermost: while frozen after a restore, a write is refused before anything else runs,
+        // so no idempotency key stores the refusal.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            refuse_writes_while_frozen,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let client_secret = client_secret_routes().route_layer(middleware::from_fn_with_state(
@@ -331,8 +345,35 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
     (router, docs)
 }
 
+/// Seconds `Retry-After` asks a client to wait before retrying a write refused while the service
+/// is frozen after a restore: reconciliation takes minutes to hours.
+const RESTORE_RETRY_AFTER_SECONDS: u64 = 300;
+
+/// `503 service_restoring` with `Retry-After`.
+fn restoring() -> Response {
+    error::ApiError::service_restoring(RESTORE_RETRY_AFTER_SECONDS).into_response()
+}
+
+/// Refuses every merchant write while the service is frozen after a restore
+/// (`crate::restore_mode`); reads pass.
+async fn refuse_writes_while_frozen(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(*request.method(), Method::GET | Method::HEAD) {
+        return next.run(request).await;
+    }
+    match crate::restore_mode::is_frozen(&state.pool).await {
+        Ok(false) => next.run(request).await,
+        Ok(true) => restoring(),
+        Err(error) => error::ApiError::from(error).into_response(),
+    }
+}
+
 /// Builds the router of an instance restored from backup (`TOPUP_SERVICE_ENABLED=read-only`,
-/// `deploy/RESTORE.md`): every request other than `GET` and `HEAD` is refused, and `/healthz`
+/// `deploy/RESTORE.md`): every request other than `GET`, `HEAD`, and the operator's restore
+/// reconciliation (`/v1/admin/restore/…`) is refused with `503 service_restoring`, and `/healthz`
 /// reports the boot-time `restore-check` result read from `restore_report`.
 pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Router {
     let (router, _) = router(state);
@@ -350,13 +391,12 @@ struct ReadOnly {
 }
 
 async fn reject_writes(request: Request, next: Next) -> Response {
-    if matches!(*request.method(), Method::GET | Method::HEAD) {
+    if matches!(*request.method(), Method::GET | Method::HEAD)
+        || request.uri().path().starts_with("/v1/admin/restore/")
+    {
         next.run(request).await
     } else {
-        error::ApiError::service_unavailable(
-            "the service is read-only while a restored database is verified",
-        )
-        .into_response()
+        restoring()
     }
 }
 
