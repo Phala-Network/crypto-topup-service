@@ -17,11 +17,11 @@ name: Deploy
 # summary prints the command); `upgrade` sends no env at all, so the sealed env stays. Every other
 # setting is public and attested: the target's render-compose.sh renders the Environment variables
 # below into the compose, so a changed value is a new compose hash and takes effect only through
-# `upgrade` (deploy/README.md, "Attested settings"). topup's public origin is its custom domain,
-# https://vars.TOPUP_DOMAIN, served by dstack-ingress in the CVM (deploy/README.md, "Custom domain");
-# the summary lists the DNS records the owner creates for it. The product's TOPUP_ORIGIN is that
-# origin: it calls topup's API there and pins from there, with its API key, its account's webhook
-# key that verifies topup's webhooks.
+# `upgrade` (deploy/README.md, "Attested settings"). Each target's public origin is its custom
+# domain, https://vars.TOPUP_DOMAIN or https://vars.PRODUCT_DOMAIN, served by dstack-ingress in the
+# CVM (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for
+# it. The product's TOPUP_ORIGIN is topup's origin: it calls topup's API there and pins from there,
+# with its API key, its account's webhook key that verifies topup's webhooks.
 #
 # Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by
 # deploy/phala-cvm.sh:
@@ -91,7 +91,7 @@ jobs:
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
       # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN,
-      # PRODUCT_PUBLIC_URL, and TOPUP_GATEWAY_DOMAIN come from step "Resolve the public URLs". The
+      # PRODUCT_PUBLIC_URL, and the gateway domain come from step "Resolve the public URLs". The
       # RPC URLs are published with the compose: a keyed provider's URL has `{key}` in place of the
       # key, which the owner seals as TOPUP_RPC_PROVIDER_<A|B>_KEY. SENTRY_ENVIRONMENT is the
       # Environment's name; an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, TOPUP_ADMIN_KID, or
@@ -101,6 +101,7 @@ jobs:
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
       WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX }}
       TOPUP_DOMAIN: ${{ vars.TOPUP_DOMAIN }}
+      PRODUCT_DOMAIN: ${{ vars.PRODUCT_DOMAIN }}
       TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
       TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
       TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
@@ -133,16 +134,17 @@ jobs:
               required="AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
                 TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY
                 TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL"
-              # The public URL is the custom domain; there is no gateway port to resolve.
               dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=phala-pay-$DEPLOY_ENVIRONMENT
-              instance_type=tdx.medium port="" origin_variable=""
+              instance_type=tdx.medium domain_variable=TOPUP_DOMAIN
+              gateway_variable=TOPUP_GATEWAY_DOMAIN policy=""
               images="TOPUP_IMAGE POSTGRES_WALG_IMAGE" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
             product)
-              required="TOPUP_DOMAIN PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY"
+              required="TOPUP_DOMAIN PRODUCT_DOMAIN PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY"
               [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
                 { echo "::error::the reference product deploys to staging only"; status=1; }
               dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=phala-pay-staging-product
-              instance_type=tdx.small port=8089 origin_variable=PRODUCT_PUBLIC_URL
+              instance_type=tdx.small domain_variable=PRODUCT_DOMAIN
+              gateway_variable=PRODUCT_GATEWAY_DOMAIN policy=dstack-ingress:443
               images=PRODUCT_IMAGE compose_name=docker-compose.product.yml ;;
             *) echo "::error::unknown target $TARGET"; exit 1 ;;
           esac
@@ -157,8 +159,9 @@ jobs:
             echo "EXISTING_CVM_ID=$existing"
             echo "CVM_NAME=$cvm_name"
             echo "INSTANCE_TYPE=$instance_type"
-            echo "PORT=$port"
-            echo "ORIGIN_VARIABLE=$origin_variable"
+            echo "DOMAIN=${!domain_variable}"
+            echo "GATEWAY_VARIABLE=$gateway_variable"
+            echo "POLICY=$policy"
             echo "IMAGES=$images"
             echo "COMPOSE_NAME=$compose_name"
           } >>"$GITHUB_ENV"
@@ -233,33 +236,25 @@ jobs:
         with:
           version: v1.8.3
 
-      # topup's public URL is its custom domain, whose CNAME target is the gateway of the CVM's node.
-      # The product's own URL is its gateway URL. Both come from the existing CVM on an upgrade; a
-      # new CVM is rendered with a provisional value until its node is known (step "Set the values
-      # known only after provisioning"). The product also renders topup's origin, the same
+      # The public URL is the target's custom domain, whose CNAME target is the gateway of the CVM's
+      # node, which dstack-ingress names: from the existing CVM on an upgrade; a new CVM is rendered
+      # with a provisional value until its node is known (step "Set the values known only after
+      # provisioning"). The product also renders its own URL and topup's origin, the same
       # Environment's domain.
       - name: Resolve the public URLs
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          if [[ "$MODE" == upgrade ]]; then
-            deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
-          fi
-          if [[ "$TARGET" == topup ]]; then
-            if [[ "$MODE" == provision ]]; then
-              gateway=gateway.pending.invalid
-            else
-              gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm-before.json")
-            fi
-            echo "TOPUP_GATEWAY_DOMAIN=$gateway" | tee -a "$GITHUB_ENV"
-            echo "PUBLIC_URL=https://$TOPUP_DOMAIN" | tee -a "$GITHUB_ENV"
+          if [[ "$MODE" == provision ]]; then
+            gateway=gateway.pending.invalid
           else
-            if [[ "$MODE" == provision ]]; then
-              url=https://pending.invalid
-            else
-              url=$(deploy/phala-cvm.sh url "$WORK/cvm-before.json" "$PORT")
-            fi
-            echo "$ORIGIN_VARIABLE=$url" | tee -a "$GITHUB_ENV"
+            deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
+            gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm-before.json")
+          fi
+          echo "$GATEWAY_VARIABLE=$gateway" | tee -a "$GITHUB_ENV"
+          echo "PUBLIC_URL=https://$DOMAIN" | tee -a "$GITHUB_ENV"
+          if [[ "$TARGET" == product ]]; then
+            echo "PRODUCT_PUBLIC_URL=https://$DOMAIN" | tee -a "$GITHUB_ENV"
             echo "TOPUP_ORIGIN=https://$TOPUP_DOMAIN" | tee -a "$GITHUB_ENV"
           fi
 
@@ -354,23 +349,16 @@ jobs:
             fi
           } >>"$GITHUB_STEP_SUMMARY"
           deploy/phala-cvm.sh wait "$cvm_id" >"$WORK/cvm.json"
-          if [[ "$TARGET" == product ]]; then
-            echo "PUBLIC_URL=$(deploy/phala-cvm.sh url "$WORK/cvm.json" "$PORT")" | tee -a "$GITHUB_ENV"
-          fi
 
-      # A new CVM lands on a node chosen by Phala Cloud. Its gateway (topup's CNAME target, which
-      # dstack-ingress names) and the product's gateway URL are known only now, and both are attested
-      # configuration: upgrade the new CVM to the compose rendered with them (no -e: the env stays).
+      # A new CVM lands on a node chosen by Phala Cloud. Its gateway (the domain's CNAME target, which
+      # dstack-ingress names) is known only now, and is attested configuration: upgrade the new CVM
+      # to the compose rendered with it (no -e: the env stays).
       - name: Set the values known only after provisioning
         if: inputs.mode == 'provision'
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          if [[ "$TARGET" == topup ]]; then
-            name=TOPUP_GATEWAY_DOMAIN value=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
-          else
-            name=$ORIGIN_VARIABLE value=$PUBLIC_URL
-          fi
+          name=$GATEWAY_VARIABLE value=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
           env "$name=$value" "$DIR/render-compose.sh" >"$COMPOSE"
           echo "$name=$value" | tee -a "$GITHUB_ENV"
           "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" --offline --unsealed
@@ -394,7 +382,7 @@ jobs:
           curl -fsS --max-time 30 --retry 5 --retry-all-errors \
             "$(deploy/phala-cvm.sh url "$WORK/cvm.json" 8090)/prpc/Info" >"$WORK/info.json"
           policy=()
-          [[ "$TARGET" == topup ]] || policy=("$DIR/staging.env.example" "product:$PORT")
+          [[ -z "$POLICY" ]] || policy=("$DIR/staging.env.example" "$POLICY")
           deploy/verify-attestation.sh "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
             "$COMPOSE" "${policy[@]}" 2>&1 | tee "$WORK/verification.txt"
           {
@@ -412,39 +400,37 @@ jobs:
       # domain to this CVM alone; dstack-ingress requests the certificate only once both records
       # resolve. An upgrade keeps the instance id; a new instance (a restore) needs a new TXT value.
       - name: Print the owner's DNS records
-        if: inputs.target == 'topup'
         run: |
           instance_id=$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
             | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
             "$WORK/attestation.json")
           {
-            echo "### Owner: DNS records for \`$TOPUP_DOMAIN\`"
+            echo "### Owner: DNS records for \`$DOMAIN\`"
             echo
             echo "In the domain's Cloudflare zone, DNS only (not proxied); keep them unchanged while this"
             echo "instance serves the domain:"
             echo
             echo "| Type | Name | Content |"
             echo "|---|---|---|"
-            echo "| CNAME | \`$TOPUP_DOMAIN\` | \`$TOPUP_GATEWAY_DOMAIN\` |"
-            echo "| TXT | \`_dstack-app-address.$TOPUP_DOMAIN\` | \`$instance_id:443\` |"
+            echo "| CNAME | \`$DOMAIN\` | \`${!GATEWAY_VARIABLE}\` |"
+            echo "| TXT | \`_dstack-app-address.$DOMAIN\` | \`$instance_id:443\` |"
             echo
-            echo "Optional, once the certificate is issued: CAA \`$TOPUP_DOMAIN\`"
+            echo "Optional, once the certificate is issued: CAA \`$DOMAIN\`"
             echo "\`0 issue \"letsencrypt.org;validationmethods=tls-alpn-01;accounturi=<ACME account>\"\`, with"
-            echo "the account that \`deploy/verify-ingress-evidence.sh $TOPUP_DOMAIN $APP_ID\` prints."
+            echo "the account that \`deploy/verify-ingress-evidence.sh $DOMAIN $APP_ID\` prints."
           } >>"$GITHUB_STEP_SUMMARY"
 
-      # A new topup CVM's PostgreSQL cannot list the backup prefix until the owner seals the
-      # storage credentials, so it refuses to initialize and the service is not up yet. The product
-      # serves without its seed. topup answers on its domain only with the records above in place
-      # and the certificate issued (curl verifies it).
+      # A new CVM answers on its domain only with the records above in place and the certificate
+      # issued (curl verifies it), and a new topup CVM's PostgreSQL cannot list the backup prefix
+      # until the owner seals the storage credentials, so the first check is the upgrade's.
       - name: Wait for the service
-        if: inputs.target == 'product' || inputs.mode == 'upgrade'
+        if: inputs.mode == 'upgrade'
         run: deploy/phala-cvm.sh healthz "$PUBLIC_URL"
 
       - name: Verify the certificate evidence
-        if: inputs.target == 'topup' && inputs.mode == 'upgrade'
+        if: inputs.mode == 'upgrade'
         run: |
-          deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID" 2>&1 |
+          deploy/verify-ingress-evidence.sh "$DOMAIN" "$APP_ID" 2>&1 |
             tee "$WORK/ingress-evidence.txt"
           { echo '```text'; cat "$WORK/ingress-evidence.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
 

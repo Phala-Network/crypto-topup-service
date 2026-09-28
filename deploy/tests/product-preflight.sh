@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed or live
-# key, a stale render, a malformed rendered setting or account, and an RPC URL with an API key are
+# key, a stale render, a malformed rendered setting or account, an ingress domain other than the
+# public URL's host, and an RPC URL with an API key are
 # refused; an unsealed env file is accepted only with --unsealed, and a restricted or secret test
 # key without it.
 set -euo pipefail
@@ -12,7 +13,9 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 export PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333
 export PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
-export PRODUCT_PUBLIC_URL=https://pending.invalid
+export PRODUCT_PUBLIC_URL=https://product.example
+export PRODUCT_DOMAIN=product.example
+export PRODUCT_GATEWAY_DOMAIN=gateway.pending.invalid
 export PRODUCT_RPC_URL=https://rpc.example/sepolia
 export TOPUP_ORIGIN=https://topup.example
 "$root/deploy/product/render-compose.sh" >"$tmp/compose.yml"
@@ -21,6 +24,7 @@ sed 's|https://rpc.example/sepolia|https://rpc.example/other|' "$tmp/compose.yml
 PRODUCT_RPC_URL=http://rpc.example/sepolia "$root/deploy/product/render-compose.sh" >"$tmp/http-rpc.yml"
 PRODUCT_RPC_URL=https://sepolia.infura.io/v3/0123456789abcdef0123456789abcdef \
     "$root/deploy/product/render-compose.sh" >"$tmp/keyed-rpc.yml"
+PRODUCT_DOMAIN=other.example "$root/deploy/product/render-compose.sh" >"$tmp/other-domain.yml"
 printf 'PRODUCT_API_KEY=\n' >"$tmp/unsealed.env"
 sed 's/^PRODUCT_API_KEY=$/PRODUCT_API_KEY=sk_test_123/' "$tmp/unsealed.env" >"$tmp/bad-key.env"
 key_body=$(printf 'A%.0s' {1..43})000000
@@ -57,6 +61,8 @@ expect_failure slug "account must be the product's acct_ id" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/slug.yml"
 expect_failure stale "differs from a fresh render" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/stale.yml"
+expect_failure other-domain "dstack-ingress must serve PRODUCT_DOMAIN" --unsealed \
+    --env "$tmp/unsealed.env" --compose "$tmp/other-domain.yml"
 expect_failure http-rpc "PRODUCT_RPC_URL must use https" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/http-rpc.yml"
 expect_failure keyed-rpc "PRODUCT_RPC_URL seems to embed an API key" --unsealed \

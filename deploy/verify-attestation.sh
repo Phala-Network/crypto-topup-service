@@ -9,8 +9,9 @@ set -eu
 # variables the compose reads, credential isolation, the single ingress: dstack-ingress on 443
 # serving the domain of TOPUP_PUBLIC_ORIGIN for the service variant, topup on 8081 and no
 # dstack-ingress for the restore-check variant); with ENV_EXAMPLE and SERVICE:PORT (the
-# reference product),
-# allowed_envs exactly ENV_EXAMPLE's names and SERVICE:PORT the only published port.
+# reference product, `dstack-ingress:443`),
+# allowed_envs exactly ENV_EXAMPLE's names and SERVICE:PORT the only published port, a
+# dstack-ingress one with tls-alpn-01.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
 # and the app-compose). INFO_JSON is the guest agent's public `GET /prpc/Info` on port 8090 (the
@@ -94,6 +95,8 @@ if [ "$#" -eq 6 ]; then
             "published": ($port | tostring),
             "protocol": "tcp"
         }]
+        and ($service != "dstack-ingress"
+            or .services[$service].environment.CHALLENGE_TYPE == "tls-alpn-01")
     ' "$tmp/docker-compose.json" >/dev/null || {
         echo "attested compose does not have the expected single $6 ingress" >&2
         exit 1

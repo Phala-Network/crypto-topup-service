@@ -236,9 +236,11 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
 
 # The reference-product CVM (deploy/product), rendered as Deploy (target `product`) does: it reads
 # exactly the names of its env example, which become its allowed_envs, carries its settings in the
-# attested config, mounts no host path, and publishes only 8089.
+# attested config, mounts no host path but the dstack socket, and publishes only dstack-ingress on
+# 443 (tls-alpn-01, forwarding to product:8089, serving the host of its public URL).
 PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
     TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
+    PRODUCT_DOMAIN=product.example PRODUCT_GATEWAY_DOMAIN=gateway.dstack.example \
     PRODUCT_RPC_URL=https://rpc.example PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
     "$root/deploy/product/render-compose.sh" >"$product_compose"
 docker compose -f "$product_compose" config --variables |
@@ -251,13 +253,19 @@ cmp -s "$compose_envs" "$staging_envs" || {
     exit 1
 }
 docker compose -f "$product_compose" config --format json >"$rendered"
-jq -e '([.services[].volumes[]? | select(.type == "bind")] | length == 0)
-    and ([.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["product"])
-    and ([.services.product.ports[].target] == [8089])
-    and (.configs.product_config.content | fromjson
-        | .service_url == "https://topup.example" and .rpc_url == "https://rpc.example")' \
+jq -e "$ingress"'([.services[].volumes[]? | select(.type == "bind") | .source]
+        == ["/var/run/dstack.sock"])
+    and ([.services[] | select(.volumes[]?.type == "bind")] == [.services["dstack-ingress"]])
+    and only("dstack-ingress"; 443; "443")
+    and (.services["dstack-ingress"].environment as $ingress
+        | $ingress.CHALLENGE_TYPE == "tls-alpn-01" and $ingress.TARGET_ENDPOINT == "product:8089"
+        and (.configs.product_config.content | fromjson
+            | .public_url == "https://\($ingress.DOMAIN)"
+            and .service_url == "https://topup.example" and .rpc_url == "https://rpc.example"))' \
     "$rendered" >/dev/null || {
-    echo "the product compose must mount no host path, publish only product:8089, and carry its settings" >&2
+    echo "the product compose must bind-mount only the dstack socket into dstack-ingress, publish only" \
+        "dstack-ingress on 443 (tls-alpn-01, forwarding to product:8089, serving the host of its" \
+        "public URL), and carry its settings" >&2
     exit 1
 }
 
