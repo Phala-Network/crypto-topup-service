@@ -19,11 +19,11 @@ use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
-use super::handlers::{ensure_customer, validate_external_id};
+use super::handlers::ensure_customer;
 use super::metadata::{self, Object};
 use super::models::{
-    ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
-    UpdateMetadataRequest,
+    ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteList,
+    QuoteView, UpdateMetadataRequest,
 };
 use super::repository;
 
@@ -41,7 +41,8 @@ use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
     security(("api_key" = [])),
     tag = "config"
 )]
-/// The assets, limits, and quote terms of the attested routes in the credential's mode.
+/// The assets, limits, and quote terms of the attested routes in the credential's mode, with the
+/// confirmation your account's policy requires.
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -53,6 +54,8 @@ pub(crate) async fn get_config(
         .routes
         .current_in(merchant.scope.livemode())
         .collect::<Vec<_>>();
+    let policies =
+        super::account::confirmation_policies(&state.pool, merchant.scope.account_id()).await?;
     let max_open_amount_per_account = routes
         .iter()
         .map(|route| route.rate_lock.max_open_minor.account)
@@ -60,29 +63,32 @@ pub(crate) async fn get_config(
         .unwrap_or_default();
     let assets = routes
         .iter()
-        .map(|route| ConfigAsset {
-            chain_id: route.chain.chain_id,
-            asset: route.asset.symbol.clone(),
-            contract: format!("{:#x}", route.asset.contract),
-            decimals: route.asset.decimals,
-            pricing: match route.pricing.mode {
-                PricingMode::Spot => "spot",
-                PricingMode::Stablecoin => "stablecoin",
+        .map(|route| {
+            let floor = route.chain.confirmations;
+            let confirmations = policies
+                .get(&route.chain.chain_id)
+                .map_or(Some(floor), |policy| floor.stricter(*policy))
+                .unwrap_or(Confirmations::Finalized);
+            ConfigAsset {
+                chain_id: route.chain.chain_id,
+                asset: route.asset.symbol.clone(),
+                contract: format!("{:#x}", route.asset.contract),
+                decimals: route.asset.decimals,
+                pricing: match route.pricing.mode {
+                    PricingMode::Spot => "spot",
+                    PricingMode::Stablecoin => "stablecoin",
+                }
+                .to_owned(),
+                min_amount: route.screening.min_credit_minor,
+                max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
+                min_refund_atomic: route.asset.min_refund_atomic.value().to_string(),
+                quote_ttl_seconds: route.rate_lock.window_s,
+                quote_spread_bps: route.rate_lock.spread_bps.value(),
+                quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
+                confirmations: confirmations.policy_value(),
+                typical_credit_seconds: confirmations.typical_credit_seconds(),
+                typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
             }
-            .to_owned(),
-            min_amount: route.screening.min_credit_minor,
-            max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
-            min_refund_atomic: route.asset.min_refund_atomic.value().to_string(),
-            quote_ttl_seconds: route.rate_lock.window_s,
-            quote_spread_bps: route.rate_lock.spread_bps.value(),
-            quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
-            confirmations: match route.chain.confirmations {
-                Confirmations::Depth(depth) => depth.to_string(),
-                Confirmations::Safe => "safe".to_owned(),
-                Confirmations::Finalized => "finalized".to_owned(),
-            },
-            typical_credit_seconds: route.chain.confirmations.typical_credit_seconds(),
-            typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
         })
         .collect();
     Ok(Json(Config {
@@ -132,7 +138,6 @@ pub(crate) async fn create_quote(
     merchant
         .require(&state.pool, Permission::QuotesWrite)
         .await?;
-    validate_external_id(&request.account_id)?;
     if request.currency != "usd" {
         return Err(ApiError::invalid_param("currency", "currency must be usd"));
     }
@@ -156,7 +161,7 @@ pub(crate) async fn create_quote(
     }
     let credit = MinorAmount::new(request.amount);
     let metadata = metadata::on_create(request.metadata.as_ref())?;
-    let customer = ensure_customer(&state, merchant.scope, &request.account_id).await?;
+    let customer = ensure_customer(&state, merchant.scope, &request.client_reference_id).await?;
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
     }
@@ -176,6 +181,115 @@ pub(crate) async fn create_quote(
     .await
     .map_err(map_error)?;
     respond_with_client_secret(&state, lock).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/quotes",
+    params(
+        ("client_reference_id" = Option<String>, Query, description = "Only this customer's quotes"),
+        ("status" = Option<String>, Query, description = "`open`, `complete`, `expired`, or `canceled`"),
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`qt_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`qt_` id: the page before it")
+    ),
+    responses(
+        (status = 200, description = "OK", body = QuoteList),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "quotes"
+)]
+/// The account's quotes in the key's mode, newest first, with Stripe's cursor pagination.
+pub(crate) async fn list_quotes(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<QuoteList>> {
+    merchant
+        .require(&state.pool, Permission::QuotesRead)
+        .await?;
+    let mut client_reference_id = None;
+    let mut status_filter = None;
+    let mut limit = 10;
+    let mut starting_after = None;
+    let mut ending_before = None;
+    for (name, value) in query_pairs(query.as_deref()) {
+        match name.as_str() {
+            "client_reference_id" => client_reference_id = Some(value),
+            "status" => {
+                status_filter = Some(match value.as_str() {
+                    "open" => RateLockStatus::Open,
+                    "complete" => RateLockStatus::Consumed,
+                    "expired" => RateLockStatus::Expired,
+                    "canceled" => RateLockStatus::Cancelled,
+                    _ => return Err(ApiError::invalid_param("status", "unknown status")),
+                });
+            }
+            "limit" => {
+                limit = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|limit| (1..=100).contains(limit))
+                    .ok_or_else(|| ApiError::invalid_param("limit", "limit must be 1 to 100"))?;
+            }
+            "starting_after" | "ending_before" => {
+                let id = ids::parse(ids::QUOTE, &value)
+                    .ok_or_else(|| ApiError::invalid_param(name.clone(), "not a qt_ id"))?;
+                if name == "starting_after" {
+                    starting_after = Some(id);
+                } else {
+                    ending_before = Some(id);
+                }
+            }
+            other => {
+                return Err(
+                    ApiError::unknown_param(format!("unknown parameter {other}")).with_param(other),
+                );
+            }
+        }
+    }
+    let cursor = match (starting_after, ending_before) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "starting_after and ending_before are mutually exclusive",
+            ));
+        }
+        (Some(id), None) => Some((id, false)),
+        (None, Some(id)) => Some((id, true)),
+        (None, None) => None,
+    };
+    let (locks, has_more) = locks::list(
+        &state.pool,
+        merchant.scope,
+        client_reference_id.as_deref(),
+        status_filter,
+        cursor,
+        limit,
+    )
+    .await
+    .map_err(|error| match (error, cursor) {
+        (RateLockError::NotFound, Some((_, before))) => ApiError::invalid_param(
+            if before {
+                "ending_before"
+            } else {
+                "starting_after"
+            },
+            "no such quote",
+        ),
+        (error, _) => map_error(error),
+    })?;
+    let mut data = Vec::with_capacity(locks.len());
+    for lock in locks {
+        data.push(quote_object(&state.pool, &state.routes, lock).await?);
+    }
+    Ok(Json(QuoteList {
+        object: "list".to_owned(),
+        url: "/v1/quotes".to_owned(),
+        has_more,
+        data,
+    }))
 }
 
 #[utoipa::path(
@@ -344,6 +458,10 @@ async fn client_quote(
         })?;
     let payment = super::pending::quote_payment(&state.pool, route, &lock).await?;
     let (payment_status, confirmations) = match payment {
+        // A reversed deposit is no payment; the page says so rather than ask for one again.
+        None if address_has_reversed_deposit(&state.pool, lock.address_id).await? => {
+            ("reversed", None)
+        }
         None => ("none", None),
         Some(payment) if payment.status == "seen" => ("seen", payment.confirmations),
         Some(payment) => {
@@ -357,6 +475,7 @@ async fn client_quote(
             let status = match deposit_state.as_str() {
                 "credited" | "swept" => "credited",
                 "rejected" => "rejected",
+                "reversed" => "reversed",
                 _ => "confirming",
             };
             (status, None)
@@ -365,6 +484,7 @@ async fn client_quote(
     Ok(ClientQuote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
+        livemode: lock.livemode,
         status: status(lock.status).to_owned(),
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),
@@ -378,6 +498,15 @@ async fn client_quote(
         payment_status: payment_status.to_owned(),
         confirmations,
     })
+}
+
+async fn address_has_reversed_deposit(pool: &PgPool, address_id: Uuid) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1 AND state = 'reversed')",
+    )
+    .bind(address_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[utoipa::path(
@@ -484,7 +613,7 @@ pub(crate) async fn quote_object(
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
         livemode: lock.livemode,
-        account_id: lock.client_reference_id,
+        client_reference_id: lock.client_reference_id,
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),
         chain_id: lock.chain_id,

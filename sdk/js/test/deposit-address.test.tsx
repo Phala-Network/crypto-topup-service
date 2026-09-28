@@ -1,7 +1,9 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  depositAddressIdFromClientSecret,
   depositAddressTransfer,
+  parseClientDepositAddress,
   type DepositAddressAsset,
   type DepositAddressDetails,
   type DepositAddressNetwork,
@@ -117,5 +119,89 @@ describe("DepositAddress", () => {
         />,
       ),
     ).toThrow(TypeError);
+  });
+});
+
+describe("DepositAddress payments", () => {
+  const SECRET = `da_${"0d".repeat(16)}_secret_${"ab".repeat(24)}`;
+
+  function view(payments: unknown[]) {
+    return {
+      id: `da_${"0d".repeat(16)}`,
+      object: "deposit_address",
+      livemode: false,
+      status: "active",
+      address: ADDRESS,
+      networks: [],
+      payments,
+    };
+  }
+
+  function payment(overrides: Record<string, unknown> = {}) {
+    return {
+      status: "seen",
+      chain_id: 11155111,
+      asset: "pha",
+      decimals: 18,
+      amount_atomic: "1500000000000000000",
+      tx_hash: `0x${"ab".repeat(32)}`,
+      confirmations: 1,
+      created: 1_790_000_000,
+      ...overrides,
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("shows a payment within a block of arriving, then its credit", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const served = [view([]), view([payment()]), view([payment({ status: "credited", confirmations: null })])];
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", (url: string) => {
+      urls.push(url);
+      return Promise.resolve(Response.json(served[Math.min(urls.length - 1, served.length - 1)]));
+    });
+    render(
+      <DepositAddress
+        depositAddress={details()}
+        clientSecret={SECRET}
+        apiBase="https://pay.example/"
+        pollInterval={1000}
+      />,
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.queryByRole("list", { name: "Payments" })).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(screen.getByText("1.5 PHA received on Sepolia, 1 confirmation")).toBeDefined();
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(screen.getByText("1.5 PHA on Sepolia credited")).toBeDefined();
+    expect(urls[0]).toBe(
+      `https://pay.example/v1/deposit_addresses/da_${"0d".repeat(16)}?client_secret=${encodeURIComponent(SECRET)}`,
+    );
+  });
+
+  it("parses the public view and refuses anything else", () => {
+    expect(parseClientDepositAddress(view([payment({ status: "reversed" })])).payments[0]?.status).toBe(
+      "reversed",
+    );
+    expect(() => parseClientDepositAddress(view([payment({ status: "final" })]))).toThrow(TypeError);
+    expect(() => parseClientDepositAddress({ ...view([]), livemode: "no" })).toThrow(TypeError);
+    expect(() => depositAddressIdFromClientSecret(`qt_${"0c".repeat(16)}_secret_ab`)).toThrow(TypeError);
+  });
+
+  it("keeps showing the address when the secret is not valid, and stops asking", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal("fetch", () => {
+      calls += 1;
+      return Promise.resolve(new Response("{}", { status: 404 }));
+    });
+    render(<DepositAddress depositAddress={details()} clientSecret={SECRET} apiBase="https://pay.example" pollInterval={1000} />);
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(calls).toBe(1);
+    expect(screen.getByText("Deposit address")).toBeDefined();
   });
 });

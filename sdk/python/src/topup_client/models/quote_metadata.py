@@ -14,11 +14,7 @@ T = TypeVar("T", bound="QuoteMetadata")
 
 @_attrs_define
 class QuoteMetadata:
-    """Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
-    Always sent; optional in the schema so clients also parse objects from servers, and
-    events rendered, before metadata.
-
-    """
+    """Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none."""
 
     additional_properties: dict[str, str] = _attrs_field(init=False, factory=dict)
 

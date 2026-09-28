@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PhalaPay, checkoutStatus, createCheckout, type CheckoutState } from "../src/index.js";
-import { API_BASE, CLIENT_SECRET, QUOTE_ID, fakeFetch, quote } from "./fixtures.js";
+import { ADDRESS, API_BASE, CLIENT_SECRET, QUOTE_ID, fakeFetch, quote } from "./fixtures.js";
 
 const NOW = (quote().expires_at - 600) * 1000;
 
@@ -15,6 +15,7 @@ function start(fetch: typeof globalThis.fetch) {
   const states: CheckoutState[] = [];
   const checkout = createCheckout({
     clientSecret: CLIENT_SECRET,
+    expectedAddress: ADDRESS.toUpperCase().replace("0X", "0x"),
     apiBase: `${API_BASE}/`,
     fetch,
     pollInterval: 1000,
@@ -122,11 +123,40 @@ describe("checkoutStatus", () => {
   });
 });
 
+describe("expectedAddress", () => {
+  it("fails closed when the quote names another address, and stops polling", async () => {
+    const { fetch, calls } = fakeFetch(quote({ address: `0x${"22".repeat(20)}` }));
+    const { states } = start(fetch);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(states).toHaveLength(1);
+    expect(states[0]?.status).toBe("error");
+    expect(states[0]?.error?.code).toBe("address_mismatch");
+    // Nothing of the quote is kept to render.
+    expect(states[0]?.quote).toBeNull();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("is required and must be an address", () => {
+    expect(() =>
+      createCheckout({ clientSecret: CLIENT_SECRET, expectedAddress: "nope", apiBase: API_BASE }),
+    ).toThrow(TypeError);
+  });
+
+  it("reports a reversed payment and stops polling", async () => {
+    expect(checkoutStatus(quote({ payment_status: "reversed" }), NOW / 1000)).toBe("reversed");
+    const { fetch, calls } = fakeFetch(quote({ payment_status: "reversed" }));
+    const { states } = start(fetch);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(states.map((s) => s.status)).toEqual(["reversed"]);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("PhalaPay", () => {
   it("retrieves the public view with the client secret", async () => {
     const { fetch, calls } = fakeFetch(quote());
     const pay = new PhalaPay({ apiBase: API_BASE, fetch });
-    await expect(pay.retrieveQuote(CLIENT_SECRET)).resolves.toEqual(quote());
+    await expect(pay.retrieveQuote(CLIENT_SECRET, ADDRESS)).resolves.toEqual(quote());
     expect(calls[0]).toBe(
       `${API_BASE}/v1/quotes/${QUOTE_ID}?client_secret=${encodeURIComponent(CLIENT_SECRET)}`,
     );
@@ -134,14 +164,14 @@ describe("PhalaPay", () => {
 
   it("rejects an unknown client secret", async () => {
     const pay = new PhalaPay({ apiBase: API_BASE, fetch: fakeFetch(404).fetch });
-    await expect(pay.retrieveQuote(CLIENT_SECRET)).rejects.toMatchObject({
+    await expect(pay.retrieveQuote(CLIENT_SECRET, ADDRESS)).rejects.toMatchObject({
       code: "invalid_client_secret",
     });
   });
 
   it("follows a checkout session", async () => {
     const pay = new PhalaPay({ apiBase: API_BASE, fetch: fakeFetch(quote()).fetch });
-    const session = pay.checkout(CLIENT_SECRET, { pollInterval: 1000 });
+    const session = pay.checkout(CLIENT_SECRET, { expectedAddress: ADDRESS, pollInterval: 1000 });
     await vi.advanceTimersByTimeAsync(0);
     expect(session.getState().status).toBe("waiting");
     session.destroy();

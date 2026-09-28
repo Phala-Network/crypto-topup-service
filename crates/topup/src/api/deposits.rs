@@ -23,7 +23,7 @@ use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::metadata::{self, Metadata, Object};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote,
-    MarkRefundPaidRequest, Refund, UpdateMetadataRequest,
+    MarkRefundPaidRequest, Refund, RefundList, UpdateMetadataRequest,
 };
 use super::repository::{self, NewRefund};
 
@@ -31,23 +31,30 @@ type ApiResult<T> = Result<T, ApiError>;
 
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 100;
-const DEPOSIT_STATES: [&str; 6] = [
-    "detected",
-    "confirmed",
-    "credited",
-    "swept",
-    "rejected",
-    "reversed",
+/// A deposit's merchant-visible `status` and the processing states it covers.
+const DEPOSIT_STATUSES: [(&str, &[&str]); 4] = [
+    ("pending", &["detected", "confirmed"]),
+    ("credited", &["credited", "swept"]),
+    ("rejected", &["rejected"]),
+    ("reversed", &["reversed"]),
 ];
+
+/// The merchant-visible `status` of a processing state.
+pub(crate) fn deposit_status(state: &str) -> &'static str {
+    DEPOSIT_STATUSES
+        .iter()
+        .find(|(_, states)| states.contains(&state))
+        .map_or("pending", |(status, _)| status)
+}
 
 #[utoipa::path(
     get,
     path = "/v1/deposits",
     params(
-        ("account_id" = Option<String>, Query, description = "Only this account's deposits"),
+        ("client_reference_id" = Option<String>, Query, description = "Only this customer's deposits"),
         ("quote" = Option<String>, Query, description = "Only deposits to this quote's address"),
         ("deposit_address" = Option<String>, Query, description = "Only deposits to this deposit address, `da_…`"),
-        ("status" = Option<String>, Query, description = "Only deposits in this status"),
+        ("status" = Option<String>, Query, description = "Only deposits in this status: `pending`, `credited`, `rejected`, or `reversed`"),
         ("tx_hash" = Option<String>, Query, description = "Only deposits in this transaction"),
         ("created[gte]" = Option<i64>, Query, description = "Created at or after, Unix seconds"),
         ("created[lte]" = Option<i64>, Query, description = "Created at or before, Unix seconds"),
@@ -78,10 +85,10 @@ pub(crate) async fn list_deposits(
     let expand = expansions(&pairs, &["data.quote"])?;
     let filters = ListFilters::parse(&pairs)?;
     let mut builder = scoped_deposit_query(merchant.scope);
-    if let Some(account_id) = &filters.account_id {
+    if let Some(client_reference_id) = &filters.client_reference_id {
         builder
             .push(" AND customer.client_reference_id = ")
-            .push_bind(account_id.clone());
+            .push_bind(client_reference_id.clone());
     }
     if let Some(quote) = filters.quote {
         builder.push(" AND address.quote_id = ").push_bind(quote);
@@ -91,10 +98,14 @@ pub(crate) async fn list_deposits(
             .push(" AND address.deposit_address_id = ")
             .push_bind(deposit_address);
     }
-    if let Some(status) = &filters.status {
-        builder
-            .push(" AND deposit.state = ")
-            .push_bind(status.clone());
+    if let Some(states) = filters.states {
+        builder.push(" AND deposit.state = ANY(").push_bind(
+            states
+                .iter()
+                .map(|state| (*state).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        builder.push(")");
     }
     if let Some(tx_hash) = &filters.tx_hash {
         builder
@@ -354,6 +365,142 @@ pub(crate) async fn create_refund(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
+}
+
+const REFUND_STATUSES: [&str; 4] = ["pending", "succeeded", "failed", "canceled"];
+
+#[utoipa::path(
+    get,
+    path = "/v1/refunds",
+    params(
+        ("deposit" = Option<String>, Query, description = "Only this deposit's refunds, `dep_…`"),
+        ("status" = Option<String>, Query, description = "`pending`, `succeeded`, `failed`, or `canceled`"),
+        ("limit" = Option<i64>, Query, description = "1 to 100, default 10"),
+        ("starting_after" = Option<String>, Query, description = "`re_` id: the page after it"),
+        ("ending_before" = Option<String>, Query, description = "`re_` id: the page before it")
+    ),
+    responses(
+        (status = 200, description = "OK", body = RefundList),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(("api_key" = [])),
+    tag = "refunds"
+)]
+/// The account's refunds in the key's mode, newest first, with Stripe's cursor pagination.
+pub(crate) async fn list_refunds(
+    State(state): State<AppState>,
+    Extension(merchant): Extension<Merchant>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<RefundList>> {
+    merchant
+        .require(&state.pool, Permission::RefundsRead)
+        .await?;
+    let scope = merchant.scope;
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT refund.id FROM refunds AS refund WHERE refund.account_id = ",
+    );
+    builder
+        .push_bind(scope.account_id())
+        .push(" AND refund.livemode = ")
+        .push_bind(scope.livemode());
+    let mut limit = DEFAULT_LIMIT;
+    let mut starting_after = None;
+    let mut ending_before = None;
+    for (name, value) in query_pairs(query.as_deref()) {
+        match name.as_str() {
+            "deposit" => {
+                let deposit = ids::parse(ids::DEPOSIT, &value)
+                    .ok_or_else(|| ApiError::invalid_param("deposit", "not a dep_ id"))?;
+                builder.push(" AND refund.deposit_id = ").push_bind(deposit);
+            }
+            "status" => {
+                if !REFUND_STATUSES.contains(&value.as_str()) {
+                    return Err(ApiError::invalid_param("status", "unknown status"));
+                }
+                builder.push(" AND refund.status = ").push_bind(value);
+            }
+            "limit" => {
+                limit = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|limit| (1..=MAX_LIMIT).contains(limit))
+                    .ok_or_else(|| ApiError::invalid_param("limit", "limit must be 1 to 100"))?;
+            }
+            "starting_after" | "ending_before" => {
+                let id = ids::parse(ids::REFUND, &value)
+                    .ok_or_else(|| ApiError::invalid_param(name.clone(), "not a re_ id"))?;
+                if name == "starting_after" {
+                    starting_after = Some(id);
+                } else {
+                    ending_before = Some(id);
+                }
+            }
+            other => {
+                return Err(
+                    ApiError::unknown_param(format!("unknown parameter {other}")).with_param(other),
+                );
+            }
+        }
+    }
+    let (cursor, before) = match (starting_after, ending_before) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "starting_after and ending_before are mutually exclusive",
+            ));
+        }
+        (Some(id), None) => (Some((id, "starting_after")), false),
+        (None, Some(id)) => (Some((id, "ending_before")), true),
+        (None, None) => (None, false),
+    };
+    if let Some((id, param)) = cursor {
+        let created_at: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT created_at FROM refunds WHERE id = $1 AND account_id = $2 AND livemode = $3",
+        )
+        .bind(id)
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| ApiError::invalid_param(param, "no such refund"))?;
+        builder
+            .push(if before {
+                " AND (refund.created_at, refund.id) > ("
+            } else {
+                " AND (refund.created_at, refund.id) < ("
+            })
+            .push_bind(created_at)
+            .push(", ")
+            .push_bind(id)
+            .push(")");
+    }
+    builder
+        .push(if before {
+            " ORDER BY refund.created_at ASC, refund.id ASC LIMIT "
+        } else {
+            " ORDER BY refund.created_at DESC, refund.id DESC LIMIT "
+        })
+        .push_bind(limit.saturating_add(1));
+    let mut ids: Vec<Uuid> = builder.build_query_scalar().fetch_all(&state.pool).await?;
+    let has_more = i64::try_from(ids.len()).map_err(|_| ApiError::internal())? > limit;
+    ids.truncate(usize::try_from(limit).map_err(|_| ApiError::internal())?);
+    if before {
+        ids.reverse();
+    }
+    let mut data = Vec::with_capacity(ids.len());
+    for id in ids {
+        data.push(
+            find_refund(&state.pool, scope, id)
+                .await?
+                .ok_or_else(ApiError::internal)?,
+        );
+    }
+    Ok(Json(RefundList {
+        object: "list".to_owned(),
+        url: "/v1/refunds".to_owned(),
+        has_more,
+        data,
+    }))
 }
 
 #[utoipa::path(
@@ -662,10 +809,12 @@ struct RefundRow {
 struct DepositRow {
     id: Uuid,
     livemode: bool,
-    external_id: String,
+    client_reference_id: String,
     quote_id: Option<Uuid>,
     deposit_address_id: Option<Uuid>,
     state: String,
+    is_final: bool,
+    swept: bool,
     reason: Option<String>,
     chain_id: i64,
     route: Option<String>,
@@ -689,10 +838,18 @@ struct DepositRow {
 fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
     let mut builder = QueryBuilder::new(
         r#"
-        SELECT deposit.id, deposit.livemode, customer.client_reference_id AS external_id,
+        SELECT deposit.id, deposit.livemode, customer.client_reference_id,
                address.quote_id,
                address.deposit_address_id,
-               deposit.state, deposit.reason, deposit.chain_id, deposit.route,
+               deposit.state, deposit.final_at IS NOT NULL AS is_final,
+               deposit.state = 'swept' OR EXISTS (
+                   SELECT 1 FROM flushed
+                   WHERE flushed.address_id = deposit.address_id
+                     AND flushed.token = deposit.asset_contract
+                     AND (flushed.block_number, flushed.log_index)
+                         > (deposit.block_number, deposit.log_index)
+               ) AS swept,
+               deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
                deposit.credit_minor::text AS credit_minor,
                deposit.price_scaled::text AS price_scaled, deposit.price_source,
@@ -729,14 +886,16 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
         livemode: row.livemode,
-        account_id: row.external_id,
+        client_reference_id: row.client_reference_id,
         quote: row
             .quote_id
             .map(|quote| ExpandableQuote::Id(ids::format(ids::QUOTE, quote))),
         deposit_address: row
             .deposit_address_id
             .map(crate::deposit_addresses::public_id),
-        status: row.state,
+        status: deposit_status(&row.state).to_owned(),
+        is_final: row.is_final,
+        swept: row.swept,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
         asset,
@@ -770,14 +929,15 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         refunded,
         created: row.created_at.timestamp(),
         metadata: row.metadata.0,
+        admin: None,
     })
 }
 
 struct ListFilters {
-    account_id: Option<String>,
+    client_reference_id: Option<String>,
     quote: Option<Uuid>,
     deposit_address: Option<Uuid>,
-    status: Option<String>,
+    states: Option<&'static [&'static str]>,
     tx_hash: Option<String>,
     created_gte: Option<DateTime<Utc>>,
     created_lte: Option<DateTime<Utc>>,
@@ -789,10 +949,10 @@ struct ListFilters {
 impl ListFilters {
     fn parse(pairs: &[(String, String)]) -> ApiResult<Self> {
         let mut filters = Self {
-            account_id: None,
+            client_reference_id: None,
             quote: None,
             deposit_address: None,
-            status: None,
+            states: None,
             tx_hash: None,
             created_gte: None,
             created_lte: None,
@@ -802,7 +962,7 @@ impl ListFilters {
         };
         for (name, value) in pairs {
             match name.as_str() {
-                "account_id" => filters.account_id = Some(value.clone()),
+                "client_reference_id" => filters.client_reference_id = Some(value.clone()),
                 "quote" => {
                     filters.quote = Some(
                         ids::parse(ids::QUOTE, value)
@@ -816,10 +976,11 @@ impl ListFilters {
                         })?);
                 }
                 "status" => {
-                    if !DEPOSIT_STATES.contains(&value.as_str()) {
-                        return Err(ApiError::invalid_param("status", "unknown status"));
-                    }
-                    filters.status = Some(value.clone());
+                    let (_, states) = DEPOSIT_STATUSES
+                        .iter()
+                        .find(|(status, _)| status == value)
+                        .ok_or_else(|| ApiError::invalid_param("status", "unknown status"))?;
+                    filters.states = Some(states);
                 }
                 "tx_hash" => {
                     let hash = B256::from_str(value).map_err(|_| {

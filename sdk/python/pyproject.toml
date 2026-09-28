@@ -26,6 +26,10 @@ dependencies = [
     "typing-extensions>=4.16,<5",
 ]
 
+[project.optional-dependencies]
+# `topup_sdk.treasury.sign_treasury_challenge`: an EOA treasury's EIP-191 proof.
+eoa = ["eth-account>=0.14,<0.15"]
+
 [project.urls]
 Homepage = "https://github.com/Phala-Network/phala-pay/tree/main/sdk/python"
 Repository = "https://github.com/Phala-Network/phala-pay"

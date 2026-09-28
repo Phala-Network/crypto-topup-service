@@ -13,7 +13,7 @@ import time
 from harness import Context, check, credit
 from topup_sdk import ApiError
 
-ALL_STATES = {"detected", "confirmed", "credited", "swept", "rejected"}
+ALL_STATES = {"pending", "credited", "swept", "rejected"}
 
 
 def run(ctx: Context) -> None:

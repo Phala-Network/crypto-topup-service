@@ -77,6 +77,15 @@ pending index per endpoint. `events.object_type` admits `webhook_endpoint` besid
 `events_scope_type_created_idx` serves `GET /v1/events?type=`. Its down migration discards
 endpoint events and deleted endpoints.
 
+`20261014000000_api_vocabulary` (design PR 10) adds `accounts.self_paused_scopes`, the merchant's
+own `quotes` pause through `POST /v1/account/pause` (design §12), kept apart from the operator's
+`paused_scopes` so a merchant's resume never lifts an operator pause;
+`deposit_address_client_secrets`, the SHA-256 of the newest client secrets of each deposit address,
+which read its public view (scoped through `deposit_addresses`, never updated); `flushed.id`, a
+generated UUID of each event's identity that is the sweep's API id; and the `forwarders.read`
+permission of `GET /v1/forwarders`. Its down migration folds a merchant's own
+pause into `paused_scopes`.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -97,7 +106,7 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 |---|---|
 | `transitions`, `audit`, `reconciliation_findings`, `heartbeat` | `SELECT`, `INSERT` (append-only) |
 | `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
-| `reconciliation_blocks` | `SELECT`, `INSERT`, `DELETE` |
+| `reconciliation_blocks`, `deposit_address_client_secrets` | `SELECT`, `INSERT`, `DELETE` |
 | `reconciliation_deposit_cursors` | `SELECT`, `INSERT`, `UPDATE` |
 | `_sqlx_migrations`, `permissions` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |

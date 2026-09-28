@@ -19,6 +19,8 @@ from .test_phala_pay import (
     ACCOUNT,
     API_KEY,
     EVENT_ID,
+    FACTORY,
+    IMPLEMENTATION,
     QUOTE_ID,
     SERVICE_KEY,
     SERVICE_PUBLIC_KEY,
@@ -54,7 +56,13 @@ def app(tmp_path: Path) -> tuple[TestClient, list[httpx.Request], Path]:
             )
         return httpx.Response(200, json=quote_object(client_secret=SECRET))
 
-    client = PhalaPay("http://service.test", API_KEY, transport=httpx.MockTransport(service))
+    client = PhalaPay(
+        "http://service.test",
+        API_KEY,
+        account=ACCOUNT,
+        forwarder=(FACTORY, IMPLEMENTATION),
+        transport=httpx.MockTransport(service),
+    )
     database = tmp_path / "product.sqlite3"
     api = create_app(
         client,
@@ -75,8 +83,9 @@ def test_topup_returns_the_client_secret_and_keys_the_quote_by_order(
     response = http.post("/topups", json={"amount": 2500}, headers={"x-team-id": "team-42"})
     assert response.status_code == 200
     assert response.json()["client_secret"] == SECRET
+    assert response.json()["expected_address"] == quote_object()["address"]
     sent = requests[0]
-    assert json.loads(sent.content)["account_id"] == "team-42"
+    assert json.loads(sent.content)["client_reference_id"] == "team-42"
     assert sent.headers["idempotency-key"] == f'"{response.json()["order_id"]}"'
 
 

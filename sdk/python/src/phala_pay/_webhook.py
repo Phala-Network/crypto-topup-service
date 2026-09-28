@@ -29,10 +29,11 @@ class EventData:
 
 @dataclass(frozen=True)
 class Event:
-    """A verified event of `account` in one mode: `deposit.credited`, `deposit.rejected`,
-    `deposit.reversed`, `deposit.refunded`, `refund.failed`, `quote.expired`, or
-    `account.updated`. Its `id` is stable across retries and replays; process each id once. Claw
-    back the credit of a `deposit.reversed` deposit as for `deposit.refunded`."""
+    """A verified event of `account` in one mode, such as `deposit.credited`,
+    `deposit.rejected`, `deposit.reversed`, `deposit.refunded`, `refund.failed`, `quote.expired`,
+    or an account event (`account.updated`, `account.treasury.*`, `api_key.*`,
+    `webhook_endpoint.*`). Its `id` is stable across retries and replays; process each id once.
+    Claw back the credit of a `deposit.reversed` deposit as for `deposit.refunded`."""
 
     id: str
     account: str

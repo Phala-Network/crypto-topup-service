@@ -19,6 +19,7 @@ function App() {
     <main>
       <Checkout
         clientSecret={params.get("client_secret") ?? ""}
+        expectedAddress={params.get("expected_address") ?? ""}
         apiBase={params.get("api_base") ?? ""}
         pollInterval={500}
         walletClient={walletClient}

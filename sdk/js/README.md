@@ -19,18 +19,26 @@ connects a wallet with wagmi, RainbowKit, ConnectKit, or AppKit, pass it in inst
 
 ## Quickstart
 
-1. Your backend creates a quote (`POST /v1/quotes`, signed with the product key) and returns only its
-   `client_secret` to the signed-in user's browser.
-2. Render the checkout with it:
+1. Your backend creates a quote (`POST /v1/quotes` with its secret key, for example
+   `phala-pay`'s `pay.quotes.create`), recomputes its address from the pinned forwarder (the
+   Python SDK does it on every call), and returns only its `client_secret` and that address to
+   the signed-in user's browser.
+2. Render the checkout with them:
 
 ```tsx
 "use client";
 import { Checkout } from "@phala/pay/react";
 
-export function TopUp(props: { clientSecret: string; onPaid: () => void; onRetry: () => void }) {
+export function TopUp(props: {
+  clientSecret: string;
+  expectedAddress: string;
+  onPaid: () => void;
+  onRetry: () => void;
+}) {
   return (
     <Checkout
       clientSecret={props.clientSecret}
+      expectedAddress={props.expectedAddress}
       apiBase="https://pay.example.com"
       onSuccess={props.onPaid}
       onExpire={props.onRetry}
@@ -47,6 +55,10 @@ The component reads `GET /v1/quotes/{id}?client_secret=…` every three seconds.
 public (`Access-Control-Allow-Origin: *`) and shows only what the payer needs: the amount, the
 token, the chain, the deposit address, the EIP-681 payment request, the expiry, and the payment
 status. Keep the client secret out of logs and URLs you share; anyone holding it can see that view.
+`expectedAddress` is required and fails closed: when the quote the service returns names another
+address, the checkout shows "This payment address could not be verified" and nothing to pay (a
+compromised service cannot make the page show its own address). A test-mode quote says "Test
+mode".
 
 ### Statuses
 
@@ -58,6 +70,7 @@ status. Keep the client secret out of logs and URLs you share; anyone holding it
 | `confirming` | Payment at the route's confirmation (two blocks on Ethereum), being valued and screened |
 | `credited` | Credited, typically about 30 seconds after paying; `onSuccess` is called once |
 | `rejected` | Will not be credited; the payer contacts support |
+| `reversed` | Credited, then its transaction left the chain before finality: the payment did not happen |
 | `expired`, `canceled` | The address is hidden; `onExpire` is called once |
 | `error` | The client secret is not valid |
 
@@ -92,7 +105,12 @@ import { useWalletClient } from "wagmi";
 export function TopUp({ clientSecret }: { clientSecret: string }) {
   const { data: walletClient } = useWalletClient();
   return (
-    <Checkout clientSecret={clientSecret} apiBase="https://pay.example.com" walletClient={walletClient} />
+    <Checkout
+      clientSecret={clientSecret}
+      expectedAddress={expectedAddress}
+      apiBase="https://pay.example.com"
+      walletClient={walletClient}
+    />
   );
 }
 ```
@@ -113,8 +131,18 @@ Credit the customer from the `deposit.credited` webhook.
 ```tsx
 import { DepositAddress } from "@phala/pay/react";
 
-<DepositAddress depositAddress={{ address, networks }} chainId={84532} asset="usdc" />;
+<DepositAddress
+  depositAddress={{ address, networks }}
+  clientSecret={clientSecret} // the same response's client_secret: shows payments as they arrive
+  apiBase="https://pay.example.com"
+  chainId={84532}
+  asset="usdc"
+/>;
 ```
+
+With `clientSecret` and `apiBase` it reads the address's public view every three seconds and lists
+its payments of the last 24 hours: "1.5 PHA received on Sepolia, 1 confirmation" within about a
+block of the transfer, then "credited" (or rejected or reversed). Display only.
 
 `depositAddressTransfer(network, asset)` reads and checks one token's amount-less EIP-681
 `payment_uri` without React.
@@ -124,6 +152,7 @@ import { DepositAddress } from "@phala/pay/react";
 ```tsx
 <Checkout
   clientSecret={clientSecret}
+  expectedAddress={expectedAddress}
   apiBase={apiBase}
   appearance={{
     theme: "dark",
@@ -160,8 +189,8 @@ readable.
 import { PhalaPay, payWithWallet, watchWallets, type Wallet } from "@phala/pay";
 
 const pay = new PhalaPay({ apiBase: "https://pay.example.com" });
-const quote = await pay.retrieveQuote(clientSecret); // one read of the public view
-const checkout = pay.checkout(clientSecret); // or follow it until it settles
+const quote = await pay.retrieveQuote(clientSecret, expectedAddress); // one read, checked
+const checkout = pay.checkout(clientSecret, { expectedAddress }); // or follow it until it settles
 const unsubscribe = checkout.subscribe(({ status, quote, error }) => render(status, quote, error));
 
 const stop = watchWallets((wallets) => showWalletButtons(wallets));
@@ -186,6 +215,29 @@ wagmi's `useWalletClient()` or `getWalletClient(config)`; its account is used wi
 connect again). It connects, switches the wallet to the quote's chain (adding Ethereum, Sepolia,
 Base, or Base Sepolia when the wallet lacks it), and sends the ERC-20 `transfer` stated by the
 quote's `payment_uri`, after checking that it pays exactly `amount_atomic` to `address`.
+
+## Server helpers
+
+`@phala/pay/server` is for your backend and takes no secret key (call the API itself with your
+secret key from the backend only, never the browser):
+
+```ts
+import { constructEvent, flushTransactions, safeBatch } from "@phala/pay/server";
+
+// Standard Webhooks v1a (ed25519, WebCrypto: Node 20+, Deno, Bun, edge runtimes). Fails closed
+// unless the signature verifies with a pinned key and the event is your account's in this mode.
+const event = await constructEvent(rawBody, request.headers, WEBHOOK_PUBLIC_KEYS, {
+  expectedAccount: "acct_…",
+  expectedLivemode: false,
+});
+
+// Sweeping, offline: forwarders from GET /v1/forwarders?sweepable=<token>.
+const calls = flushTransactions(forwarders, PHA);
+const batchFile = safeBatch(1, TREASURY_SAFE, calls); // Safe Transaction Builder JSON
+```
+
+`quoteAddress`, `depositAddress`, `forwarderAddress`, `lockSalt`, and `depositAddressSalt`
+recompute addresses from the pinned `(factory, implementation)`, as the Python SDK does.
 
 ## Development
 

@@ -18,7 +18,7 @@ def run(ctx: Context) -> None:
     _, quote = ctx.lock(team, amount_minor=2500)
     ctx.pay(quote.address, int(quote.amount_atomic))
     deposit = ctx.deposit(team, quote.address)
-    check(deposit.status in {"credited", "swept"}, f"deposit is {deposit.status}, not credited")
+    check(deposit.status == "credited", f"deposit is {deposit.status}, not credited")
     ctx.deposit_event("deposit.credited", deposit)
     order = ctx.ledger.find_order(deposit.id)
     check(order is not None and order.status == "held", "the refusal was not recorded")

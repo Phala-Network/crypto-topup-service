@@ -16,7 +16,7 @@ from typing import cast
 
 def _get_kwargs(
     *,
-    account_id: str | Unset = UNSET,
+    client_reference_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
@@ -31,7 +31,7 @@ def _get_kwargs(
 
     params: dict[str, Any] = {}
 
-    params["account_id"] = account_id
+    params["client_reference_id"] = client_reference_id
 
     params["quote"] = quote
 
@@ -106,7 +106,7 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient,
-    account_id: str | Unset = UNSET,
+    client_reference_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
@@ -122,7 +122,7 @@ def sync_detailed(
     pagination.
 
     Args:
-        account_id (str | Unset):
+        client_reference_id (str | Unset):
         quote (str | Unset):
         deposit_address (str | Unset):
         status (str | Unset):
@@ -143,7 +143,7 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
-        account_id=account_id,
+        client_reference_id=client_reference_id,
         quote=quote,
         deposit_address=deposit_address,
         status=status,
@@ -166,7 +166,7 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient,
-    account_id: str | Unset = UNSET,
+    client_reference_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
@@ -182,7 +182,7 @@ def sync(
     pagination.
 
     Args:
-        account_id (str | Unset):
+        client_reference_id (str | Unset):
         quote (str | Unset):
         deposit_address (str | Unset):
         status (str | Unset):
@@ -204,7 +204,7 @@ def sync(
 
     return sync_detailed(
         client=client,
-        account_id=account_id,
+        client_reference_id=client_reference_id,
         quote=quote,
         deposit_address=deposit_address,
         status=status,
@@ -221,7 +221,7 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
-    account_id: str | Unset = UNSET,
+    client_reference_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
@@ -237,7 +237,7 @@ async def asyncio_detailed(
     pagination.
 
     Args:
-        account_id (str | Unset):
+        client_reference_id (str | Unset):
         quote (str | Unset):
         deposit_address (str | Unset):
         status (str | Unset):
@@ -258,7 +258,7 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
-        account_id=account_id,
+        client_reference_id=client_reference_id,
         quote=quote,
         deposit_address=deposit_address,
         status=status,
@@ -279,7 +279,7 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient,
-    account_id: str | Unset = UNSET,
+    client_reference_id: str | Unset = UNSET,
     quote: str | Unset = UNSET,
     deposit_address: str | Unset = UNSET,
     status: str | Unset = UNSET,
@@ -295,7 +295,7 @@ async def asyncio(
     pagination.
 
     Args:
-        account_id (str | Unset):
+        client_reference_id (str | Unset):
         quote (str | Unset):
         deposit_address (str | Unset):
         status (str | Unset):
@@ -318,7 +318,7 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
-            account_id=account_id,
+            client_reference_id=client_reference_id,
             quote=quote,
             deposit_address=deposit_address,
             status=status,

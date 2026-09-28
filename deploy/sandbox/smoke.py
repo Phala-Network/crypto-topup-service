@@ -70,7 +70,8 @@ class Integration:
             self.service_url,
             Path(self.api_key_file).read_text(encoding="ascii").strip(),
             account=self.product_slug,
-            forwarder=(self.factory, self.implementation, self.treasury),
+            forwarder=(self.factory, self.implementation),
+            treasuries={self.chain_id: self.treasury},
         )
 
 
@@ -123,8 +124,9 @@ def receive_webhook(
     it when it is `deposit.credited`.
 
     `SignatureError` means answer `400`. `fulfill` must credit `credit.amount` cents to
-    `credit.account_id` at most once per `credit.fulfillment_key` (the `dep_` id), committing
-    before this returns, and treat a repeat as done; answer `2xx` only after it returns. Every
+    `credit.client_reference_id` at most once per `credit.fulfillment_key` (the `dep_` id),
+    committing before this returns, and treat a repeat as done; answer `2xx` only after it
+    returns. Every
     other event type is informational: notify the user and refresh history.
     """
     event = verify_webhook(
@@ -154,7 +156,9 @@ def main() -> int:
             f"quote {lock.id}: pay {lock.amount_atomic} atomic to {lock.address} before "
             f"Unix time {lock.expires_at} for {lock.amount} cents ({lock.payment_uri})"
         )
-        deposits = [(item.id, item.status) for item in client.list_deposits(account_id=account)]
+        deposits = [
+            (item.id, item.status) for item in client.list_deposits(client_reference_id=account)
+        ]
         print(f"deposits: {deposits}")
     print("smoke: OK")
     return 0

@@ -4,6 +4,8 @@
 export interface ClientQuote {
   id: string;
   object: "quote";
+  /** `false` for a test-mode quote, paid on a testnet; the page says so. */
+  livemode: boolean;
   /** `open` until a matching payment completes it, it expires by chain time, or it is canceled. */
   status: "open" | "complete" | "expired" | "canceled";
   /** Credit in the currency's minor unit (US cents). */
@@ -24,15 +26,16 @@ export interface ClientQuote {
   /**
    * `seen` once in a block (a reorg can remove it), `confirming` while a payment at the route's
    * confirmation is valued and screened, `credited` once it is credited (about 30 seconds after
-   * paying), `rejected` when it will not be.
+   * paying), `rejected` when it will not be, `reversed` when a credited payment's transaction
+   * left the chain before finality (the payment did not happen).
    */
-  payment_status: "none" | "seen" | "confirming" | "credited" | "rejected";
+  payment_status: "none" | "seen" | "confirming" | "credited" | "rejected" | "reversed";
   /** Block confirmations while `payment_status` is `seen`, otherwise `null`. */
   confirmations: number | null;
 }
 
 const QUOTE_STATUSES = ["open", "complete", "expired", "canceled"] as const;
-const PAYMENT_STATUSES = ["none", "seen", "confirming", "credited", "rejected"] as const;
+const PAYMENT_STATUSES = ["none", "seen", "confirming", "credited", "rejected", "reversed"] as const;
 
 /** Returns the quote id a client secret belongs to (`qt_…_secret_…`), or throws. */
 export function quoteIdFromClientSecret(clientSecret: string): string {
@@ -53,6 +56,7 @@ export function parseClientQuote(value: unknown): ClientQuote {
   if (
     typeof v["id"] !== "string" ||
     v["object"] !== "quote" ||
+    typeof v["livemode"] !== "boolean" ||
     !oneOf(v["status"], QUOTE_STATUSES) ||
     !isSafeInteger(v["amount"]) ||
     typeof v["currency"] !== "string" ||
@@ -73,6 +77,7 @@ export function parseClientQuote(value: unknown): ClientQuote {
   return {
     id: v["id"],
     object: "quote",
+    livemode: v["livemode"],
     status: v["status"],
     amount: v["amount"],
     currency: v["currency"],

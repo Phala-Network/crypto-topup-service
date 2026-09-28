@@ -24,34 +24,34 @@ class CreateQuoteRequest:
     """`POST /v1/quotes` body.
 
     Attributes:
-        account_id (str): Your identifier of the customer account to credit, 1 to 200 characters; the account is
-            created on its first quote.
         amount (int): The credit to quote, a positive integer in the currency's minor unit (US cents).
         asset (str): Asset code of the payment on that chain, such as `pha`.
         chain_id (int): EVM chain of the payment, one of `GET /v1/config` `assets[].chain_id`.
+        client_reference_id (str): Your identifier of the customer to credit, 1 to 200 characters (Stripe Checkout's
+            `client_reference_id`); the customer is created on first use.
         currency (str): Lowercase ISO currency code; only `usd`.
         metadata (MetadataClear | MetadataParamType0 | Unset): A `metadata` parameter: an object of string values, where
             `""` unsets the key, or `""` to
             unset every key.
     """
 
-    account_id: str
     amount: int
     asset: str
     chain_id: int
+    client_reference_id: str
     currency: str
     metadata: MetadataClear | MetadataParamType0 | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
 
-        account_id = self.account_id
-
         amount = self.amount
 
         asset = self.asset
 
         chain_id = self.chain_id
+
+        client_reference_id = self.client_reference_id
 
         currency = self.currency
 
@@ -67,10 +67,10 @@ class CreateQuoteRequest:
 
         field_dict.update(
             {
-                "account_id": account_id,
                 "amount": amount,
                 "asset": asset,
                 "chain_id": chain_id,
+                "client_reference_id": client_reference_id,
                 "currency": currency,
             }
         )
@@ -84,13 +84,13 @@ class CreateQuoteRequest:
         from ..models.metadata_param_type_0 import MetadataParamType0  # noqa: PLC0415
 
         d = dict(src_dict)
-        account_id = d.pop("account_id")
-
         amount = d.pop("amount")
 
         asset = d.pop("asset")
 
         chain_id = d.pop("chain_id")
+
+        client_reference_id = d.pop("client_reference_id")
 
         currency = d.pop("currency")
 
@@ -114,10 +114,10 @@ class CreateQuoteRequest:
         metadata = _parse_metadata(d.pop("metadata", UNSET))
 
         create_quote_request = cls(
-            account_id=account_id,
             amount=amount,
             asset=asset,
             chain_id=chain_id,
+            client_reference_id=client_reference_id,
             currency=currency,
             metadata=metadata,
         )

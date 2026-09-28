@@ -5,77 +5,39 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-/// A deposit's stored facts, for the operator (`GET /v1/admin/deposits/{id}`).
+/// The operator's view of a deposit's internals (`GET /v1/admin/deposits/{id}`), returned as the
+/// `admin` field of the deposit; never present in a merchant response or an event.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct DepositResponse {
-    /// Deposit id, `dep_…`.
-    pub id: String,
-    /// The merchant account the deposit belongs to, `acct_…`. Optional in the schema so clients
-    /// also parse responses from servers that predate accounts.
-    #[schema(required = false)]
+pub struct DepositAdmin {
+    /// The merchant account the deposit belongs to, `acct_…`.
     pub account: String,
-    /// Whether the deposit is on a live route. Optional in the schema, like `account`.
-    #[schema(required = false)]
-    pub livemode: bool,
-    /// The merchant's identifier of the customer the quote was issued for. This service always
-    /// sends it; it is optional in the schema so clients also parse responses from servers that
-    /// predate it.
-    #[schema(required = false)]
-    pub external_id: String,
-    /// EVM chain identifier.
-    pub chain_id: u64,
-    /// Canonical transaction hash.
-    pub tx_hash: String,
-    /// Position of the transfer log in its transaction's receipt; with the chain and transaction,
-    /// the deposit's identity. Optional in the schema so clients also parse responses from
-    /// servers that predate it.
-    #[schema(required = false)]
-    pub receipt_log_index: u64,
-    /// Block-wide transfer log index; it follows the transaction's re-inclusion.
-    pub log_index: u64,
-    /// Including block number.
-    pub block_number: u64,
-    /// Including block time.
-    pub block_time: DateTime<Utc>,
-    /// When both providers showed the transfer at or below `finalized`; `null` while the deposit
-    /// can still be reversed.
-    pub final_at: Option<DateTime<Utc>>,
-    /// Receiving forwarder address.
-    pub address: String,
-    /// The quote whose address received the deposit, `qt_…`; `null` for a deposit address.
-    pub lock_ref: Option<String>,
-    /// The deposit address that received the deposit, `da_…`; `null` for a quote's address.
-    #[schema(required = false)]
-    pub deposit_address: Option<String>,
+    /// The processing state: `detected`, `confirmed`, `credited`, `swept`, `rejected`, or
+    /// `reversed` (`status` is its merchant view).
+    pub state: String,
     /// Selected route.
     pub route: Option<String>,
     /// Selected route version.
     pub route_version: Option<u64>,
-    /// Canonical token contract address.
-    pub asset_contract: String,
-    /// Canonical transfer sender address.
-    pub from_address: String,
-    /// Atomic token amount encoded as a decimal string.
-    pub amount_atomic: String,
-    /// Current processing state.
-    pub state: String,
-    /// Valuation observation time.
-    pub valuation_at: Option<DateTime<Utc>>,
-    /// Eight-decimal scaled price encoded as a decimal string.
+    /// Position of the transfer log in its transaction's receipt; with the chain and transaction,
+    /// the deposit's identity.
+    pub receipt_log_index: u64,
+    /// Including block time.
+    pub block_time: DateTime<Utc>,
+    /// When both providers showed the transfer at or below `finalized`.
+    pub final_at: Option<DateTime<Utc>>,
+    /// Eight-decimal scaled price as a decimal string.
     pub price_scaled: Option<String>,
-    /// Which price valued the deposit: `lock` (the quoted price) or `spot`.
-    pub price_source: Option<String>,
-    /// Credit in minor units encoded as a decimal string.
-    pub credit_minor: Option<String>,
-    /// Row creation time.
-    pub created_at: DateTime<Utc>,
     /// Last processing update time.
     pub updated_at: DateTime<Utc>,
+    /// Transitions in ascending creation order.
+    pub transitions: Vec<DepositTransition>,
+    /// Events about the deposit in ascending creation order, with their delivery.
+    pub events: Vec<DepositEventDelivery>,
 }
 
-/// One immutable state transition in a support timeline.
+/// One immutable state transition of a deposit.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct DepositTransitionResponse {
+pub struct DepositTransition {
     /// Timeline row identifier.
     pub id: Uuid,
     /// State before the transition attempt.
@@ -90,27 +52,13 @@ pub struct DepositTransitionResponse {
     pub created_at: DateTime<Utc>,
 }
 
-/// Deposit facts with the full immutable transition timeline.
+/// An event about a deposit and its delivery state.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct SupportDepositResponse {
-    /// The deposit's stored facts.
-    #[serde(flatten)]
-    pub deposit: DepositResponse,
-    /// Transitions in ascending creation order.
-    pub timeline: Vec<DepositTransitionResponse>,
-    /// Webhook events about the deposit in ascending creation order. This service always sends
-    /// it; it is optional in the schema so clients also parse responses from servers that predate
-    /// it.
-    #[schema(required = false)]
-    pub events: Vec<DepositEventResponse>,
-}
-
-/// One webhook event about a deposit and its delivery state.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct DepositEventResponse {
-    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`.
+pub struct DepositEventDelivery {
+    /// Event id, `evt_…`.
     pub id: String,
     /// Event type, such as `deposit.credited`.
+    #[serde(rename = "type")]
     pub event_type: String,
     /// Event creation time.
     pub created_at: DateTime<Utc>,
@@ -137,9 +85,9 @@ pub struct PauseResponse {
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateQuoteRequest {
-    /// Your identifier of the customer account to credit, 1 to 200 characters; the account is
-    /// created on its first quote.
-    pub account_id: String,
+    /// Your identifier of the customer to credit, 1 to 200 characters (Stripe Checkout's
+    /// `client_reference_id`); the customer is created on first use.
+    pub client_reference_id: String,
     /// The credit to quote, a positive integer in the currency's minor unit (US cents).
     pub amount: u64,
     /// Lowercase ISO currency code; only `usd`.
@@ -206,17 +154,16 @@ impl ToSchema for MetadataClear {}
 /// A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Quote {
-    /// `qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, "lock",
-    /// id))`, where `account` is your `acct_` id.
+    /// `qt_` id. The quote's address salt is `keccak256(abi.encode(account,
+    /// client_reference_id, "lock", id))` with the types `(string, string, string, string)`,
+    /// where `account` is your `acct_` id.
     pub id: String,
     /// Always `quote`.
     pub object: String,
-    /// Whether the quote was created with a live key. Always sent; optional in the schema so
-    /// clients also parse objects from servers, and events rendered, before it.
-    #[schema(required = false)]
+    /// Whether the quote was created with a live key.
     pub livemode: bool,
-    /// Your account identifier.
-    pub account_id: String,
+    /// Your identifier of the customer the quote credits.
+    pub client_reference_id: String,
     /// Credit in the currency's minor unit.
     pub amount: u64,
     /// `usd`.
@@ -232,9 +179,7 @@ pub struct Quote {
     /// Single-use forwarder address to pay.
     pub address: String,
     /// The treasury the address pays: your treasury of the chain when the quote was created. The
-    /// address is the factory's `CREATE2` over it and the salt. Always sent; optional in the
-    /// schema so clients also parse quotes, and events rendered, before it existed.
-    #[schema(required = false)]
+    /// address is the factory's `CREATE2` over it and the salt.
     pub treasury: String,
     /// EIP-681 URI carrying the token, chain, address, and amount.
     pub payment_uri: String,
@@ -247,20 +192,43 @@ pub struct Quote {
     /// Creation time, Unix seconds.
     pub created: i64,
     /// The payment the checkout page should show, once one is seen on chain; display only.
-    pub payment: Option<QuotePayment>,
+    pub payment: Option<Payment>,
     /// The deposit that completed the quote: its `dep_` id, or the object with `expand[]=deposit`.
     pub deposit: Option<ExpandableDeposit>,
     /// Lets the payer's browser read the quote's public view, `ClientQuote`, from
-    /// `GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by
-    /// `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
-    /// returns a new secret and the earlier one stops working. Give it only to the paying
-    /// customer's page, and do not log it.
+    /// `GET /v1/quotes/{id}?client_secret=…` without an API key. Returned only by
+    /// `POST /v1/quotes`; a repeat with the same `Idempotency-Key` within 24 hours replays the
+    /// first response, the same secret included. Give it only to the paying customer's page, and
+    /// do not log it.
     pub client_secret: Option<String>,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
-    /// Always sent; optional in the schema so clients also parse objects from servers, and
-    /// events rendered, before metadata.
-    #[schema(required = false)]
     pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+/// A page of quotes, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct QuoteList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/quotes`.
+    pub url: String,
+    /// Whether more quotes follow in the direction of this page.
+    pub has_more: bool,
+    /// The quotes.
+    pub data: Vec<Quote>,
+}
+
+/// A page of refunds, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RefundList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/refunds`.
+    pub url: String,
+    /// Whether more refunds follow in the direction of this page.
+    pub has_more: bool,
+    /// The refunds.
+    pub data: Vec<Refund>,
 }
 
 /// The public view of a quote, read with its `client_secret` and without a signature, for the
@@ -271,6 +239,8 @@ pub struct ClientQuote {
     pub id: String,
     /// Always `quote`.
     pub object: String,
+    /// Whether the quote is in live mode; a test-mode page should say so.
+    pub livemode: bool,
     /// `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
     /// `expires_at` has passed.
     pub status: String,
@@ -295,7 +265,9 @@ pub struct ClientQuote {
     /// Progress of the payment shown on the page; display only, never a reason to deliver
     /// anything: `none`; `seen` (in a block, below the route's confirmation, and may still
     /// disappear); `confirming` (at the route's confirmation, being valued and screened);
-    /// `credited`; or `rejected` (not credited; the payer should contact the product's support).
+    /// `credited`; `rejected` (not credited; the payer should contact the merchant's support); or
+    /// `reversed` (credited, then its transaction left the chain before finality: the payment did
+    /// not happen, and the credit is taken back).
     pub payment_status: String,
     /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
     pub confirmations: Option<u64>,
@@ -312,13 +284,17 @@ pub enum QuoteView {
     Client(Box<ClientQuote>),
 }
 
-/// A payment observed at a quote's address. Display only: while `status` is `seen` it is not
-/// final, may still disappear in a reorg, and nothing has been credited.
+/// A payment observed at a quote's address or a deposit address. Display only: while `status` is
+/// `seen` it may still disappear in a reorg, and nothing has been credited.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct QuotePayment {
-    /// `seen` (in a block, not recorded as a deposit yet) or `final` (recorded as a deposit at the
-    /// route's confirmation; it is final once its block is). New values may be added.
+pub struct Payment {
+    /// `seen` (in a block, not recorded as a deposit yet) or `recorded` (recorded as a deposit at
+    /// the route's confirmation; follow it as `deposit`). New values may be added.
     pub status: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code; `null` for a token without a route.
+    pub asset: Option<String>,
     /// Canonical transaction hash.
     pub tx_hash: String,
     /// Token amount in base units, as a decimal string.
@@ -327,9 +303,10 @@ pub struct QuotePayment {
     pub confirmations: Option<u64>,
     /// Estimated finality time, Unix seconds: block time plus 15 minutes; `seen` only.
     pub estimated_final_at: Option<i64>,
-    /// Whether the payment is the quote's asset, in time, and within tolerance, so it will be
-    /// credited at the quoted price; otherwise it is credited at spot once final.
-    pub matches_quote: bool,
+    /// On a quote: whether the payment is the quote's asset, in time, and within tolerance, so
+    /// it is credited at the quoted price (otherwise at spot). `null` on a deposit address, whose
+    /// payments are all credited at spot.
+    pub matches_quote: Option<bool>,
     /// `dep_` id the deposit has, or will have once recorded.
     pub deposit: String,
 }
@@ -367,25 +344,29 @@ pub struct Deposit {
     pub id: String,
     /// Always `deposit`.
     pub object: String,
-    /// Whether the deposit is on a live-mode route. Always sent; optional in the schema like the
-    /// quote's.
-    #[schema(required = false)]
+    /// Whether the deposit is on a live-mode route.
     pub livemode: bool,
-    /// Your account identifier.
-    pub account_id: String,
+    /// Your identifier of the customer the deposit is credited to.
+    pub client_reference_id: String,
     /// The quote whose address received the transfer; `null` for a deposit address.
     pub quote: Option<ExpandableQuote>,
     /// The deposit address that received the transfer, `da_…`, on `chain_id` at `address`; `null`
     /// for a quote's address. Payments to a deposit address, active or retired, are credited at
-    /// spot. This service
-    /// always sends it; it is optional in the schema so clients also parse responses and events
-    /// from servers that predate it.
-    #[schema(required = false)]
+    /// spot.
     pub deposit_address: Option<String>,
-    /// `detected`, `confirmed`, `credited`, `swept`, `rejected`, or `reversed` (the transaction is
-    /// not in the final chain: claw back a credit as for `deposit.refunded`). New values may be
-    /// added.
+    /// `pending` (recorded at the route's confirmation and being valued and screened, or held
+    /// while the account's or customer's `settlement` is paused), `credited`, `rejected` (see
+    /// `rejection_reason`), or `reversed` (its transaction is not in the final chain: claw back a
+    /// credit as for `deposit.refunded`). New values may be added.
     pub status: String,
+    /// Whether the deposit's block is final on both providers: a final deposit can no longer be
+    /// reversed, and only a final deposit can be refunded. A deposit is credited at the route's
+    /// confirmation, before it is final (`GET /v1/config` `typical_finality_seconds`).
+    #[serde(rename = "final")]
+    pub is_final: bool,
+    /// Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of
+    /// its token to the treasury (`GET /v1/sweeps`), whoever sent the flush.
+    pub swept: bool,
     /// Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,
     /// `out_of_range`, or `sanctioned`.
     pub rejection_reason: Option<String>,
@@ -424,10 +405,13 @@ pub struct Deposit {
     /// Detection time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the
-    /// quote's when the deposit is recorded, independent of it afterwards; `{}` when none.
-    /// Always sent; optional in the schema like the quote's.
-    #[schema(required = false)]
+    /// quote's or the deposit address's when the deposit is recorded, independent of it
+    /// afterwards; `{}` when none.
     pub metadata: std::collections::BTreeMap<String, String>,
+    /// The operator's view of the deposit's internals; only in `GET /v1/admin/deposits/{id}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(required = false)]
+    pub admin: Option<Box<DepositAdmin>>,
 }
 
 /// `POST /v1/deposit_addresses` body.
@@ -485,6 +469,83 @@ pub struct DepositAddress {
     /// The address on each supported network of the mode it was issued on, by `chain_id`, with
     /// the tokens it takes there.
     pub networks: Vec<DepositAddressNetwork>,
+    /// Payments to the address in the last 24 hours, newest first, at most 10, as a quote's
+    /// `payment`: `seen` in a block within about a block time of arriving, then `recorded` as a
+    /// deposit. Display only; credit from `deposit.credited`.
+    pub payments: Vec<Payment>,
+    /// Lets the customer's page read the address's public view, `ClientDepositAddress`, from
+    /// `GET /v1/deposit_addresses/{id}?client_secret=…` without an API key, to show a payment as
+    /// soon as it is seen. Returned only by `POST /v1/deposit_addresses` and `…/rotate`, each
+    /// time a new one; only its hash is stored, and the newest 10 of an address stay valid. Give
+    /// it only to the customer's page, and do not log it.
+    pub client_secret: Option<String>,
+}
+
+/// The public view of a deposit address, read with its `client_secret` and without an API key,
+/// for the customer's page. It has no account, customer, treasury, or metadata fields.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ClientDepositAddress {
+    /// `da_` id.
+    pub id: String,
+    /// Always `deposit_address`.
+    pub object: String,
+    /// Whether the address is in live mode; a test-mode page should say so.
+    pub livemode: bool,
+    /// `active`, or `retired` by a rotation (still credited; show the new address instead).
+    pub status: String,
+    /// The address shared by every network, or `null` when a network's differs.
+    pub address: Option<String>,
+    /// The address on each supported network, with the tokens it takes there.
+    pub networks: Vec<ClientDepositAddressNetwork>,
+    /// Payments to the address in the last 24 hours, newest first, at most 10: display only,
+    /// never a reason to deliver anything.
+    pub payments: Vec<ClientDepositAddressPayment>,
+}
+
+/// A deposit address on one network, as its public view shows it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ClientDepositAddressNetwork {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The forwarder address to pay on this chain.
+    pub address: String,
+    /// The supported tokens on this chain.
+    pub assets: Vec<DepositAddressAsset>,
+}
+
+/// A payment to a deposit address, as its public view shows it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ClientDepositAddressPayment {
+    /// `seen` (in a block, below the route's confirmation, and may still disappear);
+    /// `confirming` (at the confirmation, being valued and screened); `credited`; `rejected`
+    /// (not credited; the payer should contact the merchant's support); or `reversed` (its
+    /// transaction left the chain before finality: the payment did not happen).
+    pub status: String,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Asset code; `null` for a token without a route.
+    pub asset: Option<String>,
+    /// The token's decimals, to display `amount_atomic`; `null` with `asset`.
+    pub decimals: Option<u8>,
+    /// Token amount in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// Transaction hash.
+    pub tx_hash: String,
+    /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
+    pub confirmations: Option<u64>,
+    /// When the payment was first seen or recorded, Unix seconds.
+    pub created: i64,
+}
+
+/// `GET /v1/deposit_addresses/{id}` returns a `DepositAddress` to a request with an API key and a
+/// `ClientDepositAddress` to a request by `client_secret`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum DepositAddressView {
+    /// The merchant's view.
+    DepositAddress(Box<DepositAddress>),
+    /// The customer's view.
+    Client(Box<ClientDepositAddress>),
 }
 
 /// A deposit address on one network (EVM chain).
@@ -579,9 +640,7 @@ pub struct Refund {
     pub id: String,
     /// Always `refund`.
     pub object: String,
-    /// Whether the refund was requested with a live key. Always sent; optional in the schema like
-    /// the quote's.
-    #[schema(required = false)]
+    /// Whether the refund was requested with a live key.
     pub livemode: bool,
     /// The refunded deposit: its `dep_` id, or the object with `expand[]=deposit`.
     pub deposit: ExpandableDeposit,
@@ -608,9 +667,6 @@ pub struct Refund {
     /// Request time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
-    /// Always sent; optional in the schema so clients also parse objects from servers, and
-    /// events rendered, before metadata.
-    #[schema(required = false)]
     pub metadata: std::collections::BTreeMap<String, String>,
 }
 
@@ -619,9 +675,7 @@ pub struct Refund {
 pub struct Config {
     /// Always `config`.
     pub object: String,
-    /// The mode of the key that reads it: `assets` lists that mode's routes. Always sent;
-    /// optional in the schema like the quote's.
-    #[schema(required = false)]
+    /// The mode of the key that reads it: `assets` lists that mode's routes.
     pub livemode: bool,
     /// Credit currency, `usd`.
     pub currency: String,
@@ -657,13 +711,11 @@ pub struct ConfigAsset {
     /// A payment within this many basis points of the quoted amount completes the quote.
     pub quote_tolerance_bps: u16,
     /// The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
-    /// block and one more), `"safe"`, or `"finalized"`. A credit before finality can still be
-    /// reversed (`deposit.reversed`). Optional in the schema, like `typical_credit_seconds`, so
-    /// clients also parse responses from servers that predate fast credit.
-    #[schema(required = false)]
+    /// block and one more), `"safe"`, or `"finalized"`: the stricter of the route's floor and
+    /// your account's `confirmation_policies`. A credit before finality can still be reversed
+    /// (`deposit.reversed`).
     pub confirmations: String,
-    /// Typical time from payment to the `deposit.credited` event, in seconds.
-    #[schema(required = false)]
+    /// Typical time from payment to the `deposit.credited` event, in seconds, at `confirmations`.
     pub typical_credit_seconds: u64,
     /// Typical time from payment to finality, in seconds; refunds wait for it.
     pub typical_finality_seconds: u64,
@@ -785,15 +837,49 @@ pub struct AccountObject {
     pub name: String,
     /// Whether the operator enabled live mode.
     pub charges_enabled: bool,
-    /// Active account-level pause scopes.
+    /// Active account-level pause scopes, the operator's and your own (`POST /v1/account/pause`):
+    /// while `quotes` is listed, no quote, deposit address, or network is issued. Your resume
+    /// lifts only your own pause.
     pub paused_scopes: Vec<String>,
     /// The keys that sign this mode's webhooks: the current one first, then any previous one
-    /// still signing during a rotation. Their public keys come from `GET /v1/attestation`. Always
-    /// sent; optional in the schema so clients also parse objects from servers before it.
-    #[schema(required = false)]
+    /// still signing during a rotation. Their public keys come from `GET /v1/attestation`.
     pub webhook_keys: Vec<WebhookKeyVersion>,
+    /// The confirmations you require on chains of this mode, stricter than the routes' (design
+    /// D1); a chain not listed uses its route's (`GET /v1/config`).
+    pub confirmation_policies: Vec<ConfirmationPolicy>,
     /// Creation time, Unix seconds.
     pub created: i64,
+}
+
+/// One chain's confirmation the account requires (design D1).
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmationPolicy {
+    /// A chain of the key's mode (`GET /v1/config`).
+    pub chain_id: u64,
+    /// A depth (`"12"`: the block and eleven more), `"safe"`, or `"finalized"`: never weaker than
+    /// the route's `confirmations`, and of the chain's kind (a depth or `finalized` on Ethereum,
+    /// `safe` or `finalized` on an OP-stack chain). In a request, `null` removes the chain's
+    /// policy, so its route's applies.
+    pub confirmations: Option<String>,
+}
+
+/// `POST /v1/account` body; parameters not sent are left unchanged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAccountObjectRequest {
+    /// The confirmations to require, per chain; chains not listed keep theirs.
+    #[serde(default)]
+    pub confirmation_policies: Option<Vec<ConfirmationPolicy>>,
+}
+
+/// `POST /v1/account/pause` and `POST /v1/account/resume` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSelfPauseRequest {
+    /// `["quotes"]`, the one scope a merchant pauses itself: no quote, deposit address, or
+    /// network is issued while it is paused. Existing addresses keep being credited.
+    pub scopes: Vec<String>,
 }
 
 /// Administrative pause or resume of a whole account, in both modes.
@@ -1090,9 +1176,7 @@ pub struct DailyReportResponse {
     /// Latest reconciliation round of the serving process; absent until the first round after a
     /// restart.
     pub reconciliation: Option<ReconciliationRoundReport>,
-    /// Active reconciliation blocks in `block_key` order. This service always sends it; it is
-    /// optional in the schema so clients also parse reports from servers that predate it.
-    #[schema(required = false)]
+    /// Active reconciliation blocks in `block_key` order.
     pub reconciliation_blocks: Vec<ReconciliationBlockReport>,
 }
 
@@ -1131,8 +1215,8 @@ pub struct AttestationResponse {
     /// `livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is
     /// its version as 4 big-endian bytes and its 32 raw public-key bytes.
     pub report_data: String,
-    /// Versioned dstack attestation bytes as lowercase hexadecimal.
-    pub quote: String,
+    /// Versioned dstack TDX quote bytes as lowercase hexadecimal.
+    pub tdx_quote: String,
 }
 
 /// One version of an account's webhook signing key, with its public key.
@@ -1313,4 +1397,123 @@ pub struct EventList {
 pub struct ResendEventRequest {
     /// The enabled endpoint to deliver the event to again, `we_…`.
     pub webhook_endpoint: String,
+}
+
+/// The account's balance held in its forwarders, in the key's mode (Stripe's Balance): what
+/// payments put there and no finalized `Flushed` event has moved to a treasury yet.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Balance {
+    /// Always `balance`.
+    pub object: String,
+    /// The mode.
+    pub livemode: bool,
+    /// One entry per chain and token held.
+    pub unswept: Vec<BalanceAmount>,
+}
+
+/// A token's unswept amounts on one chain.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct BalanceAmount {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The token contract.
+    pub token: String,
+    /// Asset code; `null` for a token without a route.
+    pub asset: Option<String>,
+    /// Every deposit not reversed, minus finalized sweeps, in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// The part of `amount_atomic` from final deposits, which can no longer be reversed: what is
+    /// safe to sweep.
+    pub final_amount_atomic: String,
+}
+
+/// A sweep: one finalized `Flushed` event of the factory, which moved a forwarder's whole balance
+/// of a token to its treasury (Stripe's Payout). Anyone can send the `flush`; the merchant usually
+/// does, with the SDK's `flush_transaction` or `safe_batch`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Sweep {
+    /// Sweep id, `sw_…`.
+    pub id: String,
+    /// Always `sweep`.
+    pub object: String,
+    /// The mode.
+    pub livemode: bool,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The forwarder swept, `fwd_…`.
+    pub forwarder: String,
+    /// The forwarder's address.
+    pub address: String,
+    /// The token contract.
+    pub token: String,
+    /// Asset code; `null` for a token without a route.
+    pub asset: Option<String>,
+    /// The treasury paid, fixed in the forwarder's address.
+    pub treasury: String,
+    /// Amount moved, in base units, as a decimal string.
+    pub amount_atomic: String,
+    /// The flush transaction.
+    pub tx_hash: String,
+    /// Block-wide index of the `Flushed` log.
+    pub log_index: u64,
+    /// Block number of the transaction.
+    pub block_number: u64,
+    /// When the finalized event was indexed, Unix seconds.
+    pub created: i64,
+}
+
+/// A page of sweeps, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct SweepList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/sweeps`.
+    pub url: String,
+    /// Whether more sweeps follow in the direction of this page.
+    pub has_more: bool,
+    /// The sweeps.
+    pub data: Vec<Sweep>,
+}
+
+/// A forwarder the account was issued (design §13): everything needed to recompute its address
+/// and sweep it without Phala Pay. The address is `factory`'s `CREATE2` clone of the pinned
+/// implementation over `treasury` and `salt`.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct Forwarder {
+    /// Forwarder id, `fwd_…`.
+    pub id: String,
+    /// Always `forwarder`.
+    pub object: String,
+    /// The mode.
+    pub livemode: bool,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// The forwarder address.
+    pub address: String,
+    /// The forwarder factory.
+    pub factory: String,
+    /// The `CREATE2` salt, 32 bytes of hex.
+    pub salt: String,
+    /// The treasury the forwarder pays, fixed in its address.
+    pub treasury: String,
+    /// The quote it was issued for, `qt_…`; `null` for a deposit address's network.
+    pub quote: Option<String>,
+    /// The deposit address it is a network of, `da_…`; `null` for a quote's.
+    pub deposit_address: Option<String>,
+    /// When a treasury change replaced this deposit address network, Unix seconds; it is still
+    /// watched and credited, and pays its own treasury.
+    pub superseded_at: Option<i64>,
+}
+
+/// A page of forwarders (<https://docs.stripe.com/api/pagination>), in `id` order.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ForwarderList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/forwarders`.
+    pub url: String,
+    /// Whether more forwarders follow in the direction of this page.
+    pub has_more: bool,
+    /// The forwarders.
+    pub data: Vec<Forwarder>,
 }

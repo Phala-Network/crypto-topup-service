@@ -4,24 +4,34 @@
 
 use std::collections::BTreeMap;
 
+use alloy_primitives::Address as EvmAddress;
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
+use axum::http::{HeaderValue, header};
+use axum::response::{IntoResponse as _, Response};
+use chrono::{DateTime, TimeDelta, Utc};
+use rand::TryRng as _;
+use sha2::{Digest as _, Sha256};
+use sqlx::PgPool;
 use topup_core::route::RouteFile;
+use uuid::Uuid;
 
 use crate::db::{Account, Customer};
 use crate::deposit_addresses::{self, ChainContracts, DepositAddressError, ListFilter, Status};
 use crate::ids;
 use crate::routes::RouteSet;
-use crate::tenancy::Permission;
+use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
+use super::handlers::validate_client_reference_id;
 use super::metadata::{self, MetadataUpdate, Object};
 use super::models::{
+    ClientDepositAddress, ClientDepositAddressNetwork, ClientDepositAddressPayment,
     CreateDepositAddressRequest, DepositAddress, DepositAddressAsset, DepositAddressList,
-    DepositAddressNetwork, UpdateMetadataRequest,
+    DepositAddressNetwork, DepositAddressView, Payment, UpdateMetadataRequest,
 };
 use super::repository;
 
@@ -90,7 +100,7 @@ pub(crate) async fn create_deposit_address(
     )
     .await
     .map_err(|error| issuable.map_error(error))?;
-    deposit_address_object(&state.routes, &address).map(Json)
+    respond_with_client_secret(&state, &address).await
 }
 
 #[utoipa::path(
@@ -135,10 +145,10 @@ pub(crate) async fn list_deposit_addresses(
             ),
             error => map_error(error),
         })?;
-    let data = addresses
-        .iter()
-        .map(|address| deposit_address_object(&state.routes, address))
-        .collect::<ApiResult<Vec<_>>>()?;
+    let mut data = Vec::with_capacity(addresses.len());
+    for address in &addresses {
+        data.push(deposit_address_response(&state.pool, &state.routes, address).await?);
+    }
     Ok(Json(DepositAddressList {
         object: "list".to_owned(),
         url: "/v1/deposit_addresses".to_owned(),
@@ -150,30 +160,73 @@ pub(crate) async fn list_deposit_addresses(
 #[utoipa::path(
     get,
     path = "/v1/deposit_addresses/{id}",
-    params(("id" = String, Path, description = "Deposit address id, `da_…`")),
-    responses(
-        (status = 200, description = "OK", body = DepositAddress),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
+    params(
+        ("id" = String, Path, description = "Deposit address id, `da_…`"),
+        (
+            "client_secret" = Option<String>, Query,
+            description = "A `client_secret` of the address, to read its public view without an \
+                           API key. Send the request without `Authorization`; the response then \
+                           allows any origin."
+        )
     ),
-    security(("api_key" = [])),
+    responses(
+        (
+            status = 200,
+            description = "OK: a `DepositAddress` to a request with an API key, a \
+                           `ClientDepositAddress` to a request by `client_secret`",
+            body = DepositAddressView
+        ),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (
+            status = 404,
+            description = "Not Found, also for a `client_secret` that is not this address's",
+            body = ErrorResponse
+        ),
+        (status = 429, description = "Too Many Requests: reads by `client_secret`", body = ErrorResponse)
+    ),
+    security(("api_key" = []), ()),
     tag = "deposit_addresses"
 )]
-/// One deposit address.
+/// One deposit address. The customer's page can read the address's public view, with the
+/// payments seen and credited in the last 24 hours, by a `client_secret` instead of an API key,
+/// as a quote's page does.
 pub(crate) async fn get_deposit_address(
     State(state): State<AppState>,
-    Extension(merchant): Extension<Merchant>,
+    merchant: Option<Extension<Merchant>>,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<DepositAddress>> {
-    merchant
-        .require(&state.pool, Permission::DepositAddressesRead)
-        .await?;
-    let id = ids::parse(ids::DEPOSIT_ADDRESS, &id).ok_or_else(ApiError::not_found)?;
-    let address = deposit_addresses::get(&state.pool, merchant.scope, id)
-        .await
-        .map_err(map_error)?
-        .ok_or_else(ApiError::not_found)?;
-    deposit_address_object(&state.routes, &address).map(Json)
+    RawQuery(query): RawQuery,
+) -> Response {
+    let Some(Extension(merchant)) = merchant else {
+        let pairs = query_pairs(query.as_deref());
+        let client_secret = pairs
+            .iter()
+            .find(|(name, _)| name == "client_secret")
+            .map(|(_, value)| value.as_str());
+        let mut response = match client_deposit_address(&state, &id, client_secret).await {
+            Ok(address) => Json(DepositAddressView::Client(Box::new(address))).into_response(),
+            Err(error) => error.into_response(),
+        };
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        return response;
+    };
+    let address = async {
+        merchant
+            .require(&state.pool, Permission::DepositAddressesRead)
+            .await?;
+        let id = ids::parse(ids::DEPOSIT_ADDRESS, &id).ok_or_else(ApiError::not_found)?;
+        let address = deposit_addresses::get(&state.pool, merchant.scope, id)
+            .await
+            .map_err(map_error)?
+            .ok_or_else(ApiError::not_found)?;
+        deposit_address_response(&state.pool, &state.routes, &address).await
+    };
+    match address.await {
+        Ok(address) => Json(DepositAddressView::DepositAddress(Box::new(address))).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 #[utoipa::path(
@@ -225,7 +278,9 @@ pub(crate) async fn update_deposit_address(
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    deposit_address_object(&state.routes, &address).map(Json)
+    deposit_address_response(&state.pool, &state.routes, &address)
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(
@@ -286,7 +341,7 @@ pub(crate) async fn rotate_deposit_address(
     )
     .await
     .map_err(|error| issuable.map_error(error))?;
-    deposit_address_object(&state.routes, &address).map(Json)
+    respond_with_client_secret(&state, &address).await
 }
 
 /// The chains a customer's deposit address gets new networks on, and why a chain was left out.
@@ -350,16 +405,6 @@ async fn issuable_chains(
     Ok(issuable)
 }
 
-fn validate_client_reference_id(client_reference_id: &str) -> ApiResult<()> {
-    if client_reference_id.is_empty() || client_reference_id.chars().count() > 200 {
-        return Err(ApiError::invalid_param(
-            "client_reference_id",
-            "client_reference_id must contain 1 to 200 characters",
-        ));
-    }
-    Ok(())
-}
-
 /// The API representation of a deposit address: its networks on the chains that have a current
 /// route in its mode, each with those routes' tokens.
 pub(crate) fn deposit_address_object(
@@ -411,7 +456,285 @@ pub(crate) fn deposit_address_object(
         retired_at: address.retired_at.map(|at| at.timestamp()),
         metadata: address.metadata.clone(),
         networks,
+        payments: Vec::new(),
+        client_secret: None,
     })
+}
+
+/// The merchant's view of a deposit address, with its recent payments.
+async fn deposit_address_response(
+    pool: &PgPool,
+    routes: &RouteSet,
+    address: &deposit_addresses::DepositAddress,
+) -> ApiResult<DepositAddress> {
+    let mut object = deposit_address_object(routes, address)?;
+    object.payments = recent_payments(pool, routes, address.id, Utc::now())
+        .await?
+        .into_iter()
+        .map(|recent| recent.payment)
+        .collect();
+    Ok(object)
+}
+
+/// Responds to a create or a rotation with a newly issued client secret.
+async fn respond_with_client_secret(
+    state: &AppState,
+    address: &deposit_addresses::DepositAddress,
+) -> ApiResult<Json<DepositAddress>> {
+    let mut object = deposit_address_response(&state.pool, &state.routes, address).await?;
+    object.client_secret = Some(issue_client_secret(&state.pool, address.id).await?);
+    Ok(Json(object))
+}
+
+/// Random bytes after `_secret_` in a client secret, as a quote's.
+const CLIENT_SECRET_BYTES: usize = 24;
+/// Client secrets of one address that stay valid: the newest, for several open pages.
+const CLIENT_SECRETS_KEPT: i64 = 10;
+/// How far back the public view lists payments.
+const CLIENT_PAYMENTS_WINDOW: TimeDelta = TimeDelta::hours(24);
+/// How many payments the public view lists.
+const CLIENT_PAYMENTS_SHOWN: usize = 10;
+
+/// Issues a `client_secret`, `da_…_secret_` and 48 random hex digits, storing only its SHA-256
+/// and dropping the address's secrets older than the newest [`CLIENT_SECRETS_KEPT`].
+async fn issue_client_secret(pool: &PgPool, id: Uuid) -> ApiResult<String> {
+    let mut random = [0_u8; CLIENT_SECRET_BYTES];
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut random)
+        .map_err(|error| {
+            tracing::error!(%error, "OS RNG failed; no client secret issued");
+            ApiError::internal()
+        })?;
+    let secret = format!(
+        "{}_secret_{}",
+        deposit_addresses::public_id(id),
+        hex::encode(random)
+    );
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO deposit_address_client_secrets (secret_hash, deposit_address_id) \
+         VALUES ($1, $2)",
+    )
+    .bind(Sha256::digest(secret.as_bytes()).as_slice())
+    .bind(id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "DELETE FROM deposit_address_client_secrets WHERE deposit_address_id = $1 \
+         AND secret_hash NOT IN (SELECT secret_hash FROM deposit_address_client_secrets \
+             WHERE deposit_address_id = $1 ORDER BY created_at DESC, secret_hash LIMIT $2)",
+    )
+    .bind(id)
+    .bind(CLIENT_SECRETS_KEPT)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(secret)
+}
+
+/// The public view of the deposit address `id` whose client secret is `client_secret`.
+async fn client_deposit_address(
+    state: &AppState,
+    id: &str,
+    client_secret: Option<&str>,
+) -> ApiResult<ClientDepositAddress> {
+    let address_id = ids::parse(ids::DEPOSIT_ADDRESS, id).ok_or_else(ApiError::not_found)?;
+    let client_secret = client_secret
+        .filter(|secret| {
+            secret
+                .strip_prefix(id)
+                .is_some_and(|rest| rest.starts_with("_secret_"))
+        })
+        .ok_or_else(ApiError::not_found)?;
+    if !state.client_reads.allow(address_id) {
+        return Err(ApiError::rate_limited());
+    }
+    // The secret authenticates for its address's account and mode, as an API key does for its
+    // own; the scope comes from the stored row, never from the request.
+    let owner: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT address.account_id, address.livemode \
+         FROM deposit_address_client_secrets AS secret \
+         JOIN deposit_addresses AS address ON address.id = secret.deposit_address_id \
+         WHERE secret.secret_hash = $1 AND address.id = $2",
+    )
+    .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
+    .bind(address_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let (account_id, livemode) = owner.ok_or_else(ApiError::not_found)?;
+    let address = deposit_addresses::get(&state.pool, Scope::new(account_id, livemode), address_id)
+        .await
+        .map_err(map_error)?
+        .ok_or_else(ApiError::not_found)?;
+    let object = deposit_address_object(&state.routes, &address)?;
+    let payments = client_payments(&state.pool, &state.routes, address_id, Utc::now()).await?;
+    Ok(ClientDepositAddress {
+        id: object.id,
+        object: object.object,
+        livemode: object.livemode,
+        status: object.status,
+        address: object.address,
+        networks: object
+            .networks
+            .into_iter()
+            .map(|network| ClientDepositAddressNetwork {
+                chain_id: network.chain_id,
+                address: network.address,
+                assets: network.assets,
+            })
+            .collect(),
+        payments,
+    })
+}
+
+/// A recent deposit: id, chain, state, token, amount, transaction, and creation time.
+type RecentDepositRow = (Uuid, i64, String, String, String, String, DateTime<Utc>);
+
+/// A payment to a deposit address with the processing state of its deposit, once recorded.
+struct RecentPayment {
+    payment: Payment,
+    decimals: Option<u8>,
+    state: Option<String>,
+    created: i64,
+}
+
+/// Transfers seen and not recorded yet, and deposits recorded within
+/// [`CLIENT_PAYMENTS_WINDOW`], newest first, at most [`CLIENT_PAYMENTS_SHOWN`].
+async fn recent_payments(
+    pool: &PgPool,
+    routes: &RouteSet,
+    deposit_address_id: Uuid,
+    now: DateTime<Utc>,
+) -> ApiResult<Vec<RecentPayment>> {
+    let since = now
+        .checked_sub_signed(CLIENT_PAYMENTS_WINDOW)
+        .ok_or_else(ApiError::internal)?;
+    let mut payments = Vec::new();
+    for transfer in pending_transfers(pool, deposit_address_id).await? {
+        let asset = route_asset(routes, transfer.chain_id, transfer.asset_contract);
+        payments.push(RecentPayment {
+            payment: Payment {
+                status: "seen".to_owned(),
+                chain_id: transfer.chain_id,
+                asset: asset.as_ref().map(|(asset, _)| asset.clone()),
+                tx_hash: format!("{:#x}", transfer.tx_hash),
+                amount_atomic: transfer.amount_atomic.value().to_string(),
+                confirmations: Some(transfer.confirmations()),
+                estimated_final_at: Some(
+                    super::pending::estimated_final_at(transfer.block_time).timestamp(),
+                ),
+                matches_quote: None,
+                deposit: ids::format(ids::DEPOSIT, transfer.deposit_id),
+            },
+            decimals: asset.map(|(_, decimals)| decimals),
+            state: None,
+            created: transfer.first_seen_at.timestamp(),
+        });
+    }
+    let deposits: Vec<RecentDepositRow> = sqlx::query_as(
+        "SELECT deposit.id, deposit.chain_id, deposit.state, deposit.asset_contract, \
+                    deposit.amount_atomic::text, deposit.tx_hash, deposit.created_at \
+             FROM deposits AS deposit \
+             JOIN addresses AS address ON address.id = deposit.address_id \
+             WHERE address.deposit_address_id = $1 AND deposit.created_at >= $2 \
+             ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT $3",
+    )
+    .bind(deposit_address_id)
+    .bind(since)
+    .bind(i64::try_from(CLIENT_PAYMENTS_SHOWN).map_err(|_| ApiError::internal())?)
+    .fetch_all(pool)
+    .await?;
+    for (id, chain_id, state, contract, amount, tx_hash, created) in deposits {
+        let chain_id = u64::try_from(chain_id).map_err(|_| ApiError::internal())?;
+        let contract: EvmAddress = contract.parse().map_err(|_| ApiError::internal())?;
+        let asset = route_asset(routes, chain_id, contract);
+        payments.push(RecentPayment {
+            payment: Payment {
+                status: "recorded".to_owned(),
+                chain_id,
+                asset: asset.as_ref().map(|(asset, _)| asset.clone()),
+                tx_hash,
+                amount_atomic: amount,
+                confirmations: None,
+                estimated_final_at: None,
+                matches_quote: None,
+                deposit: ids::format(ids::DEPOSIT, id),
+            },
+            decimals: asset.map(|(_, decimals)| decimals),
+            state: Some(state),
+            created: created.timestamp(),
+        });
+    }
+    payments.sort_by_key(|payment| std::cmp::Reverse(payment.created));
+    payments.truncate(CLIENT_PAYMENTS_SHOWN);
+    Ok(payments)
+}
+
+/// The payments the customer's page shows, by their progress.
+async fn client_payments(
+    pool: &PgPool,
+    routes: &RouteSet,
+    deposit_address_id: Uuid,
+    now: DateTime<Utc>,
+) -> ApiResult<Vec<ClientDepositAddressPayment>> {
+    Ok(recent_payments(pool, routes, deposit_address_id, now)
+        .await?
+        .into_iter()
+        .map(|recent| ClientDepositAddressPayment {
+            status: match recent.state.as_deref() {
+                None => "seen",
+                Some("credited" | "swept") => "credited",
+                Some("rejected") => "rejected",
+                Some("reversed") => "reversed",
+                Some(_) => "confirming",
+            }
+            .to_owned(),
+            chain_id: recent.payment.chain_id,
+            asset: recent.payment.asset,
+            decimals: recent.decimals,
+            amount_atomic: recent.payment.amount_atomic,
+            tx_hash: recent.payment.tx_hash,
+            confirmations: recent.payment.confirmations,
+            created: recent.created,
+        })
+        .collect())
+}
+
+/// Transfers to any network of the deposit address, current or superseded, seen in a block and
+/// not recorded as deposits yet, oldest first.
+async fn pending_transfers(
+    pool: &PgPool,
+    deposit_address_id: Uuid,
+) -> ApiResult<Vec<crate::db::PendingTransfer>> {
+    let address_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM addresses WHERE deposit_address_id = $1 ORDER BY chain_id, id",
+    )
+    .bind(deposit_address_id)
+    .fetch_all(pool)
+    .await?;
+    let mut transfers = Vec::new();
+    for address_id in address_ids {
+        for transfer in crate::db::list_address_pending(pool, address_id).await? {
+            let recorded: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposits WHERE id = $1)")
+                    .bind(transfer.deposit_id)
+                    .fetch_one(pool)
+                    .await?;
+            if !recorded {
+                transfers.push(transfer);
+            }
+        }
+    }
+    transfers.sort_by_key(|transfer| (transfer.block_number, transfer.log_index));
+    Ok(transfers)
+}
+
+/// The asset code and decimals of a routed token of `chain_id`.
+fn route_asset(routes: &RouteSet, chain_id: u64, contract: EvmAddress) -> Option<(String, u8)> {
+    routes
+        .current()
+        .find(|route| route.chain.chain_id == chain_id && route.asset.contract == contract)
+        .map(|route| (route.asset.symbol.clone(), route.asset.decimals))
 }
 
 fn parse_filter(pairs: &[(String, String)]) -> ApiResult<ListFilter> {

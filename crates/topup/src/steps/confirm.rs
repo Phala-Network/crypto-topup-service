@@ -212,21 +212,27 @@ impl ConfirmStep {
             );
         };
 
-        let (canonical, is_final) = match confirmed_evidence(chains, deposit, context.address).await
-        {
-            FinalityResult::Ready { log, is_final } => (log, is_final),
-            FinalityResult::Wait(evidence) => {
-                let reason = if chains.confirmations == Confirmations::Finalized {
-                    WaitReason::Finality
-                } else {
-                    WaitReason::Confirmations
-                };
-                return StepResult::new(StepOutcome::Wait { reason }, evidence);
-            }
-            FinalityResult::Retry(error, evidence) => {
-                return retry(error, evidence, TransitionEffects::default());
-            }
-        };
+        // The stricter of the route's floor and the account's policy; a policy no chain family
+        // accepts with the route's value (never written by the API) falls back to finality.
+        let confirmations = context.policy.map_or(Some(chains.confirmations), |policy| {
+            chains.confirmations.stricter(policy)
+        });
+        let confirmations = confirmations.unwrap_or(Confirmations::Finalized);
+        let (canonical, is_final) =
+            match confirmed_evidence(chains, confirmations, deposit, context.address).await {
+                FinalityResult::Ready { log, is_final } => (log, is_final),
+                FinalityResult::Wait(evidence) => {
+                    let reason = if confirmations == Confirmations::Finalized {
+                        WaitReason::Finality
+                    } else {
+                        WaitReason::Confirmations
+                    };
+                    return StepResult::new(StepOutcome::Wait { reason }, evidence);
+                }
+                FinalityResult::Retry(error, evidence) => {
+                    return retry(error, evidence, TransitionEffects::default());
+                }
+            };
         let selected_route = if canonical.token == deposit.asset_contract {
             deposit.route.as_ref().zip(deposit.route_version)
         } else {
@@ -377,6 +383,8 @@ impl Step for ConfirmStep {
 struct ConfirmationContext {
     address: Address,
     lock: Option<StoredLock>,
+    /// The account's stricter confirmation for the chain (design D1), if it set one.
+    policy: Option<Confirmations>,
 }
 
 #[derive(Clone)]
@@ -405,13 +413,15 @@ impl ContextLookup for PostgresContextLookup {
 async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address,
+        SELECT address.address, policy.required AS policy,
                quote.route, quote.amount_atomic::text AS amount_atomic,
                quote.price_scaled::text AS price_scaled,
                quote.credit_minor::text AS credit_minor,
                quote.expires_at, quote.consumed_by, quote.status AS lock_status
         FROM addresses AS address
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
+        LEFT JOIN confirmation_policies AS policy
+            ON policy.account_id = address.account_id AND policy.chain_id = address.chain_id
         WHERE address.id = $1
         "#,
     )
@@ -465,7 +475,19 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
     } else {
         None
     };
-    Ok(ConfirmationContext { address, lock })
+    let policy: Option<String> = row.try_get("policy")?;
+    let policy = policy
+        .map(|value| {
+            Confirmations::parse_policy(&value).ok_or_else(|| {
+                sqlx::Error::Decode(format!("invalid confirmation policy {value:?}").into())
+            })
+        })
+        .transpose()?;
+    Ok(ConfirmationContext {
+        address,
+        lock,
+        policy,
+    })
 }
 
 enum FinalityResult {
@@ -486,10 +508,10 @@ fn receipt_block(lookup: &ReceiptLookup) -> Option<u64> {
 /// on both. The block is final too when both providers' `finalized` covers it.
 async fn confirmed_evidence(
     chains: &ChainPair,
+    confirmations: Confirmations,
     deposit: &Deposit,
     address: Address,
 ) -> FinalityResult {
-    let confirmations = chains.confirmations;
     let known = deposit.tx_nonce.map(|tx_nonce| KnownTransfer {
         block_hash: deposit.block_hash,
         block_time: deposit.block_time,
@@ -966,6 +988,49 @@ mod tests {
         .await;
         assert_eq!(result.outcome, StepOutcome::Advance);
         assert!(!result.effects.mark_final);
+    }
+
+    #[tokio::test]
+    async fn an_account_policy_stricter_than_the_route_holds_the_credit() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        for (policy, reason) in [
+            (Confirmations::Depth(5), WaitReason::Confirmations),
+            (Confirmations::Finalized, WaitReason::Finality),
+        ] {
+            let result = step(
+                depth_route(),
+                chain_at(4, 11, vec![log.clone()]),
+                chain_at(4, 11, vec![log.clone()]),
+                prices(now_seconds()),
+                ConfirmationContext {
+                    policy: Some(policy),
+                    ..context(None)
+                },
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(result.outcome, StepOutcome::Wait { reason }, "{policy:?}");
+        }
+        // A policy weaker than the route's floor never lowers it.
+        let result = step(
+            depth_route(),
+            chain_at(4, 10, vec![log.clone()]),
+            chain_at(4, 10, vec![log]),
+            prices(now_seconds()),
+            ConfirmationContext {
+                policy: Some(Confirmations::Depth(1)),
+                ..context(None)
+            },
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Confirmations
+            }
+        );
     }
 
     #[tokio::test]
@@ -1490,6 +1555,7 @@ mod tests {
         ConfirmationContext {
             address: recipient(),
             lock,
+            policy: None,
         }
     }
 

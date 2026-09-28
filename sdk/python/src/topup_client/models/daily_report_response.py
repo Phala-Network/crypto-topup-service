@@ -27,22 +27,20 @@ class DailyReportResponse:
 
     Attributes:
         generated_at (datetime.datetime): Report snapshot time.
+        reconciliation_blocks (list[ReconciliationBlockReport]): Active reconciliation blocks in `block_key` order.
         routes (list[RouteDailyReport]): SQL-computed metrics for each configured route.
         exposure_minor (None | str | Unset): Open rate-lock credit across all accounts in destination minor units: the
             sum the global
             exposure cap is enforced against. This service always sends it; it is optional in the
             schema so clients also parse reports from servers that predate it.
         reconciliation (None | ReconciliationRoundReport | Unset):
-        reconciliation_blocks (list[ReconciliationBlockReport] | Unset): Active reconciliation blocks in `block_key`
-            order. This service always sends it; it is
-            optional in the schema so clients also parse reports from servers that predate it.
     """
 
     generated_at: datetime.datetime
+    reconciliation_blocks: list[ReconciliationBlockReport]
     routes: list[RouteDailyReport]
     exposure_minor: None | str | Unset = UNSET
     reconciliation: None | ReconciliationRoundReport | Unset = UNSET
-    reconciliation_blocks: list[ReconciliationBlockReport] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -51,6 +49,11 @@ class DailyReportResponse:
         from ..models.route_daily_report import RouteDailyReport  # noqa: PLC0415
 
         generated_at = self.generated_at.isoformat()
+
+        reconciliation_blocks = []
+        for reconciliation_blocks_item_data in self.reconciliation_blocks:
+            reconciliation_blocks_item = reconciliation_blocks_item_data.to_dict()
+            reconciliation_blocks.append(reconciliation_blocks_item)
 
         routes = []
         for routes_item_data in self.routes:
@@ -71,18 +74,12 @@ class DailyReportResponse:
         else:
             reconciliation = self.reconciliation
 
-        reconciliation_blocks: list[dict[str, Any]] | Unset = UNSET
-        if not isinstance(self.reconciliation_blocks, Unset):
-            reconciliation_blocks = []
-            for reconciliation_blocks_item_data in self.reconciliation_blocks:
-                reconciliation_blocks_item = reconciliation_blocks_item_data.to_dict()
-                reconciliation_blocks.append(reconciliation_blocks_item)
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
                 "generated_at": generated_at,
+                "reconciliation_blocks": reconciliation_blocks,
                 "routes": routes,
             }
         )
@@ -90,8 +87,6 @@ class DailyReportResponse:
             field_dict["exposure_minor"] = exposure_minor
         if reconciliation is not UNSET:
             field_dict["reconciliation"] = reconciliation
-        if reconciliation_blocks is not UNSET:
-            field_dict["reconciliation_blocks"] = reconciliation_blocks
 
         return field_dict
 
@@ -103,6 +98,15 @@ class DailyReportResponse:
 
         d = dict(src_dict)
         generated_at = datetime.datetime.fromisoformat(d.pop("generated_at"))
+
+        reconciliation_blocks = []
+        _reconciliation_blocks = d.pop("reconciliation_blocks")
+        for reconciliation_blocks_item_data in _reconciliation_blocks:
+            reconciliation_blocks_item = ReconciliationBlockReport.from_dict(
+                reconciliation_blocks_item_data
+            )
+
+            reconciliation_blocks.append(reconciliation_blocks_item)
 
         routes = []
         _routes = d.pop("routes")
@@ -137,23 +141,12 @@ class DailyReportResponse:
 
         reconciliation = _parse_reconciliation(d.pop("reconciliation", UNSET))
 
-        _reconciliation_blocks = d.pop("reconciliation_blocks", UNSET)
-        reconciliation_blocks: list[ReconciliationBlockReport] | Unset = UNSET
-        if _reconciliation_blocks is not UNSET:
-            reconciliation_blocks = []
-            for reconciliation_blocks_item_data in _reconciliation_blocks:
-                reconciliation_blocks_item = ReconciliationBlockReport.from_dict(
-                    reconciliation_blocks_item_data
-                )
-
-                reconciliation_blocks.append(reconciliation_blocks_item)
-
         daily_report_response = cls(
             generated_at=generated_at,
+            reconciliation_blocks=reconciliation_blocks,
             routes=routes,
             exposure_minor=exposure_minor,
             reconciliation=reconciliation,
-            reconciliation_blocks=reconciliation_blocks,
         )
 
         daily_report_response.additional_properties = d

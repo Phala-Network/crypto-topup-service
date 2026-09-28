@@ -14,6 +14,7 @@ from typing import cast
 if TYPE_CHECKING:
     from ..models.deposit_address_metadata import DepositAddressMetadata
     from ..models.deposit_address_network import DepositAddressNetwork
+    from ..models.payment import Payment
 
 
 T = TypeVar("T", bound="DepositAddress")
@@ -38,6 +39,9 @@ class DepositAddress:
                 `chain_id`, with
                 the tokens it takes there.
             object_ (str): Always `deposit_address`.
+            payments (list[Payment]): Payments to the address in the last 24 hours, newest first, at most 10, as a quote's
+                `payment`: `seen` in a block within about a block time of arriving, then `recorded` as a
+                deposit. Display only; credit from `deposit.credited`.
             salt (str): CREATE2 salt, 32 bytes of hex; the same on every network.
             status (str): `active`, or `retired` by a rotation; payments to either are credited.
             version (int): The address's version among the customer's addresses, from 1. The salt is
@@ -49,6 +53,12 @@ class DepositAddress:
                 `null`
                 when a network's treasury differs, and so its address (see `networks`), or when there is
                 no network.
+            client_secret (None | str | Unset): Lets the customer's page read the address's public view,
+                `ClientDepositAddress`, from
+                `GET /v1/deposit_addresses/{id}?client_secret=…` without an API key, to show a payment as
+                soon as it is seen. Returned only by `POST /v1/deposit_addresses` and `…/rotate`, each
+                time a new one; only its hash is stored, and the newest 10 of an address stay valid. Give
+                it only to the customer's page, and do not log it.
             retired_at (int | None | Unset): Retirement time, Unix seconds; `null` while active.
     """
 
@@ -59,16 +69,19 @@ class DepositAddress:
     metadata: DepositAddressMetadata
     networks: list[DepositAddressNetwork]
     object_: str
+    payments: list[Payment]
     salt: str
     status: str
     version: int
     address: None | str | Unset = UNSET
+    client_secret: None | str | Unset = UNSET
     retired_at: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.deposit_address_metadata import DepositAddressMetadata  # noqa: PLC0415
         from ..models.deposit_address_network import DepositAddressNetwork  # noqa: PLC0415
+        from ..models.payment import Payment  # noqa: PLC0415
 
         client_reference_id = self.client_reference_id
 
@@ -87,6 +100,11 @@ class DepositAddress:
 
         object_ = self.object_
 
+        payments = []
+        for payments_item_data in self.payments:
+            payments_item = payments_item_data.to_dict()
+            payments.append(payments_item)
+
         salt = self.salt
 
         status = self.status
@@ -98,6 +116,12 @@ class DepositAddress:
             address = UNSET
         else:
             address = self.address
+
+        client_secret: None | str | Unset
+        if isinstance(self.client_secret, Unset):
+            client_secret = UNSET
+        else:
+            client_secret = self.client_secret
 
         retired_at: int | None | Unset
         if isinstance(self.retired_at, Unset):
@@ -116,6 +140,7 @@ class DepositAddress:
                 "metadata": metadata,
                 "networks": networks,
                 "object": object_,
+                "payments": payments,
                 "salt": salt,
                 "status": status,
                 "version": version,
@@ -123,6 +148,8 @@ class DepositAddress:
         )
         if address is not UNSET:
             field_dict["address"] = address
+        if client_secret is not UNSET:
+            field_dict["client_secret"] = client_secret
         if retired_at is not UNSET:
             field_dict["retired_at"] = retired_at
 
@@ -132,6 +159,7 @@ class DepositAddress:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.deposit_address_metadata import DepositAddressMetadata  # noqa: PLC0415
         from ..models.deposit_address_network import DepositAddressNetwork  # noqa: PLC0415
+        from ..models.payment import Payment  # noqa: PLC0415
 
         d = dict(src_dict)
         client_reference_id = d.pop("client_reference_id")
@@ -153,6 +181,13 @@ class DepositAddress:
 
         object_ = d.pop("object")
 
+        payments = []
+        _payments = d.pop("payments")
+        for payments_item_data in _payments:
+            payments_item = Payment.from_dict(payments_item_data)
+
+            payments.append(payments_item)
+
         salt = d.pop("salt")
 
         status = d.pop("status")
@@ -167,6 +202,15 @@ class DepositAddress:
             return cast(None | str | Unset, data)
 
         address = _parse_address(d.pop("address", UNSET))
+
+        def _parse_client_secret(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        client_secret = _parse_client_secret(d.pop("client_secret", UNSET))
 
         def _parse_retired_at(data: object) -> int | None | Unset:
             if data is None:
@@ -185,10 +229,12 @@ class DepositAddress:
             metadata=metadata,
             networks=networks,
             object_=object_,
+            payments=payments,
             salt=salt,
             status=status,
             version=version,
             address=address,
+            client_secret=client_secret,
             retired_at=retired_at,
         )
 

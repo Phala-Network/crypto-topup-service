@@ -417,7 +417,7 @@ async fn tenant_isolation_and_operator_pauses() -> Result<()> {
                 Method::POST,
                 "/v1/quotes",
                 serde_json::to_vec(&json!({
-                    "account_id": "account-001", "amount": 1000, "currency": "usd",
+                    "client_reference_id": "account-001", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
                 &product_key,
@@ -630,7 +630,7 @@ async fn every_merchant_endpoint_is_404_across_accounts_and_modes() -> Result<()
         let lists = [
             "/v1/deposits".to_owned(),
             format!("/v1/deposits?quote={quote}"),
-            "/v1/deposits?account_id=owned-customer".to_owned(),
+            "/v1/deposits?client_reference_id=owned-customer".to_owned(),
         ];
         let app = test_router(pool, &admin_key);
         let call = |method: Method, path: &str, body: Vec<u8>, key: &str| {
@@ -802,7 +802,7 @@ async fn frozen_chain_refuses_quotes() -> Result<()> {
 
         let app = test_router(&database.app_pool, &admin_key);
         let lock_body = serde_json::to_vec(&json!({
-            "account_id": "frozen-account", "amount": 1000, "currency": "usd",
+            "client_reference_id": "frozen-account", "amount": 1000, "currency": "usd",
             "chain_id": 1, "asset": "pha",
         }))?;
         let response = app
@@ -955,7 +955,7 @@ async fn admin_lift_unfreezes_a_chain_once() -> Result<()> {
                 Method::POST,
                 "/v1/quotes",
                 serde_json::to_vec(&json!({
-                    "account_id": "lift-account", "amount": 1000, "currency": "usd",
+                    "client_reference_id": "lift-account", "amount": 1000, "currency": "usd",
                     "chain_id": 1, "asset": "pha",
                 }))?,
                 &product_key,
@@ -1090,7 +1090,7 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
                 .collect();
             let expected = report_data(&[0, 1, 2, 3], &account.public_id, livemode, &keys)
                 .context("report data")?;
-            ensure!(response["object"] == "attestation" && response["quote"] == "");
+            ensure!(response["object"] == "attestation" && response["tdx_quote"] == "");
             ensure!(response["account"] == account.public_id.as_str());
             ensure!(response["livemode"] == livemode);
             ensure!(returned == listed, "{response}");
@@ -1314,7 +1314,7 @@ fn assert_query_parameters(document: &Value) -> Result<()> {
     let cases = [(
         "/v1/deposits",
         &[
-            "account_id",
+            "client_reference_id",
             "quote",
             "status",
             "tx_hash",

@@ -11,6 +11,14 @@ export {
   type RetrieveQuoteOptions,
 } from "./checkout.js";
 export { PhalaPay, type PhalaPayOptions } from "./client.js";
+export {
+  depositAddressIdFromClientSecret,
+  parseClientDepositAddress,
+  retrieveDepositAddress,
+  type ClientDepositAddress,
+  type DepositAddressPayment,
+  type RetrieveDepositAddressOptions,
+} from "./deposit-address.js";
 export { knownChain, networkName, transactionUrl } from "./chains.js";
 export { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "./format.js";
 export {

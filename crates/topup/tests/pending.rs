@@ -206,10 +206,17 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     );
     ensure!(pending_rows(pool).await? == 0, "finalized row was kept");
     let payment = api.payment("checkout-1").await?;
-    ensure!(payment["status"] == "final", "unexpected {payment}");
+    ensure!(payment["status"] == "recorded", "unexpected {payment}");
     ensure!(payment["confirmations"].is_null());
     // Final but not yet valued and screened.
     ensure!(api.client_progress("checkout-1").await? == ("confirming".to_owned(), None));
+    // A deposit reversed before finality is no payment; the page says it was reversed rather
+    // than asking for a payment again.
+    sqlx::query("UPDATE deposits SET state = 'reversed' WHERE address_id = $1")
+        .bind(api.address_id(pool, "checkout-1").await?)
+        .execute(pool)
+        .await?;
+    ensure!(api.client_progress("checkout-1").await? == ("reversed".to_owned(), None));
 
     // Underpay, then pay in full: the finalized underpayment does not consume the lock, so the
     // later exact payment is the one shown while it is still pending.
@@ -254,7 +261,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     .await?;
     let payment = api.payment("checkout-2").await?;
     ensure!(
-        payment["status"] == "final"
+        payment["status"] == "recorded"
             && payment["deposit"] == topup::ids::format(topup::ids::DEPOSIT, underpayment),
         "consumed lock does not show its consuming deposit: {payment}"
     );
@@ -284,7 +291,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         deposit["quote"]["id"] == quote_id && deposit["quote"]["deposit"] == deposit_id,
         "{deposit}"
     );
-    ensure!(deposit["account_id"] == "ws-pending" && deposit["asset"] == "pha");
+    ensure!(deposit["client_reference_id"] == "ws-pending" && deposit["asset"] == "pha");
 
     // A cancelled lock credits every payment at spot, so none is in time or within tolerance.
     let cancelled = api.lock("checkout-4").await?;
@@ -403,7 +410,7 @@ impl Api {
             .call(
                 Method::POST,
                 "/v1/quotes",
-                json!({"account_id": "ws-pending", "amount": 100, "currency": "usd",
+                json!({"client_reference_id": "ws-pending", "amount": 100, "currency": "usd",
                        "chain_id": CHAIN_ID, "asset": "pha"}),
             )
             .await?;

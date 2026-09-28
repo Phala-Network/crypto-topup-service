@@ -26,11 +26,11 @@ class AttestationResponse:
             account (str): The caller's account, `acct_…`.
             livemode (bool): The caller's mode; each mode has its own key.
             object_ (str): Always `attestation`.
-            quote (str): Versioned dstack attestation bytes as lowercase hexadecimal.
             report_data (str): `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
                 public_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,
                 `livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is
                 its version as 4 big-endian bytes and its 32 raw public-key bytes.
+            tdx_quote (str): Versioned dstack TDX quote bytes as lowercase hexadecimal.
             webhook_keys (list[WebhookKeyObject]): The keys that sign the account's deliveries in this mode: the current one
                 first, then any
                 previous one still signing during a rotation.
@@ -39,8 +39,8 @@ class AttestationResponse:
     account: str
     livemode: bool
     object_: str
-    quote: str
     report_data: str
+    tdx_quote: str
     webhook_keys: list[WebhookKeyObject]
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -53,9 +53,9 @@ class AttestationResponse:
 
         object_ = self.object_
 
-        quote = self.quote
-
         report_data = self.report_data
+
+        tdx_quote = self.tdx_quote
 
         webhook_keys = []
         for webhook_keys_item_data in self.webhook_keys:
@@ -69,8 +69,8 @@ class AttestationResponse:
                 "account": account,
                 "livemode": livemode,
                 "object": object_,
-                "quote": quote,
                 "report_data": report_data,
+                "tdx_quote": tdx_quote,
                 "webhook_keys": webhook_keys,
             }
         )
@@ -88,9 +88,9 @@ class AttestationResponse:
 
         object_ = d.pop("object")
 
-        quote = d.pop("quote")
-
         report_data = d.pop("report_data")
+
+        tdx_quote = d.pop("tdx_quote")
 
         webhook_keys = []
         _webhook_keys = d.pop("webhook_keys")
@@ -103,8 +103,8 @@ class AttestationResponse:
             account=account,
             livemode=livemode,
             object_=object_,
-            quote=quote,
             report_data=report_data,
+            tdx_quote=tdx_quote,
             webhook_keys=webhook_keys,
         )
 

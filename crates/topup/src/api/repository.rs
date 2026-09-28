@@ -11,7 +11,7 @@ use alloy_primitives::{Address as EvmAddress, B256, U256};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{FromRow, PgPool, Postgres, Row};
 use topup_core::money::AtomicAmount;
 use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
@@ -25,9 +25,8 @@ use crate::tenancy::Scope;
 use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
-    DailyReportResponse, DepositEventResponse, DepositResponse, DepositTransitionResponse,
-    NudgeResponse, ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
-    SupportDepositResponse,
+    DailyReportResponse, DepositAdmin, DepositEventDelivery, DepositTransition, NudgeResponse,
+    ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -585,14 +584,74 @@ async fn locked_refund(
     .await?)
 }
 
-/// One deposit with its transitions and webhook events, for the operator.
+/// A deposit's account, mode, and internals with its transitions and events, for the operator:
+/// `None` for an unknown deposit.
 pub async fn admin_deposit(
     pool: &PgPool,
     deposit_id: Uuid,
-) -> Result<Option<SupportDepositResponse>, ApiError> {
-    let mut query = deposit_query();
-    query.push(" WHERE deposit.id = ").push_bind(deposit_id);
-    Ok(fetch_support_page(pool, query).await?.into_iter().next())
+) -> Result<Option<(Scope, DepositAdmin)>, ApiError> {
+    let row = sqlx::query_as::<_, DepositAdminRow>(
+        r#"
+        SELECT deposit.account_id, deposit.livemode, account.public_id AS account,
+               deposit.state, deposit.route, deposit.route_version, deposit.receipt_log_index,
+               deposit.block_time, deposit.final_at, deposit.price_scaled::text AS price_scaled,
+               deposit.updated_at
+        FROM deposits AS deposit
+        JOIN accounts AS account ON account.id = deposit.account_id
+        WHERE deposit.id = $1
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let transitions = sqlx::query_as::<_, DepositTransitionRow>(
+        r#"
+        SELECT id, from_state, to_state, attempt, evidence, created_at
+        FROM transitions
+        WHERE deposit_id = $1
+        ORDER BY created_at, id
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_all(pool)
+    .await?;
+    let events = sqlx::query_as::<_, DepositEventRow>(
+        r#"
+        SELECT event.id, event.type AS event_type, event.created AS created_at,
+               (SELECT CASE WHEN bool_and(delivery.delivered_at IS NOT NULL)
+                            THEN max(delivery.delivered_at) END
+                FROM webhook_deliveries AS delivery
+                WHERE delivery.event_id = event.id) AS delivered_at
+        FROM events AS event
+        WHERE event.object_type = 'deposit' AND event.object_id = $1
+        ORDER BY event.created, event.id
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_all(pool)
+    .await?;
+    let admin = DepositAdmin {
+        account: row.account,
+        state: row.state,
+        route: row.route,
+        route_version: row
+            .route_version
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| ApiError::internal())?,
+        receipt_log_index: u64::try_from(row.receipt_log_index)
+            .map_err(|_| ApiError::internal())?,
+        block_time: row.block_time,
+        final_at: row.final_at,
+        price_scaled: row.price_scaled,
+        updated_at: row.updated_at,
+        transitions: transitions.into_iter().map(Into::into).collect(),
+        events: events.into_iter().map(Into::into).collect(),
+    };
+    Ok(Some((Scope::new(row.account_id, row.livemode), admin)))
 }
 
 /// Makes a deposit immediately claimable without changing its state.
@@ -795,39 +854,23 @@ impl From<CustomerRow> for Customer {
 }
 
 #[derive(FromRow)]
-struct DepositViewRow {
-    id: Uuid,
-    account: String,
+struct DepositAdminRow {
+    account_id: Uuid,
     livemode: bool,
-    external_id: String,
-    chain_id: i64,
-    tx_hash: String,
-    receipt_log_index: i64,
-    log_index: i64,
-    block_number: i64,
-    block_time: DateTime<Utc>,
-    final_at: Option<DateTime<Utc>>,
-    address: String,
-    quote_id: Option<Uuid>,
-    deposit_address_id: Option<Uuid>,
+    account: String,
+    state: String,
     route: Option<String>,
     route_version: Option<i64>,
-    asset_contract: String,
-    from_address: String,
-    amount_atomic: String,
-    state: String,
-    valuation_at: Option<DateTime<Utc>>,
+    receipt_log_index: i64,
+    block_time: DateTime<Utc>,
+    final_at: Option<DateTime<Utc>>,
     price_scaled: Option<String>,
-    price_source: Option<String>,
-    credit_minor: Option<String>,
-    created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 #[derive(FromRow)]
 struct DepositTransitionRow {
     id: Uuid,
-    deposit_id: Uuid,
     from_state: String,
     to_state: String,
     attempt: i32,
@@ -835,7 +878,7 @@ struct DepositTransitionRow {
     created_at: DateTime<Utc>,
 }
 
-impl From<DepositTransitionRow> for DepositTransitionResponse {
+impl From<DepositTransitionRow> for DepositTransition {
     fn from(row: DepositTransitionRow) -> Self {
         Self {
             id: row.id,
@@ -851,13 +894,12 @@ impl From<DepositTransitionRow> for DepositTransitionResponse {
 #[derive(FromRow)]
 struct DepositEventRow {
     id: Uuid,
-    deposit_id: Uuid,
     event_type: String,
     created_at: DateTime<Utc>,
     delivered_at: Option<DateTime<Utc>>,
 }
 
-impl From<DepositEventRow> for DepositEventResponse {
+impl From<DepositEventRow> for DepositEventDelivery {
     fn from(row: DepositEventRow) -> Self {
         Self {
             id: crate::outbox::webhook_id(row.id),
@@ -893,134 +935,6 @@ impl TryFrom<ReconciliationBlockRow> for ReconciliationBlockReport {
             created_at: row.created_at,
         })
     }
-}
-
-impl TryFrom<DepositViewRow> for DepositResponse {
-    type Error = ApiError;
-
-    fn try_from(row: DepositViewRow) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: crate::ids::format(crate::ids::DEPOSIT, row.id),
-            account: row.account,
-            livemode: row.livemode,
-            external_id: row.external_id,
-            chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
-            tx_hash: row.tx_hash,
-            receipt_log_index: u64::try_from(row.receipt_log_index)
-                .map_err(|_| ApiError::internal())?,
-            log_index: u64::try_from(row.log_index).map_err(|_| ApiError::internal())?,
-            block_number: u64::try_from(row.block_number).map_err(|_| ApiError::internal())?,
-            block_time: row.block_time,
-            final_at: row.final_at,
-            address: row.address,
-            lock_ref: row.quote_id.map(crate::locks::quote_id),
-            deposit_address: row
-                .deposit_address_id
-                .map(crate::deposit_addresses::public_id),
-            route: row.route,
-            route_version: row
-                .route_version
-                .map(u64::try_from)
-                .transpose()
-                .map_err(|_| ApiError::internal())?,
-            asset_contract: row.asset_contract,
-            from_address: row.from_address,
-            amount_atomic: row.amount_atomic,
-            state: row.state,
-            valuation_at: row.valuation_at,
-            price_scaled: row.price_scaled,
-            price_source: row.price_source,
-            credit_minor: row.credit_minor,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        })
-    }
-}
-
-fn deposit_query() -> QueryBuilder<Postgres> {
-    QueryBuilder::new(
-        r#"
-        SELECT deposit.id, account.public_id AS account, deposit.livemode,
-               customer.client_reference_id AS external_id, deposit.chain_id, deposit.tx_hash,
-               deposit.receipt_log_index, deposit.log_index,
-               deposit.block_number, deposit.block_time, deposit.final_at, address.address,
-               address.quote_id, address.deposit_address_id,
-               deposit.route, deposit.route_version, deposit.asset_contract,
-               deposit.from_address, deposit.amount_atomic::text AS amount_atomic,
-               deposit.state, deposit.valuation_at, deposit.price_scaled::text AS price_scaled,
-               deposit.price_source, deposit.credit_minor::text AS credit_minor,
-               deposit.created_at, deposit.updated_at
-        FROM deposits AS deposit
-        JOIN accounts AS account ON account.id = deposit.account_id
-        JOIN customers AS customer ON customer.id = deposit.customer_id
-        JOIN addresses AS address ON address.id = deposit.address_id
-        "#,
-    )
-}
-
-async fn fetch_support_page(
-    pool: &PgPool,
-    mut query: QueryBuilder<Postgres>,
-) -> Result<Vec<SupportDepositResponse>, ApiError> {
-    query.push(" ORDER BY deposit.created_at DESC, deposit.id DESC LIMIT 50");
-    let rows = query
-        .build_query_as::<DepositViewRow>()
-        .fetch_all(pool)
-        .await?;
-    let deposits = rows
-        .into_iter()
-        .map(|row| Ok((row.id, DepositResponse::try_from(row)?)))
-        .collect::<Result<Vec<(Uuid, DepositResponse)>, ApiError>>()?;
-    let ids = deposits.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    let transitions = sqlx::query_as::<_, DepositTransitionRow>(
-        r#"
-        SELECT id, deposit_id, from_state, to_state, attempt, evidence, created_at
-        FROM transitions
-        WHERE deposit_id = ANY($1)
-        ORDER BY created_at, id
-        "#,
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-    let mut by_deposit = BTreeMap::<Uuid, Vec<DepositTransitionResponse>>::new();
-    for transition in transitions {
-        by_deposit
-            .entry(transition.deposit_id)
-            .or_default()
-            .push(transition.into());
-    }
-    let events = sqlx::query_as::<_, DepositEventRow>(
-        r#"
-        SELECT event.id, event.object_id AS deposit_id, event.type AS event_type,
-               event.created AS created_at,
-               (SELECT CASE WHEN bool_and(delivery.delivered_at IS NOT NULL)
-                            THEN max(delivery.delivered_at) END
-                FROM webhook_deliveries AS delivery
-                WHERE delivery.event_id = event.id) AS delivered_at
-        FROM events AS event
-        WHERE event.object_type = 'deposit' AND event.object_id = ANY($1)
-        ORDER BY event.created, event.id
-        "#,
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
-    let mut events_by_deposit = BTreeMap::<Uuid, Vec<DepositEventResponse>>::new();
-    for event in events {
-        events_by_deposit
-            .entry(event.deposit_id)
-            .or_default()
-            .push(event.into());
-    }
-    Ok(deposits
-        .into_iter()
-        .map(|(id, deposit)| SupportDepositResponse {
-            timeline: by_deposit.remove(&id).unwrap_or_default(),
-            events: events_by_deposit.remove(&id).unwrap_or_default(),
-            deposit,
-        })
-        .collect())
 }
 
 /// Computes the daily finance report entirely from persisted integer values.

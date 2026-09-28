@@ -635,7 +635,50 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
         );
         let worker = test_worker(pool, Vec::new(), Vec::new());
         ensure!(worker.check_once().await? == Verification::Idle);
-        merchant.refund(deposit, "150").await?;
+        let third = merchant.refund(deposit, "150").await?;
+        // The list pages newest first and filters by deposit and status.
+        let deposit_id = format!("dep_{}", deposit.simple());
+        let (status, list) = merchant
+            .call(
+                Method::GET,
+                &format!("/v1/refunds?deposit={deposit_id}"),
+                Vec::new(),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{list}");
+        let ids: Vec<&str> = list["data"]
+            .as_array()
+            .context("data")?
+            .iter()
+            .filter_map(|refund| refund["id"].as_str())
+            .collect();
+        ensure!(
+            ids == [third.as_str(), second.as_str(), first.as_str()],
+            "{list}"
+        );
+        let (_, canceled) = merchant
+            .call(
+                Method::GET,
+                "/v1/refunds?status=canceled&limit=1",
+                Vec::new(),
+            )
+            .await?;
+        ensure!(canceled["has_more"] == true && canceled["data"][0]["id"] == second);
+        let (_, next) = merchant
+            .call(
+                Method::GET,
+                &format!("/v1/refunds?status=canceled&starting_after={second}"),
+                Vec::new(),
+            )
+            .await?;
+        ensure!(
+            next["has_more"] == false && next["data"][0]["id"] == first,
+            "{next}"
+        );
+        let (status, _) = merchant
+            .call(Method::GET, "/v1/refunds?status=done", Vec::new())
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST);
         let actions: Vec<String> = sqlx::query_scalar(
             "SELECT action FROM audit WHERE action LIKE 'refund_%' ORDER BY created_at, action",
         )

@@ -137,8 +137,8 @@ contract ForwarderFactory {                            // no roles, no admin, no
   most `NATIVE_SEND_GAS` and copy no return data, so a treasury cannot consume the batch's gas;
   the factory's `flush` is non-reentrant (`ReentrancyGuardTransient`). Treasury `address(0)` is
   refused.
-- `salt = keccak256(abi.encode(account, account_id, "lock", quote_id))`, where `account` is the
-  merchant's `acct_…` id, `account_id` its customer's identifier, and `quote_id` the
+- `salt = keccak256(abi.encode(account, client_reference_id, "lock", quote_id))`, where `account`
+  is the merchant's `acct_…` id, `client_reference_id` its customer's identifier, and `quote_id` the
   service-assigned `qt_…` id. A deposit address's salt is `keccak256(abi.encode(account,
   livemode, client_reference_id, "deposit_address", version))`, types `(string, bool, string,
   string, uint256)` (§9): it names no chain or asset, so the address is the same on every chain
@@ -233,7 +233,7 @@ idempotency_keys  account_id, livemode, key, fingerprint, response jsonb, create
               PRIMARY KEY (account_id, livemode, key)                  -- pruned after 24 h
 customers     id, account_id, livemode, client_reference_id, paused_scopes text[]
               UNIQUE (account_id, livemode, client_reference_id)
-              -- client_reference_id is the API's account_id; created by the customer's first quote
+              -- created by the customer's first quote or deposit address
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
               credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
@@ -489,7 +489,7 @@ adapter that compliance may require before GA.
 
 Invoice model, enabled from the pilot, with this service's exception profile:
 
-- `POST /v1/quotes {account_id, amount, currency, chain_id, asset}` returns the quote `{id,
+- `POST /v1/quotes {client_reference_id, amount, currency, chain_id, asset}` returns the quote `{id,
   amount, amount_atomic, exchange_rate, address, payment_uri, status, expires_at, …}`.
   `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*; the
   user states USD cents and the token amount is rounded up, then up again to
@@ -623,7 +623,7 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 { "id": "<webhook-id>", "object": "event", "account": "acct_…", "livemode": true,
   "type": "deposit.credited", "created": 1790409590,
   "data": { "object": { "id": "dep_…", "object": "deposit", "livemode": true,
-                        "account_id": "<account>",
+                        "client_reference_id": "<customer>",
                         "quote": "qt_…", "status": "credited", "amount": 1234,
                         "currency": "usd", "price_source": "quote", … } } }
 ```
@@ -668,7 +668,7 @@ Product obligations:
 
 1. Verify the Standard Webhooks `v1a` signature over the raw body against the pinned
    `(keyid, public key)`, with a timestamp tolerance of 300 seconds.
-2. Credit `amount` to `account_id` at most once per deposit id (`dep_…`): the credit
+2. Credit `amount` to `client_reference_id` at most once per deposit id (`dep_…`): the credit
    and its record in one transaction under a unique index, committed before answering `2xx`.
    A repeat is acknowledged without a second credit. A repeat with a different amount can
    only follow a service restore that re-priced a spot deposit (§14); keep the first credit and
@@ -681,7 +681,7 @@ Product obligations:
    deposit is final (about 15 minutes on Ethereum), its credit can still be reversed.
 
 Optional hardening, each the product's choice: fetch `GET /v1/deposits/{id}` and require
-`credited` or `swept` with the same amount; recompute the deposit UUID `uuid_v5(NS,
+`status: "credited"` with the same amount; recompute the deposit UUID `uuid_v5(NS,
 "{chain_id}:{tx_hash}:{receipt_log_index}")`, where `receipt_log_index` is the transfer's
 position among its transaction's receipt logs, and verify the cited log on its own node at
 finality;
@@ -703,7 +703,8 @@ knows it. Where it departs, the last column says why.
 |---|---|---|
 | Resources | Top-level nouns, actions as `POST …/{id}/cancel` ([API reference](https://docs.stripe.com/api)) | `/v1/quotes`, `/v1/deposits`, `/v1/refunds`, `POST /v1/quotes/{id}/cancel` |
 | Caller | The secret key identifies the account | Same: `Authorization: Bearer ppay_sk_…`; the key also selects the mode |
-| Customer reference | Checkout's `client_reference_id` | `account_id`, the product's own id for its customer (a workspace); an account is created by its first quote |
+| Customer reference | Checkout's `client_reference_id` | Same name: the merchant's own id for its customer (a workspace); a customer is created by its first quote or deposit address |
+| Status and flags | `status` plus booleans (Charge's `refunded`) | A deposit's `status` is `pending`, `credited`, `rejected`, or `reversed`; `final` and `swept` are booleans. The internal states of §7 (`detected`, `confirmed`, `swept`) appear only in the admin view |
 | Ids | Prefixed opaque ids | `qt_`, `dep_`, `re_`, `evt_` and the 32 hex digits of a UUID; the deposit and event UUIDs are UUIDv5, so they stay recomputable (§0, §11) |
 | Amounts | Integer minor units, lowercase currency ([currencies](https://docs.stripe.com/currencies)) | `amount` in US cents with `currency: "usd"`; token amounts are decimal strings (`amount_atomic`), since 18-decimal values exceed JSON's safe integers |
 | Timestamps | Unix seconds | Same: `created`, `expires_at`, `valued_at` |
@@ -748,23 +749,29 @@ POST   /v1/treasuries/challenge {chain_id, address}               EIP-4361 messa
 GET|POST /v1/treasuries {chain_id, message, signature}, GET /v1/treasuries/{id}   ?chain_id&status&limit
 POST   /v1/treasuries/{id}/cancel                                 a pending live change
 GET    /v1/config                                                 assets, limits, quote terms
-POST   /v1/quotes {account_id, amount, currency, chain_id, asset, metadata?} single-use address + locked price; Idempotency-Key
+POST   /v1/account {confirmation_policies}                     stricter confirmation per chain (design D1)
+POST   /v1/account/pause | resume {scopes: ["quotes"]}             the merchant's own quotes pause (design §12)
+POST   /v1/quotes {client_reference_id, amount, currency, chain_id, asset, metadata?} single-use address + locked price; Idempotency-Key
+GET    /v1/quotes?client_reference_id&status&limit&starting_after&ending_before
 GET    /v1/quotes/{id}                                            resume a checkout; with ?client_secret= and no key: the payer's view
 POST   /v1/quotes/{id} {metadata}                                 update metadata, in any status
 POST   /v1/quotes/{id}/cancel                                     cancel an unpaid quote; later payments credit at spot
 POST   /v1/deposit_addresses {client_reference_id, metadata?}  the customer's active address on every network, issued once (§9)
 GET    /v1/deposit_addresses?client_reference_id&status&limit&starting_after&ending_before
-GET    /v1/deposit_addresses/{id}
+GET    /v1/deposit_addresses/{id}                             with ?client_secret= and no key: the customer's view
 POST   /v1/deposit_addresses/{id} {metadata}                      update metadata, active or retired
 POST   /v1/deposit_addresses/{id}/rotate                          retire it and return the next version
-GET    /v1/deposits?account_id&quote&deposit_address&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
+GET    /v1/deposits?client_reference_id&quote&deposit_address&status&tx_hash&created[gte|lte]&limit&starting_after&ending_before
 GET    /v1/deposits/{id}                                          expand[]=quote
 POST   /v1/deposits/{id} {metadata}                               update metadata (`deposits.write`)
 POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  pending; the merchant pays it from its treasury (§15)
 POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}  verified at finality: succeeded or failed
 POST   /v1/refunds/{id}/cancel                                    a pending refund
-GET    /v1/refunds/{id}
+GET    /v1/refunds?deposit&status&limit&starting_after&ending_before, GET /v1/refunds/{id}
 POST   /v1/refunds/{id} {metadata}                                update metadata
+GET    /v1/balance                                                unswept amounts per chain and token (Stripe's Balance)
+GET    /v1/sweeps?chain_id&forwarder&token&limit&…                finalized Flushed events (Stripe's Payouts)
+GET    /v1/forwarders?chain_id&quote&deposit_address&sweepable&limit&…   (factory, salt, treasury) of every address
 GET    /v1/attestation?nonce=…                                    the key's account's webhook keys (§14)
 POST   /v1/account/webhook_keys/roll {expires_in}                 next webhook key version (§10)
 GET|POST /v1/webhook_endpoints {url, enabled_events, description?, metadata?}   at most 16 per mode
@@ -777,8 +784,8 @@ POST   /v1/events/{id}/resend {webhook_endpoint}                  deliver it aga
 POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason}   + first keys
 POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, reason}   enabling live → first live key
 POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   recovery key
-GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
-POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, livemode}
+GET    /v1/admin/deposits/{id}            the Deposit with `admin`: state, route, transitions, events
+POST   /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
@@ -817,9 +824,9 @@ with `409 exposure_cap_exceeded`, whose message states the remaining amount. The
 and implementation are not served: the product pins them from the attested deployment, like its
 webhook keys, because the service cannot vouch for its own addresses.
 
-**Quote.** `{id, object: "quote", account_id, amount, currency, chain_id, asset, amount_atomic,
-exchange_rate, address, payment_uri, status, expires_at, created, payment, deposit,
-client_secret}`. `exchange_rate` is the locked price in USD per token, exactly, with 8 decimal
+**Quote.** `{id, object: "quote", livemode, client_reference_id, amount, currency, chain_id,
+asset, amount_atomic, exchange_rate, address, treasury, payment_uri, status, expires_at, created,
+payment, deposit, client_secret, metadata}`. `exchange_rate` is the locked price in USD per token, exactly, with 8 decimal
 places. `status` is `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`
 (Checkout Session's and PaymentIntent's names; the database keeps `consumed` and `cancelled`).
 `chain_id` and `asset` are required, so a second route for the same asset is not a breaking change.
@@ -830,8 +837,8 @@ Cancel returns `canceled`, also on a repeat, and refuses with `409 quote_payment
 rule: the deposit that consumed the quote; otherwise the first payment that would consume it,
 recorded deposits before transfers seen above `finalized` that are not deposits yet; otherwise
 the first payment at all. A reversed deposit is no payment. It carries `status` (`seen` in a
-block, `final` once it is a deposit at the route's confirmation; the wire value predates fast
-credit), `tx_hash`, `amount_atomic`, and, while `seen`, `confirmations` and `estimated_final_at`
+block, `recorded` once it is a deposit at the route's confirmation), `chain_id`, `asset`,
+`tx_hash`, `amount_atomic`, and, while `seen`, `confirmations` and `estimated_final_at`
 (block time plus 15 minutes, the typical Ethereum delay to `finalized`; an estimate);
 `matches_quote` (right asset, in time, and within tolerance: it will be credited at the quoted
 price); and `deposit`, the `dep_` id it has or will have. On a canceled quote no payment matches.
@@ -841,24 +848,44 @@ scopes, and while a chain is frozen (§13) it stops updating.
 **Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{48 random hex
 digits}`, for the payer's checkout page. Only its SHA-256 is stored with the quote, so no read
 returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
-secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, status, amount,
+secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, livemode, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
 payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
-route's confirmation, being valued and screened), `credited`, or `rejected` (the reason is not
-exposed). No account,
+route's confirmation, being valued and screened), `credited`, `rejected` (the reason is not
+exposed), or `reversed`. No account,
 price, deposit id, or transaction hash. Every such response, errors included, allows any
 origin (`Access-Control-Allow-Origin: *`); the secret is the bearer. A secret that is not the
 quote's is `404`. These reads are limited in the process to 120 per quote and 6 000 in total per
 minute (`429 rate_limit`).
 
-**Deposit.** `{id, object: "deposit", account_id, quote, status, rejection_reason, chain_id, asset,
-asset_contract, amount_atomic, amount, currency, exchange_rate, price_source, valued_at, address,
-from_address, tx_hash, log_index, block_number, amount_refunded_atomic, refunded, created}`.
-`status` is the state machine (§7), including `reversed`; a refund is not a state, because it neither moves custody nor
+**Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
+status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
+currency, exchange_rate, price_source, valued_at, address, from_address, tx_hash, log_index,
+block_number, amount_refunded_atomic, refunded, created, metadata}`. `status` is the merchant's
+view of the state machine (§7): `pending` (`detected` or `confirmed`), `credited` (`credited` or
+`swept`), `rejected`, or `reversed`; `final` is whether its block is final and `swept` whether a
+finalized `Flushed` event after it moved its forwarder's balance; a refund is not a state, because it neither moves custody nor
 has to be whole: like Stripe's Charge, the deposit carries `amount_refunded_atomic` and
 `refunded`. `amount` and `exchange_rate` are set once valued; `price_source` is `quote` or `spot`;
 `asset` is `null` for a token without a route; exactly one of `quote` and `deposit_address` is
 set, naming what the receiving address belongs to. Routes, versions, and valuation evidence are in the admin view.
+
+**Deposit address payments and client secret.** A deposit address carries `payments`, its payments
+of the last 24 hours in the quote's `payment` shape (`matches_quote` is `null`). Each create or
+rotation returns a new `client_secret`, `da_…_secret_…`; the newest 10 per address stay valid
+(`deposit_address_client_secrets`, SHA-256 only), as several pages of one customer may be open.
+`GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
+`ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each payment
+with its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
+treasury, customer, or metadata, under the quote reads' CORS and rate limit.
+
+**Balance, sweeps, forwarders.** `GET /v1/balance` sums per chain and token what the account's
+forwarders hold (deposits not reversed minus finalized `flushed` amounts) and its final part.
+`GET /v1/sweeps` lists `flushed` rows as `sw_…` objects (the id is a UUID of the event's identity).
+`GET /v1/forwarders` exports every address row with its `(factory, salt, treasury)`; with
+`sweepable=<token>` only rows with a final unswept balance of it, none holding a `sanctioned`
+deposit, and none paying a treasury the route's oracle names at request time (`503` if it cannot
+answer), so an SDK-built `flush` never sweeps a sanctioned deposit or pays a sanctioned treasury.
 
 **Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, treasury, status,
 failure_reason, transaction_hash, log_index, created}`, Stripe's Refund statuses in BTCPay's

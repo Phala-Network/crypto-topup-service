@@ -93,7 +93,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let now = Utc::now().timestamp();
         let quote_body = |account: &str, amount: u64| {
             serde_json::to_vec(&json!({
-                "account_id": account, "amount": amount, "currency": "usd",
+                "client_reference_id": account, "amount": amount, "currency": "usd",
                 "chain_id": 1, "asset": "pha"
             }))
         };
@@ -110,7 +110,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let quote_id = created["id"].as_str().context("id")?.to_owned();
         ensure!(quote_id.starts_with("qt_") && quote_id.len() == 35);
         ensure!(created["object"] == "quote" && created["status"] == "open");
-        ensure!(created["account_id"] == "account-rl" && created["amount"] == 100);
+        ensure!(created["client_reference_id"] == "account-rl" && created["amount"] == 100);
         ensure!(created["currency"] == "usd" && created["asset"] == "pha");
         ensure!(created["amount_atomic"] == "100" && created["exchange_rate"] == "1.00000000");
         ensure!(created["expires_at"].as_i64().context("expires_at")? > now);
@@ -164,7 +164,8 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         ensure!(
             public
                 == json!({
-                    "id": quote_id, "object": "quote", "status": "open", "amount": 100,
+                    "id": quote_id, "object": "quote", "livemode": true, "status": "open",
+                    "amount": 100,
                     "currency": "usd", "asset": "pha", "decimals": route.asset.decimals,
                     "chain_id": 1, "amount_atomic": "100", "address": created["address"],
                     "payment_uri": created["payment_uri"], "expires_at": created["expires_at"],
@@ -184,7 +185,34 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         ensure!(signed.status() == StatusCode::OK);
         let signed = response_json(signed).await?;
-        ensure!(signed["account_id"] == "account-rl" && signed["client_secret"].is_null());
+        ensure!(signed["client_reference_id"] == "account-rl" && signed["client_secret"].is_null());
+        // The list pages the account's quotes newest first and filters by customer and status.
+        let listed = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::GET,
+                "/v1/quotes?client_reference_id=account-rl&status=open",
+                Vec::new(),
+                &product_key,
+            ))
+            .await?;
+        ensure!(listed.status() == StatusCode::OK);
+        let listed = response_json(listed).await?;
+        ensure!(listed["object"] == "list" && listed["url"] == "/v1/quotes");
+        ensure!(listed["data"][0]["id"] == quote_id.as_str(), "{listed}");
+        ensure!(listed["data"][0]["client_secret"].is_null());
+        for query in ["client_reference_id=nobody", "status=expired"] {
+            let other = app
+                .clone()
+                .oneshot(merchant_request(
+                    Method::GET,
+                    &format!("/v1/quotes?{query}"),
+                    Vec::new(),
+                    &product_key,
+                ))
+                .await?;
+            ensure!(response_json(other).await?["data"] == json!([]), "{query}");
+        }
         let other_quote = format!("qt_{}", Uuid::new_v4().simple());
         for (path, secret) in [
             (other_quote.as_str(), client_secret),
@@ -230,26 +258,32 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         for (body, code, param) in [
             (quote_body("account-rl", 0)?, "amount_too_small", "amount"),
             (
-                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "eur",
-                    "chain_id": 1, "asset": "pha"}))?,
+                serde_json::to_vec(
+                    &json!({"client_reference_id": "a", "amount": 1, "currency": "eur",
+                    "chain_id": 1, "asset": "pha"}),
+                )?,
                 "parameter_invalid",
                 "currency",
             ),
             (
-                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "usd",
-                    "chain_id": 1, "asset": "usdc"}))?,
+                serde_json::to_vec(
+                    &json!({"client_reference_id": "a", "amount": 1, "currency": "usd",
+                    "chain_id": 1, "asset": "usdc"}),
+                )?,
                 "parameter_invalid",
                 "asset",
             ),
             (
-                serde_json::to_vec(&json!({"account_id": "a", "currency": "usd",
+                serde_json::to_vec(&json!({"client_reference_id": "a", "currency": "usd",
                     "chain_id": 1, "asset": "pha"}))?,
                 "parameter_missing",
                 "amount",
             ),
             (
-                serde_json::to_vec(&json!({"account_id": "a", "amount": 1, "currency": "usd",
-                    "chain_id": 1, "asset": "pha", "product_lock_ref": "x"}))?,
+                serde_json::to_vec(
+                    &json!({"client_reference_id": "a", "amount": 1, "currency": "usd",
+                    "chain_id": 1, "asset": "pha", "product_lock_ref": "x"}),
+                )?,
                 "parameter_unknown",
                 "product_lock_ref",
             ),
@@ -274,7 +308,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .oneshot(create("key-implicit", quote_body("implicit-rl", 100)?))
             .await?;
         ensure!(implicit.status() == StatusCode::OK);
-        ensure!(response_json(implicit).await?["account_id"] == "implicit-rl");
+        ensure!(response_json(implicit).await?["client_reference_id"] == "implicit-rl");
         let implicit_accounts: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM customers WHERE account_id = $1 \
              AND client_reference_id = 'implicit-rl'",
@@ -550,7 +584,7 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
         })
         .0;
         let body = serde_json::to_vec(&json!({
-            "account_id": "short-amount", "amount": 1_000, "currency": "usd",
+            "client_reference_id": "short-amount", "amount": 1_000, "currency": "usd",
             "chain_id": 1, "asset": "pha"
         }))?;
         let response = app

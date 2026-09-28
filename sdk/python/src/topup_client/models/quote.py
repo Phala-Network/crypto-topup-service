@@ -13,8 +13,8 @@ from typing import cast
 
 if TYPE_CHECKING:
     from ..models.deposit import Deposit
+    from ..models.payment import Payment
     from ..models.quote_metadata import QuoteMetadata
-    from ..models.quote_payment import QuotePayment
 
 
 T = TypeVar("T", bound="Quote")
@@ -25,70 +25,64 @@ class Quote:
     """A quote: a locked price, an exact token amount, and a single-use address to pay it to.
 
     Attributes:
-        account_id (str): Your account identifier.
         address (str): Single-use forwarder address to pay.
         amount (int): Credit in the currency's minor unit.
         amount_atomic (str): The exact token amount to pay, in base units, as a decimal string.
         asset (str): Asset code.
         chain_id (int): EVM chain identifier.
+        client_reference_id (str): Your identifier of the customer the quote credits.
         created (int): Creation time, Unix seconds.
         currency (str): `usd`.
         exchange_rate (str): The locked price in USD per token, a decimal string with 8 decimal places.
         expires_at (int): End of the payment window, Unix seconds.
-        id (str): `qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, "lock",
-            id))`, where `account` is your `acct_` id.
+        id (str): `qt_` id. The quote's address salt is `keccak256(abi.encode(account,
+            client_reference_id, "lock", id))` with the types `(string, string, string, string)`,
+            where `account` is your `acct_` id.
+        livemode (bool): Whether the quote was created with a live key.
+        metadata (QuoteMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when
+            none.
         object_ (str): Always `quote`.
         payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
         status (str): `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
             `open` after `expires_at` until the finalized chain passes it, so a payment mined in time
             is never reported as expired; hide the address once `expires_at` has passed.
+        treasury (str): The treasury the address pays: your treasury of the chain when the quote was created. The
+            address is the factory's `CREATE2` over it and the salt.
         client_secret (None | str | Unset): Lets the payer's browser read the quote's public view, `ClientQuote`, from
-            `GET /v1/quotes/{id}?client_secret=…` without your signature. Returned only by
-            `POST /v1/quotes`, since only its hash is stored; a repeat with the same `Idempotency-Key`
-            returns a new secret and the earlier one stops working. Give it only to the paying
-            customer's page, and do not log it.
+            `GET /v1/quotes/{id}?client_secret=…` without an API key. Returned only by
+            `POST /v1/quotes`; a repeat with the same `Idempotency-Key` within 24 hours replays the
+            first response, the same secret included. Give it only to the paying customer's page, and
+            do not log it.
         deposit (Deposit | None | str | Unset):
-        livemode (bool | Unset): Whether the quote was created with a live key. Always sent; optional in the schema so
-            clients also parse objects from servers, and events rendered, before it.
-        metadata (QuoteMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
-            when none.
-            Always sent; optional in the schema so clients also parse objects from servers, and
-            events rendered, before metadata.
-        payment (None | QuotePayment | Unset):
-        treasury (str | Unset): The treasury the address pays: your treasury of the chain when the quote was created.
-            The
-            address is the factory's `CREATE2` over it and the salt. Always sent; optional in the
-            schema so clients also parse quotes, and events rendered, before it existed.
+        payment (None | Payment | Unset):
     """
 
-    account_id: str
     address: str
     amount: int
     amount_atomic: str
     asset: str
     chain_id: int
+    client_reference_id: str
     created: int
     currency: str
     exchange_rate: str
     expires_at: int
     id: str
+    livemode: bool
+    metadata: QuoteMetadata
     object_: str
     payment_uri: str
     status: str
+    treasury: str
     client_secret: None | str | Unset = UNSET
     deposit: Deposit | None | str | Unset = UNSET
-    livemode: bool | Unset = UNSET
-    metadata: QuoteMetadata | Unset = UNSET
-    payment: None | QuotePayment | Unset = UNSET
-    treasury: str | Unset = UNSET
+    payment: None | Payment | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.payment import Payment  # noqa: PLC0415
         from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
-        from ..models.quote_payment import QuotePayment  # noqa: PLC0415
-
-        account_id = self.account_id
 
         address = self.address
 
@@ -100,6 +94,8 @@ class Quote:
 
         chain_id = self.chain_id
 
+        client_reference_id = self.client_reference_id
+
         created = self.created
 
         currency = self.currency
@@ -110,11 +106,17 @@ class Quote:
 
         id = self.id
 
+        livemode = self.livemode
+
+        metadata = self.metadata.to_dict()
+
         object_ = self.object_
 
         payment_uri = self.payment_uri
 
         status = self.status
+
+        treasury = self.treasury
 
         client_secret: None | str | Unset
         if isinstance(self.client_secret, Unset):
@@ -130,66 +132,53 @@ class Quote:
         else:
             deposit = self.deposit
 
-        livemode = self.livemode
-
-        metadata: dict[str, Any] | Unset = UNSET
-        if not isinstance(self.metadata, Unset):
-            metadata = self.metadata.to_dict()
-
         payment: dict[str, Any] | None | Unset
         if isinstance(self.payment, Unset):
             payment = UNSET
-        elif isinstance(self.payment, QuotePayment):
+        elif isinstance(self.payment, Payment):
             payment = self.payment.to_dict()
         else:
             payment = self.payment
-
-        treasury = self.treasury
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "account_id": account_id,
                 "address": address,
                 "amount": amount,
                 "amount_atomic": amount_atomic,
                 "asset": asset,
                 "chain_id": chain_id,
+                "client_reference_id": client_reference_id,
                 "created": created,
                 "currency": currency,
                 "exchange_rate": exchange_rate,
                 "expires_at": expires_at,
                 "id": id,
+                "livemode": livemode,
+                "metadata": metadata,
                 "object": object_,
                 "payment_uri": payment_uri,
                 "status": status,
+                "treasury": treasury,
             }
         )
         if client_secret is not UNSET:
             field_dict["client_secret"] = client_secret
         if deposit is not UNSET:
             field_dict["deposit"] = deposit
-        if livemode is not UNSET:
-            field_dict["livemode"] = livemode
-        if metadata is not UNSET:
-            field_dict["metadata"] = metadata
         if payment is not UNSET:
             field_dict["payment"] = payment
-        if treasury is not UNSET:
-            field_dict["treasury"] = treasury
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.deposit import Deposit  # noqa: PLC0415
+        from ..models.payment import Payment  # noqa: PLC0415
         from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
-        from ..models.quote_payment import QuotePayment  # noqa: PLC0415
 
         d = dict(src_dict)
-        account_id = d.pop("account_id")
-
         address = d.pop("address")
 
         amount = d.pop("amount")
@@ -199,6 +188,8 @@ class Quote:
         asset = d.pop("asset")
 
         chain_id = d.pop("chain_id")
+
+        client_reference_id = d.pop("client_reference_id")
 
         created = d.pop("created")
 
@@ -210,11 +201,17 @@ class Quote:
 
         id = d.pop("id")
 
+        livemode = d.pop("livemode")
+
+        metadata = QuoteMetadata.from_dict(d.pop("metadata"))
+
         object_ = d.pop("object")
 
         payment_uri = d.pop("payment_uri")
 
         status = d.pop("status")
+
+        treasury = d.pop("treasury")
 
         def _parse_client_secret(data: object) -> None | str | Unset:
             if data is None:
@@ -242,16 +239,7 @@ class Quote:
 
         deposit = _parse_deposit(d.pop("deposit", UNSET))
 
-        livemode = d.pop("livemode", UNSET)
-
-        _metadata = d.pop("metadata", UNSET)
-        metadata: QuoteMetadata | Unset
-        if isinstance(_metadata, Unset):
-            metadata = UNSET
-        else:
-            metadata = QuoteMetadata.from_dict(_metadata)
-
-        def _parse_payment(data: object) -> None | QuotePayment | Unset:
+        def _parse_payment(data: object) -> None | Payment | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -259,38 +247,36 @@ class Quote:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                payment_type_0 = QuotePayment.from_dict(data)
+                payment_type_0 = Payment.from_dict(data)
 
                 return payment_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(None | QuotePayment | Unset, data)
+            return cast(None | Payment | Unset, data)
 
         payment = _parse_payment(d.pop("payment", UNSET))
 
-        treasury = d.pop("treasury", UNSET)
-
         quote = cls(
-            account_id=account_id,
             address=address,
             amount=amount,
             amount_atomic=amount_atomic,
             asset=asset,
             chain_id=chain_id,
+            client_reference_id=client_reference_id,
             created=created,
             currency=currency,
             exchange_rate=exchange_rate,
             expires_at=expires_at,
             id=id,
+            livemode=livemode,
+            metadata=metadata,
             object_=object_,
             payment_uri=payment_uri,
             status=status,
+            treasury=treasury,
             client_secret=client_secret,
             deposit=deposit,
-            livemode=livemode,
-            metadata=metadata,
             payment=payment,
-            treasury=treasury,
         )
 
         quote.additional_properties = d

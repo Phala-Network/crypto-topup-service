@@ -21,7 +21,7 @@ from phala_pay import (
     Webhook,
 )
 from topup_client.models import DepositMetadata, QuoteMetadata
-from topup_sdk import deposit_address, load_public_key, sign_webhook
+from topup_sdk import deposit_address, load_public_key, quote_address, sign_webhook
 
 API_KEY = "ppay_sk_test_" + "B" * 43 + "000000"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([9] * 32))
@@ -36,18 +36,29 @@ ACCOUNT = "acct_" + "a1" * 16
 
 
 def _quote(**fields: object) -> dict[str, object]:
+    address = quote_address(
+        FACTORY,
+        IMPLEMENTATION,
+        TREASURY,
+        account=ACCOUNT,
+        client_reference_id="team-42",
+        quote_id=QUOTE_ID,
+    )
     return {
         "id": QUOTE_ID,
         "object": "quote",
-        "account_id": "team-42",
+        "livemode": False,
+        "client_reference_id": "team-42",
+        "treasury": TREASURY.lower(),
+        "metadata": {},
         "amount": 2500,
         "currency": "usd",
         "chain_id": 11155111,
         "asset": "pha",
         "amount_atomic": "100",
         "exchange_rate": "25.00000000",
-        "address": ADDRESS,
-        "payment_uri": f"ethereum:0x{'22' * 20}@11155111/transfer?address={ADDRESS}&uint256=100",
+        "address": address,
+        "payment_uri": f"ethereum:0x{'22' * 20}@11155111/transfer?address={address}&uint256=100",
         "status": "open",
         "expires_at": 1_790_000_900,
         "created": 1_790_000_000,
@@ -61,9 +72,13 @@ def _deposit(index: int = 1) -> dict[str, object]:
     return {
         "id": f"dep_{index:032x}",
         "object": "deposit",
-        "account_id": "team-42",
+        "livemode": False,
+        "client_reference_id": "team-42",
         "quote": QUOTE_ID,
+        "deposit_address": None,
         "status": "credited",
+        "final": False,
+        "swept": False,
         "rejection_reason": None,
         "chain_id": 11155111,
         "asset": "pha",
@@ -90,7 +105,13 @@ def _deposit(index: int = 1) -> dict[str, object]:
 
 
 def _client(handler: httpx.MockTransport) -> PhalaPay:
-    return PhalaPay("http://service.test", API_KEY, transport=handler)
+    return PhalaPay(
+        "http://service.test",
+        API_KEY,
+        account=ACCOUNT,
+        forwarder=(FACTORY, IMPLEMENTATION),
+        transport=handler,
+    )
 
 
 def test_quotes_create_returns_the_client_secret_to_a_request_with_the_key() -> None:
@@ -104,11 +125,15 @@ def test_quotes_create_returns_the_client_secret_to_a_request_with_the_key() -> 
 
     with _client(httpx.MockTransport(handler)) as client:
         quote = client.quotes.create(
-            account_id="team-42", amount=2500, chain_id=11155111, asset="pha", idempotency_key="o-1"
+            client_reference_id="team-42",
+            amount=2500,
+            chain_id=11155111,
+            asset="pha",
+            idempotency_key="o-1",
         )
     assert quote.client_secret == f"{QUOTE_ID}_secret_{'ab' * 24}"
     assert seen[0].headers["idempotency-key"] == '"o-1"'
-    assert json.loads(seen[0].content)["account_id"] == "team-42"
+    assert json.loads(seen[0].content)["client_reference_id"] == "team-42"
 
 
 def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
@@ -116,6 +141,7 @@ def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
     refund: dict[str, object] = {
         "id": REFUND_ID,
         "object": "refund",
+        "livemode": False,
         "deposit": f"dep_{1:032x}",
         "amount_atomic": "100",
         "destination_address": ADDRESS,
@@ -141,7 +167,7 @@ def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
 
     with _client(httpx.MockTransport(handler)) as client:
         quote = client.quotes.create(
-            account_id="team-42",
+            client_reference_id="team-42",
             amount=2500,
             chain_id=11155111,
             asset="pha",
@@ -183,7 +209,7 @@ def test_deposits_list_follows_every_page() -> None:
         )
 
     with _client(httpx.MockTransport(handler)) as client:
-        deposits = list(client.deposits.list(account_id="team-42"))
+        deposits = list(client.deposits.list(client_reference_id="team-42"))
     assert [d.log_index for d in deposits] == [3, 2, 1]
 
 
@@ -233,6 +259,7 @@ def _deposit_address(version: int = 1, **fields: object) -> dict[str, object]:
         "retired_at": None,
         "metadata": {},
         "networks": [_network(11155111, address), _network(84532, address)],
+        "payments": [],
         **fields,
     }
 
@@ -271,7 +298,7 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
         "http://service.test",
         API_KEY,
         account=ACCOUNT,
-        forwarder=(FACTORY, IMPLEMENTATION, TREASURY),
+        forwarder=(FACTORY, IMPLEMENTATION),
         transport=httpx.MockTransport(handler),
     ) as client:
         created = client.deposit_addresses.create(
@@ -295,17 +322,37 @@ def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -
     assert seen[3].url.params["client_reference_id"] == "team-42"
 
 
+OTHER_TREASURY = "0x" + "99" * 20
+
+
+def _derived(treasury: str) -> str:
+    return deposit_address(
+        FACTORY,
+        IMPLEMENTATION,
+        treasury,
+        account=ACCOUNT,
+        livemode=False,
+        client_reference_id="team-42",
+        version=1,
+    )
+
+
 @pytest.mark.parametrize(
-    "network",
+    ("network", "treasuries"),
     [
         # Another address on one chain.
-        _network(84532, "0x" + "11" * 20),
-        # A treasury other than the pinned one: the account's pin must be updated first.
-        _network(84532, "0x" + "11" * 20, "0x" + "99" * 20),
+        (_network(84532, "0x" + "11" * 20), None),
+        # The address of another treasury, which a pin of the account's treasuries refuses.
+        (
+            _network(84532, _derived(OTHER_TREASURY), OTHER_TREASURY),
+            {11155111: TREASURY, 84532: TREASURY},
+        ),
+        # A chain without a pinned treasury.
+        (_network(84532, _derived(TREASURY)), {11155111: TREASURY}),
     ],
 )
 def test_a_deposit_address_the_account_cannot_derive_is_refused(
-    network: dict[str, object],
+    network: dict[str, object], treasuries: dict[int, str] | None
 ) -> None:
     body = _deposit_address()
     networks = body["networks"]
@@ -321,7 +368,8 @@ def test_a_deposit_address_the_account_cannot_derive_is_refused(
             "http://service.test",
             API_KEY,
             account=ACCOUNT,
-            forwarder=(FACTORY, IMPLEMENTATION, TREASURY),
+            forwarder=(FACTORY, IMPLEMENTATION),
+            treasuries=treasuries,
             transport=httpx.MockTransport(handler),
         ) as client,
         pytest.raises(AddressMismatchError, match="chain 84532"),
@@ -331,7 +379,7 @@ def test_a_deposit_address_the_account_cannot_derive_is_refused(
 
 def test_the_key_must_be_a_secret_key() -> None:
     with pytest.raises(ValueError, match="secret key"):
-        PhalaPay("http://service.test", "acme/v1")
+        PhalaPay("http://service.test", "acme/v1", forwarder=(FACTORY, IMPLEMENTATION))
 
 
 # Webhooks ----------------------------------------------------------------------------------------
@@ -379,7 +427,7 @@ def test_construct_event_returns_the_typed_deposit() -> None:
     assert (event.id, event.type, event.created) == (EVENT_ID, "deposit.credited", 1_790_000_321)
     assert (event.account, event.livemode) == (ACCOUNT, False)
     assert isinstance(event.data.object, Deposit)
-    assert (event.deposit.id, event.deposit.account_id, event.deposit.amount) == (
+    assert (event.deposit.id, event.deposit.client_reference_id, event.deposit.amount) == (
         f"dep_{1:032x}",
         "team-42",
         2500,
@@ -408,6 +456,7 @@ def test_construct_event_parses_a_failed_refund() -> None:
     refund: dict[str, object] = {
         "id": "re_" + "0e" * 16,
         "object": "refund",
+        "livemode": False,
         "deposit": f"dep_{1:032x}",
         "amount_atomic": "100",
         "destination_address": "0x" + "44" * 20,
@@ -417,6 +466,7 @@ def test_construct_event_parses_a_failed_refund() -> None:
         "transaction_hash": "0x" + "dd" * 32,
         "log_index": None,
         "created": 1_790_000_000,
+        "metadata": {},
     }
     body, headers = _delivery("refund.failed", refund)
     event = _construct(body, headers)

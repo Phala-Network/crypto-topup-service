@@ -8,8 +8,6 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..types import UNSET, Unset
-
 
 T = TypeVar("T", bound="ConfigAsset")
 
@@ -21,6 +19,10 @@ class ConfigAsset:
     Attributes:
         asset (str): Asset code.
         chain_id (int): EVM chain identifier.
+        confirmations (str): The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
+            block and one more), `"safe"`, or `"finalized"`: the stricter of the route's floor and
+            your account's `confirmation_policies`. A credit before finality can still be reversed
+            (`deposit.reversed`).
         contract (str): Token contract address.
         decimals (int): Token decimals.
         max_deposit_atomic (str): Maximum creditable deposit in base units, as a decimal string.
@@ -31,17 +33,14 @@ class ConfigAsset:
             spread.
         quote_tolerance_bps (int): A payment within this many basis points of the quoted amount completes the quote.
         quote_ttl_seconds (int): Payment window of a quote, in seconds.
+        typical_credit_seconds (int): Typical time from payment to the `deposit.credited` event, in seconds, at
+            `confirmations`.
         typical_finality_seconds (int): Typical time from payment to finality, in seconds; refunds wait for it.
-        confirmations (str | Unset): The confirmation a payment's block must reach before it is credited: a depth
-            (`"2"`: the
-            block and one more), `"safe"`, or `"finalized"`. A credit before finality can still be
-            reversed (`deposit.reversed`). Optional in the schema, like `typical_credit_seconds`, so
-            clients also parse responses from servers that predate fast credit.
-        typical_credit_seconds (int | Unset): Typical time from payment to the `deposit.credited` event, in seconds.
     """
 
     asset: str
     chain_id: int
+    confirmations: str
     contract: str
     decimals: int
     max_deposit_atomic: str
@@ -51,15 +50,16 @@ class ConfigAsset:
     quote_spread_bps: int
     quote_tolerance_bps: int
     quote_ttl_seconds: int
+    typical_credit_seconds: int
     typical_finality_seconds: int
-    confirmations: str | Unset = UNSET
-    typical_credit_seconds: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         asset = self.asset
 
         chain_id = self.chain_id
+
+        confirmations = self.confirmations
 
         contract = self.contract
 
@@ -79,11 +79,9 @@ class ConfigAsset:
 
         quote_ttl_seconds = self.quote_ttl_seconds
 
-        typical_finality_seconds = self.typical_finality_seconds
-
-        confirmations = self.confirmations
-
         typical_credit_seconds = self.typical_credit_seconds
+
+        typical_finality_seconds = self.typical_finality_seconds
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -91,6 +89,7 @@ class ConfigAsset:
             {
                 "asset": asset,
                 "chain_id": chain_id,
+                "confirmations": confirmations,
                 "contract": contract,
                 "decimals": decimals,
                 "max_deposit_atomic": max_deposit_atomic,
@@ -100,13 +99,10 @@ class ConfigAsset:
                 "quote_spread_bps": quote_spread_bps,
                 "quote_tolerance_bps": quote_tolerance_bps,
                 "quote_ttl_seconds": quote_ttl_seconds,
+                "typical_credit_seconds": typical_credit_seconds,
                 "typical_finality_seconds": typical_finality_seconds,
             }
         )
-        if confirmations is not UNSET:
-            field_dict["confirmations"] = confirmations
-        if typical_credit_seconds is not UNSET:
-            field_dict["typical_credit_seconds"] = typical_credit_seconds
 
         return field_dict
 
@@ -116,6 +112,8 @@ class ConfigAsset:
         asset = d.pop("asset")
 
         chain_id = d.pop("chain_id")
+
+        confirmations = d.pop("confirmations")
 
         contract = d.pop("contract")
 
@@ -135,15 +133,14 @@ class ConfigAsset:
 
         quote_ttl_seconds = d.pop("quote_ttl_seconds")
 
+        typical_credit_seconds = d.pop("typical_credit_seconds")
+
         typical_finality_seconds = d.pop("typical_finality_seconds")
-
-        confirmations = d.pop("confirmations", UNSET)
-
-        typical_credit_seconds = d.pop("typical_credit_seconds", UNSET)
 
         config_asset = cls(
             asset=asset,
             chain_id=chain_id,
+            confirmations=confirmations,
             contract=contract,
             decimals=decimals,
             max_deposit_atomic=max_deposit_atomic,
@@ -153,9 +150,8 @@ class ConfigAsset:
             quote_spread_bps=quote_spread_bps,
             quote_tolerance_bps=quote_tolerance_bps,
             quote_ttl_seconds=quote_ttl_seconds,
-            typical_finality_seconds=typical_finality_seconds,
-            confirmations=confirmations,
             typical_credit_seconds=typical_credit_seconds,
+            typical_finality_seconds=typical_finality_seconds,
         )
 
         config_asset.additional_properties = d

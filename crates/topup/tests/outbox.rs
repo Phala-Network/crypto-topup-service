@@ -638,7 +638,7 @@ async fn successful_delivery_marks_delivered_and_stores_response() -> Result<()>
     ensure!(envelope["created"].is_i64());
     let deposit = &envelope["data"]["object"];
     ensure!(
-        deposit["object"] == "deposit" && deposit["status"] == "detected",
+        deposit["object"] == "deposit" && deposit["status"] == "pending",
         "{envelope}"
     );
     ensure!(deposit["metadata"] == serde_json::json!({ "order_id": "6735" }));

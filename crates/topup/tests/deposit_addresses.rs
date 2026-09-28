@@ -684,7 +684,7 @@ async fn deposits_to_active_and_retired_addresses_on_any_chain_name_the_deposit_
                     )
                     .await?;
                 ensure!(body["metadata"] == json!({"version": number.to_string()}));
-                ensure!(body["account_id"] == "team-42");
+                ensure!(body["client_reference_id"] == "team-42");
                 let (_, list) = fixture
                     .request(
                         Method::GET,
@@ -699,6 +699,175 @@ async fn deposits_to_active_and_retired_addresses_on_any_chain_name_the_deposit_
                 let data = list["data"].as_array().context("data")?;
                 ensure!(data.len() == 1 && data[0]["id"] == deposit, "{list}");
             }
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let (object, secret) = fixture
+                .create_with_secret(&fixture.live_key, "team-42")
+                .await?;
+            let id = object["id"].as_str().context("id")?;
+            ensure!(object["payments"] == json!([]), "{object}");
+            // A second create issues another secret; both read the address.
+            let (_, second) = fixture
+                .create_with_secret(&fixture.live_key, "team-42")
+                .await?;
+            ensure!(second != secret);
+            for secret in [&secret, &second] {
+                let (status, view) = fixture.client_read(id, secret).await?;
+                ensure!(status == StatusCode::OK, "{view}");
+                ensure!(view["payments"] == json!([]) && view["livemode"] == true);
+            }
+
+            // The head scan sees a transfer one block deep, before the route's confirmation.
+            let address_id: Uuid = sqlx::query_scalar(
+                "SELECT id FROM addresses WHERE deposit_address_id = $1 AND chain_id = 1",
+            )
+            .bind(topup::ids::parse(topup::ids::DEPOSIT_ADDRESS, id).context("da_ id")?)
+            .fetch_one(pool)
+            .await?;
+            let tx_hash = B256::repeat_byte(0x5e);
+            db::commit_head_scan(
+                pool,
+                1,
+                100,
+                100,
+                &[db::NewPendingTransfer {
+                    chain_id: 1,
+                    tx_hash,
+                    receipt_log_index: 0,
+                    log_index: 3,
+                    block_number: 100,
+                    block_hash: B256::repeat_byte(0xb1),
+                    block_time: Utc::now(),
+                    address_id,
+                    asset_contract: fixture.live_route.asset.contract,
+                    from_address: Address::repeat_byte(0x74),
+                    amount_atomic: AtomicAmount::new(U256::from(7_u64)),
+                }],
+            )
+            .await?;
+            let (status, merchant) = fixture
+                .request(
+                    Method::GET,
+                    &format!("/v1/deposit_addresses/{id}"),
+                    &fixture.live_key,
+                    Value::Null,
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{merchant}");
+            let deposit = topup::ids::format(topup::ids::DEPOSIT, deposit_id(1, tx_hash, 0));
+            ensure!(
+                merchant["payments"]
+                    == json!([{
+                        "status": "seen", "chain_id": 1, "asset": "pha", "amount_atomic": "7",
+                        "tx_hash": format!("{tx_hash:#x}"), "confirmations": 1,
+                        "estimated_final_at": merchant["payments"][0]["estimated_final_at"],
+                        "matches_quote": null, "deposit": deposit,
+                    }]),
+                "{merchant}"
+            );
+            ensure!(merchant["payments"][0]["estimated_final_at"].is_i64());
+            let (_, view) = fixture.client_read(id, &secret).await?;
+            let payments = view["payments"].as_array().context("payments")?;
+            ensure!(payments.len() == 1, "{view}");
+            ensure!(payments[0]["status"] == "seen" && payments[0]["confirmations"] == 1);
+            ensure!(payments[0]["asset"] == "pha" && payments[0]["decimals"] == 18);
+            ensure!(payments[0]["amount_atomic"] == "7");
+            // The public view carries no merchant fields.
+            for field in ["client_reference_id", "metadata", "salt", "client_secret"] {
+                ensure!(view.get(field).is_none(), "{field} in {view}");
+            }
+            ensure!(view["networks"][0].get("treasury").is_none());
+
+            // Recorded as a deposit, it is `recorded` and the page shows the deposit's progress.
+            ensure!(
+                db::insert_deposit(
+                    pool,
+                    &NewDeposit {
+                        chain_id: 1,
+                        tx_hash,
+                        receipt_log_index: 0,
+                        log_index: 3,
+                        block_number: 100,
+                        block_hash: B256::repeat_byte(0xb1),
+                        block_time: Utc::now(),
+                        address_id,
+                        route: Some(fixture.live_route.route.clone()),
+                        route_version: Some(fixture.live_route.version),
+                        asset_contract: fixture.live_route.asset.contract,
+                        from_address: Address::repeat_byte(0x74),
+                        amount_atomic: AtomicAmount::new(U256::from(7_u64)),
+                        state: DepositState::Detected,
+                        reason: None,
+                        next_attempt_at: Utc::now(),
+                        tx_from: Address::repeat_byte(0x74),
+                        tx_nonce: 0,
+                        is_final: false,
+                    },
+                )
+                .await?
+            );
+            let (_, merchant) = fixture
+                .request(
+                    Method::GET,
+                    &format!("/v1/deposit_addresses/{id}"),
+                    &fixture.live_key,
+                    Value::Null,
+                )
+                .await?;
+            ensure!(
+                merchant["payments"][0]["status"] == "recorded",
+                "{merchant}"
+            );
+            ensure!(merchant["payments"][0]["deposit"] == deposit, "{merchant}");
+            let (_, view) = fixture.client_read(id, &secret).await?;
+            ensure!(view["payments"][0]["status"] == "confirming", "{view}");
+            sqlx::query("UPDATE deposits SET state = 'reversed' WHERE tx_hash = $1")
+                .bind(format!("{tx_hash:#x}"))
+                .execute(pool)
+                .await?;
+            let (_, view) = fixture.client_read(id, &secret).await?;
+            ensure!(view["payments"][0]["status"] == "reversed", "{view}");
+
+            // Another address's secret, a made-up secret, and a missing one read nothing.
+            let (other, other_secret) = fixture
+                .create_with_secret(&fixture.live_key, "team-43")
+                .await?;
+            ensure!(other["id"] != object["id"]);
+            for secret in [
+                other_secret.replace(other["id"].as_str().context("id")?, id),
+                format!("{id}_secret_{}", "0".repeat(48)),
+            ] {
+                let (status, _) = fixture.client_read(id, &secret).await?;
+                ensure!(status == StatusCode::NOT_FOUND, "{secret}");
+            }
+            let response = fixture
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/v1/deposit_addresses/{id}"))
+                        .body(axum::body::Body::empty())?,
+                )
+                .await?;
+            ensure!(response.status() == StatusCode::UNAUTHORIZED);
+            // Only the newest ten secrets of an address stay valid.
+            for _ in 0..10 {
+                fixture
+                    .create_with_secret(&fixture.live_key, "team-42")
+                    .await?;
+            }
+            let (status, _) = fixture.client_read(id, &secret).await?;
+            ensure!(status == StatusCode::NOT_FOUND);
             Ok(())
         })
     })
@@ -816,7 +985,12 @@ impl Fixture {
         Ok((status, serde_json::from_slice(&bytes)?))
     }
 
+    /// The customer's address without its `client_secret`, which every create issues anew.
     async fn create(&self, key: &str, customer: &str) -> Result<Value> {
+        Ok(self.create_with_secret(key, customer).await?.0)
+    }
+
+    async fn create_with_secret(&self, key: &str, customer: &str) -> Result<(Value, String)> {
         let (status, body) = self
             .request(
                 Method::POST,
@@ -826,7 +1000,28 @@ impl Fixture {
             )
             .await?;
         ensure!(status == StatusCode::OK, "{status}: {body}");
-        Ok(body)
+        without_secret(body)
+    }
+
+    /// An anonymous `GET` of the address's public view by `client_secret`.
+    async fn client_read(&self, id: &str, client_secret: &str) -> Result<(StatusCode, Value)> {
+        let request = axum::http::Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/deposit_addresses/{id}?client_secret={client_secret}"
+            ))
+            .body(axum::body::Body::empty())?;
+        let response = self.app.clone().oneshot(request).await?;
+        let status = response.status();
+        ensure!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_some_and(|origin| origin == "*"),
+            "a public read allows any origin"
+        );
+        let bytes = to_bytes(response.into_body(), 1_048_576).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
     }
 
     async fn rotate(&self, key: &str, address: &Value) -> Result<Value> {
@@ -840,8 +1035,20 @@ impl Fixture {
             )
             .await?;
         ensure!(status == StatusCode::OK, "{status}: {body}");
-        Ok(body)
+        Ok(without_secret(body)?.0)
     }
+}
+
+/// Splits off the response's `client_secret`, `da_…_secret_…` of the returned address.
+fn without_secret(mut body: Value) -> Result<(Value, String)> {
+    let object = body.as_object_mut().context("object")?;
+    let secret = object
+        .remove("client_secret")
+        .and_then(|secret| secret.as_str().map(str::to_owned))
+        .context("client_secret")?;
+    let id = object.get("id").and_then(Value::as_str).context("id")?;
+    ensure!(secret.starts_with(&format!("{id}_secret_")) && secret.len() == id.len() + 56);
+    Ok((body, secret))
 }
 
 fn app(pool: &sqlx::PgPool, routes: Vec<RouteFile>) -> Result<Router> {

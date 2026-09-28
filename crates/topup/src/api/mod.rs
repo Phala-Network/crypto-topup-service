@@ -19,6 +19,7 @@ mod pending;
 mod quotes;
 mod rate_limit;
 mod repository;
+mod sweeps;
 mod treasuries;
 mod webhook_endpoints;
 
@@ -141,10 +142,9 @@ pub(crate) async fn event_data(
             })
             .map_err(|_| error::ApiError::internal()),
         crate::db::EventObject::Account(id) if id == scope.account_id() => {
-            account::find_account(pool, scope)
+            account::find_account(pool, routes, scope)
                 .await
                 .map(|account| account.map(serde_json::to_value))
-                .map_err(error::ApiError::from)
         }
         crate::db::EventObject::Account(_) => Ok(None),
         crate::db::EventObject::WebhookEndpoint(id) => {
@@ -172,25 +172,24 @@ pub(crate) async fn event_data(
 pub fn router(state: AppState) -> (Router, OpenApi) {
     let merchant = OpenApiRouter::new()
         .routes(routes!(quotes::get_config))
-        .routes(routes!(quotes::create_quote))
+        .routes(routes!(quotes::list_quotes, quotes::create_quote))
         .routes(routes!(quotes::update_quote))
         .routes(routes!(quotes::cancel_quote))
         .routes(routes!(
             deposit_addresses::list_deposit_addresses,
             deposit_addresses::create_deposit_address
         ))
-        .routes(routes!(
-            deposit_addresses::get_deposit_address,
-            deposit_addresses::update_deposit_address
-        ))
+        .routes(routes!(deposit_addresses::update_deposit_address))
         .routes(routes!(deposit_addresses::rotate_deposit_address))
         .routes(routes!(deposits::list_deposits))
         .routes(routes!(deposits::get_deposit, deposits::update_deposit))
-        .routes(routes!(deposits::create_refund))
+        .routes(routes!(deposits::list_refunds, deposits::create_refund))
         .routes(routes!(deposits::get_refund, deposits::update_refund))
         .routes(routes!(deposits::mark_refund_paid))
         .routes(routes!(deposits::cancel_refund))
-        .routes(routes!(account::get_account))
+        .routes(routes!(account::get_account, account::update_account))
+        .routes(routes!(account::pause_account))
+        .routes(routes!(account::resume_account))
         .routes(routes!(account::roll_webhook_key))
         .routes(routes!(account::get_attestation))
         .routes(routes!(keys::list_api_keys, keys::create_api_key))
@@ -213,6 +212,9 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             webhook_endpoints::delete_webhook_endpoint
         ))
         .routes(routes!(webhook_endpoints::test_webhook_endpoint))
+        .routes(routes!(sweeps::get_balance))
+        .routes(routes!(sweeps::list_sweeps))
+        .routes(routes!(sweeps::list_forwarders))
         .routes(routes!(events::list_events))
         .routes(routes!(events::get_event))
         .routes(routes!(events::resend_event))
@@ -246,9 +248,10 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
             auth::authenticate_admin,
         ));
 
-    // A quote is also readable without an API key by its `client_secret`.
+    // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let quote = OpenApiRouter::new()
         .routes(routes!(quotes::get_quote))
+        .routes(routes!(deposit_addresses::get_deposit_address))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant_or_client_secret,

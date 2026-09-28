@@ -215,7 +215,8 @@ class AccountApi:
                 if amount is None or amount <= 0:
                     raise ValueError("amount_atomic must be a positive decimal string")
                 if self.ledger.team_suspended(team) is None or not any(
-                    item.id == deposit for item in self._service().list_deposits(account_id=team)
+                    item.id == deposit
+                    for item in self._service().list_deposits(client_reference_id=team)
                 ):
                     return Answer(HTTPStatus.NOT_FOUND)
                 refund = self._service().create_refund(deposit, destination, amount)
@@ -246,7 +247,7 @@ class AccountApi:
         return Answer(HTTPStatus.NOT_FOUND)
 
     def _account_view(self, team: str) -> dict[str, Any]:
-        deposits = list(self._service().list_deposits(account_id=team))
+        deposits = list(self._service().list_deposits(client_reference_id=team))
         ids = {deposit.id for deposit in deposits}
         return {
             "account_id": team,

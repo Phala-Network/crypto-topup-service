@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 
 import httpx
 
-from topup_client.models import Config, Deposit, DepositAddress, Quote, Refund
-from topup_sdk import TopupClient
+from topup_client.models import (
+    AccountObject,
+    ApiKeyObject,
+    Balance,
+    Config,
+    DeletedWebhookEndpoint,
+    Deposit,
+    DepositAddress,
+    EventObjectResponse,
+    Forwarder,
+    Quote,
+    Refund,
+    Sweep,
+    Treasury,
+    TreasuryChallenge,
+    WebhookEndpointObject,
+)
+from topup_sdk import TopupClient, export_account, sign_treasury_challenge
 from topup_sdk.client import Metadata
 
 from ._webhook import Webhook
@@ -16,20 +33,25 @@ from ._webhook import Webhook
 class PhalaPay:
     """A client for one account and mode, authenticated with its secret key.
 
-        pay = PhalaPay(api_base="https://pay.example.com", api_key=os.environ["PHALA_PAY_KEY"])
-        quote = pay.quotes.create(account_id="team-42", amount=2500, chain_id=11155111,
-                                  asset="pha")
-        return {"client_secret": quote.client_secret}
+        pay = PhalaPay(
+            api_base="https://pay.example.com",
+            api_key=os.environ["PHALA_PAY_KEY"],
+            forwarder=(FACTORY, IMPLEMENTATION),
+        )
+        quote = pay.quotes.create(client_reference_id="team-42", amount=2500,
+                                  chain_id=11155111, asset="pha")
+        return {"client_secret": quote.client_secret, "expected_address": quote.address}
 
     `api_key` is a secret key, `ppay_sk_test_…` or `ppay_sk_live_…`; the key selects the account
-    and the mode. `forwarder`, the `(factory, implementation, treasury)` triple pinned from the
-    attested deployment and the merchant's treasury, makes `quotes.create` and `quotes.retrieve`
-    recompute every open quote's address and raise `AddressMismatchError` rather than return one
-    the merchant did not derive; `account` (`acct_…`) saves the one `GET /v1/account` that check
-    otherwise makes.
+    and the mode. `forwarder`, the `(factory, implementation)` pair pinned from the attested
+    deployment, is required: every quote and deposit address is recomputed from it before it is
+    returned, and one the account cannot derive raises `AddressMismatchError` (fail closed).
+    `treasuries` (`{chain_id: treasury}`) additionally pins the treasury each may pay. `account`
+    (`acct_…`) saves the one `GET /v1/account` the check otherwise makes.
 
     Requests that fail with a transport error, `429`, or `5xx` are retried with backoff; `POST`s
-    reuse one `Idempotency-Key` across retries, so a retry never creates a second object.
+    reuse one `Idempotency-Key` across retries, so a retry never creates a second object. A
+    failed request raises `ApiError` with the service's `code`, `param`, and `request_id`.
     """
 
     def __init__(
@@ -37,8 +59,9 @@ class PhalaPay:
         api_base: str,
         api_key: str,
         *,
+        forwarder: tuple[str, str],
+        treasuries: Mapping[int, str] | None = None,
         account: str | None = None,
-        forwarder: tuple[str, str, str] | None = None,
         timeout: float = 15.0,
         max_attempts: int = 4,
         transport: httpx.BaseTransport | None = None,
@@ -48,16 +71,31 @@ class PhalaPay:
             api_key,
             account=account,
             forwarder=forwarder,
+            treasuries=treasuries,
             timeout=timeout,
             max_attempts=max_attempts,
             transport=transport,
         )
+        self.account = AccountResource(self._client)
+        self.config = ConfigResource(self._client)
         self.quotes = Quotes(self._client)
         self.deposits = Deposits(self._client)
         self.deposit_addresses = DepositAddresses(self._client)
         self.refunds = Refunds(self._client)
-        self.config = ConfigResource(self._client)
+        self.balance = BalanceResource(self._client)
+        self.sweeps = Sweeps(self._client)
+        self.forwarders = Forwarders(self._client)
+        self.treasuries = Treasuries(self._client)
+        self.api_keys = ApiKeys(self._client)
+        self.webhook_endpoints = WebhookEndpoints(self._client)
+        self.events = Events(self._client)
         self.webhooks = Webhook
+
+    def export_account(self, directory: str | Path) -> dict[str, int]:
+        """Writes every object of the key's account and mode to `directory`, one JSON file per
+        resource, and returns the counts (design §13). `forwarders.json` keeps funds sweepable
+        without Phala Pay."""
+        return export_account(self._client, directory)
 
     def close(self) -> None:
         self._client.close()
@@ -69,6 +107,44 @@ class PhalaPay:
         self.close()
 
 
+class AccountResource:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def retrieve(self) -> AccountObject:
+        """The key's account, in the key's mode."""
+        return self._client.get_account()
+
+    def update(self, *, confirmation_policies: Mapping[int, str | None]) -> AccountObject:
+        """Requires, per chain, a confirmation stricter than the route's before a payment is
+        credited: a depth such as `"12"`, `"safe"`, or `"finalized"`; `None` restores the
+        route's."""
+        return self._client.update_account(confirmation_policies=confirmation_policies)
+
+    def pause_quotes(self) -> AccountObject:
+        """Stops issuing quotes, deposit addresses, and networks in both modes, for an
+        emergency; existing addresses keep being credited."""
+        return self._client.pause_quotes()
+
+    def resume_quotes(self) -> AccountObject:
+        """Lifts your own `quotes` pause; an operator's pause stays."""
+        return self._client.resume_quotes()
+
+    def roll_webhook_key(self, *, expires_in: int = 0) -> AccountObject:
+        """Rolls this mode's webhook signing key; the old one signs beside it for `expires_in`
+        seconds (at most 7 days)."""
+        return self._client.roll_webhook_key(expires_in=expires_in)
+
+
+class ConfigResource:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def retrieve(self) -> Config:
+        """The payable assets, limits, quote terms, and confirmations, for the product's UI."""
+        return self._client.get_config()
+
+
 class Quotes:
     def __init__(self, client: TopupClient) -> None:
         self._client = client
@@ -76,7 +152,7 @@ class Quotes:
     def create(
         self,
         *,
-        account_id: str,
+        client_reference_id: str,
         amount: int,
         chain_id: int,
         asset: str,
@@ -84,17 +160,20 @@ class Quotes:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Quote:
-        """Quotes `amount` cents for `account_id`, payable in `asset` on `chain_id`.
+        """Quotes `amount` cents for the customer `client_reference_id`, payable in `asset` on
+        `chain_id`.
 
-        Only this response carries `client_secret`, the value the payer's browser needs. Pass an
-        `idempotency_key` of your own (for example your order id) to resume a checkout: the same
-        key returns the same quote with a new `client_secret`, and the old one stops working.
+        Only this response carries `client_secret`, the value the payer's browser needs, beside
+        the recomputed `address` to pass as `<Checkout expectedAddress>`. Pass an
+        `idempotency_key` of your own (for example your order id) to resume a checkout: for 24
+        hours a repeat of the same request replays the first response, the same quote and the
+        same `client_secret` included.
 
         `metadata` is Stripe's: up to 50 string pairs for your own use, such as your order id,
         copied to the deposit that pays the quote. Do not store sensitive information in it.
         """
         return self._client.create_quote(
-            account_id,
+            client_reference_id,
             amount,
             chain_id=chain_id,
             asset=asset,
@@ -105,6 +184,12 @@ class Quotes:
 
     def retrieve(self, quote_id: str) -> Quote:
         return self._client.get_quote(quote_id)
+
+    def list(
+        self, *, client_reference_id: str | None = None, status: str | None = None
+    ) -> Iterator[Quote]:
+        """Yields every matching quote, newest first, fetching pages as it goes."""
+        return self._client.list_quotes(client_reference_id=client_reference_id, status=status)
 
     def update(self, quote_id: str, *, metadata: Metadata | None = None) -> Quote:
         """Merges `metadata` into the quote's: a key set to `""` is unset, and `metadata=""`
@@ -125,14 +210,14 @@ class Deposits:
         return self._client.get_deposit(deposit_id, expand=expand)
 
     def update(self, deposit_id: str, *, metadata: Metadata | None = None) -> Deposit:
-        """Merges `metadata` into the deposit's, which started as a copy of its quote's; the
-        quote's is left unchanged."""
+        """Merges `metadata` into the deposit's, which started as a copy of its quote's or its
+        deposit address's; theirs are left unchanged."""
         return self._client.update_deposit(deposit_id, metadata=metadata)
 
     def list(
         self,
         *,
-        account_id: str | None = None,
+        client_reference_id: str | None = None,
         quote: str | None = None,
         deposit_address: str | None = None,
         status: str | None = None,
@@ -141,9 +226,10 @@ class Deposits:
         created_lte: int | None = None,
         expand: list[str] | None = None,
     ) -> Iterator[Deposit]:
-        """Yields every matching deposit, newest first, fetching pages as it goes."""
+        """Yields every matching deposit, newest first, fetching pages as it goes. `status` is
+        `pending`, `credited`, `rejected`, or `reversed`."""
         return self._client.list_deposits(
-            account_id=account_id,
+            client_reference_id=client_reference_id,
             quote=quote,
             deposit_address=deposit_address,
             status=status,
@@ -158,7 +244,8 @@ class DepositAddresses:
     """A customer's persistent deposit address: one address for every supported token on every
     supported network. Show it like a bank account number; any amount of a supported token sent
     to it is credited at the market rate when it arrives. `networks` lists each chain's address
-    (the same wherever the treasury is the same; `address` is it when all agree) and tokens.
+    (the same wherever the treasury is the same; `address` is it when all agree) and tokens, and
+    `payments` the transfers seen and recorded in the last 24 hours.
 
     `topup_sdk.deposit_address(...)` recomputes any version offline from its salt inputs and a
     network's treasury.
@@ -173,9 +260,11 @@ class DepositAddresses:
         client_reference_id: str,
         metadata: Metadata | None = None,
     ) -> DepositAddress:
-        """Returns the customer's active address; the same call keeps returning it until it is
-        rotated, and adds a network supported since. `metadata` is merged into the address's;
-        each deposit to it starts with a copy, and a rotation carries it to the next address."""
+        """Returns the customer's active address, recomputed; the same call keeps returning it
+        until it is rotated, and adds a network supported since. Each response carries a new
+        `client_secret` for the customer's page (`<DepositAddress clientSecret>`) to follow
+        payments. `metadata` is merged into the address's; each deposit to it starts with a
+        copy, and a rotation carries it to the next address."""
         return self._client.create_deposit_address(client_reference_id, metadata=metadata)
 
     def update(
@@ -222,9 +311,9 @@ class Refunds:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Refund:
-        """Creates a pending refund of `deposit` (its unrefunded remainder unless `amount_atomic`
-        is given) to an address the customer controls; pay it from its `treasury`, then call
-        `mark_paid`."""
+        """Creates a pending refund of a final `deposit` (its unrefunded remainder unless
+        `amount_atomic` is given) to an address the customer controls; pay it from its
+        `treasury`, then call `mark_paid`."""
         return self._client.create_refund(
             deposit,
             destination_address,
@@ -250,11 +339,172 @@ class Refunds:
         """Merges `metadata` into the refund's."""
         return self._client.update_refund(refund_id, metadata=metadata)
 
+    def list(self, *, deposit: str | None = None, status: str | None = None) -> Iterator[Refund]:
+        """Yields every matching refund, newest first, fetching pages as it goes."""
+        return self._client.list_refunds(deposit=deposit, status=status)
 
-class ConfigResource:
+
+class BalanceResource:
     def __init__(self, client: TopupClient) -> None:
         self._client = client
 
-    def retrieve(self) -> Config:
-        """The payable assets, limits, and quote terms, for the product's UI."""
-        return self._client.get_config()
+    def retrieve(self) -> Balance:
+        """What the account's forwarders hold, per chain and token, and the final part of it."""
+        return self._client.get_balance()
+
+
+class Sweeps:
+    """Sweeps: finalized `Flushed` events that moved a forwarder's balance to its treasury.
+    Build the `flush` calls offline with `topup_sdk.flush_transactions` from
+    `forwarders.list(sweepable=token)`, and for a Safe treasury write them with
+    `topup_sdk.safe_batch`."""
+
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def list(
+        self,
+        *,
+        chain_id: int | None = None,
+        forwarder: str | None = None,
+        token: str | None = None,
+    ) -> Iterator[Sweep]:
+        """Yields the sweeps, newest first, fetching pages as it goes."""
+        return self._client.list_sweeps(chain_id=chain_id, forwarder=forwarder, token=token)
+
+
+class Forwarders:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def list(
+        self, *, chain_id: int | None = None, sweepable: str | None = None
+    ) -> Iterator[Forwarder]:
+        """Yields the account's forwarders with their `(factory, salt, treasury)`; with
+        `sweepable` (a token contract), only those safe to sweep of it."""
+        return self._client.list_forwarders(chain_id=chain_id, sweepable=sweepable)
+
+
+class Treasuries:
+    """Treasuries, proven through the API (design D10): an EOA signs the challenge with
+    `set_eoa`; a Safe's owners sign it as a Safe message and `create` submits it
+    (docs/integration.md, "Set a Safe as treasury")."""
+
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def challenge(self, *, chain_id: int, address: str) -> TreasuryChallenge:
+        """The EIP-4361 message that proves `address` as the treasury of `chain_id`."""
+        return self._client.create_treasury_challenge(chain_id, address)
+
+    def create(self, *, chain_id: int, message: str, signature: str) -> Treasury:
+        """Submits a signed challenge `message`."""
+        return self._client.create_treasury(chain_id, message, signature)
+
+    def set_eoa(self, *, chain_id: int, address: str, private_key: str | bytes) -> Treasury:
+        """Proves the EOA `address` as the treasury of `chain_id`: requests a challenge, signs it
+        with `private_key` (which must be `address`'s; needs `phala-pay[eoa]`), and submits it."""
+        challenge = self.challenge(chain_id=chain_id, address=address)
+        signature = sign_treasury_challenge(challenge.message, private_key, address=address)
+        return self.create(chain_id=chain_id, message=challenge.message, signature=signature)
+
+    def retrieve(self, treasury_id: str) -> Treasury:
+        return self._client.get_treasury(treasury_id)
+
+    def list(self, *, chain_id: int | None = None, status: str | None = None) -> list[Treasury]:
+        """The treasuries of this mode, newest first."""
+        return self._client.list_treasuries(chain_id=chain_id, status=status)
+
+    def cancel(self, treasury_id: str) -> Treasury:
+        """Cancels a pending treasury change before it applies."""
+        return self._client.cancel_treasury(treasury_id)
+
+
+class ApiKeys:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def create(self, *, name: str = "") -> ApiKeyObject:
+        """A new secret key of this mode; its `secret` is in this response only."""
+        return self._client.create_api_key(name=name)
+
+    def retrieve(self, api_key_id: str) -> ApiKeyObject:
+        return self._client.get_api_key(api_key_id)
+
+    def list(self) -> list[ApiKeyObject]:
+        """This mode's keys, without their secrets."""
+        return self._client.list_api_keys()
+
+    def roll(self, api_key_id: str, *, expires_in: int = 0) -> ApiKeyObject:
+        """A replacement key with its `secret`; the old one works for `expires_in` seconds."""
+        return self._client.roll_api_key(api_key_id, expires_in=expires_in)
+
+    def revoke(self, api_key_id: str) -> ApiKeyObject:
+        return self._client.revoke_api_key(api_key_id)
+
+
+class WebhookEndpoints:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def create(
+        self,
+        *,
+        url: str,
+        enabled_events: list[str],
+        description: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> WebhookEndpointObject:
+        return self._client.create_webhook_endpoint(
+            url, enabled_events, description=description, metadata=metadata
+        )
+
+    def retrieve(self, endpoint_id: str) -> WebhookEndpointObject:
+        return self._client.get_webhook_endpoint(endpoint_id)
+
+    def update(
+        self,
+        endpoint_id: str,
+        *,
+        url: str | None = None,
+        enabled_events: list[str] | None = None,
+        description: str | None = None,
+        disabled: bool | None = None,
+        metadata: Metadata | None = None,
+    ) -> WebhookEndpointObject:
+        return self._client.update_webhook_endpoint(
+            endpoint_id,
+            url=url,
+            enabled_events=enabled_events,
+            description=description,
+            disabled=disabled,
+            metadata=metadata,
+        )
+
+    def delete(self, endpoint_id: str) -> DeletedWebhookEndpoint:
+        return self._client.delete_webhook_endpoint(endpoint_id)
+
+    def test(self, endpoint_id: str) -> EventObjectResponse:
+        """Sends a test event to the endpoint."""
+        return self._client.test_webhook_endpoint(endpoint_id)
+
+    def list(self) -> Iterator[WebhookEndpointObject]:
+        return self._client.list_webhook_endpoints()
+
+
+class Events:
+    """Events of this mode: every webhook ever sent, and the account's audit log."""
+
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def retrieve(self, event_id: str) -> EventObjectResponse:
+        return self._client.get_event(event_id)
+
+    def resend(self, event_id: str, *, webhook_endpoint: str) -> EventObjectResponse:
+        """Delivers the event again to one enabled endpoint."""
+        return self._client.resend_event(event_id, webhook_endpoint=webhook_endpoint)
+
+    def list(self, *, type: str | None = None) -> Iterator[EventObjectResponse]:
+        """Yields events, newest first; `type` filters, such as `deposit.reversed`."""
+        return self._client.list_events(type=type)

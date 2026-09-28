@@ -446,7 +446,7 @@ body = httpx.get(url, params={"nonce": nonce.hex()}, headers=headers, timeout=30
 verify_attestation_binding(
     AttestationResponse.from_dict(body), nonce, expected_account=account, expected_livemode=False
 )
-assert len(body["quote"]) > 0, "empty quote"
+assert len(body["tdx_quote"]) > 0, "empty quote"
 assert "operators" not in body, "the service sends no transactions, so it attests no operator"
 keys = [{"version": key["version"], "public_key": key["public_key"]} for key in body["webhook_keys"]]
 print(json.dumps({"webhook_keys": keys, "report_data": body["report_data"]}))

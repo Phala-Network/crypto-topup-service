@@ -302,7 +302,7 @@ fn dev_attestation_prints_the_required_json_shape() {
         Some(64)
     );
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
-    assert_eq!(value["quote"], "");
+    assert_eq!(value["tdx_quote"], "");
     assert_eq!(value["app_id"], "");
     assert_eq!(value["compose_hash"], "");
 }

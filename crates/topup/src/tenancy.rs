@@ -85,6 +85,10 @@ pub enum Permission {
     EndpointsWrite,
     /// List and read events.
     EventsRead,
+    /// Read the balance held in forwarders and the sweeps that moved it.
+    SweepsRead,
+    /// Read every issued forwarder with its `(factory, salt, treasury)`, the export.
+    ForwardersRead,
 }
 
 impl Permission {
@@ -109,6 +113,8 @@ impl Permission {
             Self::EndpointsRead => "endpoints.read",
             Self::EndpointsWrite => "endpoints.write",
             Self::EventsRead => "events.read",
+            Self::SweepsRead => "sweeps.read",
+            Self::ForwardersRead => "forwarders.read",
         }
     }
 }

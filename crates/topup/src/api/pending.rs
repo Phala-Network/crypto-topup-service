@@ -14,7 +14,7 @@ use crate::db::{self, PendingTransfer};
 use crate::locks::{RateLock, RateLockStatus};
 
 use super::error::ApiError;
-use super::models::QuotePayment;
+use super::models::Payment;
 use sqlx::PgPool;
 
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
@@ -31,7 +31,7 @@ pub(super) async fn quote_payment(
     pool: &PgPool,
     route: &RouteFile,
     lock: &RateLock,
-) -> Result<Option<QuotePayment>, ApiError> {
+) -> Result<Option<Payment>, ApiError> {
     let deposits = address_deposits(pool, lock.address_id).await?;
     if let Some(consumed) = deposits
         .iter()
@@ -118,15 +118,19 @@ fn terms(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Terms {
     }
 }
 
-fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> QuotePayment {
-    QuotePayment {
+fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Payment {
+    Payment {
         status: observed.status.to_owned(),
+        chain_id: observed.chain_id,
+        asset: (observed.chain_id == route.chain.chain_id
+            && observed.asset_contract == route.asset.contract)
+            .then(|| route.asset.symbol.clone()),
         tx_hash: format!("{:#x}", observed.tx_hash),
         amount_atomic: observed.amount_atomic.value().to_string(),
         confirmations: observed.confirmations,
         estimated_final_at: (observed.status == "seen")
             .then(|| estimated_final_at(observed.block_time).timestamp()),
-        matches_quote: terms(route, lock, observed).consumes_lock(),
+        matches_quote: Some(terms(route, lock, observed).consumes_lock()),
         deposit: crate::ids::format(crate::ids::DEPOSIT, observed.deposit_id),
     }
 }
@@ -151,7 +155,7 @@ async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observe
                 let chain_id = u64::try_from(chain_id).ok()?;
                 let tx_hash = tx_hash.parse().ok()?;
                 Some(Observed {
-                    status: "final",
+                    status: "recorded",
                     reversed: state == "reversed",
                     deposit_id: id,
                     tx_hash,
@@ -167,7 +171,7 @@ async fn address_deposits(pool: &PgPool, address_id: Uuid) -> Result<Vec<Observe
         .ok_or_else(ApiError::internal)
 }
 
-fn estimated_final_at(block_time: DateTime<Utc>) -> DateTime<Utc> {
+pub(super) fn estimated_final_at(block_time: DateTime<Utc>) -> DateTime<Utc> {
     block_time
         .checked_add_signed(ESTIMATED_FINALITY_DELAY)
         .unwrap_or(block_time)

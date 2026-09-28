@@ -30,6 +30,9 @@ class Refund:
             deposit (Deposit | str): A deposit id, or the deposit with `expand[]`.
             destination_address (str): Destination address.
             id (str): `re_` id.
+            livemode (bool): Whether the refund was requested with a live key.
+            metadata (RefundMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when
+                none.
             object_ (str): Always `refund`.
             status (str): `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
                 final), `failed` (the attached transaction does not pay the refund; see
@@ -40,16 +43,9 @@ class Refund:
                 `sender_mismatch`,
                 `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
                 added.
-            livemode (bool | Unset): Whether the refund was requested with a live key. Always sent; optional in the schema
-                like
-                the quote's.
             log_index (int | None | Unset): Block-wide index of the paying `Transfer` log: as named when marked paid, or
                 found at
                 verification.
-            metadata (RefundMetadata | Unset): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}`
-                when none.
-                Always sent; optional in the schema so clients also parse objects from servers, and
-                events rendered, before metadata.
             transaction_hash (None | str | Unset): The attached refund transaction, once marked paid.
     """
 
@@ -58,13 +54,13 @@ class Refund:
     deposit: Deposit | str
     destination_address: str
     id: str
+    livemode: bool
+    metadata: RefundMetadata
     object_: str
     status: str
     treasury: str
     failure_reason: None | str | Unset = UNSET
-    livemode: bool | Unset = UNSET
     log_index: int | None | Unset = UNSET
-    metadata: RefundMetadata | Unset = UNSET
     transaction_hash: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -86,6 +82,10 @@ class Refund:
 
         id = self.id
 
+        livemode = self.livemode
+
+        metadata = self.metadata.to_dict()
+
         object_ = self.object_
 
         status = self.status
@@ -98,17 +98,11 @@ class Refund:
         else:
             failure_reason = self.failure_reason
 
-        livemode = self.livemode
-
         log_index: int | None | Unset
         if isinstance(self.log_index, Unset):
             log_index = UNSET
         else:
             log_index = self.log_index
-
-        metadata: dict[str, Any] | Unset = UNSET
-        if not isinstance(self.metadata, Unset):
-            metadata = self.metadata.to_dict()
 
         transaction_hash: None | str | Unset
         if isinstance(self.transaction_hash, Unset):
@@ -125,6 +119,8 @@ class Refund:
                 "deposit": deposit,
                 "destination_address": destination_address,
                 "id": id,
+                "livemode": livemode,
+                "metadata": metadata,
                 "object": object_,
                 "status": status,
                 "treasury": treasury,
@@ -132,12 +128,8 @@ class Refund:
         )
         if failure_reason is not UNSET:
             field_dict["failure_reason"] = failure_reason
-        if livemode is not UNSET:
-            field_dict["livemode"] = livemode
         if log_index is not UNSET:
             field_dict["log_index"] = log_index
-        if metadata is not UNSET:
-            field_dict["metadata"] = metadata
         if transaction_hash is not UNSET:
             field_dict["transaction_hash"] = transaction_hash
 
@@ -170,6 +162,10 @@ class Refund:
 
         id = d.pop("id")
 
+        livemode = d.pop("livemode")
+
+        metadata = RefundMetadata.from_dict(d.pop("metadata"))
+
         object_ = d.pop("object")
 
         status = d.pop("status")
@@ -185,8 +181,6 @@ class Refund:
 
         failure_reason = _parse_failure_reason(d.pop("failure_reason", UNSET))
 
-        livemode = d.pop("livemode", UNSET)
-
         def _parse_log_index(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -195,13 +189,6 @@ class Refund:
             return cast(int | None | Unset, data)
 
         log_index = _parse_log_index(d.pop("log_index", UNSET))
-
-        _metadata = d.pop("metadata", UNSET)
-        metadata: RefundMetadata | Unset
-        if isinstance(_metadata, Unset):
-            metadata = UNSET
-        else:
-            metadata = RefundMetadata.from_dict(_metadata)
 
         def _parse_transaction_hash(data: object) -> None | str | Unset:
             if data is None:
@@ -218,13 +205,13 @@ class Refund:
             deposit=deposit,
             destination_address=destination_address,
             id=id,
+            livemode=livemode,
+            metadata=metadata,
             object_=object_,
             status=status,
             treasury=treasury,
             failure_reason=failure_reason,
-            livemode=livemode,
             log_index=log_index,
-            metadata=metadata,
             transaction_hash=transaction_hash,
         )
 
