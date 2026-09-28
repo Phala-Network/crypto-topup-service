@@ -96,7 +96,8 @@ macro_rules! endpoint_columns {
 }
 
 /// An endpoint's undelivered deliveries: how many, and the creation time of the oldest one's
-/// event.
+/// event. A notice to a URL the endpoint had before a change is not a delivery to the endpoint as it
+/// is now (like its attempts, [`crate::outbox`]), so it is not part of its backlog.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Backlog {
     /// Deliveries neither delivered nor stopped; they are retried until delivered.
@@ -115,7 +116,7 @@ pub async fn backlogs<'e>(
         SELECT delivery.endpoint_id, count(*), min(event.created)
         FROM webhook_deliveries AS delivery
         JOIN events AS event ON event.id = delivery.event_id
-        WHERE delivery.endpoint_id = ANY($1)
+        WHERE delivery.endpoint_id = ANY($1) AND delivery.url IS NULL
           AND delivery.delivered_at IS NULL AND delivery.failed_at IS NULL
         GROUP BY delivery.endpoint_id
         "#,

@@ -1308,6 +1308,7 @@ async fn failing_webhook_endpoints(
         JOIN events AS event ON event.id = delivery.event_id
         JOIN accounts AS account ON account.id = endpoint.account_id
         WHERE delivery.delivered_at IS NULL AND delivery.failed_at IS NULL
+          AND delivery.url IS NULL
           AND endpoint.status = 'enabled' AND endpoint.deleted_at IS NULL
         GROUP BY endpoint.id, account.public_id
         HAVING min(event.created) < $1 - make_interval(hours => $2)
