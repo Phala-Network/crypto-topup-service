@@ -317,11 +317,15 @@ async fn credit_past_the_unfinalized_cap_waits_for_finality() -> Result<()> {
             };
             set_paused("{merchant}").await?;
             for _ in 0..2 {
-                ensure!(matches!(pump.run_once().await?, RunOnceResult::Applied { .. }));
+                ensure!(matches!(
+                    pump.run_once().await?,
+                    RunOnceResult::Applied { .. }
+                ));
             }
             ensure!(state(first).await? == DepositState::Confirmed);
             ensure!(state(second).await? == DepositState::Confirmed);
-            let exposure = db::unfinalized_credit(pool, seed.account_id, livemode, Uuid::nil()).await?;
+            let exposure =
+                db::unfinalized_credit(pool, seed.account_id, livemode, Uuid::nil()).await?;
             ensure!(exposure.credited == 0 && exposure.cap == 50, "{exposure:?}");
             set_paused("{}").await?;
 
