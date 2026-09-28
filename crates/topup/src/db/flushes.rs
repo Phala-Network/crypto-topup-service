@@ -313,8 +313,8 @@ pub async fn rebind_planned_flushes(
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO audit (id, actor, action, subject, reason)
-            VALUES ($1, $2, 'flush.plan_operator_rebound', $3, $4)
+            INSERT INTO audit (id, actor_type, actor_id, action, subject, reason)
+            VALUES ($1, 'system', $2, 'flush.plan_operator_rebound', $3, $4)
             "#,
         )
         .bind(Uuid::new_v4())
@@ -472,8 +472,8 @@ pub async fn void_paused_plan(
     }
     sqlx::query(
         r#"
-        INSERT INTO audit (id, actor, action, subject, reason)
-        VALUES ($1, 'flusher', 'flush.send_paused', $2, $3)
+        INSERT INTO audit (id, actor_type, actor_id, action, subject, reason)
+        VALUES ($1, 'system', 'flusher', 'flush.send_paused', $2, $3)
         "#,
     )
     .bind(Uuid::new_v4())

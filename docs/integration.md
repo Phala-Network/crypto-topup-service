@@ -1,6 +1,6 @@
 # Integration guide
 
-For the Phala Cloud backend team, who connect Phala Cloud (product slug `phala-cloud`) to this
+For the Phala Cloud backend team, who connect Phala Cloud (a Phala Pay account, `acct_…`) to this
 service. Where this guide and the code disagree, the code wins. The contract is defined by:
 
 - [crates/topup/openapi.json](../crates/topup/openapi.json): every request and response shape,
@@ -43,7 +43,7 @@ example) and fail to find the package; install it with `uv` or `pip` directly, a
 and pin the service's settlement key from its attestation (§5.3):
 
 ```sh
-uvx --from phala-pay topup-sdk keygen --keyid phala-cloud/v1 --seed-out product.seed
+uvx --from phala-pay topup-sdk keygen --keyid pending/v1 --seed-out product.seed
 ```
 
 **1. Backend: create a quote, return its client secret.** Only the create response carries
@@ -53,7 +53,8 @@ new secret (the old one stops working), which is how a reloaded page resumes.
 ```python
 from phala_pay import PhalaPay
 
-pay = PhalaPay(api_base=PHALA_PAY_API_BASE, key_id="phala-cloud/v1", key_file="product.seed")
+# PHALA_PAY_KEY_ID is the key id the operator issued with your account, "acct_…/v1".
+pay = PhalaPay(api_base=PHALA_PAY_API_BASE, key_id=PHALA_PAY_KEY_ID, key_file="product.seed")
 
 @app.post("/topups")
 def create_topup(body: TopupRequest, team: Team = Depends(current_team)) -> dict[str, str]:
@@ -184,7 +185,7 @@ and never reduces a credit.
 }
 ```
 
-- `account_id` is your workspace id (1 to 255 bytes); its account is created by its first quote.
+- `account_id` is your workspace id (1 to 200 characters); its account is created by its first quote.
 - `amount` is an integer in US cents; `amount_atomic` is the exact token amount to pay, a decimal
   string in base units, rounded up to four token decimals (the route's `quote.amount_decimals`) so
   the payer reads and types a short amount such as `100.5026 PHA`; show every digit of it. The
@@ -389,7 +390,7 @@ closed or suspended workspace, your own caps), record it as held and answer `2xx
 has a destination address from the user, an operator refunds it from your admin (§3).
 Finance approves it and executes it from the treasury Safe, and `deposit.refunded` follows. To
 stop crediting an account before deposits arrive, pause its `settlement` scope
-(the operator's `POST /v1/admin/products/phala-cloud/accounts/{account_id}/pause`): its deposits
+(the operator's `POST /v1/admin/accounts/{acct}/customers/{account_id}/pause`): its deposits
 then wait in `confirmed` until you resume.
 
 ### 2.5 Phala Cloud ledger mapping
@@ -590,11 +591,13 @@ On a machine you control, one key per environment:
 
 ```sh
 cd sdk/python
-uv run --locked topup-sdk keygen --keyid phala-cloud/v1 --seed-out ~/phala-cloud-staging.seed
+uv run --locked topup-sdk keygen --keyid pending/v1 --seed-out ~/phala-cloud-staging.seed
 ```
 
 It writes the 32-byte seed as hex to a new mode-0600 file and prints
-`{"keyid": "phala-cloud/v1", "public_key": "<base64>"}`. Keep the seed in your secret store;
+`{"keyid": "pending/v1", "public_key": "<base64>"}`; your key id is your account's, known once the
+operator issues it (§5.2), and the key itself does not depend on it. Keep the seed in your secret
+store;
 never send it. Use a distinct key per environment: each deployment records used signatures in its
 own database, so a shared key would let a request be replayed against another deployment within
 the five-minute window.
@@ -604,13 +607,14 @@ the five-minute window.
 Send the operator the printed `keyid` and `public_key` and your webhook URL (public `https`). The
 operator then:
 
-1. names your product in the attested route file (`product: phala-cloud`; your key id is
-   `phala-cloud/v1`; a route change is a new attested deployment);
-2. issues the product with the admin-signed `POST /v1/admin/products {slug, public_key,
-   webhook_url}` ([deploy/README.md](../deploy/README.md#product-credentials)).
+1. issues your account with the admin-signed `POST /v1/admin/accounts {name, livemode,
+   public_key, webhook_url}` ([deploy/README.md](../deploy/README.md#account-credentials));
+2. sends you its id, `acct_…`, and your key id, `{acct_…}/v1`: sign every request with that key
+   id (`topup-sdk keygen` printed a placeholder key id; the key itself is unchanged).
 
-A repeat with the same values returns the same product; a different key or webhook URL for an
-issued slug is refused with `409`, because changing them is a replacement (§5.4).
+Your key is either live or test (`livemode`); it quotes on every attested route of its mode, and
+reads only the objects created in that mode. Changing the key or webhook URL is a replacement
+(§5.4).
 
 ### 5.3 Pin the service's settlement key
 
@@ -652,18 +656,18 @@ worthless without the verifier step: it proves only that the response is self-co
 
 ### 5.4 Rotate the product key
 
-The key id, `phala-cloud/v1`, stays the same; a rotation replaces only the public key the service
-stores for your slug:
+The key id, `{acct_…}/v1`, stays the same; a rotation replaces only the public key the service
+stores for your account:
 
 1. Generate a new key under the same key id (§5.1) and send the operator its `public_key`.
-2. The operator stores it with the admin-signed `PUT /v1/admin/products/phala-cloud {public_key,
-   webhook_url, reason}` ([deploy/README.md](../deploy/README.md#product-credentials)); the same
+2. The operator stores it with the admin-signed `PUT /v1/admin/accounts/{acct} {public_key,
+   webhook_url, reason}` ([deploy/README.md](../deploy/README.md#account-credentials)); the same
    call changes your webhook URL.
 3. Switch your signer to the new seed.
 
 The cut is immediate: from step 2 the old key gets `401`, and the new key gets `401` before it.
-There is no overlap window, because the service verifies a product against one stored key under the
-one key id its routes name. Agree a time for step 2 and switch right after it; `TopupClient` does
+There is no overlap window, because the service verifies an account against one stored key under
+its one key id. Agree a time for step 2 and switch right after it; `TopupClient` does
 not retry `401`. For a leaked seed, tell the operator at once: they follow the
 [product key compromise runbook](../deploy/runbooks/product-key-compromise.md).
 
@@ -674,7 +678,7 @@ Every product request carries an RFC 9421 HTTP Message Signature with your ed255
 - covered components, in order: `"@method"`, `"@target-uri"`, `"content-digest"`, plus
   `"idempotency-key"` when that header is sent (quote and refund creation);
 - `Content-Digest: sha-256=:<base64>:` over the exact body bytes, also for an empty body;
-- parameters `created` (Unix seconds) and `keyid` (`phala-cloud/v1`), optionally
+- parameters `created` (Unix seconds) and `keyid` (`{acct_…}/v1`), optionally
   `alg="ed25519"` and `nonce`, serialized as RFC 8941 structured fields;
 - `@target-uri` is `scheme://host[:port]/path?query` of the public origin in §4.1, exactly as sent.
   The service rebuilds it from its configured origin and ignores `Host` and `X-Forwarded-*`, so a
@@ -689,7 +693,7 @@ by the Rust tests; the Python signer reproduces them byte for byte).
 ```python
 from topup_sdk import RequestSigner, TopupClient
 
-signer = RequestSigner.from_seed_file("phala-cloud/v1", "/secrets/phala-cloud-staging.seed")
+signer = RequestSigner.from_seed_file(PHALA_PAY_KEY_ID, "/secrets/phala-cloud-staging.seed")
 # The forwarder factory and implementation, pinned from the attested deployment like the settlement
 # key (§5.3), and your treasury: the client recomputes every open quote's address before returning it.
 forwarder = (
@@ -704,7 +708,8 @@ with TopupClient(
     quote = client.create_quote("team-42", 2500, chain_id=11155111, asset="pha")
 ```
 
-The key id names the product: `phala-cloud/v1` is product `phala-cloud`.
+The key id names the account: `{acct_…}/v1` is account `acct_…`, whose id is also the first input
+of every quote's address salt.
 
 ### 5.6 Idempotency and retries
 
@@ -725,8 +730,8 @@ on every retry.
 
 ### 5.7 Endpoints
 
-Every path is a top-level resource; the key id names your product, and a request for another
-product's resources is refused. `account_id` is your workspace id (1 to 255 bytes).
+Every path is a top-level resource; the key id names your account and its key's mode, and another
+account's or the other mode's objects answer `404`, as a missing one does. `account_id` is your workspace id (1 to 200 characters).
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|

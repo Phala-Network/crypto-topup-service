@@ -1111,7 +1111,8 @@ async fn replay_outbox(
     } else {
         "manual CLI replay of pending events"
     };
-    let count = topup::outbox::replay(&pool, selector, force, "cli", reason)
+    let actor = topup::audit::Actor::system("cli");
+    let count = topup::outbox::replay(&pool, selector, force, &actor, reason)
         .await
         .context("failed to schedule outbox replay")?;
     tracing::info!(count, force, "outbox replay scheduled");

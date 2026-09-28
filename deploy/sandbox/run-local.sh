@@ -56,7 +56,6 @@ rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
 service_url="http://127.0.0.1:$TOPUP_LOCAL_PORT"
 public_url="http://product:8089"
 slug="sandbox-local"
-keyid="$slug/v1"
 mkdir -p "$TOPUP_LOCAL_ROUTES_DIR"
 # A throwaway admin key for this run; the service issues the product through the admin API.
 export TOPUP_LOCAL_ADMIN_KID="sandbox-admin/v1"
@@ -84,7 +83,8 @@ implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rp
 jq . "$tmp/contracts.json"
 
 echo "== creating the product key and rendering the sandbox route"
-uv run --locked --project "$root/sdk/python" topup-sdk keygen --keyid "$keyid" \
+# The key id is the issued account's, `{acct_…}/v1`, known once the account is issued below.
+uv run --locked --project "$root/sdk/python" topup-sdk keygen --keyid "$slug/v1" \
     --seed-out "$tmp/product.seed" >"$tmp/product-key.json"
 FORWARDER_FACTORY="$factory" TREASURY="$owner" \
     TEST_TOKEN=$(jq -er .test_token "$tmp/contracts.json") \
@@ -98,27 +98,30 @@ echo "== starting the service"
 "${compose[@]}" up -d topup
 wait_for "GET /healthz" curl -fsS "$service_url/healthz"
 
-echo "== issuing product credentials through POST /v1/admin/products"
+echo "== issuing the sandbox account through POST /v1/admin/accounts"
 # Signed for the service's public origin (http://topup:8080), sent to its published port.
-jq -n --arg slug "$slug" --arg public_key "$(jq -er .public_key "$tmp/product-key.json")" \
+jq -n --arg name "$slug" --arg public_key "$(jq -er .public_key "$tmp/product-key.json")" \
     --arg webhook_url "$public_url/webhooks" \
-    '{slug: $slug, public_key: $public_key, webhook_url: $webhook_url}' >"$tmp/product.json"
+    '{name: $name, livemode: false, public_key: $public_key, webhook_url: $webhook_url}' \
+    >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
-    http://topup:8080/v1/admin/products "$tmp/product.json" "$tmp/admin.pem" \
+    http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" \
     "$TOPUP_LOCAL_ADMIN_KID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
     -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
-    --data-binary @"$tmp/product.json" "$service_url/v1/admin/products"
-echo
+    --data-binary @"$tmp/product.json" "$service_url/v1/admin/accounts" >"$tmp/account.json"
+account=$(jq -er .id "$tmp/account.json")
+keyid=$(jq -er .key_id "$tmp/account.json")
+echo "issued $account"
 
 # Addresses as seen from the product container on the compose network.
 jq -n \
-    --arg slug "$slug" --arg keyid "$keyid" --arg route "sandbox-$slug-tpha-usd" \
+    --arg account "$account" --arg keyid "$keyid" --arg route "sandbox-$slug-tpha-usd" \
     --arg factory "$factory" --arg implementation "$implementation" \
     --arg token "$(jq -er .test_token "$tmp/contracts.json")" \
     --arg unsupported "$(jq -er .unsupported_token "$tmp/contracts.json")" \
     --arg public_url "$public_url" --arg payer "$owner" --arg topup "$project-topup-1" \
-    '{service_url: "http://topup:8080", product_slug: $slug, product_keyid: $keyid,
+    '{service_url: "http://topup:8080", product_slug: $account, product_keyid: $keyid,
       product_seed_file: "/sandbox/product.seed", route: $route, chain_id: 11155111,
       rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
       treasury: $payer, token: $token, token_symbol: "PHA", unsupported_token: $unsupported,

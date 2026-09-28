@@ -139,7 +139,7 @@ impl ParsePauseScopeError {
 /// Checks are deliberately ordered as sanctions, bounds, then pause. A sanctions hit therefore
 /// rejects even when the amount is out of bounds or settlement is paused, and an out-of-bounds
 /// deposit rejects instead of waiting behind a pause. Only the `settlement` pause scope gates this
-/// step because it holds a deposit before product crediting; the other scopes govern their own
+/// step because it holds a deposit before crediting; the other scopes govern their own
 /// operations.
 ///
 /// The sanctions truth table is:
@@ -160,8 +160,8 @@ pub fn screen(
     amount: AtomicAmount,
     sanctions: &SanctionsResult,
     bounds: &Bounds,
+    customer_scopes: &PauseScopes,
     account_scopes: &PauseScopes,
-    product_scopes: &PauseScopes,
 ) -> StepOutcome {
     if matches!(sanctions.provider_a, SanctionsAnswer::Sanctioned)
         || matches!(sanctions.provider_b, SanctionsAnswer::Sanctioned)
@@ -181,8 +181,8 @@ pub fn screen(
         return StepOutcome::Reject(RejectReason::OutOfBounds);
     }
 
-    if account_scopes.contains(PauseScope::Settlement)
-        || product_scopes.contains(PauseScope::Settlement)
+    if customer_scopes.contains(PauseScope::Settlement)
+        || account_scopes.contains(PauseScope::Settlement)
     {
         return StepOutcome::Wait {
             reason: WaitReason::Paused,
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_pause_on_account_or_product_waits() {
+    fn settlement_pause_on_customer_or_account_waits() {
         let sanctions = sanctions(SanctionsAnswer::Clear, SanctionsAnswer::Clear);
         let bounds = bounds();
         let active = PauseScopes::default();
@@ -354,14 +354,14 @@ mod tests {
             (&paused, &paused, wait),
         ];
 
-        for (account_scopes, product_scopes, expected) in cases {
+        for (customer_scopes, account_scopes, expected) in cases {
             assert_eq!(
                 screen(
                     amount(15),
                     &sanctions,
                     &bounds,
+                    customer_scopes,
                     account_scopes,
-                    product_scopes,
                 ),
                 expected
             );

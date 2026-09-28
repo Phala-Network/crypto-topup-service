@@ -483,10 +483,7 @@ mod tests {
                     min_flush_atomic: AtomicAmount::new(U256::ZERO),
                     min_refund_atomic: AtomicAmount::new(U256::ZERO),
                 },
-                destination: DestinationConfig {
-                    product: "phala-cloud".to_owned(),
-                    unit_decimals: 2,
-                },
+                destination: DestinationConfig { unit_decimals: 2 },
                 screening: ScreeningConfig {
                     sanctions_oracle: Address::from([9_u8; 20]),
                     min_deposit_atomic: AtomicAmount::new(U256::ZERO),

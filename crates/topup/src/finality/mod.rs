@@ -7,7 +7,7 @@
 //!   followed and nothing is reversed.
 //! - Receipt at or below `finalized` without the transfer, or no receipt on both providers while
 //!   the sender's nonce at `finalized` is past the transaction's (another transaction consumed
-//!   it): the deposit is `reversed`, `deposit.reversed` is sent if the product was told of it,
+//!   it): the deposit is `reversed`, `deposit.reversed` is sent if the account was told of it,
 //!   and a quote it consumed opens again (or expires).
 //! - No receipt and the nonce not consumed: the transaction is pending again; the watch waits and
 //!   alerts after an hour.
@@ -579,7 +579,7 @@ async fn record_evidence(
 }
 
 /// Reverses a deposit that is still in the observed state and not final: the transition and, for
-/// a deposit the product was told of (`credited` or `rejected`), `deposit.reversed`; a quote it
+/// a deposit the account was told of (`credited` or `rejected`), `deposit.reversed`; a quote it
 /// consumed opens again while its window lasts, or expires with `quote.expired`. A pending refund
 /// cannot exist: refunds require a final deposit.
 async fn reverse_deposit(
@@ -593,15 +593,13 @@ async fn reverse_deposit(
     let from = db::state_code(transition.from);
     let to = db::state_code(transition.to);
     let mut transaction = pool.begin().await?;
-    let product_id = sqlx::query_scalar::<_, Uuid>(
+    let owner = sqlx::query_as::<_, (Uuid, bool)>(
         r#"
-        UPDATE deposits AS deposit
+        UPDATE deposits
         SET state = $3, reason = NULL, lease_token = NULL, lease_until = NULL,
             next_attempt_at = now(), updated_at = now()
-        FROM accounts AS account
-        WHERE deposit.id = $1 AND deposit.state = $2 AND deposit.final_at IS NULL
-          AND account.id = deposit.account_id
-        RETURNING account.product_id
+        WHERE id = $1 AND state = $2 AND final_at IS NULL
+        RETURNING account_id, livemode
         "#,
     )
     .bind(deposit.id)
@@ -609,7 +607,7 @@ async fn reverse_deposit(
     .bind(to)
     .fetch_optional(&mut *transaction)
     .await?;
-    let Some(product_id) = product_id else {
+    let Some((account_id, livemode)) = owner else {
         return Ok(false);
     };
     insert_transition(
@@ -626,11 +624,12 @@ async fn reverse_deposit(
         DepositState::Credited | DepositState::Rejected
     ) {
         db::enqueue_in(
-            &mut *transaction,
+            &mut transaction,
             &NewOutboxEvent {
                 id: reversed_event_id(deposit.id),
                 event_type: "deposit.reversed".to_owned(),
-                product_id,
+                account_id,
+                livemode,
                 object: EventObject::Deposit(deposit.id),
                 next_attempt_at: Utc::now(),
             },
@@ -639,13 +638,13 @@ async fn reverse_deposit(
     }
     let reopened = sqlx::query(
         r#"
-        UPDATE rate_locks
+        UPDATE quotes
         SET consumed_by = NULL,
             status = CASE WHEN expires_at > now() THEN 'open' ELSE 'expired' END,
             exposure_reserved = expires_at > now(),
             closed_at = CASE WHEN expires_at > now() THEN NULL ELSE now() END
         WHERE consumed_by = $1
-        RETURNING address_id, status
+        RETURNING id, status
         "#,
     )
     .bind(deposit.id)
@@ -654,14 +653,15 @@ async fn reverse_deposit(
     if let Some(row) = reopened
         && row.try_get::<String, _>("status")? == "expired"
     {
-        let address_id: Uuid = row.try_get("address_id")?;
+        let quote_id: Uuid = row.try_get("id")?;
         db::enqueue_in(
-            &mut *transaction,
+            &mut transaction,
             &NewOutboxEvent {
-                id: event_id("quote.expired", address_id),
+                id: event_id("quote.expired", quote_id),
                 event_type: "quote.expired".to_owned(),
-                product_id,
-                object: EventObject::Quote(address_id),
+                account_id,
+                livemode,
+                object: EventObject::Quote(quote_id),
                 next_attempt_at: Utc::now(),
             },
         )

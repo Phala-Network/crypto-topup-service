@@ -1,8 +1,8 @@
-# Staging route on Sepolia (test contracts). The `phala-cloud` product is the staging reference-product CVM (deploy/README.md, "Staging reference product").
+# Staging route on Sepolia (test contracts), a test-mode route any account can quote on; the staging reference-product CVM uses it (deploy/README.md, "Staging reference product").
 # Every value not written here is a code default (docs/architecture.md §14); `topup route show` prints the resolved route.
 route: phala-cloud-sepolia-pha-usd
 version: 2
-product: phala-cloud
+livemode: false
 
 chain:
   chain_id: 11155111

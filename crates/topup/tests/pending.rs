@@ -29,11 +29,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
-use support::seed::{self, NewAccount, NewProduct};
+use support::seed::{self, NewAccount, NewAddress};
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request, with_database};
 
 const ANVIL_DEPLOYER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-const PRODUCT_KID: &str = "phala-cloud/v1";
 /// With 32-slot epochs anvil reports `finalized = latest - 64`.
 const FINALITY_LAG: u64 = 64;
 
@@ -78,7 +77,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
         .context("one chain")?;
     let product_key = SigningKey::from_bytes(&[61; 32]);
     let admin_key = SigningKey::from_bytes(&[62; 32]);
-    seed_account(pool, &product_key).await?;
+    let kid = seed_account(pool, &product_key).await?;
     let app = topup::api::router(AppState {
         pool: pool.clone(),
         routes: Arc::clone(&route_set),
@@ -96,6 +95,7 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let api = Api {
         app,
         key: product_key,
+        kid,
         created: Utc::now().timestamp().into(),
         quotes: std::sync::Mutex::default(),
     };
@@ -241,12 +241,13 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     scan_once(pool, &reader, &chain_routes).await?;
     let underpayment: Uuid =
         sqlx::query_scalar("SELECT id FROM deposits WHERE address_id = $1 AND amount_atomic = 50")
-            .bind(api.address_id("checkout-2")?)
+            .bind(api.address_id(pool, "checkout-2").await?)
             .fetch_one(pool)
             .await?;
     sqlx::query(
-        "UPDATE rate_locks SET status = 'consumed', consumed_by = $1, exposure_reserved = false, \
-         closed_at = now() WHERE address_id = (SELECT address_id FROM deposits WHERE id = $1)",
+        "UPDATE quotes SET status = 'consumed', consumed_by = $1, exposure_reserved = false, \
+         closed_at = now() WHERE id = (SELECT address.quote_id FROM deposits AS deposit \
+         JOIN addresses AS address ON address.id = deposit.address_id WHERE deposit.id = $1)",
     )
     .bind(underpayment)
     .execute(pool)
@@ -312,36 +313,29 @@ async fn head_scan_watches_only_open_quote_addresses() -> Result<()> {
 }
 
 async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
-    let product_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO products (id, slug, webhook_url, pubkey) \
-         VALUES ($1, 'watch', 'https://product.test/w', 'k')",
+    let (_, customer) = seed::create_account_and_customer(
+        pool,
+        &NewAccount {
+            livemode: false,
+            ..NewAccount::named("watch")
+        },
+        "ws-0",
     )
-    .bind(product_id)
-    .execute(pool)
     .await?;
-    // A persistent address from before quotes were the only flow is found by the finalized
-    // scanner, but the head scan no longer watches it. Its address is `0x0…0`.
-    sqlx::query(
-        r#"
-        WITH account AS (
-            INSERT INTO accounts (id, product_id, external_id)
-            VALUES (gen_random_uuid(), $1, 'ws-0')
-            RETURNING id
-        )
-        INSERT INTO addresses (id, account_id, chain_id, kind, version, salt, address)
-        SELECT gen_random_uuid(), account.id, $2, 'persistent', 1, '0x' || repeat('0', 64),
-               '0x' || repeat('0', 40)
-        FROM account
-        "#,
+    // An address whose quote was canceled is found by the finalized scanner, but the head scan
+    // does not watch it. Its address is `0x0…0`.
+    seed::insert_address(
+        pool,
+        &NewAddress {
+            id: Uuid::new_v4(),
+            customer_id: customer.id,
+            chain_id: CHAIN_ID,
+            route: "r".to_owned(),
+            salt: B256::ZERO,
+            address: Address::ZERO,
+        },
     )
-    .bind(product_id)
-    .bind(i64::try_from(CHAIN_ID)?)
-    .execute(pool)
     .await?;
-    let account_id: Uuid = sqlx::query_scalar("SELECT id FROM accounts WHERE external_id = 'ws-0'")
-        .fetch_one(pool)
-        .await?;
     for (index, status, expires, watched) in [
         (
             0xffff_00a1_u64,
@@ -365,20 +359,23 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
     ] {
         let address = format!("0x{index:040x}");
         let address_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO addresses (id, account_id, chain_id, kind, version, lock_ref, salt, address) \
-             VALUES ($1, $2, $3, 'lock', 0, $4, '0x' || repeat('0', 64), $4)",
+        seed::insert_address(
+            pool,
+            &NewAddress {
+                id: address_id,
+                customer_id: customer.id,
+                chain_id: CHAIN_ID,
+                route: "r".to_owned(),
+                salt: B256::from(U256::from(index)),
+                address: address.parse()?,
+            },
         )
-        .bind(address_id)
-        .bind(account_id)
-        .bind(i64::try_from(CHAIN_ID)?)
-        .bind(&address)
-        .execute(pool)
         .await?;
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, \
-             expires_at, status, closed_at) VALUES ($1, 'r', 1, 1, 1, {expires}, $2, \
-             CASE WHEN $2 = 'open' THEN NULL ELSE now() END)"
+            "UPDATE quotes SET amount_atomic = 1, price_scaled = 1, credit_minor = 1, \
+             expires_at = {expires}, status = $2, \
+             closed_at = CASE WHEN $2 = 'open' THEN NULL ELSE now() END \
+             WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)"
         )))
         .bind(address_id)
         .bind(status)
@@ -398,7 +395,7 @@ async fn run_watched_scenario(pool: &sqlx::PgPool) -> Result<()> {
             .await?
             .iter()
             .all(|watched| watched.address != Address::ZERO),
-        "the head scan watches a persistent address"
+        "the head scan watches an address whose quote was canceled"
     );
 
     // A head scan from a provider that lags behind a stored row leaves the row alone; the next
@@ -450,7 +447,7 @@ impl Ledger {
                 .fetch_one(pool)
                 .await?,
             locks: sqlx::query_as(
-                "SELECT status, consumed_by, exposure_reserved FROM rate_locks ORDER BY address_id",
+                "SELECT status, consumed_by, exposure_reserved FROM quotes ORDER BY id",
             )
             .fetch_all(pool)
             .await?,
@@ -461,6 +458,8 @@ impl Ledger {
 struct Api {
     app: axum::Router,
     key: SigningKey,
+    /// The account's key id, `{acct_…}/v1`.
+    kid: String,
     /// Distinct `created` per request: identical requests signed in the same second would carry
     /// the same single-use signature.
     created: std::sync::atomic::AtomicI64,
@@ -529,8 +528,14 @@ impl Api {
         ))
     }
 
-    fn address_id(&self, name: &str) -> Result<Uuid> {
-        topup::ids::parse(topup::ids::QUOTE, &self.id(name)?).context("quote id")
+    async fn address_id(&self, pool: &sqlx::PgPool, name: &str) -> Result<Uuid> {
+        let quote = topup::ids::parse(topup::ids::QUOTE, &self.id(name)?).context("quote id")?;
+        Ok(
+            sqlx::query_scalar("SELECT id FROM addresses WHERE quote_id = $1")
+                .bind(quote)
+                .fetch_one(pool)
+                .await?,
+        )
     }
 
     async fn quote(&self, name: &str) -> Result<Value> {
@@ -556,7 +561,7 @@ impl Api {
                 method,
                 path,
                 body,
-                PRODUCT_KID,
+                &self.kid,
                 &self.key,
                 self.created
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -580,7 +585,7 @@ async fn pending_rows(pool: &sqlx::PgPool) -> Result<i64> {
 }
 
 async fn outbox_rows(pool: &sqlx::PgPool) -> Result<i64> {
-    Ok(sqlx::query_scalar("SELECT count(*) FROM outbox")
+    Ok(sqlx::query_scalar("SELECT count(*) FROM events")
         .fetch_one(pool)
         .await?)
 }
@@ -594,34 +599,27 @@ async fn pending_block_time(pool: &sqlx::PgPool, tx_hash: &str) -> Result<DateTi
     )
 }
 
-async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<()> {
-    let product = seed::create_product(
-        pool,
-        &NewProduct {
-            id: Uuid::new_v4(),
-            slug: "phala-cloud".to_owned(),
-            webhook_url: "https://product.test/webhooks".to_owned(),
-            pubkey: public_key_base64(key),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
-    seed::create_account(
+/// Seeds a test-mode account signing with `key` and its customer `ws-pending`; returns the
+/// account's key id.
+async fn seed_account(pool: &sqlx::PgPool, key: &SigningKey) -> Result<String> {
+    let (account, _) = seed::create_account_and_customer(
         pool,
         &NewAccount {
-            id: Uuid::new_v4(),
-            product_id: product.id,
-            external_id: "ws-pending".to_owned(),
-            paused_scopes: Vec::new(),
+            livemode: false,
+            public_key: public_key_base64(key),
+            webhook_url: "https://product.test/webhooks".to_owned(),
+            ..NewAccount::named("phala-cloud")
         },
+        "ws-pending",
     )
     .await?;
-    Ok(())
+    Ok(format!("{}/v1", account.public_id))
 }
 
 fn test_route(token: Address) -> RouteFile {
     let yaml = include_str!("fixtures/phala-cloud-pha.yaml")
         .replace("chain_id: 1", &format!("chain_id: {CHAIN_ID}"))
+        .replace("livemode: true", "livemode: false")
         .replace(
             "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
             &format!("{token:#x}"),

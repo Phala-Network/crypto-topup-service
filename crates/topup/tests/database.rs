@@ -15,8 +15,8 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use topup::db::{
-    self, AddressKind, ApplyTransitionResult, EventObject, FlushedEvent, NewDeposit, NewFlush,
-    OutboxEvent, TransitionUpdate,
+    self, ApplyTransitionResult, EventObject, FlushedEvent, NewDeposit, NewFlush, OutboxEvent,
+    TransitionUpdate,
 };
 use topup::reconciler::{CheckName, Reconciler, ReconciliationChain, ReconciliationError};
 use topup::{heartbeat, restore};
@@ -27,7 +27,7 @@ use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 use support::with_database;
 
 #[tokio::test]
@@ -47,6 +47,228 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The schema is one migration that builds every table on an empty database: staging is reset
+/// rather than migrated (design §14, §16 PR 13).
+#[tokio::test]
+async fn one_migration_builds_the_schema_on_an_empty_database() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let migrations = db::MIGRATOR
+                .iter()
+                .filter(|migration| migration.migration_type.is_up_migration())
+                .count();
+            ensure!(
+                migrations == 1,
+                "expected one squashed migration, found {migrations}"
+            );
+            // `with_database` migrated a database created empty; every documented table exists
+            // and nothing else does.
+            let tables: Vec<String> = sqlx::query_scalar(
+                "SELECT tablename::text FROM pg_tables WHERE schemaname = 'public' ORDER BY 1",
+            )
+            .fetch_all(&context.owner_pool)
+            .await?;
+            let mut documented: Vec<&str> =
+                DOCUMENTED_GRANTS.iter().map(|(table, _)| *table).collect();
+            documented.sort_unstable();
+            ensure!(tables == documented, "tables={tables:?}");
+            // The migration refuses a database that already holds the pre-tenancy schema: it
+            // runs only on an empty one.
+            let rerun = sqlx::raw_sql(include_str!(
+                "../migrations/20261004000000_multi_tenant.up.sql"
+            ))
+            .execute(&context.owner_pool)
+            .await
+            .err();
+            assert_sqlstate(rerun, "42723")?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Composite keys tie every tenant row to its parent's account and mode, so no write can join
+/// rows of two accounts or two modes (design D13).
+#[tokio::test]
+async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let pool = &context.app_pool;
+            let seed = seed_account(pool, 90).await?;
+            let other = seed_account_without_address(pool, 91).await?;
+            // A quote of the seeded customer that has no address yet.
+            let quote = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO quotes (id, account_id, livemode, customer_id, route, \
+                 amount_atomic, price_scaled, credit_minor, expires_at) \
+                 VALUES ($1, $2, true, $3, 'r', 1, 1, 1, now())",
+            )
+            .bind(quote)
+            .bind(seed.account_id)
+            .bind(seed.customer_id)
+            .execute(pool)
+            .await?;
+
+            // An address for another account's quote, or for the quote in the other mode.
+            for (account, livemode) in [(other.account_id, true), (seed.account_id, false)] {
+                assert_sqlstate(
+                    sqlx::query(
+                        "INSERT INTO addresses (id, account_id, livemode, chain_id, quote_id, \
+                         salt, treasury, address) VALUES ($1, $2, $3, 1, $4, $5, $6, $7)",
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(account)
+                    .bind(livemode)
+                    .bind(quote)
+                    .bind(format!("{:#x}", b256(92)))
+                    .bind(format!("{:#x}", evm_address(92)))
+                    .bind(format!("{:#x}", evm_address(93)))
+                    .execute(pool)
+                    .await
+                    .err(),
+                    "23503",
+                )?;
+            }
+            // A quote for another account's customer.
+            assert_sqlstate(
+                sqlx::query(
+                    "INSERT INTO quotes (id, account_id, livemode, customer_id, route, \
+                     amount_atomic, price_scaled, credit_minor, expires_at) \
+                     VALUES ($1, $2, true, $3, 'r', 1, 1, 1, now())",
+                )
+                .bind(Uuid::new_v4())
+                .bind(other.account_id)
+                .bind(seed.customer_id)
+                .execute(pool)
+                .await
+                .err(),
+                "23503",
+            )?;
+            // A deposit is recorded under its address's account, mode, and customer, whatever
+            // the caller holds.
+            let deposit_id = insert_numbered_deposit(pool, &seed, 94).await?;
+            let deposit = db::get_deposit(pool, deposit_id)
+                .await?
+                .context("deposit")?;
+            ensure!(deposit.account_id == seed.account_id && deposit.livemode);
+            ensure!(deposit.customer_id == seed.customer_id);
+            // A refund of that deposit filed under another account.
+            assert_sqlstate(
+                sqlx::query(
+                    "INSERT INTO refunds (id, account_id, livemode, deposit_id, amount_atomic, \
+                     to_address, status, requested_by, route) \
+                     VALUES ($1, $2, true, $3, 1, $4, 'requested', 'test', 'r')",
+                )
+                .bind(Uuid::new_v4())
+                .bind(other.account_id)
+                .bind(deposit_id)
+                .bind(format!("{:#x}", evm_address(95)))
+                .execute(pool)
+                .await
+                .err(),
+                "23503",
+            )?;
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The one authorization table (design D13): secret keys hold every API permission and no
+/// dashboard permission, restricted keys may be granted the same, and the roles follow Stripe's.
+#[tokio::test]
+async fn the_authorization_table_grants_roles_and_keys_as_designed() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let rows: Vec<(String, String)> =
+                sqlx::query_as("SELECT principal, permission FROM permissions")
+                    .fetch_all(&context.app_pool)
+                    .await?;
+            let held = |principal: &str| -> std::collections::BTreeSet<&str> {
+                rows.iter()
+                    .filter(|(holder, _)| holder == principal)
+                    .map(|(_, permission)| permission.as_str())
+                    .collect()
+            };
+            let all: std::collections::BTreeSet<&str> = rows
+                .iter()
+                .map(|(_, permission)| permission.as_str())
+                .collect();
+            let (secret, restricted) = (held("key:secret"), held("key:restricted"));
+            let (owner, administrator) = (held("role:owner"), held("role:administrator"));
+            let (developer, view_only) = (held("role:developer"), held("role:view_only"));
+
+            ensure!(secret == restricted);
+            for dashboard_only in ["keys.write", "members.write", "treasury.write"] {
+                ensure!(!secret.contains(dashboard_only), "{dashboard_only}");
+            }
+            for api in [
+                "quotes.write",
+                "refunds.write",
+                "deposits.read",
+                "endpoints.write",
+            ] {
+                ensure!(secret.contains(api), "{api}");
+            }
+            ensure!(owner == all);
+            ensure!(
+                administrator
+                    .iter()
+                    .all(|permission| *permission != "ownership.write")
+            );
+            ensure!(administrator.len() + 1 == all.len());
+            ensure!(
+                view_only
+                    .iter()
+                    .all(|permission| permission.ends_with(".read"))
+            );
+            ensure!(
+                all.iter()
+                    .filter(|permission| permission.ends_with(".read"))
+                    .all(|permission| view_only.contains(permission))
+            );
+            let developer_writes: Vec<&str> = developer
+                .iter()
+                .copied()
+                .filter(|permission| permission.ends_with(".write"))
+                .collect();
+            ensure!(developer_writes == ["endpoints.write", "keys.write", "refunds.write"]);
+
+            // The service reads the table and checks it through `tenancy::holds`.
+            use topup::tenancy::{Permission, Principal, Role, holds};
+            ensure!(
+                holds(
+                    &context.app_pool,
+                    Principal::SecretKey,
+                    Permission::QuotesWrite
+                )
+                .await?
+            );
+            ensure!(
+                !holds(
+                    &context.app_pool,
+                    Principal::Role(Role::ViewOnly),
+                    Permission::RefundsWrite
+                )
+                .await?
+            );
+            // The migrations own it: the service cannot grant itself a permission.
+            assert_sqlstate(
+                sqlx::query(
+                    "INSERT INTO permissions (permission, principal) \
+                     VALUES ('keys.write', 'key:secret')",
+                )
+                .execute(&context.app_pool)
+                .await
+                .err(),
+                "42501",
+            )?;
             Ok(())
         })
     })
@@ -282,153 +504,11 @@ async fn restore_check_asks_the_product_nothing_and_keeps_recorded_credits() -> 
 }
 
 #[tokio::test]
-async fn fulfillment_migration_returns_cleared_deposits_to_confirmed_with_history() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            // Recreate the pre-migration schema, where `cleared` still existed.
-            sqlx::raw_sql(include_str!(
-                "../migrations/20260928000000_webhook_fulfillment.down.sql"
-            ))
-            .execute(&context.owner_pool)
-            .await?;
-            let seed = seed_account(&context.app_pool, 5).await?;
-            let cleared = insert_numbered_deposit(&context.app_pool, &seed, 5).await?;
-            sqlx::query(
-                "UPDATE deposits SET state = 'cleared', attempt = 3, valuation_at = now(), \
-                 price_scaled = 25000000, price_source = 'lock', credit_minor = 250 WHERE id = $1",
-            )
-            .bind(cleared)
-            .execute(&context.owner_pool)
-            .await?;
-
-            sqlx::raw_sql(include_str!(
-                "../migrations/20260928000000_webhook_fulfillment.up.sql"
-            ))
-            .execute(&context.owner_pool)
-            .await?;
-
-            let deposit = db::get_deposit(&context.app_pool, cleared)
-                .await?
-                .context("migrated deposit")?;
-            ensure!(deposit.state == DepositState::Confirmed);
-            ensure!(deposit.attempt == 0);
-            ensure!(deposit.credit_minor.map(|value| value.value()) == Some(250));
-            ensure!(deposit.price_source.as_deref() == Some("lock"));
-            let transition = sqlx::query(
-                "SELECT from_state, to_state, evidence FROM transitions WHERE deposit_id = $1",
-            )
-            .bind(cleared)
-            .fetch_one(&context.app_pool)
-            .await?;
-            ensure!(transition.try_get::<String, _>("from_state")? == "cleared");
-            ensure!(transition.try_get::<String, _>("to_state")? == "confirmed");
-            ensure!(
-                transition.try_get::<serde_json::Value, _>("evidence")?
-                    == json!({"migration": "webhook_fulfillment"})
-            );
-            assert_sqlstate(
-                sqlx::query("UPDATE deposits SET state = 'cleared' WHERE id = $1")
-                    .bind(cleared)
-                    .execute(&context.owner_pool)
-                    .await
-                    .err(),
-                "23514",
-            )?;
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn fast_credit_migration_keeps_recorded_deposits_final_under_their_ids() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            // Recreate the pre-migration schema with a deposit and a pending row recorded by it.
-            sqlx::raw_sql(include_str!(
-                "../migrations/20261003000000_fast_credit.down.sql"
-            ))
-            .execute(&context.owner_pool)
-            .await?;
-            let seed = seed_account(&context.app_pool, 6).await?;
-            let id = deposit_id(1, b256(6), 7);
-            sqlx::query(
-                r#"
-                INSERT INTO deposits (
-                    id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
-                    address_id, account_id, asset_contract, from_address, amount_atomic, state,
-                    next_attempt_at
-                )
-                VALUES ($1, 1, $2, 7, 10, $3, now(), $4, $5, $6, $6, 100, 'credited', now())
-                "#,
-            )
-            .bind(id)
-            .bind(format!("{:#x}", b256(6)))
-            .bind(format!("{:#x}", b256(7)))
-            .bind(seed.address_id)
-            .bind(seed.account_id)
-            .bind(format!("{:#x}", evm_address(6)))
-            .execute(&context.owner_pool)
-            .await?;
-            sqlx::query(
-                r#"
-                INSERT INTO pending_transfers (
-                    chain_id, tx_hash, log_index, block_number, block_hash, block_time, head_block,
-                    address_id, asset_contract, from_address, amount_atomic
-                )
-                VALUES (1, $1, 0, 20, $1, now(), 20, $2, $3, $3, 5)
-                "#,
-            )
-            .bind(format!("{:#x}", b256(8)))
-            .bind(seed.address_id)
-            .bind(format!("{:#x}", evm_address(8)))
-            .execute(&context.owner_pool)
-            .await?;
-
-            sqlx::raw_sql(include_str!(
-                "../migrations/20261003000000_fast_credit.up.sql"
-            ))
-            .execute(&context.owner_pool)
-            .await?;
-
-            let deposit = db::get_deposit(&context.app_pool, id)
-                .await?
-                .context("migrated deposit")?;
-            ensure!(deposit.receipt_log_index == 7 && deposit.log_index == 7);
-            ensure!(
-                deposit.final_at.is_some(),
-                "a deposit born final stays final"
-            );
-            ensure!(deposit.tx_from.is_none() && deposit.tx_nonce.is_none());
-            let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_transfers")
-                .fetch_one(&context.app_pool)
-                .await?;
-            ensure!(pending == 0, "the head scan rebuilds the pending view");
-            // A swept deposit must be final; `reversed` is a state.
-            sqlx::query("UPDATE deposits SET state = 'swept' WHERE id = $1")
-                .bind(id)
-                .execute(&context.owner_pool)
-                .await?;
-            assert_sqlstate(
-                sqlx::query("UPDATE deposits SET final_at = NULL WHERE id = $1")
-                    .bind(id)
-                    .execute(&context.owner_pool)
-                    .await
-                    .err(),
-                "23514",
-            )?;
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
 async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 1).await?;
-            let deposit = new_deposit(seed.address_id, seed.account_id, 1, 1, 0);
+            let deposit = new_deposit(seed.address_id, 1, 1, 0);
             let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
             ensure!(db::insert_deposit(&context.app_pool, &deposit).await?);
 
@@ -441,15 +521,7 @@ async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> 
             .execute(&context.app_pool)
             .await?;
             let audit_id = Uuid::new_v4();
-            seed::insert_audit(
-                &context.app_pool,
-                audit_id,
-                "admin:test",
-                "pause",
-                "product:test",
-                "permission test",
-            )
-            .await?;
+            insert_audit(&context.app_pool, audit_id, "permission test").await?;
 
             let transition_count: i64 = sqlx::query("SELECT count(*) FROM transitions")
                 .fetch_one(&context.app_pool)
@@ -478,7 +550,7 @@ async fn application_role_can_append_and_read_history_but_cannot_mutate_it() -> 
                 )?;
             }
             assert_sqlstate(
-                sqlx::query("TRUNCATE outbox")
+                sqlx::query("TRUNCATE events")
                     .execute(&context.app_pool)
                     .await
                     .err(),
@@ -540,11 +612,24 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
         &["SELECT", "INSERT", "UPDATE"],
     ),
     ("_sqlx_migrations", &["SELECT"]),
-    ("settlements", &["SELECT"]),
-    ("products", OPERATIONAL),
+    ("permissions", &["SELECT"]),
     ("accounts", OPERATIONAL),
+    ("confirmation_policies", OPERATIONAL),
+    ("account_limits", OPERATIONAL),
+    ("users", OPERATIONAL),
+    ("identities", OPERATIONAL),
+    ("passkeys", OPERATIONAL),
+    ("recovery_codes", OPERATIONAL),
+    ("memberships", OPERATIONAL),
+    ("invitations", OPERATIONAL),
+    ("sessions", OPERATIONAL),
+    ("api_keys", OPERATIONAL),
+    ("request_signing_keys", OPERATIONAL),
+    ("treasuries", OPERATIONAL),
     ("route_pauses", OPERATIONAL),
     ("seen_signatures", OPERATIONAL),
+    ("customers", OPERATIONAL),
+    ("quotes", OPERATIONAL),
     ("addresses", OPERATIONAL),
     ("cursors", OPERATIONAL),
     ("pending_transfers", OPERATIONAL),
@@ -552,10 +637,12 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("flushed", OPERATIONAL),
     ("flush_exclusions", OPERATIONAL),
     ("deposits", OPERATIONAL),
-    ("rate_locks", OPERATIONAL),
-    ("outbox", OPERATIONAL),
     ("refunds", OPERATIONAL),
     ("refund_payment_claims", OPERATIONAL),
+    ("webhook_endpoints", OPERATIONAL),
+    ("events", OPERATIONAL),
+    ("webhook_deliveries", OPERATIONAL),
+    ("idempotency_keys", OPERATIONAL),
 ];
 const OPERATIONAL: &[&str] = &["SELECT", "INSERT", "UPDATE", "DELETE"];
 
@@ -613,7 +700,7 @@ async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() 
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 2).await?;
-            let deposit = new_deposit(seed.address_id, seed.account_id, 1, 2, 0);
+            let deposit = new_deposit(seed.address_id, 1, 2, 0);
             let deposit_id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
             db::insert_deposit(&context.app_pool, &deposit).await?;
             let transition_id = Uuid::new_v4();
@@ -625,33 +712,12 @@ async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() 
             .execute(&context.app_pool)
             .await?;
             let audit_id = Uuid::new_v4();
-            seed::insert_audit(
-                &context.app_pool,
-                audit_id,
-                "admin:test",
-                "pause",
-                "product:test",
-                "trigger test",
-            )
-            .await?;
-            // Only the owner can still write the retired settlement protocol's history.
-            sqlx::query(
-                "INSERT INTO settlements (deposit_id, product_id, key, payload, status) \
-                 VALUES ($1, $2, $3, '{}'::jsonb, 'accepted')",
-            )
-            .bind(deposit_id)
-            .bind(seed.product_id)
-            .bind(format!("deposit:{deposit_id}"))
-            .execute(&context.owner_pool)
-            .await?;
-
+            insert_audit(&context.app_pool, audit_id, "trigger test").await?;
             for (statement, id) in [
                 ("UPDATE transitions SET evidence = '{}'::jsonb WHERE id = $1", transition_id),
                 ("DELETE FROM transitions WHERE id = $1", transition_id),
                 ("UPDATE audit SET reason = 'changed' WHERE id = $1", audit_id),
                 ("DELETE FROM audit WHERE id = $1", audit_id),
-                ("UPDATE settlements SET status = 'rejected' WHERE deposit_id = $1", deposit_id),
-                ("DELETE FROM settlements WHERE deposit_id = $1", deposit_id),
             ] {
                 assert_sqlstate(
                     sqlx::query(statement)
@@ -669,65 +735,73 @@ async fn owner_side_history_mutation_is_rejected_by_defense_in_depth_triggers() 
 }
 
 #[tokio::test]
-async fn products_and_accounts_enforce_identity_uniqueness_and_only_pause_mutates() -> Result<()> {
+async fn accounts_and_customers_enforce_identity_uniqueness_and_only_pause_mutates() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
-            let first_product = new_product(10, "product-a");
-            let second_product = new_product(11, "product-b");
-            seed::create_product(&context.app_pool, &first_product).await?;
-            seed::create_product(&context.app_pool, &second_product).await?;
+            let first_account =
+                seed::create_account(&context.app_pool, &NewAccount::named("a")).await?;
+            let second_account =
+                seed::create_account(&context.app_pool, &NewAccount::named("b")).await?;
+            ensure!(
+                first_account.public_id
+                    == topup::ids::format(topup::ids::ACCOUNT, first_account.id)
+            );
 
-            seed::set_product_paused_scopes(
-                &context.app_pool,
-                first_product.id,
-                &["quotes".to_owned()],
-            )
-            .await?;
-            let stored_product = db::get_product(&context.app_pool, first_product.id)
-                .await?
-                .context("product must exist")?;
-            ensure!(stored_product.slug == first_product.slug);
-            ensure!(stored_product.paused_scopes == ["quotes"]);
-
-            let first_account = NewAccount {
-                id: Uuid::new_v4(),
-                product_id: first_product.id,
-                external_id: "workspace".to_owned(),
-                paused_scopes: Vec::new(),
-            };
-            seed::create_account(&context.app_pool, &first_account).await?;
-            assert_unique(
-                seed::create_account(
-                    &context.app_pool,
-                    &NewAccount {
-                        id: Uuid::new_v4(),
-                        ..first_account.clone()
-                    },
-                )
-                .await
-                .err(),
-            )?;
-            seed::create_account(
-                &context.app_pool,
-                &NewAccount {
-                    id: Uuid::new_v4(),
-                    product_id: second_product.id,
-                    ..first_account.clone()
-                },
-            )
-            .await?;
             seed::set_account_paused_scopes(
                 &context.app_pool,
                 first_account.id,
-                &["settlement".to_owned()],
+                &["quotes".to_owned()],
             )
             .await?;
             let stored_account = db::get_account(&context.app_pool, first_account.id)
                 .await?
                 .context("account must exist")?;
-            ensure!(stored_account.product_id == first_account.product_id);
-            ensure!(stored_account.external_id == first_account.external_id);
-            ensure!(stored_account.paused_scopes == ["settlement"]);
+            ensure!(stored_account.paused_scopes == ["quotes"]);
+
+            let first_customer = NewCustomer {
+                id: Uuid::new_v4(),
+                account_id: first_account.id,
+                livemode: true,
+                client_reference_id: "workspace".to_owned(),
+                paused_scopes: Vec::new(),
+            };
+            seed::create_customer(&context.app_pool, &first_customer).await?;
+            assert_unique(
+                seed::create_customer(
+                    &context.app_pool,
+                    &NewCustomer {
+                        id: Uuid::new_v4(),
+                        ..first_customer.clone()
+                    },
+                )
+                .await
+                .err(),
+            )?;
+            // The same reference is another customer in the other mode or another account.
+            for (account_id, livemode) in [(first_account.id, false), (second_account.id, true)] {
+                seed::create_customer(
+                    &context.app_pool,
+                    &NewCustomer {
+                        id: Uuid::new_v4(),
+                        account_id,
+                        livemode,
+                        ..first_customer.clone()
+                    },
+                )
+                .await?;
+            }
+            seed::set_customer_paused_scopes(
+                &context.app_pool,
+                first_customer.id,
+                &["settlement".to_owned()],
+            )
+            .await?;
+            let stored_customer = db::get_customer(&context.app_pool, first_customer.id)
+                .await?
+                .context("customer must exist")?;
+            ensure!(stored_customer.account_id == first_customer.account_id);
+            ensure!(stored_customer.client_reference_id == first_customer.client_reference_id);
+            ensure!(stored_customer.paused_scopes == ["settlement"]);
             Ok(())
         })
     })
@@ -743,26 +817,26 @@ async fn addresses_are_canonical_and_unique_per_chain() -> Result<()> {
             let checksum = Address::from_str("0x52908400098527886E0F7030069857D2E4169EE7")?;
             let lowercase = Address::from_str("0x52908400098527886e0f7030069857d2e4169ee7")?;
             ensure!(checksum == lowercase);
-            let first = new_address(first_account.account_id, 1, 1, checksum, 20);
+            let first = new_address(first_account.customer_id, 1, checksum, 20);
             seed::insert_address(&context.app_pool, &first).await?;
             assert_unique(
                 seed::insert_address(
                     &context.app_pool,
-                    &new_address(second.account_id, 1, 1, lowercase, 22),
+                    &new_address(second.customer_id, 1, lowercase, 22),
                 )
                 .await
                 .err(),
             )?;
 
-            // One account may hold several addresses on a chain.
+            // One customer may hold several addresses on a chain.
             seed::insert_address(
                 &context.app_pool,
-                &new_address(first_account.account_id, 1, 2, evm_address(23), 23),
+                &new_address(first_account.customer_id, 1, evm_address(23), 23),
             )
             .await?;
             seed::insert_address(
                 &context.app_pool,
-                &new_address(second.account_id, 2, 1, lowercase, 24),
+                &new_address(second.customer_id, 2, lowercase, 24),
             )
             .await?;
 
@@ -788,7 +862,7 @@ async fn deposits_are_idempotent_and_concurrent_claimers_get_different_rows() ->
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 30).await?;
-            let first = new_deposit(seed.address_id, seed.account_id, 1, 30, 0);
+            let first = new_deposit(seed.address_id, 1, 30, 0);
             ensure!(db::insert_deposit(&context.app_pool, &first).await?);
             ensure!(!db::insert_deposit(&context.app_pool, &first).await?);
             ensure!(
@@ -801,11 +875,7 @@ async fn deposits_are_idempotent_and_concurrent_claimers_get_different_rows() ->
                 )
                 .await?
             );
-            db::insert_deposit(
-                &context.app_pool,
-                &new_deposit(seed.address_id, seed.account_id, 1, 31, 0),
-            )
-            .await?;
+            db::insert_deposit(&context.app_pool, &new_deposit(seed.address_id, 1, 31, 0)).await?;
 
             let (first_claim, second_claim) = tokio::join!(
                 db::claim_deposit(&context.app_pool, Uuid::new_v4()),
@@ -825,7 +895,7 @@ async fn attempts_survive_claim_and_wait_then_reset_on_advance() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 40).await?;
-            let deposit = new_deposit(seed.address_id, seed.account_id, 1, 40, 0);
+            let deposit = new_deposit(seed.address_id, 1, 40, 0);
             let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
             db::insert_deposit(&context.app_pool, &deposit).await?;
             sqlx::query("UPDATE deposits SET attempt = 3 WHERE id = $1")
@@ -911,7 +981,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 50).await?;
-            let deposit = new_deposit(seed.address_id, seed.account_id, 1, 50, 0);
+            let deposit = new_deposit(seed.address_id, 1, 50, 0);
             let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
             db::insert_deposit(&context.app_pool, &deposit).await?;
             let claimed = db::claim_deposit(&context.app_pool, Uuid::new_v4())
@@ -944,21 +1014,23 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
             );
             transaction.commit().await?;
 
-            // The second event cannot be stored (its product does not exist), after the state,
+            // The second event cannot be stored (its account does not exist), after the state,
             // transition, and first event were written: none of them may survive.
             let first_event = Uuid::new_v4();
             let events = [
                 OutboxEvent {
                     id: first_event,
                     event_type: "deposit.rejected".to_owned(),
-                    product_id: seed.product_id,
+                    account_id: seed.account_id,
+                    livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 },
                 OutboxEvent {
                     id: Uuid::new_v4(),
                     event_type: "deposit.rejected".to_owned(),
-                    product_id: Uuid::new_v4(),
+                    account_id: Uuid::new_v4(),
+                    livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 },
@@ -986,14 +1058,15 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
                 .context("deposit must exist")?;
             ensure!(stored.state == DepositState::Detected);
             ensure!(count_where(&context.app_pool, "transitions", "deposit_id", id).await? == 0);
-            ensure!(count_where(&context.app_pool, "outbox", "id", first_event).await? == 0);
+            ensure!(count_where(&context.app_pool, "events", "id", first_event).await? == 0);
 
             // A repeated event id is written once: deterministic ids make re-emission a no-op.
             let repeated = Uuid::new_v4();
             let events = [id, Uuid::new_v4()].map(|object| OutboxEvent {
                 id: repeated,
                 event_type: "deposit.credited".to_owned(),
-                product_id: seed.product_id,
+                account_id: seed.account_id,
+                livemode: true,
                 object: EventObject::Deposit(object),
                 next_attempt_at: Utc::now(),
             });
@@ -1016,7 +1089,7 @@ async fn transition_cas_and_outbox_are_atomic() -> Result<()> {
             );
             transaction.commit().await?;
             let objects: Vec<Uuid> =
-                sqlx::query_scalar("SELECT object_id FROM outbox WHERE id = $1")
+                sqlx::query_scalar("SELECT object_id FROM events WHERE id = $1")
                     .bind(repeated)
                     .fetch_all(&context.app_pool)
                     .await?;
@@ -1097,10 +1170,10 @@ async fn rate_lock_consumption_is_unique_but_unconsumed_locks_are_independent() 
             let seed = seed_account(&context.app_pool, 80).await?;
             let first_deposit = insert_numbered_deposit(&context.app_pool, &seed, 80).await?;
             let second_deposit = insert_numbered_deposit(&context.app_pool, &seed, 81).await?;
-            let first_lock = insert_lock_address(&context.app_pool, seed.account_id, 80).await?;
-            let second_lock = insert_lock_address(&context.app_pool, seed.account_id, 81).await?;
-            let third_lock = insert_lock_address(&context.app_pool, seed.account_id, 82).await?;
-            let fourth_lock = insert_lock_address(&context.app_pool, seed.account_id, 83).await?;
+            let first_lock = insert_lock_address(&context.app_pool, seed.customer_id, 80).await?;
+            let second_lock = insert_lock_address(&context.app_pool, seed.customer_id, 81).await?;
+            let third_lock = insert_lock_address(&context.app_pool, seed.customer_id, 82).await?;
+            let fourth_lock = insert_lock_address(&context.app_pool, seed.customer_id, 83).await?;
 
             insert_rate_lock(&context.app_pool, first_lock, Some(first_deposit)).await?;
             assert_unique(
@@ -1118,81 +1191,72 @@ async fn rate_lock_consumption_is_unique_but_unconsumed_locks_are_independent() 
 
 #[derive(Clone, Copy)]
 struct Seed {
-    product_id: Uuid,
     account_id: Uuid,
+    customer_id: Uuid,
     address_id: Uuid,
 }
 
 #[derive(Clone, Copy)]
 struct AccountSeed {
-    product_id: Uuid,
     account_id: Uuid,
+    customer_id: Uuid,
 }
 
 async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
     let account = seed_account_without_address(pool, number).await?;
-    let address = new_address(account.account_id, 1, 1, evm_address(number), number);
+    let address = new_address(account.customer_id, 1, evm_address(number), number);
     seed::insert_address(pool, &address).await?;
     Ok(Seed {
-        product_id: account.product_id,
         account_id: account.account_id,
+        customer_id: account.customer_id,
         address_id: address.id,
     })
 }
 
 async fn seed_account_without_address(pool: &PgPool, number: u8) -> Result<AccountSeed> {
-    let product = new_product(number, &format!("product-{number}"));
-    seed::create_product(pool, &product).await?;
-    let account = NewAccount {
-        id: Uuid::new_v4(),
-        product_id: product.id,
-        external_id: format!("workspace-{number}"),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_account(pool, &account).await?;
+    let (account, customer) = seed::create_account_and_customer(
+        pool,
+        &NewAccount {
+            webhook_url: format!("https://product-{number}.test/webhooks"),
+            ..NewAccount::named(&format!("product-{number}"))
+        },
+        &format!("workspace-{number}"),
+    )
+    .await?;
     Ok(AccountSeed {
-        product_id: product.id,
         account_id: account.id,
+        customer_id: customer.id,
     })
 }
 
-fn new_product(number: u8, slug: &str) -> NewProduct {
-    NewProduct {
-        id: Uuid::new_v4(),
-        slug: slug.to_owned(),
-        webhook_url: format!("https://product-{number}.test/webhooks"),
-        pubkey: format!("public-key-{number}"),
-        paused_scopes: Vec::new(),
-    }
-}
-
-fn new_address(
-    account_id: Uuid,
-    chain_id: u64,
-    version: u64,
-    address: Address,
-    salt_byte: u8,
-) -> NewAddress {
+fn new_address(customer_id: Uuid, chain_id: u64, address: Address, salt_byte: u8) -> NewAddress {
     NewAddress {
         id: Uuid::new_v4(),
-        account_id,
+        customer_id,
         chain_id,
-        kind: AddressKind::Persistent,
-        version,
-        lock_ref: None,
+        route: "ethereum-pha".to_owned(),
         salt: b256(salt_byte),
         address,
-        retired_at: None,
     }
 }
 
-fn new_deposit(
-    address_id: Uuid,
-    account_id: Uuid,
-    chain_id: u64,
-    number: u8,
-    log_index: u64,
-) -> NewDeposit {
+async fn insert_audit(pool: &PgPool, id: Uuid, reason: &str) -> Result<()> {
+    topup::audit::insert_with_id(
+        pool,
+        id,
+        &topup::audit::Entry {
+            account_id: None,
+            actor: &topup::audit::Actor::admin("admin/v1"),
+            action: "pause",
+            subject: "route:test",
+            reason,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+fn new_deposit(address_id: Uuid, chain_id: u64, number: u8, log_index: u64) -> NewDeposit {
     NewDeposit {
         chain_id,
         tx_hash: b256(number),
@@ -1205,7 +1269,6 @@ fn new_deposit(
         block_hash: b256(number.wrapping_add(1)),
         block_time: Utc::now(),
         address_id,
-        account_id,
         route: Some("ethereum-pha".to_owned()),
         route_version: Some(1),
         asset_contract: evm_address(200),
@@ -1218,7 +1281,7 @@ fn new_deposit(
 }
 
 async fn insert_numbered_deposit(pool: &PgPool, seed: &Seed, number: u8) -> Result<Uuid> {
-    let deposit = new_deposit(seed.address_id, seed.account_id, 1, number, 0);
+    let deposit = new_deposit(seed.address_id, 1, number, 0);
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
     ensure!(db::insert_deposit(pool, &deposit).await?);
     Ok(id)
@@ -1232,20 +1295,17 @@ fn restore_expectations(heartbeat: &heartbeat::Heartbeat) -> restore::RestoreExp
     }
 }
 
-async fn insert_lock_address(pool: &PgPool, account_id: Uuid, number: u8) -> Result<Uuid> {
+async fn insert_lock_address(pool: &PgPool, customer_id: Uuid, number: u8) -> Result<Uuid> {
     let id = Uuid::new_v4();
     seed::insert_address(
         pool,
         &NewAddress {
             id,
-            account_id,
+            customer_id,
             chain_id: 1,
-            kind: AddressKind::Lock,
-            version: 0,
-            lock_ref: Some(format!("lock-{number}")),
+            route: "ethereum-pha".to_owned(),
             salt: b256(number),
             address: evm_address(number.wrapping_add(100)),
-            retired_at: None,
         },
     )
     .await?;
@@ -1257,18 +1317,23 @@ async fn insert_rate_lock(
     address_id: Uuid,
     consumed_by: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    let (status, closed_at) = if consumed_by.is_some() {
-        ("consumed", Some(Utc::now()))
+    let status = if consumed_by.is_some() {
+        "consumed"
     } else {
-        ("open", None)
+        "open"
     };
     sqlx::query(
-        "INSERT INTO rate_locks (address_id, route, amount_atomic, price_scaled, credit_minor, expires_at, consumed_by, status, closed_at) VALUES ($1, 'ethereum-pha', 1000, 25000000, 250, now() + interval '15 minutes', $2, $3, $4)",
+        r#"
+        UPDATE quotes
+        SET amount_atomic = 1000, price_scaled = 25000000, credit_minor = 250,
+            expires_at = now() + interval '15 minutes', consumed_by = $2, status = $3,
+            closed_at = CASE WHEN $3 = 'open' THEN NULL ELSE now() END
+        WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
+        "#,
     )
     .bind(address_id)
     .bind(consumed_by)
     .bind(status)
-    .bind(closed_at)
     .execute(pool)
     .await?;
     Ok(())

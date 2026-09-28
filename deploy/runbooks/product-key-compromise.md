@@ -13,24 +13,24 @@ credited deposit with the product before approving it.
 
 ## Replace the key
 
-Replacement is a hard cut (architecture §15, Rotation): the service verifies a product against one
-stored key under the key id its routes name, so the old key fails from the moment the new one is
+Replacement is a hard cut (architecture §15, Rotation): the service verifies an account against one
+stored key under its key id, `{acct_…}/v1`, so the old key fails from the moment the new one is
 stored, and the product's requests fail until it signs with the new seed.
 
-1. The product generates a new key under the same key id, `{slug}/v1`
-   (`topup-sdk keygen --keyid <slug>/v1`), and sends the printed `public_key`; confirm it with
+1. The product generates a new key under the same key id, `{acct_…}/v1`
+   (`topup-sdk keygen --keyid <acct_…>/v1`), and sends the printed `public_key`; confirm it with
    the product's owner over a second channel. If the product cannot do this promptly, pause
    `quotes` and `refunds` on each of its routes meanwhile
    (`admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["quotes","refunds"]}'`);
    deposits keep being credited.
-2. Store it, with the product's current webhook URL (or its new one):
+2. Store it on the product's account, with its current webhook URL (or its new one):
 
 ```sh
-admin PUT /v1/admin/products/phala-cloud \
+admin PUT "/v1/admin/accounts/$ACCOUNT" \
   '{"public_key":"<new base64>","webhook_url":"https://product.example/topup/webhooks","reason":"product key compromise: <incident>"}'
 ```
 
-   The answer is `200` with the new `public_key`; the `audit` row `product.update` records the
+   The answer is `200` with the new `public_key`; the `audit` row `account.update` records the
    reason and the replaced key.
 3. The product switches its signer to the new seed. Resume any scope paused in step 1.
 4. Review what the old key could have done: confirm every refund request since the exposure with

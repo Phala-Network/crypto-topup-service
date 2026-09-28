@@ -8,6 +8,13 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Changed
 
+- **Breaking**: products are gone; the service's tenant is an account, `acct_…`. Sign with the key
+  id the operator issued with your account, `{acct_…}/v1`: the client takes the account id from
+  it as the first input of every quote's address salt, as it took the product slug. The
+  regenerated admin client replaces `register_product`, `update_product`, `pause_account`, and
+  `resume_account` with `create_account`, `update_account`, `pause_customer`, and
+  `resume_customer`; the admin deposit view carries `account` and `livemode`.
+
 - **Breaking**: forwarders are clones of the new permissionless factory whose address commits to
   the treasury. `forwarder_address(factory, implementation, treasury, salt)` takes the treasury,
   and `forwarder=` is the `(factory, implementation, treasury)` triple.

@@ -122,8 +122,8 @@ every deploy, and uploads the rendered compose and the verification as the run's
 ([CONTRACTS.md](CONTRACTS.md#mainnet)) and a reviewed route PR putting the mainnet route into the
 compose (Deploy refuses a `production` compose with any route off chain 1). After the first
 deploy, in order: seal the secrets; [verify the attestation](#attestation-ingress-and-egress);
-grant and fund the [flusher operator](#flusher-operator); [register the
-product](#product-credentials); and have Finance, Risk, and Operations approve the pilot limits
+grant and fund the [flusher operator](#flusher-operator); [issue the product's
+account](#account-credentials); and have Finance, Risk, and Operations approve the pilot limits
 (route bounds, lock-exposure caps, product-side caps; architecture §17) and a passed restore drill
 ([RESTORE.md](RESTORE.md)) before the product enables deposits.
 
@@ -352,20 +352,23 @@ chain and Deploy `upgrade`; read the new address from a fresh verified attestati
 (in-flight flushes of the old operator keep confirming). The flusher and operator keys are removed
 by [design PR 4](../docs/design/multi-tenant.md#16-plan).
 
-## Product credentials
+## Account credentials
 
-`POST /v1/admin/products {"slug", "public_key", "webhook_url"}` is the only way to issue a
-product. The product's key id is `{slug}/v1`, and the slug must be named by a loaded route (the
-route's `product`), so the route change comes first. `public_key` is the base64 key the integrator printed with
-`topup-sdk keygen`; `webhook_url` is an absolute `https` URL. The answer is `200` (also for a repeat
-with the same values), `409` for the same slug with a different key or URL, or `400`.
+`POST /v1/admin/accounts {"name", "livemode", "public_key", "webhook_url"}` issues a merchant
+account (design §6) until self-serve signup and API keys replace it (design PRs 5 and 6). The
+answer carries the account's id, `acct_…`, and its key id, `{acct_…}/v1`, which the merchant signs
+its requests with; `livemode` is the mode of every request that key signs (`false` on staging:
+Sepolia routes are test routes). `public_key` is the base64 key the integrator printed with
+`topup-sdk keygen`; `webhook_url` is an absolute `https` URL. Each call issues a new account:
+`200`, or `400`. Any account may quote on every loaded route of its key's mode; routes no longer
+name a product.
 
-`PUT /v1/admin/products/{slug} {"public_key", "webhook_url", "reason"}` replaces an issued
-product's key and webhook URL: a hard cut, since requests are verified against the one stored key
-under the key id `{slug}/v1`, which stays the same (architecture §15, Rotation). The answer is `200`
-with the stored values (a repeat changes nothing), `404` for a slug never issued, or `400`; the
-`audit` row `product.update` records the reason and the replaced values. A compromised key:
-[product key compromise](runbooks/product-key-compromise.md).
+`PUT /v1/admin/accounts/{account} {"public_key", "webhook_url", "reason"}` replaces an issued
+account's key and webhook URL: a hard cut, since requests are verified against the one stored key
+under the key id `{acct_…}/v1`, which stays the same (architecture §15, Rotation). The answer is
+`200` with the stored values (a repeat changes nothing), `404` for an account never issued, or
+`400`; the `audit` row `account.update` records the reason and the replaced values. A compromised
+key: [product key compromise](runbooks/product-key-compromise.md).
 
 **HUMAN-ONLY, admin key holder**, after [attestation](#attestation-ingress-and-egress): convert the
 admin seed to PEM once, then sign and send the exact body:
@@ -375,15 +378,33 @@ admin seed to PEM once, then sign and send the exact body:
   xxd -r -p | openssl pkey -inform DER -out admin.pem)
 export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/staging-v1   # the CVM's TOPUP_ADMIN_KID
 jq -cjn --arg public_key '<base64 from the integrator>' \
-  '{slug: "phala-cloud", public_key: $public_key,
-    webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-product.json
+  '{name: "Phala Cloud", livemode: false, public_key: $public_key,
+    webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-account.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST \
-  "$TOPUP_PUBLIC_ORIGIN/v1/admin/products" /tmp/topup-product.json \
+  "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts" /tmp/topup-account.json \
   "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
   -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
-  --data-binary @/tmp/topup-product.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/products"
+  --data-binary @/tmp/topup-account.json "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts"
 ```
+
+## Staging reset (HUMAN-ONLY, design PR 13)
+
+The multi-tenant schema (design §14) replaced the migration history with one migration and
+migrates no data (`crates/topup/migrations/README.md`). A staging database that still holds the
+old history cannot run the new image: the migrator refuses the missing versions. Before staging
+runs an image with the multi-tenant schema, the staging owner, in order:
+
+1. Stops the staging CVM's `topup` service (Deploy `stop`, or `docker compose stop topup`).
+2. Drops and recreates the `topup` database with the owner credentials, or replaces the database
+   volume with an empty one. Keep the last backup for the retention period; it restores only with
+   an image built before the reset.
+3. Deploys the new image (Deploy `upgrade`): `migrate` builds the schema on the empty database.
+4. Re-issues each account ([Account credentials](#account-credentials)) and sends each merchant
+   its `acct_…` id and key id. For the staging reference product, set `product_slug` to the issued
+   `acct_…` id and `product_keyid` to its key id in
+   [product/docker-compose.yml](product/docker-compose.yml), then Deploy (`product`, `upgrade`).
+5. Runs one deposit ([Staging reference product](#staging-reference-product), step 4).
 
 ## Staging reference product
 
@@ -398,8 +419,8 @@ for its API calls), `PRODUCT_PUBLIC_URL` (its own gateway URL), `PRODUCT_RPC_URL
 verifies the webhooks, from a verified attestation at `TOPUP_ORIGIN`. Its preflight
 ([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a keyless Sepolia
 RPC (it is published and the product seals no RPC key); the deposit driver pays through it. Switching staging to Phala Cloud's backend is a
-`PUT /v1/admin/products/phala-cloud` with their key and webhook URL
-([Product credentials](#product-credentials)); the route stays as it is. A product
+`PUT /v1/admin/accounts/{account}` with their key and webhook URL
+([Account credentials](#account-credentials)); the route stays as it is. A product
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`
 with only `PRODUCT_SEED`, then Deploy `upgrade`, once.
 
@@ -431,8 +452,9 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
 2. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, and seal
    `.env.product` holding `PRODUCT_SEED=<hex seed>` with the two commands the summary prints.
    Until then the account API answers 503.
-3. Register `phala-cloud` in topup ([Product credentials](#product-credentials)) with the
-   `phala-cloud/v1` public key and `<product URL>/webhooks`.
+3. Issue the product's account in topup ([Account credentials](#account-credentials)) with the
+   product key's public key and `<product URL>/webhooks`, and set the product's `product_slug`
+   and `product_keyid` to the issued `acct_…` id and key id.
 4. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the locked amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),

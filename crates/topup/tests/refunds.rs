@@ -21,7 +21,7 @@ use sqlx::Row;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
-use topup::db::{AddressKind, NewDeposit};
+use topup::db::{Account, NewDeposit};
 use topup::refunds::{
     EvmRefundChainReader, RefundChainReader, RefundCheck, RefundConfirmationConfig,
     RefundConfirmationWorker, RefundObservation, RefundReadError, RefundTransfer,
@@ -35,10 +35,9 @@ use topup_core::route::RouteFile;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress, NewCustomer};
 use support::{TEST_ORIGIN, TestDatabase, public_key_base64, signed_request};
 
-const PRODUCT_KID: &str = "phala-cloud/v1";
 const ADMIN_KID: &str = "admin/v1";
 const REFUND_DESTINATION: &str = "0x4444444444444444444444444444444444444444";
 const REFUND_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -64,6 +63,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         let admin_key = SigningKey::from_bytes(&[43; 32]);
         let product =
             seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let other = seed_product(&database.app_pool, "builder", &other_key).await?;
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "refund-account", 150).await?;
@@ -80,16 +80,16 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 cross_tenant_path,
                 refund_body(other_deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
             .await?;
         ensure!(response.status() == StatusCode::NOT_FOUND);
 
-        seed::set_account_paused_scopes(
+        seed::set_customer_paused_scopes(
             &database.app_pool,
-            account_id(&database.app_pool, deposit).await?,
+            customer_id(&database.app_pool, deposit).await?,
             &["refunds".to_owned()],
         )
         .await?;
@@ -100,20 +100,20 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 1,
             ))
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_account_paused_scopes(
+        seed::set_customer_paused_scopes(
             &database.app_pool,
-            account_id(&database.app_pool, deposit).await?,
+            customer_id(&database.app_pool, deposit).await?,
             &[],
         )
         .await?;
 
-        seed::set_product_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             product.id,
             &["refunds".to_owned()],
@@ -125,13 +125,13 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 2,
             ))
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
+        seed::set_account_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
             "INSERT INTO route_pauses (route, paused_scopes) VALUES ($1, ARRAY['refunds']) ON CONFLICT (route) DO UPDATE SET paused_scopes = EXCLUDED.paused_scopes",
@@ -145,7 +145,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 3,
             ))
@@ -162,7 +162,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 4,
             ))
@@ -181,7 +181,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 5,
             ))
@@ -199,7 +199,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::POST,
                 request_path,
                 refund_body(deposit, "0x6666666666666666666666666666666666666666", "60")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 6,
             ))
@@ -249,9 +249,9 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             "/v1/admin/refunds/{}/approve",
             requested["id"].as_str().context("refund id")?
         );
-        seed::set_account_paused_scopes(
+        seed::set_customer_paused_scopes(
             &database.app_pool,
-            account_id(&database.app_pool, deposit).await?,
+            customer_id(&database.app_pool, deposit).await?,
             &["refunds".to_owned()],
         )
         .await?;
@@ -267,14 +267,14 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_account_paused_scopes(
+        seed::set_customer_paused_scopes(
             &database.app_pool,
-            account_id(&database.app_pool, deposit).await?,
+            customer_id(&database.app_pool, deposit).await?,
             &[],
         )
         .await?;
 
-        seed::set_product_paused_scopes(
+        seed::set_account_paused_scopes(
             &database.app_pool,
             product.id,
             &["refunds".to_owned()],
@@ -292,7 +292,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             ))
             .await?;
         ensure!(response.status() == StatusCode::CONFLICT);
-        seed::set_product_paused_scopes(&database.app_pool, product.id, &[]).await?;
+        seed::set_account_paused_scopes(&database.app_pool, product.id, &[]).await?;
 
         sqlx::query(
             "UPDATE route_pauses SET paused_scopes = ARRAY['refunds'] WHERE route = $1",
@@ -395,7 +395,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
         ensure!(confirmed.try_get::<String, _>("status")? == "confirmed");
         ensure!(confirmed.try_get::<Value, _>("confirmation_evidence")?["result"] == "matched");
         let event = sqlx::query(
-            "SELECT id, product_id, object_id FROM outbox WHERE event_type = 'deposit.refunded'",
+            "SELECT id, account_id, object_id FROM events WHERE type = 'deposit.refunded'",
         )
         .fetch_one(&database.app_pool)
         .await?;
@@ -403,7 +403,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
             event.try_get::<Uuid, _>("id")?
                 == topup_core::identity::event_id("deposit.refunded", refund_id)
         );
-        ensure!(event.try_get::<Option<Uuid>, _>("product_id")? == Some(product.id));
+        ensure!(event.try_get::<Uuid, _>("account_id")? == product.id);
         ensure!(event.try_get::<Option<Uuid>, _>("object_id")? == Some(deposit));
 
         let tx_hash: String = sqlx::query_scalar("SELECT tx_hash FROM deposits WHERE id = $1")
@@ -416,7 +416,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::GET,
                 &format!("/v1/deposits?tx_hash={tx_hash}"),
                 Vec::new(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 6,
             ))
@@ -434,7 +434,7 @@ async fn refund_flow_confirms_only_matching_finalized_transfer() -> Result<()> {
                 Method::GET,
                 &format!("/v1/refunds/re_{}?expand[]=deposit", refund_id.simple()),
                 Vec::new(),
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 7,
             ))
@@ -488,6 +488,7 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
         let product_key = SigningKey::from_bytes(&[61; 32]);
         let admin_key = SigningKey::from_bytes(&[62; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let pending = seed_deposit(
             &database.app_pool,
             product.id,
@@ -511,7 +512,7 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
                 Method::POST,
                 pending_path,
                 refund_body(pending, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -525,7 +526,7 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
                 Method::POST,
                 request_path,
                 refund_body(refundable, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 1,
             ))
@@ -576,7 +577,7 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
                 Method::POST,
                 sanctioned_path,
                 refund_body(sanctioned, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 3,
             ))
@@ -627,7 +628,7 @@ async fn refund_request_requires_a_final_outcome_and_approval_rechecks_current_s
                 Method::POST,
                 credited_path,
                 refund_body(credited, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 5,
             ))
@@ -650,6 +651,7 @@ async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> 
         let product_key = SigningKey::from_bytes(&[63; 32]);
         let admin_key = SigningKey::from_bytes(&[64; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "not-final-yet", 100).await?;
         sqlx::query("UPDATE deposits SET final_at = NULL WHERE id = $1")
@@ -664,7 +666,7 @@ async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> 
                 Method::POST,
                 "/v1/refunds",
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -681,7 +683,7 @@ async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> 
                 Method::POST,
                 "/v1/refunds",
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now + 1,
             ))
@@ -703,6 +705,7 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
         let product_key = SigningKey::from_bytes(&[63; 32]);
         let admin_key = SigningKey::from_bytes(&[64; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let deposit =
             seed_rejected_deposit(&database.app_pool, product.id, "unsupported-refund", 100)
                 .await?;
@@ -726,7 +729,7 @@ async fn unsupported_refund_approval_uses_persisted_fallback_route_pause() -> Re
                 Method::POST,
                 request_path,
                 refund_body(deposit, REFUND_DESTINATION, "100")?,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 now,
             ))
@@ -817,7 +820,7 @@ async fn one_transfer_log_confirms_only_one_refund() -> Result<()> {
             .fetch_one(&database.app_pool)
             .await?;
         let events: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM outbox WHERE event_type = 'deposit.refunded'")
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE type = 'deposit.refunded'")
                 .fetch_one(&database.app_pool)
                 .await?;
         ensure!(confirmed == 1);
@@ -945,6 +948,7 @@ async fn refund_idempotency_keys_replay_and_refuse_other_parameters() -> Result<
         let product_key = SigningKey::from_bytes(&[71; 32]);
         let admin_key = SigningKey::from_bytes(&[72; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         let deposit = seed_rejected_deposit(&database.app_pool, product.id, "keyed", 150).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
@@ -953,7 +957,7 @@ async fn refund_idempotency_keys_replay_and_refuse_other_parameters() -> Result<
                 Method::POST,
                 "/v1/refunds",
                 body,
-                PRODUCT_KID,
+                &product_kid,
                 &product_key,
                 created,
                 "\"refund-1\"",
@@ -999,11 +1003,12 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
         let product_key = SigningKey::from_bytes(&[47; 32]);
         let admin_key = SigningKey::from_bytes(&[48; 32]);
         let product = seed_product(&database.app_pool, "phala-cloud", &product_key).await?;
+        let product_kid = seed::key_id(&product);
         seed_same_address_deposits(&database.app_pool, product.id, 52).await?;
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
         let created = std::sync::atomic::AtomicI64::new(now);
-        let list = |query: String, kid: &'static str, key: &SigningKey| {
+        let list = |query: String, kid: &str, key: &SigningKey| {
             let app = app.clone();
             let request = signed_request(
                 Method::GET,
@@ -1028,7 +1033,7 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
                 .collect()
         };
 
-        let (status, first) = list("?limit=50".to_owned(), PRODUCT_KID, &product_key).await?;
+        let (status, first) = list("?limit=50".to_owned(), &product_kid, &product_key).await?;
         ensure!(status == StatusCode::OK, "{first}");
         ensure!(first["object"] == "list" && first["url"] == "/v1/deposits");
         ensure!(first["has_more"] == true);
@@ -1037,7 +1042,7 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
         let last = first_ids.last().context("last")?;
         let (_, second) = list(
             format!("?limit=50&starting_after={last}"),
-            PRODUCT_KID,
+            &product_kid,
             &product_key,
         )
         .await?;
@@ -1047,13 +1052,13 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
         // Paging back from the second page returns the end of the first, in the same order.
         let (_, back) = list(
             format!("?limit=3&ending_before={}", second_ids[0]),
-            PRODUCT_KID,
+            &product_kid,
             &product_key,
         )
         .await?;
         ensure!(ids(&back)? == first_ids[47..]);
         ensure!(back["has_more"] == true);
-        let (_, default) = list(String::new(), PRODUCT_KID, &product_key).await?;
+        let (_, default) = list(String::new(), &product_kid, &product_key).await?;
         ensure!(ids(&default)?.len() == 10);
 
         for (query, param) in [
@@ -1062,7 +1067,7 @@ async fn deposit_lists_page_with_stripe_cursors() -> Result<()> {
             ("?expand[]=quote", "expand"),
             ("?color=red", "color"),
         ] {
-            let (status, error) = list(query.to_owned(), PRODUCT_KID, &product_key).await?;
+            let (status, error) = list(query.to_owned(), &product_kid, &product_key).await?;
             ensure!(status == StatusCode::BAD_REQUEST, "{query}");
             ensure!(error["error"]["param"] == param, "{query}: {error}");
         }
@@ -1101,7 +1106,8 @@ async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Re
         let observation = reader
             .observe(&RefundCheck {
                 refund_id: Uuid::new_v4(),
-                product_id: Uuid::new_v4(),
+                account_id: Uuid::new_v4(),
+                livemode: true,
                 deposit_id: Uuid::new_v4(),
                 chain_id: 1,
                 asset_contract: route.asset.contract,
@@ -1130,7 +1136,8 @@ async fn evm_reader_rejects_wrong_or_unfinalized_transfers_and_times_out() -> Re
     let hung = reader
         .observe(&RefundCheck {
             refund_id: Uuid::new_v4(),
-            product_id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            livemode: true,
             deposit_id: Uuid::new_v4(),
             chain_id: 1,
             asset_contract: route.asset.contract,
@@ -1222,13 +1229,19 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
             .bind([rejected, credited])
             .execute(&database.app_pool)
             .await?;
-        // The credited deposit's fulfillment event is still waiting for the product.
+        // The credited deposit's fulfillment event is still waiting for the account's endpoint.
         sqlx::query(
             r#"
-            INSERT INTO outbox (id, event_type, payload, next_attempt_at, created_at, product_id,
-                                object_type, object_id)
-            VALUES ($1, 'deposit.credited', '{}', now(), now() - interval '1 hour', $2,
-                    'deposit', $3)
+            WITH event AS (
+                INSERT INTO events (id, account_id, livemode, type, object_type, object_id,
+                                    created)
+                VALUES ($1, $2, true, 'deposit.credited', 'deposit', $3, now() - interval '1 hour')
+                RETURNING id, account_id
+            )
+            INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at)
+            SELECT event.id, endpoint.id, now()
+            FROM event
+            JOIN webhook_endpoints AS endpoint ON endpoint.account_id = event.account_id
             "#,
         )
         .bind(Uuid::new_v4())
@@ -1240,7 +1253,7 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
         seed_expired_lock(&database.app_pool, product.id).await?;
         seed_refund_row(&database.app_pool, rejected, 20).await?;
         // The report sums the open reserved locks, as lock creation would have reserved them.
-        sqlx::query("UPDATE rate_locks SET exposure_reserved = true WHERE expires_at > now()")
+        sqlx::query("UPDATE quotes SET exposure_reserved = true WHERE expires_at > now()")
             .execute(&database.app_pool)
             .await?;
 
@@ -1555,18 +1568,31 @@ fn route_fixture() -> RouteFile {
     route
 }
 
-async fn seed_product(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    key: &SigningKey,
-) -> Result<topup::db::Product> {
-    Ok(seed::create_product(
+/// A live account signing with `key`, with a webhook endpoint.
+async fn seed_product(pool: &sqlx::PgPool, name: &str, key: &SigningKey) -> Result<Account> {
+    Ok(seed::create_account(
         pool,
-        &NewProduct {
-            id: Uuid::new_v4(),
-            slug: slug.to_owned(),
+        &NewAccount {
+            public_key: public_key_base64(key),
             webhook_url: "https://product.test/webhooks".to_owned(),
-            pubkey: public_key_base64(key),
+            ..NewAccount::named(name)
+        },
+    )
+    .await?)
+}
+
+async fn seed_customer(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+    client_reference_id: &str,
+) -> Result<topup::db::Customer> {
+    Ok(seed::create_customer(
+        pool,
+        &NewCustomer {
+            id: Uuid::new_v4(),
+            account_id,
+            livemode: true,
+            client_reference_id: client_reference_id.to_owned(),
             paused_scopes: Vec::new(),
         },
     )
@@ -1598,29 +1624,17 @@ async fn seed_deposit(
     state: DepositState,
     reason: Option<RejectReason>,
 ) -> Result<Uuid> {
-    let account = seed::create_account(
-        pool,
-        &NewAccount {
-            id: Uuid::new_v4(),
-            product_id,
-            external_id: external_id.to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
+    let customer = seed_customer(pool, product_id, external_id).await?;
     let index = Uuid::new_v4().as_u128();
     let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),
-            account_id: account.id,
+            customer_id: customer.id,
             chain_id: 1,
-            kind: AddressKind::Persistent,
-            version: 1,
-            lock_ref: None,
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: B256::from(U256::from(index)),
             address: Address::from_word(B256::from(U256::from(index))),
-            retired_at: None,
         },
     )
     .await?;
@@ -1643,7 +1657,6 @@ async fn seed_deposit(
             )),
             block_time: Utc::now() - Duration::hours(2),
             address_id: address.id,
-            account_id: account.id,
             route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
             route_version: Some(1),
             asset_contract: route_fixture().asset.contract,
@@ -1672,9 +1685,9 @@ async fn insert_transition(pool: &sqlx::PgPool, deposit_id: Uuid) -> Result<()> 
     Ok(())
 }
 
-async fn account_id(pool: &sqlx::PgPool, deposit_id: Uuid) -> Result<Uuid> {
+async fn customer_id(pool: &sqlx::PgPool, deposit_id: Uuid) -> Result<Uuid> {
     Ok(
-        sqlx::query_scalar("SELECT account_id FROM deposits WHERE id = $1")
+        sqlx::query_scalar("SELECT customer_id FROM deposits WHERE id = $1")
             .bind(deposit_id)
             .fetch_one(pool)
             .await?,
@@ -1705,43 +1718,32 @@ async fn seed_lock(
     amount: u64,
     expiry: &str,
 ) -> Result<()> {
-    let account = seed::create_account(
+    let customer = seed_customer(pool, product_id, external_id).await?;
+    let address = seed::insert_address(
         pool,
-        &NewAccount {
+        &NewAddress {
             id: Uuid::new_v4(),
-            product_id,
-            external_id: external_id.to_owned(),
-            paused_scopes: Vec::new(),
+            customer_id: customer.id,
+            chain_id: 1,
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
+            salt: B256::from(U256::from(Uuid::new_v4().as_u128())),
+            address: Address::from_word(B256::from(U256::from(Uuid::new_v4().as_u128()))),
         },
     )
     .await?;
-    let address_id = Uuid::new_v4();
     sqlx::query(
         r#"
-        INSERT INTO addresses (id, account_id, chain_id, kind, version, lock_ref, salt, address)
-        VALUES ($1, $2, 1, 'lock', 1, $3, $4, $5)
+        UPDATE quotes
+        SET amount_atomic = $2::text::numeric, price_scaled = 100000000,
+            credit_minor = $2::text::numeric, expires_at = now() + $3::text::interval,
+            status = 'open', closed_at = NULL, idempotency_key = $4
+        WHERE id = $1
         "#,
     )
-    .bind(address_id)
-    .bind(account.id)
-    .bind(lock_ref)
-    .bind(format!("0x{:064x}", Uuid::new_v4().as_u128()))
-    .bind(format!("0x{:040x}", Uuid::new_v4().as_u128()))
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO rate_locks (
-            address_id, route, amount_atomic, price_scaled, credit_minor, expires_at
-        )
-        VALUES ($1, 'phala-cloud-ethereum-pha-usd', $2::text::numeric, 100000000,
-                $2::text::numeric,
-                now() + $3::text::interval)
-        "#,
-    )
-    .bind(address_id)
+    .bind(address.quote_id)
     .bind(amount.to_string())
     .bind(expiry)
+    .bind(lock_ref)
     .execute(pool)
     .await?;
     Ok(())
@@ -1752,10 +1754,12 @@ async fn seed_approved_refund(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64
     sqlx::query(
         r#"
         INSERT INTO refunds (
-            id, deposit_id, amount_atomic, to_address, route, status, requested_by, approved_by
+            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
+            requested_by, approved_by
         )
-        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd',
-                'approved', 'test', 'admin:test')
+        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
+               'phala-cloud-ethereum-pha-usd', 'approved', 'test', 'admin:test'
+        FROM deposits WHERE id = $2
         "#,
     )
     .bind(id)
@@ -1777,11 +1781,12 @@ async fn seed_sent_refund(
     sqlx::query(
         r#"
         INSERT INTO refunds (
-            id, deposit_id, amount_atomic, to_address, route, tx_hash, status,
-            requested_by, approved_by, tx_version, next_check_at
+            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, tx_hash,
+            status, requested_by, approved_by, tx_version, next_check_at
         )
-        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd', $5,
-                'sent', 'test', 'admin:test', 1, now())
+        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
+               'phala-cloud-ethereum-pha-usd', $5, 'sent', 'test', 'admin:test', 1, now()
+        FROM deposits WHERE id = $2
         "#,
     )
     .bind(id)
@@ -1799,29 +1804,17 @@ async fn seed_same_address_deposits(
     product_id: Uuid,
     count: u64,
 ) -> Result<String> {
-    let account = seed::create_account(
-        pool,
-        &NewAccount {
-            id: Uuid::new_v4(),
-            product_id,
-            external_id: "support-pages".to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
+    let customer = seed_customer(pool, product_id, "support-pages").await?;
     let receiving = Address::from_str("0x5656565656565656565656565656565656565656")?;
     let address = seed::insert_address(
         pool,
         &NewAddress {
             id: Uuid::new_v4(),
-            account_id: account.id,
+            customer_id: customer.id,
             chain_id: 1,
-            kind: AddressKind::Persistent,
-            version: 1,
-            lock_ref: None,
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: B256::from(U256::from(99_u64)),
             address: receiving,
-            retired_at: None,
         },
     )
     .await?;
@@ -1840,7 +1833,6 @@ async fn seed_same_address_deposits(
                 block_hash: B256::from(U256::from(index.checked_add(1).context("block hash")?)),
                 block_time: Utc::now(),
                 address_id: address.id,
-                account_id: account.id,
                 route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
                 route_version: Some(1),
                 asset_contract: route_fixture().asset.contract,
@@ -1860,10 +1852,12 @@ async fn seed_refund_row(pool: &sqlx::PgPool, deposit_id: Uuid, amount: u64) -> 
     sqlx::query(
         r#"
         INSERT INTO refunds (
-            id, deposit_id, amount_atomic, to_address, route, status, requested_by
+            id, account_id, livemode, deposit_id, amount_atomic, to_address, route, status,
+            requested_by
         )
-        VALUES ($1, $2, $3::text::numeric, $4, 'phala-cloud-ethereum-pha-usd',
-                'requested', 'test')
+        SELECT $1, account_id, livemode, id, $3::text::numeric, $4,
+               'phala-cloud-ethereum-pha-usd', 'requested', 'test'
+        FROM deposits WHERE id = $2
         "#,
     )
     .bind(Uuid::new_v4())

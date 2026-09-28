@@ -11,11 +11,12 @@ use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
-use crate::db::Product;
 use crate::ids;
 use crate::routes::RouteSet;
+use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
+use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, idempotency_key, query_pairs};
 use super::models::{
@@ -59,28 +60,27 @@ const DEPOSIT_STATES: [&str; 6] = [
     security(("http_message_signature" = [])),
     tag = "deposits"
 )]
-/// The product's deposits, newest first, with Stripe's cursor pagination.
+/// The account's deposits in the credential's mode, newest first, with Stripe's cursor
+/// pagination.
 pub(crate) async fn list_deposits(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<DepositList>> {
+    merchant
+        .require(&state.pool, Permission::DepositsRead)
+        .await?;
     let pairs = query_pairs(query.as_deref());
     let expand = expansions(&pairs, &["data.quote"])?;
     let filters = ListFilters::parse(&pairs)?;
-    let mut builder = deposit_query();
-    builder
-        .push(" WHERE account.product_id = ")
-        .push_bind(product.id);
+    let mut builder = scoped_deposit_query(merchant.scope);
     if let Some(account_id) = &filters.account_id {
         builder
-            .push(" AND account.external_id = ")
+            .push(" AND customer.client_reference_id = ")
             .push_bind(account_id.clone());
     }
     if let Some(quote) = filters.quote {
-        builder
-            .push(" AND address.kind = 'lock' AND deposit.address_id = ")
-            .push_bind(quote);
+        builder.push(" AND address.quote_id = ").push_bind(quote);
     }
     if let Some(status) = &filters.status {
         builder
@@ -111,14 +111,14 @@ pub(crate) async fn list_deposits(
     if let Some((id, param)) = cursor {
         let found: Option<(DateTime<Utc>, Uuid)> = sqlx::query_as(
             r#"
-            SELECT deposit.created_at, deposit.id
-            FROM deposits AS deposit
-            JOIN accounts AS account ON account.id = deposit.account_id
-            WHERE deposit.id = $1 AND account.product_id = $2
+            SELECT created_at, id
+            FROM deposits
+            WHERE id = $1 AND account_id = $2 AND livemode = $3
             "#,
         )
         .bind(id)
-        .bind(product.id)
+        .bind(merchant.scope.account_id())
+        .bind(merchant.scope.livemode())
         .fetch_optional(&state.pool)
         .await?;
         let (created_at, id) =
@@ -153,7 +153,7 @@ pub(crate) async fn list_deposits(
     for row in rows {
         let mut deposit = deposit_object(&state.routes, row)?;
         if expand.contains(&"data.quote") {
-            deposit.quote = expanded_quote(&state, &product, deposit.quote).await?;
+            deposit.quote = expanded_quote(&state, merchant.scope, deposit.quote).await?;
         }
         data.push(deposit);
     }
@@ -183,17 +183,20 @@ pub(crate) async fn list_deposits(
 /// One deposit.
 pub(crate) async fn get_deposit(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Deposit>> {
+    merchant
+        .require(&state.pool, Permission::DepositsRead)
+        .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["quote"])?;
     let id = ids::parse(ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
-    let mut deposit = find_deposit(&state.pool, &state.routes, Some(product.id), id)
+    let mut deposit = find_deposit(&state.pool, &state.routes, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     if expand.contains(&"quote") {
-        deposit.quote = expanded_quote(&state, &product, deposit.quote).await?;
+        deposit.quote = expanded_quote(&state, merchant.scope, deposit.quote).await?;
     }
     Ok(Json(deposit))
 }
@@ -224,14 +227,17 @@ pub(crate) async fn get_deposit(
     tag = "refunds"
 )]
 /// Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-/// other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+/// other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
 /// must be final.
 pub(crate) async fn create_refund(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<CreateRefundRequest>,
 ) -> ApiResult<Json<Refund>> {
+    merchant
+        .require(&state.pool, Permission::RefundsWrite)
+        .await?;
     let key = idempotency_key(&headers)?;
     let deposit_id = ids::parse(ids::DEPOSIT, &request.deposit)
         .ok_or_else(|| ApiError::invalid_param("deposit", "deposit must be a dep_ id"))?;
@@ -256,21 +262,21 @@ pub(crate) async fn create_refund(
             })
         })
         .transpose()?;
-    let route = state.route_for_product(&product)?;
+    let route = state.refund_route(merchant.scope, deposit_id).await?;
     let refund_id = repository::request_refund(
         &state.pool,
         &NewRefund {
-            product_id: product.id,
+            scope: merchant.scope,
             deposit_id,
             route,
             destination,
             amount,
             idempotency_key: key.as_deref(),
-            actor: &format!("product:{}", product.id),
+            actor: &merchant.actor(),
         },
     )
     .await?;
-    let refund = find_refund(&state, product.id, refund_id)
+    let refund = find_refund(&state, merchant.scope, refund_id)
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(Json(refund))
@@ -294,20 +300,23 @@ pub(crate) async fn create_refund(
 /// One refund.
 pub(crate) async fn get_refund(
     State(state): State<AppState>,
-    Extension(product): Extension<Product>,
+    Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Refund>> {
+    merchant
+        .require(&state.pool, Permission::RefundsRead)
+        .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["deposit"])?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
-    let mut refund = find_refund(&state, product.id, id)
+    let mut refund = find_refund(&state, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     if expand.contains(&"deposit")
         && let ExpandableDeposit::Id(deposit) = &refund.deposit
     {
         let deposit_id = ids::parse(ids::DEPOSIT, deposit).ok_or_else(ApiError::internal)?;
-        let deposit = find_deposit(&state.pool, &state.routes, Some(product.id), deposit_id)
+        let deposit = find_deposit(&state.pool, &state.routes, merchant.scope, deposit_id)
             .await?
             .ok_or_else(ApiError::internal)?;
         refund.deposit = ExpandableDeposit::Object(Box::new(deposit));
@@ -315,20 +324,15 @@ pub(crate) async fn get_refund(
     Ok(Json(refund))
 }
 
-/// Deposit `id`, of `product_id` when given, if it exists.
+/// The scope's deposit `id`, if it exists.
 pub(crate) async fn find_deposit(
     pool: &PgPool,
     routes: &RouteSet,
-    product_id: Option<Uuid>,
+    scope: Scope,
     id: Uuid,
 ) -> ApiResult<Option<Deposit>> {
-    let mut builder = deposit_query();
-    builder.push(" WHERE deposit.id = ").push_bind(id);
-    if let Some(product_id) = product_id {
-        builder
-            .push(" AND account.product_id = ")
-            .push_bind(product_id);
-    }
+    let mut builder = scoped_deposit_query(scope);
+    builder.push(" AND deposit.id = ").push_bind(id);
     builder
         .build_query_as::<DepositRow>()
         .fetch_optional(pool)
@@ -339,14 +343,14 @@ pub(crate) async fn find_deposit(
 
 async fn expanded_quote(
     state: &AppState,
-    product: &Product,
+    scope: Scope,
     quote: Option<ExpandableQuote>,
 ) -> ApiResult<Option<ExpandableQuote>> {
     let Some(ExpandableQuote::Id(id)) = quote else {
         return Ok(quote);
     };
-    let address_id = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::internal)?;
-    let lock = crate::locks::get(&state.pool, product.id, address_id)
+    let quote_id = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::internal)?;
+    let lock = crate::locks::get(&state.pool, scope, quote_id)
         .await
         .map_err(|_| ApiError::internal())?
         .ok_or_else(ApiError::internal)?;
@@ -354,19 +358,18 @@ async fn expanded_quote(
     Ok(Some(ExpandableQuote::Object(Box::new(quote))))
 }
 
-async fn find_refund(state: &AppState, product_id: Uuid, id: Uuid) -> ApiResult<Option<Refund>> {
+async fn find_refund(state: &AppState, scope: Scope, id: Uuid) -> ApiResult<Option<Refund>> {
     let row = sqlx::query_as::<_, RefundRow>(
         r#"
-        SELECT refund.id, refund.deposit_id, refund.amount_atomic::text AS amount_atomic,
-               refund.to_address, refund.status, refund.tx_hash, refund.created_at
-        FROM refunds AS refund
-        JOIN deposits AS deposit ON deposit.id = refund.deposit_id
-        JOIN accounts AS account ON account.id = deposit.account_id
-        WHERE refund.id = $1 AND account.product_id = $2
+        SELECT id, deposit_id, amount_atomic::text AS amount_atomic, to_address, status, tx_hash,
+               created_at
+        FROM refunds
+        WHERE id = $1 AND account_id = $2 AND livemode = $3
         "#,
     )
     .bind(id)
-    .bind(product_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
     .fetch_optional(&state.pool)
     .await?;
     Ok(row.map(|row| Refund {
@@ -401,8 +404,7 @@ struct RefundRow {
 struct DepositRow {
     id: Uuid,
     external_id: String,
-    address_kind: String,
-    address_id: Uuid,
+    quote_id: Uuid,
     state: String,
     reason: Option<String>,
     chain_id: i64,
@@ -422,10 +424,11 @@ struct DepositRow {
     created_at: DateTime<Utc>,
 }
 
-fn deposit_query() -> QueryBuilder<Postgres> {
-    QueryBuilder::new(
+/// Deposits of `scope`; callers append further `AND` conditions.
+fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
+    let mut builder = QueryBuilder::new(
         r#"
-        SELECT deposit.id, account.external_id, address.kind AS address_kind, deposit.address_id,
+        SELECT deposit.id, customer.client_reference_id AS external_id, address.quote_id,
                deposit.state, deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
                deposit.credit_minor::text AS credit_minor,
@@ -439,10 +442,15 @@ fn deposit_query() -> QueryBuilder<Postgres> {
                ), 0)::text AS amount_refunded_atomic,
                deposit.created_at
         FROM deposits AS deposit
-        JOIN accounts AS account ON account.id = deposit.account_id
+        JOIN customers AS customer ON customer.id = deposit.customer_id
         JOIN addresses AS address ON address.id = deposit.address_id
-        "#,
-    )
+        WHERE deposit.account_id = "#,
+    );
+    builder
+        .push_bind(scope.account_id())
+        .push(" AND deposit.livemode = ")
+        .push_bind(scope.livemode());
+    builder
 }
 
 fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
@@ -458,8 +466,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
         account_id: row.external_id,
-        quote: (row.address_kind == "lock")
-            .then(|| ExpandableQuote::Id(ids::format(ids::QUOTE, row.address_id))),
+        quote: Some(ExpandableQuote::Id(ids::format(ids::QUOTE, row.quote_id))),
         status: row.state,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,

@@ -9,20 +9,25 @@ from ...types import Response, UNSET
 from ... import errors
 
 from ...models.error_response import ErrorResponse
-from ...models.product_response import ProductResponse
-from ...models.register_product_request import RegisterProductRequest
+from ...models.pause_request import PauseRequest
+from ...models.pause_response import PauseResponse
 from typing import cast
 
 
 def _get_kwargs(
+    account: str,
+    customer: str,
     *,
-    body: RegisterProductRequest,
+    body: PauseRequest,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
         "method": "post",
-        "url": "/v1/admin/products",
+        "url": "/v1/admin/accounts/{account}/customers/{customer}/pause".format(
+            account=quote(str(account), safe=""),
+            customer=quote(str(customer), safe=""),
+        ),
     }
 
     _kwargs["json"] = body.to_dict()
@@ -35,9 +40,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | ProductResponse | None:
+) -> ErrorResponse | PauseResponse | None:
     if response.status_code == 200:
-        response_200 = ProductResponse.from_dict(response.json())
+        response_200 = PauseResponse.from_dict(response.json())
 
         return response_200
 
@@ -46,15 +51,10 @@ def _parse_response(
 
         return response_400
 
-    if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+    if response.status_code == 404:
+        response_404 = ErrorResponse.from_dict(response.json())
 
-        return response_401
-
-    if response.status_code == 409:
-        response_409 = ErrorResponse.from_dict(response.json())
-
-        return response_409
+        return response_404
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
@@ -64,7 +64,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | ProductResponse]:
+) -> Response[ErrorResponse | PauseResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -74,25 +74,30 @@ def _build_response(
 
 
 def sync_detailed(
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
-    body: RegisterProductRequest,
-) -> Response[ErrorResponse | ProductResponse]:
-    """
+    body: PauseRequest,
+) -> Response[ErrorResponse | PauseResponse]:
+    """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
+
     Args:
-        body (RegisterProductRequest): Administrative product registration body. The product's key
-            id is not part of it: the
-            attested route is its only source.
+        account (str):
+        customer (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ProductResponse]
+        Response[ErrorResponse | PauseResponse]
     """
 
     kwargs = _get_kwargs(
+        account=account,
+        customer=customer,
         body=body,
     )
 
@@ -104,50 +109,60 @@ def sync_detailed(
 
 
 def sync(
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
-    body: RegisterProductRequest,
-) -> ErrorResponse | ProductResponse | None:
-    """
+    body: PauseRequest,
+) -> ErrorResponse | PauseResponse | None:
+    """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
+
     Args:
-        body (RegisterProductRequest): Administrative product registration body. The product's key
-            id is not part of it: the
-            attested route is its only source.
+        account (str):
+        customer (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ProductResponse
+        ErrorResponse | PauseResponse
     """
 
     return sync_detailed(
+        account=account,
+        customer=customer,
         client=client,
         body=body,
     ).parsed
 
 
 async def asyncio_detailed(
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
-    body: RegisterProductRequest,
-) -> Response[ErrorResponse | ProductResponse]:
-    """
+    body: PauseRequest,
+) -> Response[ErrorResponse | PauseResponse]:
+    """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
+
     Args:
-        body (RegisterProductRequest): Administrative product registration body. The product's key
-            id is not part of it: the
-            attested route is its only source.
+        account (str):
+        customer (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ProductResponse]
+        Response[ErrorResponse | PauseResponse]
     """
 
     kwargs = _get_kwargs(
+        account=account,
+        customer=customer,
         body=body,
     )
 
@@ -157,26 +172,31 @@ async def asyncio_detailed(
 
 
 async def asyncio(
+    account: str,
+    customer: str,
     *,
     client: AuthenticatedClient,
-    body: RegisterProductRequest,
-) -> ErrorResponse | ProductResponse | None:
-    """
+    body: PauseRequest,
+) -> ErrorResponse | PauseResponse | None:
+    """Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
+
     Args:
-        body (RegisterProductRequest): Administrative product registration body. The product's key
-            id is not part of it: the
-            attested route is its only source.
+        account (str):
+        customer (str):
+        body (PauseRequest): Pause or resume request.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ProductResponse
+        ErrorResponse | PauseResponse
     """
 
     return (
         await asyncio_detailed(
+            account=account,
+            customer=customer,
             client=client,
             body=body,
         )

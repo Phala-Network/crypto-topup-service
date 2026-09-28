@@ -5,7 +5,7 @@
 # illustrative; finance and risk set the real ones.
 route: phala-cloud-ethereum-pha-usd
 version: 1
-product: phala-cloud               # signs with key id phala-cloud/v1
+livemode: true                     # a mainnet; test routes (testnets) are false
 
 chain:
   chain_id: 1                      # default sanctions oracle: Chainalysis 0x40C5…aC8fb

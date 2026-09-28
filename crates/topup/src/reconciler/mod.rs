@@ -505,7 +505,8 @@ impl Reconciler {
         ))?;
         let expected = if deposit.price_source.as_deref() == Some("lock") {
             let value: Option<String> = sqlx::query_scalar(
-                "SELECT credit_minor::text FROM rate_locks WHERE address_id = $1",
+                "SELECT quote.credit_minor::text FROM quotes AS quote \
+                 JOIN addresses AS address ON address.quote_id = quote.id WHERE address.id = $1",
             )
             .bind(deposit.address_id)
             .fetch_optional(&self.pool)

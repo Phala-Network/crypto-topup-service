@@ -8,25 +8,23 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
+from ...models.account_response import AccountResponse
 from ...models.error_response import ErrorResponse
-from ...models.pause_request import PauseRequest
-from ...models.pause_response import PauseResponse
+from ...models.update_account_request import UpdateAccountRequest
 from typing import cast
 
 
 def _get_kwargs(
-    slug: str,
-    account_id: str,
+    account: str,
     *,
-    body: PauseRequest,
+    body: UpdateAccountRequest,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "post",
-        "url": "/v1/admin/products/{slug}/accounts/{account_id}/pause".format(
-            slug=quote(str(slug), safe=""),
-            account_id=quote(str(account_id), safe=""),
+        "method": "put",
+        "url": "/v1/admin/accounts/{account}".format(
+            account=quote(str(account), safe=""),
         ),
     }
 
@@ -40,9 +38,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | PauseResponse | None:
+) -> AccountResponse | ErrorResponse | None:
     if response.status_code == 200:
-        response_200 = PauseResponse.from_dict(response.json())
+        response_200 = AccountResponse.from_dict(response.json())
 
         return response_200
 
@@ -50,6 +48,11 @@ def _parse_response(
         response_400 = ErrorResponse.from_dict(response.json())
 
         return response_400
+
+    if response.status_code == 401:
+        response_401 = ErrorResponse.from_dict(response.json())
+
+        return response_401
 
     if response.status_code == 404:
         response_404 = ErrorResponse.from_dict(response.json())
@@ -64,7 +67,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | PauseResponse]:
+) -> Response[AccountResponse | ErrorResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -74,30 +77,29 @@ def _build_response(
 
 
 def sync_detailed(
-    slug: str,
-    account_id: str,
+    account: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> Response[ErrorResponse | PauseResponse]:
-    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+    body: UpdateAccountRequest,
+) -> Response[AccountResponse | ErrorResponse]:
+    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
 
     Args:
-        slug (str):
-        account_id (str):
-        body (PauseRequest): Pause or resume request.
+        account (str):
+        body (UpdateAccountRequest): Administrative replacement of an account's verification key
+            and webhook URL. The key id and
+            mode stay.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | PauseResponse]
+        Response[AccountResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
-        account_id=account_id,
+        account=account,
         body=body,
     )
 
@@ -109,60 +111,58 @@ def sync_detailed(
 
 
 def sync(
-    slug: str,
-    account_id: str,
+    account: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> ErrorResponse | PauseResponse | None:
-    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+    body: UpdateAccountRequest,
+) -> AccountResponse | ErrorResponse | None:
+    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
 
     Args:
-        slug (str):
-        account_id (str):
-        body (PauseRequest): Pause or resume request.
+        account (str):
+        body (UpdateAccountRequest): Administrative replacement of an account's verification key
+            and webhook URL. The key id and
+            mode stay.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | PauseResponse
+        AccountResponse | ErrorResponse
     """
 
     return sync_detailed(
-        slug=slug,
-        account_id=account_id,
+        account=account,
         client=client,
         body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    slug: str,
-    account_id: str,
+    account: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> Response[ErrorResponse | PauseResponse]:
-    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+    body: UpdateAccountRequest,
+) -> Response[AccountResponse | ErrorResponse]:
+    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
 
     Args:
-        slug (str):
-        account_id (str):
-        body (PauseRequest): Pause or resume request.
+        account (str):
+        body (UpdateAccountRequest): Administrative replacement of an account's verification key
+            and webhook URL. The key id and
+            mode stay.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | PauseResponse]
+        Response[AccountResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
-        account_id=account_id,
+        account=account,
         body=body,
     )
 
@@ -172,31 +172,30 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    slug: str,
-    account_id: str,
+    account: str,
     *,
     client: AuthenticatedClient,
-    body: PauseRequest,
-) -> ErrorResponse | PauseResponse | None:
-    """Pauses scopes of one product account, for example `settlement` to stop crediting it.
+    body: UpdateAccountRequest,
+) -> AccountResponse | ErrorResponse | None:
+    """Replaces an account's request signing key and webhook URL; the key id and mode stay.
 
     Args:
-        slug (str):
-        account_id (str):
-        body (PauseRequest): Pause or resume request.
+        account (str):
+        body (UpdateAccountRequest): Administrative replacement of an account's verification key
+            and webhook URL. The key id and
+            mode stay.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | PauseResponse
+        AccountResponse | ErrorResponse
     """
 
     return (
         await asyncio_detailed(
-            slug=slug,
-            account_id=account_id,
+            account=account,
             client=client,
             body=body,
         )

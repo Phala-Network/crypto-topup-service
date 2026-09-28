@@ -5,26 +5,26 @@ use topup_core::screening::{PauseScope, PauseScopes};
 use uuid::Uuid;
 
 pub(crate) struct PauseScopeSources {
+    pub(crate) customer: PauseScopes,
     pub(crate) account: PauseScopes,
-    pub(crate) product: PauseScopes,
     pub(crate) route: PauseScopes,
     pub(crate) effective: PauseScopes,
 }
 
 impl PauseScopeSources {
     pub(crate) fn from_codes(
+        customer_codes: &[String],
         account_codes: &[String],
-        product_codes: &[String],
         route_codes: &[String],
     ) -> Result<Self, sqlx::Error> {
         Ok(Self {
+            customer: parse_codes(customer_codes)?,
             account: parse_codes(account_codes)?,
-            product: parse_codes(product_codes)?,
             route: parse_codes(route_codes)?,
             effective: parse_codes(
-                &account_codes
+                &customer_codes
                     .iter()
-                    .chain(product_codes)
+                    .chain(account_codes)
                     .chain(route_codes)
                     .collect::<Vec<_>>(),
             )?,
@@ -36,39 +36,35 @@ impl PauseScopeSources {
     }
 }
 
-pub(crate) async fn account_pause_scopes(
+/// The pause scopes that apply to a customer's deposits on `route`.
+pub(crate) async fn customer_pause_scopes(
     pool: &PgPool,
-    account_id: Uuid,
+    customer_id: Uuid,
     route: &str,
-) -> Result<Option<(Uuid, PauseScopeSources)>, sqlx::Error> {
+) -> Result<Option<PauseScopeSources>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT
-            product.id AS product_id,
+            customer.paused_scopes AS customer_scopes,
             account.paused_scopes AS account_scopes,
-            product.paused_scopes AS product_scopes,
             COALESCE(route_pause.paused_scopes, '{}'::text[]) AS route_scopes
-        FROM accounts AS account
-        JOIN products AS product ON product.id = account.product_id
+        FROM customers AS customer
+        JOIN accounts AS account ON account.id = customer.account_id
         LEFT JOIN route_pauses AS route_pause ON route_pause.route = $2
-        WHERE account.id = $1
+        WHERE customer.id = $1
         "#,
     )
-    .bind(account_id)
+    .bind(customer_id)
     .bind(route)
     .fetch_optional(pool)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let product_id = row.try_get("product_id")?;
+    let customer_codes: Vec<String> = row.try_get("customer_scopes")?;
     let account_codes: Vec<String> = row.try_get("account_scopes")?;
-    let product_codes: Vec<String> = row.try_get("product_scopes")?;
     let route_codes: Vec<String> = row.try_get("route_scopes")?;
-    Ok(Some((
-        product_id,
-        PauseScopeSources::from_codes(&account_codes, &product_codes, &route_codes)?,
-    )))
+    PauseScopeSources::from_codes(&customer_codes, &account_codes, &route_codes).map(Some)
 }
 
 pub(crate) async fn route_pause_scopes(
@@ -111,16 +107,17 @@ pub(crate) async fn flush_pause_for_addresses_locked(
         r#"
         SELECT
             address.id,
+            customer.id AS customer_id,
             account.id AS account_id,
-            product.id AS product_id,
-            account.paused_scopes AS account_scopes,
-            product.paused_scopes AS product_scopes
+            customer.paused_scopes AS customer_scopes,
+            account.paused_scopes AS account_scopes
         FROM addresses AS address
+        JOIN quotes AS quote ON quote.id = address.quote_id
+        JOIN customers AS customer ON customer.id = quote.customer_id
         JOIN accounts AS account ON account.id = address.account_id
-        JOIN products AS product ON product.id = account.product_id
         WHERE address.id = ANY($1)
         ORDER BY address.id
-        FOR SHARE OF account, product
+        FOR SHARE OF customer, account
         "#,
     )
     .bind(address_ids)
@@ -133,15 +130,15 @@ pub(crate) async fn flush_pause_for_addresses_locked(
         ));
     }
     for row in rows {
-        let product_codes: Vec<String> = row.try_get("product_scopes")?;
-        if parse_codes(&product_codes)?.contains(PauseScope::Flush) {
-            let product_id: Uuid = row.try_get("product_id")?;
-            return Ok(Some(format!("product {product_id}")));
-        }
         let account_codes: Vec<String> = row.try_get("account_scopes")?;
         if parse_codes(&account_codes)?.contains(PauseScope::Flush) {
             let account_id: Uuid = row.try_get("account_id")?;
             return Ok(Some(format!("account {account_id}")));
+        }
+        let customer_codes: Vec<String> = row.try_get("customer_scopes")?;
+        if parse_codes(&customer_codes)?.contains(PauseScope::Flush) {
+            let customer_id: Uuid = row.try_get("customer_id")?;
+            return Ok(Some(format!("customer {customer_id}")));
         }
     }
     Ok(None)

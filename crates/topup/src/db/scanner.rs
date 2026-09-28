@@ -13,8 +13,6 @@ use super::types::{parse_address, to_i64, to_u64};
 pub struct ScanAddress {
     /// Address row identifier.
     pub id: Uuid,
-    /// Owning account identifier.
-    pub account_id: Uuid,
     /// Physical EVM address.
     pub address: EvmAddress,
     /// Earliest block requiring inspection.
@@ -26,7 +24,6 @@ pub struct ScanAddress {
 #[derive(Debug, sqlx::FromRow)]
 struct ScanAddressRecord {
     id: Uuid,
-    account_id: Uuid,
     address: String,
     created_block: i64,
     backfilled: bool,
@@ -38,7 +35,6 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
     fn try_from(record: ScanAddressRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             id: record.id,
-            account_id: record.account_id,
             address: parse_address(&record.address)?,
             created_block: to_u64(record.created_block, "addresses.created_block")?,
             backfilled: record.backfilled,
@@ -60,19 +56,18 @@ async fn insert_rejected_event(
     deposit: &NewDeposit,
 ) -> Result<(), sqlx::Error> {
     let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index);
-    let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
-        .bind(deposit.account_id)
-        .fetch_optional(&mut **transaction)
-        .await?
-        .ok_or_else(|| {
-            sqlx::Error::Protocol("rejected deposit account does not exist".to_owned())
-        })?;
+    let (account_id, livemode): (Uuid, bool) =
+        sqlx::query_as("SELECT account_id, livemode FROM deposits WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **transaction)
+            .await?;
     super::outbox::enqueue_in(
-        &mut **transaction,
+        transaction,
         &super::outbox::NewOutboxEvent {
             id: event_id("deposit.rejected", id),
             event_type: "deposit.rejected".to_owned(),
-            product_id,
+            account_id,
+            livemode,
             object: super::outbox::EventObject::Deposit(id),
             next_attempt_at: Utc::now(),
         },
@@ -164,7 +159,7 @@ async fn insert_deposits_in(
     })
 }
 
-/// Loads every address for a chain, including retired persistent and lock addresses.
+/// Loads every quote address for a chain, whatever its quote's status.
 pub async fn list_scan_addresses(
     pool: &PgPool,
     chain_id: u64,
@@ -172,7 +167,7 @@ pub async fn list_scan_addresses(
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
     let records = sqlx::query_as::<_, ScanAddressRecord>(
         r#"
-        SELECT id, account_id, address, created_block, backfilled
+        SELECT id, address, created_block, backfilled
         FROM addresses
         WHERE chain_id = $1
         ORDER BY created_block, id
@@ -189,7 +184,7 @@ pub async fn list_scan_addresses(
 ///
 /// `scanned_block_time` is the block time of `scanned_block` when the advance reaches the
 /// finalized head the scanner observed; it is ignored without a cursor advance. The stored time
-/// never moves backwards and stays a lower bound on the cursor block's time, so rate-lock expiry
+/// never moves backwards and stays a lower bound on the cursor block's time, so quote expiry
 /// (§9) can rely on every block up to that time being committed.
 ///
 /// A deposit born `rejected` (no route for its asset) never passes through a pump step, so its

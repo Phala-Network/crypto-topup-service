@@ -32,7 +32,7 @@ class RouteDailyReport:
             state.
         asset_contract (str): Route asset contract.
         chain_id (int): EVM chain identifier.
-        credited_undelivered (int): Credited deposits whose `deposit.credited` webhook the product has not acknowledged
+        credited_undelivered (int): Credited deposits whose `deposit.credited` webhook an endpoint has not acknowledged
             yet.
         credited_undelivered_max_age_seconds (int): Age in seconds of the oldest of those events; zero when every one
             was delivered.

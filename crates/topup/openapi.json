@@ -2,16 +2,301 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Phala Pay API",
-    "description": "Authenticated product and administrative API for Phala Pay crypto payments.",
+    "description": "Authenticated merchant and administrative API for Phala Pay crypto payments.",
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/admin/accounts": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.\nEach call issues a new account. Until self-serve signup and API keys replace it.",
+        "operationId": "create_account",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Replaces an account's request signing key and webhook URL; the key id and mode stay.",
+        "operationId": "update_account",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAccountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: replaced, or already holding these values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found: no account is issued with this id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/customers/{customer}/pause": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.",
+        "operationId": "pause_customer",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "customer",
+            "in": "path",
+            "description": "The account's identifier of its customer, the quotes' `account_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
+    "/v1/admin/accounts/{account}/customers/{customer}/resume": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Resumes scopes of one customer of an account.",
+        "operationId": "resume_customer",
+        "parameters": [
+          {
+            "name": "account",
+            "in": "path",
+            "description": "Account id, `acct_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "customer",
+            "in": "path",
+            "description": "The account's identifier of its customer, the quotes' `account_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ]
+      }
+    },
     "/v1/admin/deposits/{id}": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "One deposit of any product with its stored facts, transitions, and webhook events.",
+        "summary": "One deposit of any account with its stored facts, transitions, and webhook events.",
         "operationId": "admin_get_deposit",
         "parameters": [
           {
@@ -129,7 +414,7 @@
           {
             "name": "event_id",
             "in": "path",
-            "description": "The `webhook-id` header: `evt_…`, or the UUID of an older event",
+            "description": "The `webhook-id` header, `evt_…`",
             "required": true,
             "schema": {
               "type": "string"
@@ -153,295 +438,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OutboxReplayResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/products": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "operationId": "register_product",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RegisterProductRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK: registered, or already registered with the same values",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProductResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict: the slug is registered with different values; `PUT /v1/admin/products/{slug}` replaces them",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/products/{slug}": {
-      "put": {
-        "tags": [
-          "admin"
-        ],
-        "operationId": "update_product",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "description": "Product slug",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateProductRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK: replaced, or already holding these values",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProductResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found: no product is issued with this slug",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/products/{slug}/accounts/{account_id}/pause": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Pauses scopes of one product account, for example `settlement` to stop crediting it.",
-        "operationId": "pause_account",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "account_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/products/{slug}/accounts/{account_id}/resume": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Resumes scopes of one product account.",
-        "operationId": "resume_account",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "account_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PauseRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PauseResponse"
                 }
               }
             }
@@ -863,7 +859,7 @@
         "tags": [
           "config"
         ],
-        "summary": "The calling product's assets, limits, and quote terms, from its attested routes.",
+        "summary": "The assets, limits, and quote terms of the attested routes in the credential's mode.",
         "operationId": "get_config",
         "responses": {
           "200": {
@@ -899,7 +895,7 @@
         "tags": [
           "deposits"
         ],
-        "summary": "The product's deposits, newest first, with Stripe's cursor pagination.",
+        "summary": "The account's deposits in the credential's mode, newest first, with Stripe's cursor\npagination.",
         "operationId": "list_deposits",
         "parameters": [
           {
@@ -1368,7 +1364,7 @@
         "tags": [
           "refunds"
         ],
-        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the product did not apply. The deposit\nmust be final.",
+        "summary": "Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit\nother than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit\nmust be final.",
         "operationId": "create_refund",
         "parameters": [
           {
@@ -1515,6 +1511,52 @@
   },
   "components": {
     "schemas": {
+      "AccountResponse": {
+        "type": "object",
+        "description": "An issued account and its request signing credential.",
+        "required": [
+          "id",
+          "name",
+          "livemode",
+          "key_id",
+          "public_key",
+          "webhook_url",
+          "paused_scopes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Account id, `acct_…`."
+          },
+          "key_id": {
+            "type": "string",
+            "description": "The key id the account signs its requests with, `{id}/v1`."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode the account's signing key acts in."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "paused_scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Active account-level pause scopes."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Standard base64 of the account's ed25519 public key."
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Webhook receiver URL."
+          }
+        }
+      },
       "AdminReasonRequest": {
         "type": "object",
         "description": "Administrative action body; `reason` is recorded in the action's audit row.",
@@ -1805,6 +1847,34 @@
           }
         }
       },
+      "CreateAccountRequest": {
+        "type": "object",
+        "description": "Administrative account issuance body, until self-serve signup (design PR 5) and API keys\n(design PR 6) replace it.",
+        "required": [
+          "name",
+          "livemode",
+          "public_key",
+          "webhook_url"
+        ],
+        "properties": {
+          "livemode": {
+            "type": "boolean",
+            "description": "The mode the account's signing key acts in: `true` for live routes, `false` for test\nroutes."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 200 characters."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Standard base64 of the account's 32-byte ed25519 request-verification public key."
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Absolute `https` URL of the account's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
+          }
+        }
+      },
       "CreateQuoteRequest": {
         "type": "object",
         "description": "`POST /v1/quotes` body.",
@@ -1818,7 +1888,7 @@
         "properties": {
           "account_id": {
             "type": "string",
-            "description": "Your identifier of the customer account to credit, 1 to 255 bytes; the account is created\non its first quote."
+            "description": "Your identifier of the customer account to credit, 1 to 200 characters; the account is\ncreated on its first quote."
           },
           "amount": {
             "type": "integer",
@@ -1882,7 +1952,7 @@
               "string",
               "null"
             ],
-            "description": "Open rate-lock credit across all products in destination minor units: the sum the global\nexposure cap is enforced against. This service always sends it; it is optional in the\nschema so clients also parse reports from servers that predate it."
+            "description": "Open rate-lock credit across all accounts in destination minor units: the sum the global\nexposure cap is enforced against. This service always sends it; it is optional in the\nschema so clients also parse reports from servers that predate it."
           },
           "generated_at": {
             "type": "string",
@@ -2031,7 +2101,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/ExpandableQuote",
-                "description": "The quote whose address received the transfer; `null` for a persistent address."
+                "description": "The quote whose address received the transfer."
               },
               {
                 "type": "null"
@@ -2047,7 +2117,7 @@
               "string",
               "null"
             ],
-            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, `sanctioned`, or `product_refused` (historical)."
+            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`."
           },
           "status": {
             "type": "string",
@@ -2087,7 +2157,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the receiver accepted the event, or `null` while it is undelivered."
+            "description": "When the last of the account's webhook endpoints accepted the event, or `null` while one\nhas not or the account has none."
           },
           "event_type": {
             "type": "string",
@@ -2095,7 +2165,7 @@
           },
           "id": {
             "type": "string",
-            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an\nolder event."
+            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`."
           }
         }
       },
@@ -2149,6 +2219,10 @@
           "updated_at"
         ],
         "properties": {
+          "account": {
+            "type": "string",
+            "description": "The merchant account the deposit belongs to, `acct_…`. Optional in the schema so clients\nalso parse responses from servers that predate accounts."
+          },
           "address": {
             "type": "string",
             "description": "Receiving forwarder address."
@@ -2188,11 +2262,11 @@
               "string",
               "null"
             ],
-            "description": "Product credit in minor units encoded as a decimal string."
+            "description": "Credit in minor units encoded as a decimal string."
           },
           "external_id": {
             "type": "string",
-            "description": "Product-owned identifier of the account the receiving address belongs to. This service\nalways sends it; it is optional in the schema so clients also parse responses from servers\nthat predate it."
+            "description": "The merchant's identifier of the customer the quote was issued for. This service always\nsends it; it is optional in the schema so clients also parse responses from servers that\npredate it."
           },
           "final_at": {
             "type": [
@@ -2210,12 +2284,16 @@
             "type": "string",
             "description": "Deposit id, `dep_…`."
           },
+          "livemode": {
+            "type": "boolean",
+            "description": "Whether the deposit is on a live route. Optional in the schema, like `account`."
+          },
           "lock_ref": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Rate-lock reference, when applicable."
+            "description": "The quote whose address received the deposit, `qt_…`."
           },
           "log_index": {
             "type": "integer",
@@ -2500,22 +2578,24 @@
         "description": "A webhook event queued for delivery again.",
         "required": [
           "event_id",
-          "event_type",
-          "next_attempt_at"
+          "event_type"
         ],
         "properties": {
           "event_id": {
             "type": "string",
-            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`, or the UUID of an\nolder event."
+            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`."
           },
           "event_type": {
             "type": "string",
             "description": "Event type, such as `deposit.credited`."
           },
           "next_attempt_at": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
-            "description": "When the delivery worker next attempts the event."
+            "description": "When the delivery worker next attempts the event, or `null` when the account has no\nwebhook endpoint to deliver it to."
           }
         }
       },
@@ -2548,43 +2628,6 @@
               "type": "string"
             },
             "description": "Current pause scopes."
-          }
-        }
-      },
-      "ProductResponse": {
-        "type": "object",
-        "description": "Registered product.",
-        "required": [
-          "id",
-          "slug",
-          "public_key",
-          "webhook_url",
-          "paused_scopes"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Service product identifier."
-          },
-          "paused_scopes": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Active product-level pause scopes."
-          },
-          "public_key": {
-            "type": "string",
-            "description": "Standard base64 of the product's ed25519 public key."
-          },
-          "slug": {
-            "type": "string",
-            "description": "Product slug."
-          },
-          "webhook_url": {
-            "type": "string",
-            "description": "Webhook receiver URL."
           }
         }
       },
@@ -2674,7 +2717,7 @@
           },
           "id": {
             "type": "string",
-            "description": "`qt_` id. New quotes' address salt is `keccak256(abi.encode(product_slug, account_id,\n\"lock\", id))`."
+            "description": "`qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, \"lock\",\nid))`, where `account` is your `acct_` id."
           },
           "object": {
             "type": "string",
@@ -2918,29 +2961,6 @@
           }
         }
       },
-      "RegisterProductRequest": {
-        "type": "object",
-        "description": "Administrative product registration body. The product's key id is not part of it: the\nattested route is its only source.",
-        "required": [
-          "slug",
-          "public_key",
-          "webhook_url"
-        ],
-        "properties": {
-          "public_key": {
-            "type": "string",
-            "description": "Standard base64 of the product's 32-byte ed25519 request-verification public key."
-          },
-          "slug": {
-            "type": "string",
-            "description": "Product slug named by a loaded route's `destination.product`; matches\n`^[a-z0-9][a-z0-9-]{0,62}$`."
-          },
-          "webhook_url": {
-            "type": "string",
-            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
-          }
-        }
-      },
       "RouteDailyReport": {
         "type": "object",
         "description": "Per-route daily finance report produced by C12.",
@@ -2984,7 +3004,7 @@
           "credited_undelivered": {
             "type": "integer",
             "format": "int64",
-            "description": "Credited deposits whose `deposit.credited` webhook the product has not acknowledged yet.",
+            "description": "Credited deposits whose `deposit.credited` webhook an endpoint has not acknowledged yet.",
             "minimum": 0
           },
           "credited_undelivered_max_age_seconds": {
@@ -3082,7 +3102,7 @@
         "allOf": [
           {
             "$ref": "#/components/schemas/DepositResponse",
-            "description": "Product-visible deposit facts."
+            "description": "The deposit's stored facts."
           },
           {
             "type": "object",
@@ -3109,9 +3129,9 @@
         ],
         "description": "Deposit facts with the full immutable transition timeline."
       },
-      "UpdateProductRequest": {
+      "UpdateAccountRequest": {
         "type": "object",
-        "description": "Administrative replacement of an issued product's verification key and webhook URL. The key id\nstays the route's `destination.product_kid`.",
+        "description": "Administrative replacement of an account's verification key and webhook URL. The key id and\nmode stay.",
         "required": [
           "public_key",
           "webhook_url",
@@ -3120,7 +3140,7 @@
         "properties": {
           "public_key": {
             "type": "string",
-            "description": "Standard base64 of the product's new 32-byte ed25519 request-verification public key."
+            "description": "Standard base64 of the account's new 32-byte ed25519 request-verification public key."
           },
           "reason": {
             "type": "string",
@@ -3128,7 +3148,7 @@
           },
           "webhook_url": {
             "type": "string",
-            "description": "Absolute `https` URL of the product's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
+            "description": "Absolute `https` URL of the account's webhook receiver; `http` only when the service's\nown public origin uses `http` (local stacks)."
           }
         }
       }

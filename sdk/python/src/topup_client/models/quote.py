@@ -34,8 +34,8 @@ class Quote:
         currency (str): `usd`.
         exchange_rate (str): The locked price in USD per token, a decimal string with 8 decimal places.
         expires_at (int): End of the payment window, Unix seconds.
-        id (str): `qt_` id. New quotes' address salt is `keccak256(abi.encode(product_slug, account_id,
-            "lock", id))`.
+        id (str): `qt_` id. The quote's address salt is `keccak256(abi.encode(account, account_id, "lock",
+            id))`, where `account` is your `acct_` id.
         object_ (str): Always `quote`.
         payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
         status (str): `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays

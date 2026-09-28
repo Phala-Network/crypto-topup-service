@@ -26,8 +26,8 @@ each item. The design is [architecture.md](architecture.md); integrators read
 - [ ] Phala Cloud: create quotes, render `<Checkout>`, fulfill `deposit.credited` through the
       existing Order and credit path. A draft PR is open in the Phala Cloud monorepo, pending the
       `phala-pay` PyPI release and a staging run. Owner: engineering; review: Phala Cloud team.
-- [ ] Register Phala Cloud as the production product (`PUT /v1/admin/products/phala-cloud`:
-      webhook URL, product public key). Owner: operator.
+- [ ] Issue Phala Cloud's production account (`POST /v1/admin/accounts`: webhook URL, public
+      key; self-serve signup replaces this in design PR 5). Owner: operator.
 
 ### Production inputs
 

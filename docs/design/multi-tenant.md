@@ -750,8 +750,9 @@ flush-reverted, operator-key compromise, treasury change, product-key compromise
 treasury, refund execution; add merchant sweep guide (including a note for Phala Cloud's
 finance: its Safe owners sign a sweep periodically, like any merchant), reversal handling,
 restore notice, `live_access` grants. HUMAN-ONLY
-steps listed, not executed: staging reset, factory deployment on Sepolia and mainnet, second domain
-DNS, SES domain verification.
+steps listed, not executed: staging reset (procedure in `deploy/README.md`, "Staging reset",
+written with PR 3), factory deployment on Sepolia and mainnet, second domain DNS, SES domain
+verification.
 
 **Phala Cloud** (monorepo draft PR, after the launch set) integrates like any merchant: sign up,
 set Phala's Safe as treasury with a Safe signature, create `ppay_sk_test_`/`ppay_sk_live_` keys,

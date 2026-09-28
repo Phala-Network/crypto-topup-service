@@ -23,9 +23,12 @@ pub struct RouteFile {
     pub route: String,
     /// Attested route version.
     pub version: u64,
+    /// Whether the route moves real value: its chain is a mainnet. Test-mode keys use only test
+    /// routes, live-mode keys only live ones (design D9).
+    pub livemode: bool,
     /// Asset settings.
     pub asset: AssetConfig,
-    /// Destination product settings.
+    /// Credit unit settings.
     pub destination: DestinationConfig,
     /// Price-source and freshness settings.
     pub pricing: PricingConfig,
@@ -65,8 +68,8 @@ impl RouteFile {
         validate_address("asset.contract", self.asset.contract)?;
         validate_address("chain.sanctions_oracle", self.screening.sanctions_oracle)?;
         self.chain.confirmations.validate(self.chain.chain_id)?;
+        validate_livemode(self.livemode, self.chain.chain_id)?;
         validate_slug("asset.symbol", &self.asset.symbol)?;
-        validate_slug("product", &self.destination.product)?;
         self.chain.operator_key_version()?;
         validate_decimals("asset.decimals", self.asset.decimals)?;
         validate_decimals("unit_decimals", self.destination.unit_decimals)?;
@@ -395,23 +398,11 @@ pub struct AssetConfig {
     pub min_refund_atomic: AtomicAmount,
 }
 
-/// Product ledger destination configuration.
+/// The unit credits are counted in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestinationConfig {
-    /// Product slug.
-    pub product: String,
     /// Number of USD minor-unit decimal places.
     pub unit_decimals: u8,
-}
-
-impl DestinationConfig {
-    /// The key id the product signs its requests with: `{product}/v1`.
-    ///
-    /// A product key rotation replaces the stored public key under the same key id.
-    #[must_use]
-    pub fn product_kid(&self) -> String {
-        format!("{}/v1", self.product)
-    }
 }
 
 /// Price validation configuration.
@@ -541,8 +532,8 @@ pub struct RouteSpec {
     pub route: String,
     /// Attested route version.
     pub version: u64,
-    /// Product slug; the product signs with key id `{product}/v1`.
-    pub product: String,
+    /// Whether the route is live (a mainnet) or test (a testnet); checked against the chain.
+    pub livemode: bool,
     /// USD minor-unit decimals; default [`DEFAULT_UNIT_DECIMALS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit_decimals: Option<u8>,
@@ -957,8 +948,8 @@ impl TryFrom<RouteSpec> for RouteFile {
                 min_flush_atomic: spec.limits.min_flush_atomic.unwrap_or_default(),
                 min_refund_atomic: spec.limits.min_refund_atomic,
             },
+            livemode: spec.livemode,
             destination: DestinationConfig {
-                product: spec.product,
                 unit_decimals: spec.unit_decimals.unwrap_or(DEFAULT_UNIT_DECIMALS),
             },
             pricing: PricingConfig {
@@ -1015,7 +1006,7 @@ impl From<RouteFile> for RouteSpec {
         Self {
             route: route.route,
             version: route.version,
-            product: route.destination.product,
+            livemode: route.livemode,
             unit_decimals: Some(route.destination.unit_decimals),
             chain: ChainSpec {
                 chain_id: route.chain.chain_id,
@@ -1114,6 +1105,31 @@ fn validate_address(field: &'static str, address: Address) -> Result<(), RouteEr
     Ok(())
 }
 
+/// Whether `chain_id` is a test network: Ethereum's testnets, the OP-stack testnets, and local
+/// development chains. A route on one is a test route; every other chain is live (design D9).
+#[must_use]
+pub const fn is_testnet(chain_id: u64) -> bool {
+    matches!(
+        chain_id,
+        // Sepolia, Holesky, Hoodi, Base Sepolia, OP Sepolia, Anvil and Hardhat, and Geth dev.
+        11_155_111 | 17_000 | 560_048 | 84_532 | 11_155_420 | 31_337 | 1_337
+    )
+}
+
+fn validate_livemode(livemode: bool, chain_id: u64) -> Result<(), RouteError> {
+    match (livemode, is_testnet(chain_id)) {
+        (true, true) => Err(RouteError::validation(
+            "livemode",
+            format!("must be false: chain {chain_id} is a test network"),
+        )),
+        (false, false) => Err(RouteError::validation(
+            "livemode",
+            format!("must be true: chain {chain_id} is not a known test network"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn validate_slug(field: &'static str, value: &str) -> Result<(), RouteError> {
     let valid = value
         .bytes()
@@ -1208,6 +1224,25 @@ mod tests {
         assert_eq!(default_sanctions_oracle(11_155_111), None);
         assert_eq!(default_native_price_asset(11_155_111), Some("eth"));
         assert_eq!(default_native_price_asset(137), None);
+    }
+
+    #[test]
+    fn livemode_matches_the_chain() {
+        assert!(validate_livemode(true, 1).is_ok());
+        assert!(validate_livemode(false, 11_155_111).is_ok());
+        assert!(validate_livemode(false, 31_337).is_ok());
+        assert!(
+            validate_livemode(false, 1)
+                .expect_err("a mainnet route is live")
+                .to_string()
+                .contains("must be true")
+        );
+        assert!(
+            validate_livemode(true, 11_155_111)
+                .expect_err("a testnet route is test")
+                .to_string()
+                .contains("must be false")
+        );
     }
 
     #[test]

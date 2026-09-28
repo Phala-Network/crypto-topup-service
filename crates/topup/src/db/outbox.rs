@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::PgExecutor;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 /// The object an event is about; the event's `data.object` is its API representation, rendered
@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub enum EventObject {
     /// A deposit, by its UUID.
     Deposit(Uuid),
-    /// A quote, by its address row id.
+    /// A quote, by its id.
     Quote(Uuid),
 }
 
@@ -48,34 +48,59 @@ pub struct NewOutboxEvent {
     pub id: Uuid,
     /// Stable event type.
     pub event_type: String,
-    /// Product the event is delivered to.
-    pub product_id: Uuid,
+    /// Account the event belongs to: the object's account.
+    pub account_id: Uuid,
+    /// Mode of the object.
+    pub livemode: bool,
     /// Object the event is about.
     pub object: EventObject,
     /// Earliest delivery attempt.
     pub next_attempt_at: DateTime<Utc>,
 }
 
-/// Enqueues an event for at-least-once delivery; an event already enqueued is kept unchanged.
-pub async fn enqueue_in<'e>(
-    executor: impl PgExecutor<'e>,
+/// Records an event and one delivery to each enabled webhook endpoint of its account and mode
+/// that subscribes to its type, for at-least-once delivery (the outbox, architecture §11). An
+/// event already recorded is kept unchanged, and so are its deliveries.
+pub async fn enqueue_in(
+    connection: &mut PgConnection,
     event: &NewOutboxEvent,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
-        INSERT INTO outbox (id, event_type, payload, next_attempt_at, format, product_id,
-                            object_type, object_id)
-        VALUES ($1, $2, '{}', $3, 2, $4, $5, $6)
+        INSERT INTO events (id, account_id, livemode, type, object_type, object_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (id) DO NOTHING
         "#,
     )
     .bind(event.id)
+    .bind(event.account_id)
+    .bind(event.livemode)
     .bind(&event.event_type)
-    .bind(event.next_attempt_at)
-    .bind(event.product_id)
     .bind(event.object.type_code())
     .bind(event.object.id())
-    .execute(executor)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at)
+        SELECT $1, endpoint.id, $5
+        FROM webhook_endpoints AS endpoint
+        WHERE endpoint.account_id = $2
+          AND endpoint.livemode = $3
+          AND endpoint.status = 'enabled'
+          AND ('*' = ANY(endpoint.enabled_events) OR $4 = ANY(endpoint.enabled_events))
+        "#,
+    )
+    .bind(event.id)
+    .bind(event.account_id)
+    .bind(event.livemode)
+    .bind(&event.event_type)
+    .bind(event.next_attempt_at)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }

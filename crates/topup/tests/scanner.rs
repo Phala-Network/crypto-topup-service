@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
-use topup::db::{self, AddressKind};
+use topup::db;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
@@ -32,7 +32,7 @@ use support::TestDatabase;
 use support::chain::{
     ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, contracts_dir, forge_create, run_checked,
 };
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress};
 
 /// One slot per epoch keeps anvil's finalized block close to the head for the finalized scanner.
 const ANVIL_ARGS: &[&str] = &["--slots-in-an-epoch", "1"];
@@ -228,6 +228,7 @@ impl RouteFixture {
         let path = directory.join(format!("c3-route-{}.yaml", Uuid::new_v4()));
         let yaml = include_str!("fixtures/phala-cloud-pha.yaml")
             .replace("chain_id: 1", &format!("chain_id: {CHAIN_ID}"))
+            .replace("livemode: true", "livemode: false")
             .replace(
                 "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
                 &format!("{token:#x}"),
@@ -422,13 +423,13 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
 }
 
 /// A deposit born `rejected(unsupported_asset)` emits exactly one `deposit.rejected` event.
-async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Result<()> {
+async fn assert_unsupported_asset_events(pool: &PgPool, customer_id: Uuid) -> Result<()> {
     let rows = sqlx::query(
         r#"
-        SELECT event.id, event.product_id, event.object_id, deposit.reason
-        FROM outbox AS event
+        SELECT event.id, event.account_id, event.livemode, event.object_id, deposit.reason
+        FROM events AS event
         JOIN deposits AS deposit ON deposit.id = event.object_id
-        WHERE event.event_type = 'deposit.rejected' AND event.object_type = 'deposit'
+        WHERE event.type = 'deposit.rejected' AND event.object_type = 'deposit'
         "#,
     )
     .fetch_all(pool)
@@ -438,17 +439,19 @@ async fn assert_unsupported_asset_events(pool: &PgPool, account_id: Uuid) -> Res
         "expected one deposit.rejected event, got {}",
         rows.len()
     );
-    let product_id: Uuid = sqlx::query_scalar("SELECT product_id FROM accounts WHERE id = $1")
-        .bind(account_id)
-        .fetch_one(pool)
-        .await?;
+    let (account_id, livemode): (Uuid, bool) =
+        sqlx::query_as("SELECT account_id, livemode FROM customers WHERE id = $1")
+            .bind(customer_id)
+            .fetch_one(pool)
+            .await?;
     let deposit: Uuid = rows[0].try_get("object_id")?;
     ensure!(
         rows[0].try_get::<Option<String>, _>("reason")?.as_deref() == Some("unsupported_asset")
     );
     ensure!(
-        rows[0].try_get::<Option<Uuid>, _>("product_id")? == Some(product_id),
-        "event does not name the owning product"
+        rows[0].try_get::<Uuid, _>("account_id")? == account_id
+            && rows[0].try_get::<bool, _>("livemode")? == livemode,
+        "event does not name the owning account and mode"
     );
     ensure!(
         rows[0].try_get::<Uuid, _>("id")?
@@ -654,7 +657,7 @@ async fn run_confirm_scenario(
             .await?;
     ensure!(evidence["stage"] == "confirmed");
     // Confirmation announces nothing.
-    let outbox_count: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox WHERE object_id = $1")
+    let outbox_count: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE object_id = $1")
         .bind(confirmed_id)
         .fetch_one(&database.app_pool)
         .await?;
@@ -777,36 +780,24 @@ fn current_block(rpc_url: &str) -> Result<u64> {
         .context("parse anvil block number")
 }
 
+/// Seeds an account and one customer, and returns the customer id.
 async fn seed_account(pool: &PgPool) -> Result<Uuid> {
-    let product_id = Uuid::new_v4();
-    seed::create_product(
-        pool,
-        &NewProduct {
-            id: product_id,
-            slug: "scanner-test".to_owned(),
-            webhook_url: "https://product.test/webhooks".to_owned(),
-            pubkey: "test-key".to_owned(),
-            paused_scopes: Vec::new(),
-        },
-    )
-    .await?;
-    let account_id = Uuid::new_v4();
-    seed::create_account(
+    let (_, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
-            id: account_id,
-            product_id,
-            external_id: "workspace-scanner".to_owned(),
-            paused_scopes: Vec::new(),
+            livemode: false,
+            webhook_url: "https://product.test/webhooks".to_owned(),
+            ..NewAccount::named("scanner-test")
         },
+        "workspace-scanner",
     )
     .await?;
-    Ok(account_id)
+    Ok(customer.id)
 }
 
 async fn insert_address(
     pool: &PgPool,
-    account_id: Uuid,
+    customer_id: Uuid,
     address: Address,
     version: u64,
 ) -> Result<Uuid> {
@@ -815,17 +806,11 @@ async fn insert_address(
         pool,
         &NewAddress {
             id,
-            account_id,
+            customer_id,
             chain_id: CHAIN_ID,
-            kind: AddressKind::Persistent,
-            version,
-            lock_ref: None,
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: B256::from([u8::try_from(version)?; 32]),
             address,
-            retired_at: version
-                .checked_sub(1)
-                .filter(|value| *value > 0)
-                .map(|_| chrono::Utc::now()),
         },
     )
     .await?;
@@ -834,7 +819,7 @@ async fn insert_address(
 
 async fn insert_lock_address(
     pool: &PgPool,
-    account_id: Uuid,
+    customer_id: Uuid,
     address: Address,
     index: u64,
 ) -> Result<Uuid> {
@@ -843,14 +828,11 @@ async fn insert_lock_address(
         pool,
         &NewAddress {
             id,
-            account_id,
+            customer_id,
             chain_id: CHAIN_ID,
-            kind: AddressKind::Lock,
-            version: 0,
-            lock_ref: Some(format!("lock-{index}")),
+            route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: indexed_word(index),
             address,
-            retired_at: None,
         },
     )
     .await?;

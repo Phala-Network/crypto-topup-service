@@ -13,9 +13,7 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 use tokio::sync::{Barrier, Semaphore};
 use tokio_util::sync::CancellationToken;
-use topup::db::{
-    self, AddressKind, EventObject, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects,
-};
+use topup::db::{self, EventObject, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects};
 use topup::jitter::JitterSource;
 use topup::pump::{
     AgeAlertConfig, AgeAlerter, Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet,
@@ -32,7 +30,7 @@ use topup_core::route::{ChainHeads, Confirmations, RouteFile};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
-use support::seed::{self, NewAccount, NewAddress, NewProduct};
+use support::seed::{self, NewAccount, NewAddress};
 use support::with_database;
 
 #[tokio::test]
@@ -166,7 +164,8 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 events: vec![OutboxEvent {
                     id: event_id,
                     event_type: "deposit.credited".to_owned(),
-                    product_id: seed.product_id,
+                    account_id: seed.account_id,
+                    livemode: true,
                     object: EventObject::Deposit(id),
                     next_attempt_at: Utc::now(),
                 }],
@@ -198,7 +197,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                     .await?
                     .try_get(0)?;
             ensure!(evidence == json!({"provider": "test", "confirmed": true}));
-            let event_count: i64 = sqlx::query("SELECT count(*) FROM outbox WHERE id = $1")
+            let event_count: i64 = sqlx::query("SELECT count(*) FROM events WHERE id = $1")
                 .bind(event_id)
                 .fetch_one(&context.app_pool)
                 .await?
@@ -223,20 +222,16 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 14).await?;
-            sqlx::query("UPDATE addresses SET kind = 'lock', lock_ref = 'race-lock' WHERE id = $1")
-                .bind(seed.address_id)
-                .execute(&context.app_pool)
-                .await?;
             let first_id = insert_deposit(&context.app_pool, seed, 14).await?;
             let second_id = insert_deposit(&context.app_pool, seed, 15).await?;
             sqlx::query(
                 r#"
-                INSERT INTO rate_locks (
-                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
-                    exposure_reserved
-                )
-                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
-                        now() + interval '15 minutes', true)
+                UPDATE quotes
+                SET route = 'phala-cloud-ethereum-pha-usd', amount_atomic = 1000,
+                    price_scaled = 9000000, credit_minor = 777,
+                    expires_at = now() + interval '15 minutes', status = 'open',
+                    exposure_reserved = true, closed_at = NULL
+                WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
                 "#,
             )
             .bind(seed.address_id)
@@ -279,7 +274,7 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
                     == 1
             );
             let consumed_by: Uuid =
-                sqlx::query_scalar("SELECT consumed_by FROM rate_locks WHERE address_id = $1")
+                sqlx::query_scalar("SELECT consumed_by FROM quotes WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)")
                     .bind(seed.address_id)
                     .fetch_one(&context.app_pool)
                     .await?;
@@ -301,7 +296,7 @@ async fn two_pumps_consume_one_rate_lock_only_once() -> Result<()> {
             .await?;
             ensure!(locked == 1);
             let (lock_status, reserved): (String, bool) = sqlx::query_as(
-                "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
+                "SELECT status, exposure_reserved FROM quotes WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
             )
             .bind(seed.address_id)
             .fetch_one(&context.app_pool)
@@ -326,12 +321,6 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
 
             for (name, number, amount, expiry_seconds, source, credit, consumed) in cases {
                 let seed = seed_account(&context.app_pool, number).await?;
-                let lock_ref = format!("{name}-lock");
-                sqlx::query("UPDATE addresses SET kind = 'lock', lock_ref = $2 WHERE id = $1")
-                    .bind(seed.address_id)
-                    .bind(&lock_ref)
-                    .execute(&context.app_pool)
-                    .await?;
                 let deposit_id = insert_deposit(&context.app_pool, seed, number).await?;
                 sqlx::query("UPDATE deposits SET amount_atomic = $2::text::numeric WHERE id = $1")
                     .bind(deposit_id)
@@ -350,11 +339,11 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                 let expires_at = block_time + Duration::seconds(expiry_seconds);
                 sqlx::query(
                     r#"
-                    INSERT INTO rate_locks (
-                        address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
-                        exposure_reserved
-                    )
-                    VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777, $2, true)
+                    UPDATE quotes
+                    SET route = 'phala-cloud-ethereum-pha-usd', amount_atomic = 1000,
+                        price_scaled = 9000000, credit_minor = 777, expires_at = $2,
+                        status = 'open', exposure_reserved = true, closed_at = NULL
+                    WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
                     "#,
                 )
                 .bind(seed.address_id)
@@ -386,7 +375,7 @@ async fn confirm_uses_lock_only_within_amount_and_time_tolerance() -> Result<()>
                     "{name}"
                 );
                 let (lock_status, reserved): (String, bool) = sqlx::query_as(
-                    "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
+                    "SELECT status, exposure_reserved FROM quotes WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
                 )
                 .bind(seed.address_id)
                 .fetch_one(&context.app_pool)
@@ -417,12 +406,6 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
     with_database(|context| {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 23).await?;
-            sqlx::query(
-                "UPDATE addresses SET kind = 'lock', lock_ref = 'expiry-race' WHERE id = $1",
-            )
-            .bind(seed.address_id)
-            .execute(&context.app_pool)
-            .await?;
             let deposit_id = insert_deposit(&context.app_pool, seed, 23).await?;
             let expires_at = Utc::now() - Duration::seconds(1);
             sqlx::query("UPDATE deposits SET block_time = $2 WHERE id = $1")
@@ -432,11 +415,11 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
                 .await?;
             sqlx::query(
                 r#"
-                INSERT INTO rate_locks (
-                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
-                    exposure_reserved
-                )
-                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777, $2, true)
+                UPDATE quotes
+                SET route = 'phala-cloud-ethereum-pha-usd', amount_atomic = 1000,
+                    price_scaled = 9000000, credit_minor = 777, expires_at = $2,
+                    status = 'open', exposure_reserved = true, closed_at = NULL
+                WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
                 "#,
             )
             .bind(seed.address_id)
@@ -474,7 +457,7 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             ensure!(stored.price_source.as_deref() == Some("lock"));
             ensure!(stored.credit_minor == Some(MinorAmount::new(777)));
             let (lock_status, reserved): (String, bool) = sqlx::query_as(
-                "SELECT status, exposure_reserved FROM rate_locks WHERE address_id = $1",
+                "SELECT status, exposure_reserved FROM quotes WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
             )
             .bind(seed.address_id)
             .fetch_one(&context.app_pool)
@@ -482,7 +465,7 @@ async fn in_window_payment_finalized_after_the_window_never_emits_expired() -> R
             ensure!(lock_status == "consumed" && !reserved);
             ensure!(topup::locks::expire_once(&context.app_pool).await? == 0);
             let expired_events: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM outbox WHERE event_type = 'quote.expired'",
+                "SELECT count(*) FROM events WHERE type = 'quote.expired'",
             )
             .fetch_one(&context.app_pool)
             .await?;
@@ -499,19 +482,13 @@ async fn cancelled_lock_payment_is_credited_at_spot() -> Result<()> {
         Box::pin(async move {
             let seed = seed_account(&context.app_pool, 18).await?;
             sqlx::query(
-                "UPDATE addresses SET kind = 'lock', lock_ref = 'cancelled-lock' WHERE id = $1",
-            )
-            .bind(seed.address_id)
-            .execute(&context.app_pool)
-            .await?;
-            sqlx::query(
                 r#"
-                INSERT INTO rate_locks (
-                    address_id, route, amount_atomic, price_scaled, credit_minor, expires_at,
-                    status, closed_at
-                )
-                VALUES ($1, 'phala-cloud-ethereum-pha-usd', 1000, 9000000, 777,
-                        now() + interval '15 minutes', 'cancelled', now())
+                UPDATE quotes
+                SET route = 'phala-cloud-ethereum-pha-usd', amount_atomic = 1000,
+                    price_scaled = 9000000, credit_minor = 777,
+                    expires_at = now() + interval '15 minutes', status = 'cancelled',
+                    closed_at = now()
+                WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
                 "#,
             )
             .bind(seed.address_id)
@@ -987,41 +964,30 @@ fn transfer_log(deposit: &db::Deposit, recipient: Address) -> TransferLog {
 
 #[derive(Clone, Copy)]
 struct Seed {
-    product_id: Uuid,
     account_id: Uuid,
     address_id: Uuid,
 }
 
 async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
-    let product = NewProduct {
-        id: Uuid::new_v4(),
-        slug: format!("product-{number}"),
-        webhook_url: format!("https://product-{number}.test/webhooks"),
-        pubkey: format!("public-key-{number}"),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_product(pool, &product).await?;
-    let account = NewAccount {
-        id: Uuid::new_v4(),
-        product_id: product.id,
-        external_id: format!("workspace-{number}"),
-        paused_scopes: Vec::new(),
-    };
-    seed::create_account(pool, &account).await?;
+    let (account, customer) = seed::create_account_and_customer(
+        pool,
+        &NewAccount {
+            webhook_url: format!("https://product-{number}.test/webhooks"),
+            ..NewAccount::named(&format!("product-{number}"))
+        },
+        &format!("workspace-{number}"),
+    )
+    .await?;
     let address = NewAddress {
         id: Uuid::new_v4(),
-        account_id: account.id,
+        customer_id: customer.id,
         chain_id: 1,
-        kind: AddressKind::Persistent,
-        version: 1,
-        lock_ref: None,
+        route: "phala-cloud-ethereum-pha-usd".to_owned(),
         salt: b256(number),
         address: evm_address(number),
-        retired_at: None,
     };
     seed::insert_address(pool, &address).await?;
     Ok(Seed {
-        product_id: product.id,
         account_id: account.id,
         address_id: address.id,
     })
@@ -1040,7 +1006,6 @@ async fn insert_deposit(pool: &PgPool, seed: Seed, number: u8) -> Result<Uuid> {
         block_hash: b256(number.wrapping_add(1)),
         block_time: Utc::now(),
         address_id: seed.address_id,
-        account_id: seed.account_id,
         route: Some("phala-cloud-ethereum-pha-usd".to_owned()),
         route_version: Some(1),
         asset_contract: evm_address(200),

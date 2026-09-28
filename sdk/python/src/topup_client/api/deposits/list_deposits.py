@@ -114,7 +114,8 @@ def sync_detailed(
     ending_before: str | Unset = UNSET,
     expand: list[str] | Unset = UNSET,
 ) -> Response[DepositList | ErrorResponse]:
-    """The product's deposits, newest first, with Stripe's cursor pagination.
+    """The account's deposits in the credential's mode, newest first, with Stripe's cursor
+    pagination.
 
     Args:
         account_id (str | Unset):
@@ -170,7 +171,8 @@ def sync(
     ending_before: str | Unset = UNSET,
     expand: list[str] | Unset = UNSET,
 ) -> DepositList | ErrorResponse | None:
-    """The product's deposits, newest first, with Stripe's cursor pagination.
+    """The account's deposits in the credential's mode, newest first, with Stripe's cursor
+    pagination.
 
     Args:
         account_id (str | Unset):
@@ -221,7 +223,8 @@ async def asyncio_detailed(
     ending_before: str | Unset = UNSET,
     expand: list[str] | Unset = UNSET,
 ) -> Response[DepositList | ErrorResponse]:
-    """The product's deposits, newest first, with Stripe's cursor pagination.
+    """The account's deposits in the credential's mode, newest first, with Stripe's cursor
+    pagination.
 
     Args:
         account_id (str | Unset):
@@ -275,7 +278,8 @@ async def asyncio(
     ending_before: str | Unset = UNSET,
     expand: list[str] | Unset = UNSET,
 ) -> DepositList | ErrorResponse | None:
-    """The product's deposits, newest first, with Stripe's cursor pagination.
+    """The account's deposits in the credential's mode, newest first, with Stripe's cursor
+    pagination.
 
     Args:
         account_id (str | Unset):

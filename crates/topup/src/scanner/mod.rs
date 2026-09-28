@@ -514,7 +514,6 @@ fn resolve_logs(
                 block_hash: log.block_hash,
                 block_time: log.block_time,
                 address_id: address.id,
-                account_id: address.account_id,
                 route: selected.map(|route| route.name.clone()),
                 route_version: selected.map(|route| route.version),
                 asset_contract: log.token,
@@ -647,7 +646,6 @@ mod tests {
         let recipient = Address::from([1_u8; 20]);
         let address = ScanAddress {
             id: Uuid::new_v4(),
-            account_id: Uuid::new_v4(),
             address: recipient,
             created_block: 0,
             backfilled: false,

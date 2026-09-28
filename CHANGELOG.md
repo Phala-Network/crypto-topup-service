@@ -9,6 +9,16 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- Accounts and tenancy (docs/design/multi-tenant.md §14, D13, PR 3). The tenant is an account,
+  `acct_…`. Its request signing key id is `{acct_…}/v1`, and the key is live or test: it quotes on
+  the routes of its mode and reads only its mode's objects. Another account's object, or the same
+  account's object in the other mode, answers `404` like a missing one. Webhook events go to every
+  enabled endpoint of the event's account and mode.
+- `POST /v1/admin/accounts {name, livemode, public_key, webhook_url}` issues an account and
+  `PUT /v1/admin/accounts/{account}` replaces its key and webhook URL;
+  `POST /v1/admin/accounts/{account}/customers/{customer}/pause | resume` pauses one customer.
+  The admin deposit view carries the deposit's `account` and `livemode`.
+
 - Fast credit and reversal (docs/design/multi-tenant.md §4, D1). A route's
   `chain.confirmations` (a depth, `safe`, or `finalized`, per chain family; default 2 on
   Ethereum L1, `safe` on OP-stack, `finalized` elsewhere) sets when a deposit is credited: at the
@@ -26,6 +36,15 @@ webhook receivers must ignore unknown fields. The format follows
   nothing is paid back for a payment that could still be reversed.
 
 ### Changed
+
+- **Breaking:** one squashed database migration builds the multi-tenant schema on an empty
+  database; staging is reset (HUMAN-ONLY, deploy/README.md "Staging reset") and nothing is
+  migrated. Route files drop `product` and require `livemode`, checked against the chain.
+- **Breaking:** products are gone. `POST /v1/admin/products`, `PUT /v1/admin/products/{slug}`,
+  and `POST /v1/admin/products/{slug}/accounts/{account_id}/pause | resume` are replaced by the
+  account endpoints above; the quote address salt's first input is the `acct_…` id instead of the
+  product slug.
+- A quote's `account_id` holds 1 to 200 characters (was 255 bytes).
 
 - **Breaking** for deposits recorded from now on: a deposit id is `uuid_v5(NS,
   "{chain_id}:{tx_hash}:{receipt_log_index}")`, the transfer's position among its transaction's
@@ -241,6 +260,10 @@ happens only from two-provider finalized data.
 
 ### Removed
 
+- Webhook events written before Stripe-style events (outbox format 1) and their old envelope;
+  every event is `{id: "evt_…", object: "event", type, created, data: {object}}`.
+- The retired `rejected(product_refused)` reason and `cleared` state, and addresses issued before
+  quotes (persistent addresses).
 - **Settlement conformance suite** (`topup-conformance`, `topup-conformance-reference`,
   `docs/conformance.md`, `make product-conformance`) and the reference product's conformance mode
   (test accounts and the `_conformance/ledger` hook). The settlement endpoint it tested is being

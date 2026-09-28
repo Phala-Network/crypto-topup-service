@@ -84,7 +84,7 @@ def sync_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
     """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-    other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+    other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
     must be final.
 
     Args:
@@ -118,7 +118,7 @@ def sync(
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
     """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-    other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+    other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
     must be final.
 
     Args:
@@ -147,7 +147,7 @@ async def asyncio_detailed(
     idempotency_key: None | str | Unset = UNSET,
 ) -> Response[ErrorResponse | Refund]:
     """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-    other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+    other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
     must be final.
 
     Args:
@@ -179,7 +179,7 @@ async def asyncio(
     idempotency_key: None | str | Unset = UNSET,
 ) -> ErrorResponse | Refund | None:
     """Requests a refund of a deposit for finance's approval (architecture §15): a rejected deposit
-    other than a sanctioned or dust one, or a credited one the product did not apply. The deposit
+    other than a sanctioned or dust one, or a credited one the merchant did not apply. The deposit
     must be final.
 
     Args:

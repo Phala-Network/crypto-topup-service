@@ -8,24 +8,21 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
+from ...models.account_response import AccountResponse
+from ...models.create_account_request import CreateAccountRequest
 from ...models.error_response import ErrorResponse
-from ...models.product_response import ProductResponse
-from ...models.update_product_request import UpdateProductRequest
 from typing import cast
 
 
 def _get_kwargs(
-    slug: str,
     *,
-    body: UpdateProductRequest,
+    body: CreateAccountRequest,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
 
     _kwargs: dict[str, Any] = {
-        "method": "put",
-        "url": "/v1/admin/products/{slug}".format(
-            slug=quote(str(slug), safe=""),
-        ),
+        "method": "post",
+        "url": "/v1/admin/accounts",
     }
 
     _kwargs["json"] = body.to_dict()
@@ -38,9 +35,9 @@ def _get_kwargs(
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> ErrorResponse | ProductResponse | None:
+) -> AccountResponse | ErrorResponse | None:
     if response.status_code == 200:
-        response_200 = ProductResponse.from_dict(response.json())
+        response_200 = AccountResponse.from_dict(response.json())
 
         return response_200
 
@@ -54,11 +51,6 @@ def _parse_response(
 
         return response_401
 
-    if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
-
-        return response_404
-
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -67,7 +59,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[ErrorResponse | ProductResponse]:
+) -> Response[AccountResponse | ErrorResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -77,28 +69,27 @@ def _build_response(
 
 
 def sync_detailed(
-    slug: str,
     *,
     client: AuthenticatedClient,
-    body: UpdateProductRequest,
-) -> Response[ErrorResponse | ProductResponse]:
-    """
+    body: CreateAccountRequest,
+) -> Response[AccountResponse | ErrorResponse]:
+    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
+    Each call issues a new account. Until self-serve signup and API keys replace it.
+
     Args:
-        slug (str):
-        body (UpdateProductRequest): Administrative replacement of an issued product's
-            verification key and webhook URL. The key id
-            stays the route's `destination.product_kid`.
+        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
+            (design PR 5) and API keys
+            (design PR 6) replace it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ProductResponse]
+        Response[AccountResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
         body=body,
     )
 
@@ -110,56 +101,54 @@ def sync_detailed(
 
 
 def sync(
-    slug: str,
     *,
     client: AuthenticatedClient,
-    body: UpdateProductRequest,
-) -> ErrorResponse | ProductResponse | None:
-    """
+    body: CreateAccountRequest,
+) -> AccountResponse | ErrorResponse | None:
+    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
+    Each call issues a new account. Until self-serve signup and API keys replace it.
+
     Args:
-        slug (str):
-        body (UpdateProductRequest): Administrative replacement of an issued product's
-            verification key and webhook URL. The key id
-            stays the route's `destination.product_kid`.
+        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
+            (design PR 5) and API keys
+            (design PR 6) replace it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ProductResponse
+        AccountResponse | ErrorResponse
     """
 
     return sync_detailed(
-        slug=slug,
         client=client,
         body=body,
     ).parsed
 
 
 async def asyncio_detailed(
-    slug: str,
     *,
     client: AuthenticatedClient,
-    body: UpdateProductRequest,
-) -> Response[ErrorResponse | ProductResponse]:
-    """
+    body: CreateAccountRequest,
+) -> Response[AccountResponse | ErrorResponse]:
+    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
+    Each call issues a new account. Until self-serve signup and API keys replace it.
+
     Args:
-        slug (str):
-        body (UpdateProductRequest): Administrative replacement of an issued product's
-            verification key and webhook URL. The key id
-            stays the route's `destination.product_kid`.
+        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
+            (design PR 5) and API keys
+            (design PR 6) replace it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[ErrorResponse | ProductResponse]
+        Response[AccountResponse | ErrorResponse]
     """
 
     kwargs = _get_kwargs(
-        slug=slug,
         body=body,
     )
 
@@ -169,29 +158,28 @@ async def asyncio_detailed(
 
 
 async def asyncio(
-    slug: str,
     *,
     client: AuthenticatedClient,
-    body: UpdateProductRequest,
-) -> ErrorResponse | ProductResponse | None:
-    """
+    body: CreateAccountRequest,
+) -> AccountResponse | ErrorResponse | None:
+    """Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
+    Each call issues a new account. Until self-serve signup and API keys replace it.
+
     Args:
-        slug (str):
-        body (UpdateProductRequest): Administrative replacement of an issued product's
-            verification key and webhook URL. The key id
-            stays the route's `destination.product_kid`.
+        body (CreateAccountRequest): Administrative account issuance body, until self-serve signup
+            (design PR 5) and API keys
+            (design PR 6) replace it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        ErrorResponse | ProductResponse
+        AccountResponse | ErrorResponse
     """
 
     return (
         await asyncio_detailed(
-            slug=slug,
             client=client,
             body=body,
         )

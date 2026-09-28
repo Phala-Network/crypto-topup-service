@@ -12,8 +12,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use sqlx::PgPool;
 use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
-use topup_core::route::DestinationConfig;
+use uuid::Uuid;
+
+use crate::audit::Actor;
+use crate::db::Account;
+use crate::tenancy::{self, Permission, Principal, Scope};
 
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -41,39 +46,68 @@ impl VerificationKey {
     }
 }
 
-/// Authenticates a product request and attaches its product identifier.
-pub async fn authenticate_product(
+/// The authenticated merchant of a request: its account, the [`Scope`] every query it makes
+/// takes, and the credential it signed with.
+#[derive(Clone, Debug)]
+pub(crate) struct Merchant {
+    /// The account the credential belongs to.
+    pub(crate) account: Account,
+    /// Built from the credential alone: its account and mode.
+    pub(crate) scope: Scope,
+    /// The credential's key id, `{acct_…}/v1`.
+    pub(crate) key_id: String,
+}
+
+impl Merchant {
+    /// The audit actor of the merchant's requests.
+    pub(crate) fn actor(&self) -> Actor {
+        Actor::api_key(&self.key_id)
+    }
+
+    /// Fails with `403 permission_denied` unless the authorization table grants `permission` to
+    /// the credential. The request signing key is a secret key until API keys replace it.
+    pub(crate) async fn require(
+        &self,
+        pool: &PgPool,
+        permission: Permission,
+    ) -> Result<(), ApiError> {
+        if tenancy::holds(pool, Principal::SecretKey, permission).await? {
+            Ok(())
+        } else {
+            Err(ApiError::permission_denied())
+        }
+    }
+}
+
+/// Authenticates a merchant request and attaches its [`Merchant`], whose scope comes from the
+/// signing key: key id `{acct_…}/v1` names the account, and the stored key fixes the mode.
+pub async fn authenticate_merchant(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    // The key id names the product: `{slug}/v1` (architecture §14).
-    let Some(product_slug) = request
+    let Some((account_id, kid)) = request
         .headers()
         .get("signature-input")
         .and_then(|value| value.to_str().ok())
         .map(http_signature::signature_keyids)
-        .and_then(|keyids| keyids.into_iter().find_map(|keyid| product_slug_of(&keyid)))
+        .and_then(|keyids| {
+            keyids
+                .into_iter()
+                .find_map(|keyid| account_of_key_id(&keyid).map(|account| (account, keyid)))
+        })
     else {
         return ApiError::unauthorized().into_response();
     };
-    let product = match repository::find_product_by_slug(&state.pool, &product_slug).await {
-        Ok(Some(product)) => product,
+    let signing_key = match repository::find_signing_key(&state.pool, account_id).await {
+        Ok(Some(signing_key)) => signing_key,
         Ok(None) => return ApiError::unauthorized().into_response(),
         Err(error) => return error.into_response(),
     };
-    // The key id is attested in the route; a product no loaded route names cannot authenticate.
-    let Some(kid) = state
-        .routes
-        .destination(&product.slug)
-        .map(DestinationConfig::product_kid)
-    else {
-        return ApiError::unauthorized().into_response();
-    };
-    let key = match VerificationKey::from_base64(kid, &product.pubkey) {
+    let key = match VerificationKey::from_base64(kid.clone(), &signing_key.public_key) {
         Ok(key) => key,
         Err(message) => {
-            tracing::error!(product_id = %product.id, %message, "stored product key is invalid");
+            tracing::error!(account_id = %account_id, %message, "stored signing key is invalid");
             return ApiError::unauthorized().into_response();
         }
     };
@@ -84,18 +118,19 @@ pub async fn authenticate_product(
     if let Err(error) = repository::record_signature(&state.pool, &verified).await {
         return error.into_response();
     }
-    // Paths that still name a product must name the signer's.
-    if product_slug_from_path(request.uri().path()).is_some_and(|slug| slug != product.slug) {
-        return ApiError::unauthorized().into_response();
-    }
-    request.extensions_mut().insert(product);
+    let scope = Scope::new(signing_key.account.id, signing_key.livemode);
+    request.extensions_mut().insert(Merchant {
+        account: signing_key.account,
+        scope,
+        key_id: kid,
+    });
     next.run(request).await
 }
 
-/// Passes an unsigned request that carries a `client_secret` query parameter to the handler without
-/// a product, which then serves the quote's public view; any other request must be a signed
-/// product request.
-pub async fn authenticate_product_or_client_secret(
+/// Passes an unsigned request that carries a `client_secret` query parameter to the handler
+/// without a merchant, which then serves the quote's public view; any other request must be a
+/// signed merchant request.
+pub async fn authenticate_merchant_or_client_secret(
     state: State<AppState>,
     request: Request,
     next: Next,
@@ -108,20 +143,13 @@ pub async fn authenticate_product_or_client_secret(
     if unsigned && has_client_secret {
         next.run(request).await
     } else {
-        authenticate_product(state, request, next).await
+        authenticate_merchant(state, request, next).await
     }
 }
 
-/// The product slug of a product key id, `{slug}/v1`.
-fn product_slug_of(keyid: &str) -> Option<String> {
-    let slug = keyid.strip_suffix("/v1")?;
-    let bytes = slug.as_bytes();
-    let valid = matches!(bytes.first(), Some(b'a'..=b'z' | b'0'..=b'9'))
-        && bytes.len() <= 63
-        && bytes
-            .iter()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
-    valid.then(|| slug.to_owned())
+/// The account a merchant key id names: `{acct_…}/v1`.
+fn account_of_key_id(keyid: &str) -> Option<Uuid> {
+    crate::ids::parse(crate::ids::ACCOUNT, keyid.strip_suffix("/v1")?)
 }
 
 /// Authenticates an administrative request with the separately configured key.
@@ -202,14 +230,6 @@ fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a st
         .map_err(|_| ())
 }
 
-fn product_slug_from_path(path: &str) -> Option<&str> {
-    let mut segments = path.trim_start_matches('/').split('/');
-    match (segments.next(), segments.next(), segments.next()) {
-        (Some("v1"), Some("products"), Some(product)) if !product.is_empty() => Some(product),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -217,6 +237,27 @@ mod tests {
     use ed25519_dalek::SigningKey;
 
     use super::*;
+
+    /// The scope's account comes only from the key id the request was verified with; anything
+    /// but `{acct_…}/v1` names no account.
+    #[test]
+    fn only_an_account_key_id_names_an_account() {
+        let account = Uuid::from_u128(0x0c6e_1d0a_9b3f_4c2e_8d7a_6b5c_4d3e_2f10);
+        assert_eq!(
+            account_of_key_id("acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10/v1"),
+            Some(account)
+        );
+        for keyid in [
+            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10/v2",
+            "phala-cloud/v1",
+            "admin/v1",
+            "0c6e1d0a-9b3f-4c2e-8d7a-6b5c4d3e2f10/v1",
+            "acct_0C6E1D0A9B3F4C2E8D7A6B5C4D3E2F10/v1",
+        ] {
+            assert_eq!(account_of_key_id(keyid), None, "{keyid}");
+        }
+    }
 
     fn signed_message<'a>(
         vector: &'a serde_json::Value,

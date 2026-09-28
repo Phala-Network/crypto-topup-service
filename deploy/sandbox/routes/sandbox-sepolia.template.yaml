@@ -5,7 +5,7 @@
 # Every value not written here is a code default (docs/architecture.md §14).
 route: sandbox-${PRODUCT_SLUG}-tpha-usd
 version: 1
-product: ${PRODUCT_SLUG}
+livemode: false
 
 chain:
   chain_id: 11155111

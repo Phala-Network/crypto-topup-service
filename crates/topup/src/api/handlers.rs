@@ -9,8 +9,10 @@ use axum::extract::State;
 use topup_core::screening::PauseScope;
 use uuid::Uuid;
 
-use crate::db::{Account, Product};
+use crate::audit::Actor;
+use crate::db::Customer;
 use crate::routes::{ProviderError, RouteSet};
+use crate::tenancy::Scope;
 
 use super::AppState;
 use super::attestation::AttestationError;
@@ -18,12 +20,12 @@ use super::auth::VerificationKey;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, ApiQuery};
 use super::models::{
-    AdminReasonRequest, AdminRefundResponse, AttestationQuery, AttestationResponse,
-    DailyReportResponse, NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
-    ProductResponse, ReconciliationBlockLiftResponse, RecordRefundRequest, RegisterProductRequest,
-    RoutePauseResponse, SupportDepositResponse, UpdateProductRequest,
+    AccountResponse, AdminReasonRequest, AdminRefundResponse, AttestationQuery,
+    AttestationResponse, CreateAccountRequest, DailyReportResponse, NudgeResponse,
+    OutboxReplayResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
+    RecordRefundRequest, RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
 };
-use super::repository;
+use super::repository::{self, IssuedAccount};
 
 type ApiResult<T> = Result<T, ApiError>;
 
@@ -58,69 +60,75 @@ pub(crate) async fn get_attestation(
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/products",
-    request_body = RegisterProductRequest,
+    path = "/v1/admin/accounts",
+    request_body = CreateAccountRequest,
     responses(
-        (status = 200, description = "OK: registered, or already registered with the same values", body = ProductResponse),
+        (status = 200, description = "OK: issued", body = AccountResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 409, description = "Conflict: the slug is registered with different values; `PUT /v1/admin/products/{slug}` replaces them", body = ErrorResponse)
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn register_product(
+/// Issues a merchant account with its request signing key (key id `{id}/v1`) and webhook URL.
+/// Each call issues a new account. Until self-serve signup and API keys replace it.
+pub(crate) async fn create_account(
     State(state): State<AppState>,
-    ApiJson(request): ApiJson<RegisterProductRequest>,
-) -> ApiResult<Json<ProductResponse>> {
-    validate_product_credentials(
-        &state,
-        &request.slug,
-        &request.public_key,
-        &request.webhook_url,
-    )?;
-    let product = repository::register_product(
+    ApiJson(request): ApiJson<CreateAccountRequest>,
+) -> ApiResult<Json<AccountResponse>> {
+    let name = request.name.trim();
+    if name.is_empty() || name.chars().count() > 200 {
+        return Err(ApiError::invalid_param(
+            "name",
+            "name must contain 1 to 200 characters",
+        ));
+    }
+    validate_credentials(&state, &request.public_key, &request.webhook_url)?;
+    let account = repository::create_account(
         &state.pool,
-        &request.slug,
+        name,
+        request.livemode,
         &request.public_key,
         &request.webhook_url,
         &admin_actor(&state),
     )
     .await?;
-    Ok(Json(product_response(product)))
+    Ok(Json(account_response(account)))
 }
 
 #[utoipa::path(
     put,
-    path = "/v1/admin/products/{slug}",
-    params(("slug" = String, Path, description = "Product slug")),
-    request_body = UpdateProductRequest,
+    path = "/v1/admin/accounts/{account}",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    request_body = UpdateAccountRequest,
     responses(
-        (status = 200, description = "OK: replaced, or already holding these values", body = ProductResponse),
+        (status = 200, description = "OK: replaced, or already holding these values", body = AccountResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no product is issued with this slug", body = ErrorResponse)
+        (status = 404, description = "Not Found: no account is issued with this id", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn update_product(
+/// Replaces an account's request signing key and webhook URL; the key id and mode stay.
+pub(crate) async fn update_account(
     State(state): State<AppState>,
-    ApiPath(slug): ApiPath<String>,
-    ApiJson(request): ApiJson<UpdateProductRequest>,
-) -> ApiResult<Json<ProductResponse>> {
-    validate_product_credentials(&state, &slug, &request.public_key, &request.webhook_url)?;
+    ApiPath(account): ApiPath<String>,
+    ApiJson(request): ApiJson<UpdateAccountRequest>,
+) -> ApiResult<Json<AccountResponse>> {
+    let account_id = parse_account_id(&account)?;
+    validate_credentials(&state, &request.public_key, &request.webhook_url)?;
     validate_reason(&request.reason)?;
-    let product = repository::update_product(
+    let account = repository::update_account(
         &state.pool,
-        &slug,
+        account_id,
         &request.public_key,
         &request.webhook_url,
         &admin_actor(&state),
         &request.reason,
     )
     .await?;
-    Ok(Json(product_response(product)))
+    Ok(Json(account_response(account)))
 }
 
 #[utoipa::path(
@@ -135,7 +143,7 @@ pub(crate) async fn update_product(
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// One deposit of any product with its stored facts, transitions, and webhook events.
+/// One deposit of any account with its stored facts, transitions, and webhook events.
 pub(crate) async fn admin_get_deposit(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -149,38 +157,44 @@ pub(crate) async fn admin_get_deposit(
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/products/{slug}/accounts/{account_id}/pause",
-    params(("slug" = String, Path), ("account_id" = String, Path)),
+    path = "/v1/admin/accounts/{account}/customers/{customer}/pause",
+    params(
+        ("account" = String, Path, description = "Account id, `acct_…`"),
+        ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
+    ),
     request_body = PauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// Pauses scopes of one product account, for example `settlement` to stop crediting it.
-pub(crate) async fn pause_account(
+/// Pauses scopes of one customer of an account, for example `settlement` to stop crediting it.
+pub(crate) async fn pause_customer(
     State(state): State<AppState>,
-    ApiPath((slug, account_id)): ApiPath<(String, String)>,
+    ApiPath((account, customer)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &slug, &account_id, request, true).await
+    mutate_customer_scopes(&state, &account, &customer, request, true).await
 }
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/products/{slug}/accounts/{account_id}/resume",
-    params(("slug" = String, Path), ("account_id" = String, Path)),
+    path = "/v1/admin/accounts/{account}/customers/{customer}/resume",
+    params(
+        ("account" = String, Path, description = "Account id, `acct_…`"),
+        ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
+    ),
     request_body = PauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// Resumes scopes of one product account.
-pub(crate) async fn resume_account(
+/// Resumes scopes of one customer of an account.
+pub(crate) async fn resume_customer(
     State(state): State<AppState>,
-    ApiPath((slug, account_id)): ApiPath<(String, String)>,
+    ApiPath((account, customer)): ApiPath<(String, String)>,
     ApiJson(request): ApiJson<PauseRequest>,
 ) -> ApiResult<Json<PauseResponse>> {
-    mutate_account_scopes(&state, &slug, &account_id, request, false).await
+    mutate_customer_scopes(&state, &account, &customer, request, false).await
 }
 
 #[utoipa::path(
@@ -331,7 +345,7 @@ pub(crate) async fn lift_reconciliation_block(
     params((
         "event_id" = String,
         Path,
-        description = "The `webhook-id` header: `evt_…`, or the UUID of an older event"
+        description = "The `webhook-id` header, `evt_…`"
     )),
     request_body = AdminReasonRequest,
     responses(
@@ -347,7 +361,8 @@ pub(crate) async fn replay_outbox_event(
     ApiPath(event_id): ApiPath<String>,
     ApiJson(request): ApiJson<AdminReasonRequest>,
 ) -> ApiResult<Json<OutboxReplayResponse>> {
-    let event_id = crate::ids::parse_event(&event_id).ok_or_else(ApiError::not_found)?;
+    let event_id =
+        crate::ids::parse(crate::ids::EVENT, &event_id).ok_or_else(ApiError::not_found)?;
     validate_reason(&request.reason)?;
     Ok(Json(
         repository::replay_outbox_event(
@@ -443,42 +458,40 @@ async fn populate_treasury_balances(routes: &RouteSet, report: &mut DailyReportR
     }
 }
 
-/// Finds or creates the account, so creating a quote or an address is one call.
-pub(super) async fn ensure_account(
+/// Finds or creates the scope's customer, so creating a quote is one call.
+pub(super) async fn ensure_customer(
     state: &AppState,
-    product_id: Uuid,
-    external_id: &str,
-) -> ApiResult<Account> {
-    validate_external_id(external_id)?;
-    repository::register_account(&state.pool, product_id, external_id).await
+    scope: Scope,
+    client_reference_id: &str,
+) -> ApiResult<Customer> {
+    validate_external_id(client_reference_id)?;
+    repository::ensure_customer(&state.pool, scope, client_reference_id).await
 }
 
-pub(super) async fn require_account(
+async fn mutate_customer_scopes(
     state: &AppState,
-    product_id: Uuid,
-    external_id: &str,
-) -> ApiResult<Account> {
-    repository::find_account(&state.pool, product_id, external_id)
-        .await?
-        .ok_or_else(ApiError::not_found)
-}
-
-async fn mutate_account_scopes(
-    state: &AppState,
-    slug: &str,
-    external_id: &str,
+    account: &str,
+    client_reference_id: &str,
     request: PauseRequest,
     pause: bool,
 ) -> ApiResult<Json<PauseResponse>> {
     let scopes = validate_scopes(request.scopes)?;
-    let product = repository::find_product_by_slug(&state.pool, slug)
+    let account_id = parse_account_id(account)?;
+    let livemode = repository::find_signing_key(&state.pool, account_id)
         .await?
-        .ok_or_else(ApiError::not_found)?;
-    let account = require_account(state, product.id, external_id).await?;
-    let updated = repository::mutate_account_scopes(
+        .ok_or_else(ApiError::not_found)?
+        .livemode;
+    // The operator names the customer in the mode of the account's signing key.
+    let customer = repository::find_customer(
         &state.pool,
-        product.id,
-        account.id,
+        Scope::new(account_id, livemode),
+        client_reference_id,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let updated = repository::mutate_customer_scopes(
+        &state.pool,
+        &customer,
         &scopes,
         pause,
         &admin_actor(state),
@@ -504,25 +517,22 @@ async fn mutate_route_scopes(
         return Err(ApiError::not_found());
     }
     let scopes = validate_scopes(request.scopes)?;
-    let updated = repository::mutate_route_scopes(
-        &state.pool,
-        route,
-        &scopes,
-        pause,
-        &format!("admin:{}", state.admin_key.kid),
-    )
-    .await?;
+    let updated =
+        repository::mutate_route_scopes(&state.pool, route, &scopes, pause, &admin_actor(state))
+            .await?;
     Ok(Json(RoutePauseResponse {
         route: route.to_owned(),
         paused_scopes: updated,
     }))
 }
 
+/// The customer identifier is stored as `customers.client_reference_id`: 1 to 200 characters
+/// (design D6).
 pub(super) fn validate_external_id(external_id: &str) -> ApiResult<()> {
-    if external_id.is_empty() || external_id.len() > 255 {
+    if external_id.is_empty() || external_id.chars().count() > 200 {
         return Err(ApiError::invalid_param(
             "account_id",
-            "account_id must contain 1 to 255 bytes",
+            "account_id must contain 1 to 200 characters",
         ));
     }
     Ok(())
@@ -535,37 +545,11 @@ fn validate_reason(reason: &str) -> ApiResult<()> {
     Ok(())
 }
 
-fn validate_product_slug(slug: &str) -> ApiResult<()> {
-    let bytes = slug.as_bytes();
-    let valid = matches!(bytes.first(), Some(b'a'..=b'z' | b'0'..=b'9'))
-        && bytes.len() <= 63
-        && bytes
-            .iter()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'));
-    if !valid {
-        return Err(ApiError::bad_request(
-            "slug must match ^[a-z0-9][a-z0-9-]{0,62}$",
-        ));
-    }
-    Ok(())
-}
-
-/// Validates a product's credentials against the attested route that names its slug. The key id
-/// comes only from that route, so a product no loaded route names could never authenticate.
-fn validate_product_credentials(
-    state: &AppState,
-    slug: &str,
-    public_key: &str,
-    webhook_url: &str,
-) -> ApiResult<()> {
-    validate_product_slug(slug)?;
+/// Validates an account's credentials: an ed25519 public key and a webhook URL.
+fn validate_credentials(state: &AppState, public_key: &str, webhook_url: &str) -> ApiResult<()> {
     VerificationKey::from_base64(String::new(), public_key).map_err(|_| {
         ApiError::bad_request("public_key must be standard base64 of a 32-byte ed25519 key")
     })?;
-    state
-        .routes
-        .destination(slug)
-        .ok_or_else(|| ApiError::bad_request("no loaded route names this product slug"))?;
     let local_stack = state.public_origin.to_string().starts_with("http://");
     validate_webhook_url(webhook_url, local_stack)
 }
@@ -616,37 +600,33 @@ fn decode_nonce(value: &str) -> ApiResult<Vec<u8>> {
     hex::decode(value).map_err(|_| ApiError::bad_request("nonce must be valid hexadecimal"))
 }
 
-fn product_response(product: Product) -> ProductResponse {
-    ProductResponse {
-        id: product.id,
-        slug: product.slug,
-        public_key: product.pubkey,
-        webhook_url: product.webhook_url,
-        paused_scopes: product.paused_scopes,
+fn account_response(issued: IssuedAccount) -> AccountResponse {
+    AccountResponse {
+        key_id: format!("{}/v1", issued.account.public_id),
+        id: issued.account.public_id,
+        name: issued.account.name,
+        livemode: issued.livemode,
+        public_key: issued.public_key,
+        webhook_url: issued.webhook_url,
+        paused_scopes: issued.account.paused_scopes,
     }
+}
+
+fn parse_account_id(id: &str) -> ApiResult<Uuid> {
+    crate::ids::parse(crate::ids::ACCOUNT, id).ok_or_else(ApiError::not_found)
 }
 
 fn parse_refund_id(id: &str) -> ApiResult<Uuid> {
     crate::ids::parse_or_uuid(crate::ids::REFUND, id).ok_or_else(ApiError::not_found)
 }
 
-fn admin_actor(state: &AppState) -> String {
-    format!("admin:{}", state.admin_key.kid)
+fn admin_actor(state: &AppState) -> Actor {
+    Actor::admin(state.admin_key.kid.clone())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_product_slug, validate_webhook_url};
-
-    #[test]
-    fn product_slugs_match_the_documented_pattern() {
-        for slug in ["a", "0", "phala-cloud", "a-", &"a".repeat(63)] {
-            assert!(validate_product_slug(slug).is_ok(), "{slug}");
-        }
-        for slug in ["", "-a", "A", "a_b", "a.b", "a b", &"a".repeat(64)] {
-            assert!(validate_product_slug(slug).is_err(), "{slug}");
-        }
-    }
+    use super::validate_webhook_url;
 
     #[test]
     fn webhook_urls_use_https_unless_the_service_origin_is_http() {

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, account_id, chain_id, kind, version, lock_ref, salt, address, retired_at FROM addresses WHERE id = $1",
+  "query": "\n        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address\n        FROM addresses\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "livemode",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "addresses",
+            "name": "livemode"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "chain_id",
         "type_info": "Int8",
         "origin": {
@@ -37,46 +48,35 @@
         }
       },
       {
-        "ordinal": 3,
-        "name": "kind",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "addresses",
-            "name": "kind"
-          }
-        }
-      },
-      {
         "ordinal": 4,
-        "name": "version",
-        "type_info": "Int8",
+        "name": "quote_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
             "table": "addresses",
-            "name": "version"
+            "name": "quote_id"
           }
         }
       },
       {
         "ordinal": 5,
-        "name": "lock_ref",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "addresses",
-            "name": "lock_ref"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
         "name": "salt",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "addresses",
             "name": "salt"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "treasury",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "addresses",
+            "name": "treasury"
           }
         }
       },
@@ -88,17 +88,6 @@
           "Table": {
             "table": "addresses",
             "name": "address"
-          }
-        }
-      },
-      {
-        "ordinal": 8,
-        "name": "retired_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "addresses",
-            "name": "retired_at"
           }
         }
       }
@@ -114,11 +103,10 @@
       false,
       false,
       false,
-      true,
       false,
       false,
-      true
+      false
     ]
   },
-  "hash": "c0058c8dfb24648e58135afebd6610e1ddc606ead60fe5040a816fe513f4e6d1"
+  "hash": "986cd7da0d0c2822217992b5c6e19445a4b1f31c158b644084a341d661208023"
 }

@@ -90,8 +90,8 @@ impl Planner {
                 .into_iter()
                 .filter_map(|scoped| {
                     let paused = PauseScopeSources::from_codes(
+                        &scoped.customer_scopes,
                         &scoped.account_scopes,
-                        &scoped.product_scopes,
                         &route_scopes,
                     )
                     .map(|scopes| scopes.contains(PauseScope::Flush));
