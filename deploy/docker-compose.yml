@@ -129,6 +129,9 @@ services:
       TOPUP_BACKUP_TIMESTAMP_FILE: /run/topup-observability/last-backup-unix-seconds
       # Served on /healthz while TOPUP_SERVICE_ENABLED=read-only.
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
+      # Every webhook delivery goes through the smokescreen sidecar, the only filter of the
+      # addresses a merchant's URL may reach (deploy/README.md, "Webhook egress").
+      TOPUP_WEBHOOK_PROXY: http://smokescreen:4750
       # Sentry reporting (deploy/README.md, "Sentry"): off while the owner-sealed DSN is empty. The
       # release is the digest of the image rendered here; the environment is this deployment's.
       SENTRY_DSN: ${SENTRY_DSN:-}
@@ -184,6 +187,32 @@ services:
     depends_on:
       topup:
         condition: service_started
+    restart: unless-stopped
+
+  # Webhook egress (docs/design/multi-tenant.md §8; deploy/README.md, "Webhook egress"): Stripe's
+  # smokescreen v0.1.0, built into the phala-pay image and so pinned by its digest, is the only IP
+  # filter of merchants' webhook URLs. It refuses every address that is not publicly routable:
+  # loopback, private (RFC 1918, fc00::/7), link-local (169.254/16 with the cloud metadata address
+  # 169.254.169.254, fe80::/10), CGNAT (100.64/10, with Alibaba's metadata 100.100.100.200),
+  # multicast, and IPv6 that embeds IPv4 (NAT64, 6to4, Teredo); an IPv4-mapped IPv6 address is
+  # checked as the IPv4 address it maps. The ranges below are refused explicitly as well, since
+  # some count as global unicast: 0.0.0.0/8, IETF 192.0.0.0/24, benchmarking 198.18.0.0/15,
+  # reserved 240.0.0.0/4. It publishes no port: only topup reaches it on the compose network. The
+  # restore-check variant runs it too, idle: a read-only topup delivers nothing.
+  smokescreen:
+    labels: *rendered-labels
+    image: ${TOPUP_IMAGE:-ghcr.io/phala-network/phala-pay@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    command:
+      - smokescreen
+      - --listen-ip=0.0.0.0
+      - --listen-port=4750
+      - --timeout=10s
+      - --deny-range=0.0.0.0/8
+      - --deny-range=100.64.0.0/10
+      - --deny-range=169.254.0.0/16
+      - --deny-range=192.0.0.0/24
+      - --deny-range=198.18.0.0/15
+      - --deny-range=240.0.0.0/4
     restart: unless-stopped
 
   heartbeat:

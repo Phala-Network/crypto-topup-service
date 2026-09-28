@@ -26,8 +26,8 @@ use super::auth::VerifiedSignature;
 use super::error::ApiError;
 use super::models::{
     DailyReportResponse, DepositEventResponse, DepositResponse, DepositTransitionResponse,
-    NudgeResponse, OutboxReplayResponse, ReconciliationBlockLiftResponse,
-    ReconciliationBlockReport, RouteDailyReport, SupportDepositResponse,
+    NudgeResponse, ReconciliationBlockLiftResponse, ReconciliationBlockReport, RouteDailyReport,
+    SupportDepositResponse,
 };
 
 /// Records a verified request signature exactly once within the acceptance window.
@@ -107,13 +107,11 @@ pub struct NewAccount<'a> {
     pub due_diligence: Value,
     /// Live mode.
     pub charges_enabled: bool,
-    /// Webhook URL registered in each enabled mode, until design PR 8.
-    pub webhook_url: Option<&'a str>,
 }
 
 /// Creates an account with the first secret key of test mode and, with `charges_enabled`, of
-/// live mode, a webhook endpoint per enabled mode when a URL is given, and the audit rows and
-/// `api_key.created` events, in one transaction.
+/// live mode, and the audit rows and `api_key.created` events, in one transaction. The merchant
+/// registers its webhook endpoints itself (`/v1/webhook_endpoints`).
 pub async fn create_account(
     pool: &PgPool,
     account: &NewAccount<'_>,
@@ -156,9 +154,6 @@ pub async fn create_account(
     };
     let mut issued = Vec::with_capacity(modes.len());
     for &livemode in modes {
-        if let Some(url) = account.webhook_url {
-            insert_endpoint(&mut transaction, created.id, livemode, url).await?;
-        }
         issued.push(
             api_keys::create_in(
                 &mut transaction,
@@ -179,25 +174,22 @@ pub async fn create_account(
 }
 
 /// An admin update of an account; absent fields stay.
-pub struct AccountChanges<'a> {
+pub struct AccountChanges {
     /// Live mode.
     pub charges_enabled: Option<bool>,
     /// Restricted for review.
     pub restricted: Option<bool>,
     /// `{name, email}`.
     pub contact: Option<Value>,
-    /// Webhook URL of every endpoint, until design PR 8.
-    pub webhook_url: Option<&'a str>,
 }
 
 /// Applies `changes`, with an audit row and an `account.updated` event per enabled mode, in one
 /// transaction; an update that changes nothing writes nothing. Enabling live mode for an account
-/// without a live key issues its first live key, and registers a live webhook endpoint with the
-/// test endpoint's URL when there is none.
+/// without a live key issues its first live key.
 pub async fn update_account(
     pool: &PgPool,
     account_id: Uuid,
-    changes: &AccountChanges<'_>,
+    changes: &AccountChanges,
     actor: &Actor,
     reason: &str,
 ) -> Result<IssuedAccount, ApiError> {
@@ -211,12 +203,6 @@ pub async fn update_account(
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or_else(ApiError::not_found)?;
-    let urls: Vec<(bool, String)> = sqlx::query_as(
-        "SELECT livemode, url FROM webhook_endpoints WHERE account_id = $1 ORDER BY created_at, id",
-    )
-    .bind(account_id)
-    .fetch_all(&mut *transaction)
-    .await?;
     let after = sqlx::query_as::<_, AdminAccount>(concat!(
         "UPDATE accounts SET charges_enabled = COALESCE($2, charges_enabled), \
          restricted = COALESCE($3, restricted), contact = COALESCE($4, contact) \
@@ -229,13 +215,9 @@ pub async fn update_account(
     .bind(&changes.contact)
     .fetch_one(&mut *transaction)
     .await?;
-    let url_changed = changes
-        .webhook_url
-        .is_some_and(|url| urls.is_empty() || urls.iter().any(|(_, stored)| stored != url));
     let unchanged = after.charges_enabled == before.charges_enabled
         && after.restricted == before.restricted
-        && after.contact == before.contact
-        && !url_changed;
+        && after.contact == before.contact;
     if unchanged {
         transaction.commit().await?;
         return Ok(IssuedAccount {
@@ -248,23 +230,6 @@ pub async fn update_account(
     } else {
         &[false]
     };
-    let url = changes
-        .webhook_url
-        .map(str::to_owned)
-        .or_else(|| urls.first().map(|(_, url)| url.clone()));
-    if let Some(url) = &url {
-        sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
-            .bind(account_id)
-            .bind(url)
-            .execute(&mut *transaction)
-            .await?;
-        for &livemode in modes {
-            let registered = urls.iter().any(|(mode, _)| *mode == livemode);
-            if !registered {
-                insert_endpoint(&mut transaction, account_id, livemode, url).await?;
-            }
-        }
-    }
     let mut issued = Vec::new();
     if after.charges_enabled && !before.charges_enabled {
         let has_live_key: bool = sqlx::query_scalar(
@@ -301,7 +266,6 @@ pub async fn update_account(
                     "charges_enabled": before.charges_enabled,
                     "restricted": before.restricted,
                     "contact": before.contact,
-                    "webhook_url": urls.first().map(|(_, url)| url),
                 },
             })
             .to_string(),
@@ -328,24 +292,6 @@ pub async fn update_account(
         account: after,
         api_keys: issued,
     })
-}
-
-async fn insert_endpoint(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    account_id: Uuid,
-    livemode: bool,
-    url: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO webhook_endpoints (id, account_id, livemode, url) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(account_id)
-    .bind(livemode)
-    .bind(url)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
 }
 
 /// Finds or creates the customer `client_reference_id` of `scope`.
@@ -743,62 +689,6 @@ pub async fn lift_reconciliation_block(
     Ok(ReconciliationBlockLiftResponse {
         block_key: block_key.to_owned(),
         lifted_at,
-    })
-}
-
-/// Queues one webhook event for delivery again to every endpoint it was queued for, and appends
-/// an audit row in the same transaction.
-///
-/// A delivered delivery is marked undelivered and a pending one becomes due now; the event's
-/// identifier and payload never change. Repeating the request while every delivery is already
-/// due changes nothing and writes no audit row.
-pub async fn replay_outbox_event(
-    pool: &PgPool,
-    event_id: Uuid,
-    actor: &Actor,
-    reason: &str,
-) -> Result<OutboxReplayResponse, ApiError> {
-    let mut transaction = pool.begin().await?;
-    let (event_type, account_id) = sqlx::query_as::<_, (String, Uuid)>(
-        "SELECT type, account_id FROM events WHERE id = $1 FOR UPDATE",
-    )
-    .bind(event_id)
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    let rescheduled = sqlx::query(
-        r#"
-        UPDATE webhook_deliveries
-        SET next_attempt_at = now(), delivered_at = NULL
-        WHERE event_id = $1 AND NOT (delivered_at IS NULL AND next_attempt_at <= now())
-        "#,
-    )
-    .bind(event_id)
-    .execute(&mut *transaction)
-    .await?
-    .rows_affected();
-    if rescheduled > 0 {
-        insert_audit_tx_with_reason(
-            &mut transaction,
-            Some(account_id),
-            actor,
-            "outbox.replay",
-            &format!("event:{event_id}"),
-            reason,
-        )
-        .await?;
-    }
-    let next_attempt_at = sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-        "SELECT min(next_attempt_at) FROM webhook_deliveries WHERE event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_one(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    Ok(OutboxReplayResponse {
-        event_id: crate::outbox::webhook_id(event_id),
-        event_type,
-        next_attempt_at,
     })
 }
 

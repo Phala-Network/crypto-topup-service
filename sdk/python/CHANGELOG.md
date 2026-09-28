@@ -31,6 +31,14 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   from a network's treasury; `Deposits.list` and `TopupClient.list_deposits` take
   `deposit_address`, and `Deposit.deposit_address` names the address a deposit reached.
 
+- Generated `topup_client.api.webhook_endpoints` (create, list, retrieve, update, delete, test)
+  and `topup_client.api.events` (list, retrieve, resend) with their models
+  (`WebhookEndpointObject`, `EventObjectResponse`, and the request and list types); the
+  hand-written `PhalaPay` helpers for them come with design PR 10.
+- Generated `CreateAccountRequest` and `UpdateAccountRequest` lose `webhook_url`, and
+  `topup_client.api.admin.replay_outbox_event` and `OutboxReplayResponse` are removed: the
+  operator no longer manages merchants' webhooks.
+
 - `TopupClient.roll_webhook_key(expires_in=)` rolls the mode's webhook key (one
   `Idempotency-Key` across retries). `sign_webhook` accepts several keys, as a rotation signs.
 

@@ -61,6 +61,21 @@ jq -e '
     exit 1
 }
 
+# Webhook egress goes through the smokescreen sidecar, run from the service's own image, with
+# its default refusal of non-public addresses never relaxed (deploy/README.md, "Webhook egress").
+jq -e '
+    .services.topup.environment.TOPUP_WEBHOOK_PROXY == "http://smokescreen:4750"
+    and .services.smokescreen.image == .services.topup.image
+    and .services.smokescreen.command[0] == "smokescreen"
+    and (.services.smokescreen.command | index("--listen-port=4750") != null)
+    and ([.services.smokescreen.command[]
+        | select(test("^--(allow|unsafe|upstream|egress-acl)"))] | length == 0)
+    and ((.services.smokescreen.ports // []) | length == 0)
+' "$rendered" >/dev/null || {
+    echo "webhook egress must go through smokescreen from the service image, unrelaxed" >&2
+    exit 1
+}
+
 jq -e '
     .services["restore-check"].entrypoint == [
         "topup",

@@ -379,7 +379,7 @@ echo "== one quote-first deposit against the reference product"
 # `-j` omits the trailing newline, so the body passes through an argument byte for byte.
 jq -cjn '{name: "phala-cloud", contact: {name: "Rehearsal", email: "rehearsal@example.com"},
       due_diligence: {reference: "rehearsal", reviewed_at: "2026-09-28", reviewed_by: "cvm-rehearsal"},
-      charges_enabled: false, reason: "CVM rehearsal", webhook_url: "http://product:8089/webhooks"}' \
+      charges_enabled: false, reason: "CVM rehearsal"}' \
     >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
     http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" rehearsal-admin/v1)
@@ -391,12 +391,18 @@ response = httpx.post("http://topup:8080/v1/admin/accounts", content=sys.argv[1]
                       headers=headers, timeout=30)
 assert response.status_code == 200, (response.status_code, response.text)
 account = response.json()
+secret = account["api_keys"][0]["secret"]
 with open("/opt/product.key", "w", encoding="ascii") as key:
-    key.write(account["api_keys"][0]["secret"])
+    key.write(secret)
+# The merchant, not the operator, registers its webhook endpoint, with its own key.
+endpoint = httpx.post("http://topup:8080/v1/webhook_endpoints",
+                      json={"url": "http://product:8089/webhooks", "enabled_events": ["*"]},
+                      headers={"Authorization": f"Bearer {secret}"}, timeout=30)
+assert endpoint.status_code == 200, (endpoint.status_code, endpoint.text)
 print(account["id"])
 PY
-) || die "POST /v1/admin/accounts did not create the account"
-echo "ok: POST /v1/admin/accounts created $account with its first test key"
+) || die "POST /v1/admin/accounts did not create the account and its webhook endpoint"
+echo "ok: POST /v1/admin/accounts created $account with its first test key; its endpoint is registered"
 
 # The account proves its test-mode treasury through the API (design D10), here the owner EOA: the
 # mock Safe above implements no EIP-1271. The challenge is signed on this host with `cast`.

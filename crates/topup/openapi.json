@@ -183,7 +183,7 @@
         "tags": [
           "admin"
         ],
-        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nthe contact, or the webhook URL. Audited, and announced to the account as `account.updated`.",
+        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nor the contact. Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
         "operationId": "update_account",
         "parameters": [
           {
@@ -754,72 +754,6 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "http_message_signature": []
-          }
-        ]
-      }
-    },
-    "/v1/admin/outbox/{event_id}/replay": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "operationId": "replay_outbox_event",
-        "parameters": [
-          {
-            "name": "event_id",
-            "in": "path",
-            "description": "The `webhook-id` header, `evt_…`",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AdminReasonRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK: queued for delivery",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OutboxReplayResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not Found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2195,6 +2129,287 @@
         ]
       }
     },
+    "/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "The account's events in the key's mode, newest first, with Stripe's cursor pagination: the\nnotifications webhooks deliver, and the audit log of every key, endpoint, and account change\nwith its `actor`. An event stays listed whether or not any endpoint received it.",
+        "operationId": "list_events",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Only events of this type, such as `deposit.credited`, or of a group, such as `deposit.*`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created[gt]",
+            "in": "query",
+            "description": "Created after, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "created[gte]",
+            "in": "query",
+            "description": "Created at or after, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "created[lt]",
+            "in": "query",
+            "description": "Created before, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "created[lte]",
+            "in": "query",
+            "description": "Created at or before, Unix seconds",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`evt_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`evt_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/events/{id}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "One event.",
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Event id, `evt_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventObjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/events/{id}/resend": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Delivers an event again to one enabled endpoint, whether it was delivered there, stopped, or\nnever sent there (the Stripe CLI's `events resend`), with the same `webhook-id` and body. Use\nit after re-enabling an endpoint for the events it missed.",
+        "operationId": "resend_event",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Event id, `evt_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResendEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK: queued for delivery",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventObjectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found: no such event or endpoint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`webhook_endpoint_disabled`: enable the endpoint first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/v1/quotes": {
       "post": {
         "tags": [
@@ -3366,6 +3581,428 @@
           }
         ]
       }
+    },
+    "/v1/webhook_endpoints": {
+      "get": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "The key's mode's webhook endpoints, newest first, with Stripe's cursor pagination.",
+        "operationId": "list_webhook_endpoints",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1 to 100, default 10",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "starting_after",
+            "in": "query",
+            "description": "`we_` id: the page after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ending_before",
+            "in": "query",
+            "description": "`we_` id: the page before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "Registers a webhook endpoint in the key's mode, at most 16 per mode. It receives the events it\nsubscribes to and, whatever it subscribes to, every account event (`account.*`, `api_key.*`,\n`webhook_endpoint.*`), starting with `webhook_endpoint.created` about itself. Deliveries are\nsigned with the account's webhook key of the mode (`GET /v1/attestation`).",
+        "operationId": "create_webhook_endpoint",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWebhookEndpointRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`webhook_endpoint_cap_exceeded`: the mode already has 16 endpoints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/webhook_endpoints/{id}": {
+      "get": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "One webhook endpoint.",
+        "operationId": "get_webhook_endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id, `we_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "Updates a webhook endpoint; parameters not sent are left unchanged. A change is announced as\n`webhook_endpoint.updated`, with the replaced values in `data.previous_attributes`, to every\nenabled endpoint, and first to this endpoint at the URL it had before, even when the change\ndisables it. Disabling stops its pending deliveries; enabling does not restart them (resend\nwith `POST /v1/events/{id}/resend`).",
+        "operationId": "update_webhook_endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id, `we_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWebhookEndpointRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "Deletes a webhook endpoint. `webhook_endpoint.deleted` goes to every enabled endpoint, and\nfirst to the deleted one; then it receives nothing more, and its pending deliveries stop.",
+        "operationId": "delete_webhook_endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id, `we_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedWebhookEndpoint"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/v1/webhook_endpoints/{id}/test": {
+      "post": {
+        "tags": [
+          "webhook_endpoints"
+        ],
+        "summary": "Sends a `webhook_endpoint.test` event about the endpoint to this endpoint only, enabled or\nnot, signed like every delivery: check your receiver and its signature verification with it.\nThere is no URL challenge.",
+        "operationId": "test_webhook_endpoint",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Endpoint id, `we_…`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK: the test event, queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventObjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -3934,13 +4571,6 @@
           "reason": {
             "type": "string",
             "description": "Why the account is created, 1 to 1024 bytes."
-          },
-          "webhook_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Absolute `https` URL of the account's webhook receiver, registered in each enabled mode;\n`http` only when the service's own public origin uses `http` (local stacks). Until\nmerchants register endpoints through the API (design PR 8)."
           }
         },
         "additionalProperties": false
@@ -4093,6 +4723,39 @@
         },
         "additionalProperties": false
       },
+      "CreateWebhookEndpointRequest": {
+        "type": "object",
+        "description": "`POST /v1/webhook_endpoints` body.",
+        "required": [
+          "url",
+          "enabled_events"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Your description, up to 5000 characters."
+          },
+          "enabled_events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The event types to deliver, such as `deposit.credited`, or `[\"*\"]` for all."
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters."
+          },
+          "url": {
+            "type": "string",
+            "description": "Where to deliver events, up to 2048 characters, without credentials or fragment: `https` on\nport 443; in test mode also `http` on port 80. Redirects are not followed."
+          }
+        },
+        "additionalProperties": false
+      },
       "CustomerPauseRequest": {
         "type": "object",
         "description": "Administrative pause or resume of one customer of an account.",
@@ -4158,6 +4821,29 @@
               "$ref": "#/components/schemas/RouteDailyReport"
             },
             "description": "SQL-computed metrics for each configured route."
+          }
+        }
+      },
+      "DeletedWebhookEndpoint": {
+        "type": "object",
+        "description": "A deleted webhook endpoint.",
+        "required": [
+          "id",
+          "object",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "Always `true`."
+          },
+          "id": {
+            "type": "string",
+            "description": "Endpoint id, `we_…`."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `webhook_endpoint`."
           }
         }
       },
@@ -4859,6 +5545,92 @@
           "api_error"
         ]
       },
+      "EventList": {
+        "type": "object",
+        "description": "A page of events, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventObjectResponse"
+            },
+            "description": "The events."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more events follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/events`."
+          }
+        }
+      },
+      "EventObjectResponse": {
+        "type": "object",
+        "description": "An event (<https://docs.stripe.com/api/events/object>): what happened to an object of the\naccount in one mode, and who caused it. The same object is the body of every webhook delivery;\n`GET /v1/events` is also the account's audit log.",
+        "required": [
+          "id",
+          "object",
+          "account",
+          "livemode",
+          "type",
+          "created",
+          "actor",
+          "data",
+          "pending_webhooks"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "The account, `acct_…`."
+          },
+          "actor": {
+            "type": "string",
+            "description": "Who caused it: an API key id (`key_…`), `admin` (the operator), or `system`."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "data": {
+            "type": "object",
+            "description": "`{\"object\": …}`, the object's API representation when the event was first delivered or\nread, never re-rendered; `webhook_endpoint.updated` adds `previous_attributes`."
+          },
+          "id": {
+            "type": "string",
+            "description": "Event id, `evt_…`, also the `webhook-id` header of its deliveries."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The event's mode."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `event`."
+          },
+          "pending_webhooks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Deliveries to webhook endpoints that are neither delivered nor stopped."
+          },
+          "type": {
+            "type": "string",
+            "description": "Event type, such as `deposit.credited`."
+          }
+        }
+      },
       "ExpandableDeposit": {
         "oneOf": [
           {
@@ -4995,32 +5767,6 @@
             "type": "string",
             "format": "date-time",
             "description": "Newly due processing time."
-          }
-        }
-      },
-      "OutboxReplayResponse": {
-        "type": "object",
-        "description": "A webhook event queued for delivery again.",
-        "required": [
-          "event_id",
-          "event_type"
-        ],
-        "properties": {
-          "event_id": {
-            "type": "string",
-            "description": "Stable event identifier, sent as the `webhook-id` header: `evt_…`."
-          },
-          "event_type": {
-            "type": "string",
-            "description": "Event type, such as `deposit.credited`."
-          },
-          "next_attempt_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "When the delivery worker next attempts the event, or `null` when the account has no\nwebhook endpoint to deliver it to."
           }
         }
       },
@@ -5426,6 +6172,20 @@
           }
         }
       },
+      "ResendEventRequest": {
+        "type": "object",
+        "description": "`POST /v1/events/{id}/resend` body.",
+        "required": [
+          "webhook_endpoint"
+        ],
+        "properties": {
+          "webhook_endpoint": {
+            "type": "string",
+            "description": "The enabled endpoint to deliver the event to again, `we_…`."
+          }
+        },
+        "additionalProperties": false
+      },
       "RollApiKeyRequest": {
         "type": "object",
         "description": "`POST /v1/api_keys/{id}/roll` body.",
@@ -5789,13 +6549,6 @@
               "null"
             ],
             "description": "Marks the account restricted for review."
-          },
-          "webhook_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Replaces the URL of the account's webhook endpoints (until design PR 8)."
           }
         },
         "additionalProperties": false
@@ -5810,6 +6563,158 @@
           }
         },
         "additionalProperties": false
+      },
+      "UpdateWebhookEndpointRequest": {
+        "type": "object",
+        "description": "`POST /v1/webhook_endpoints/{id}` body; parameters not sent are left unchanged.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new description; `\"\"` unsets it."
+          },
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` disables the endpoint, `false` enables it. A disabled endpoint receives nothing and\nits pending deliveries stop; resend missed events with `POST /v1/events/{id}/resend`."
+          },
+          "enabled_events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "New event types, or `[\"*\"]`."
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/MetadataParam",
+            "description": "Merged into the endpoint's metadata: a key set to `\"\"` is unset, and `metadata: \"\"` unsets\nevery key."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new URL, as on creation."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookEndpointList": {
+        "type": "object",
+        "description": "A page of webhook endpoints, newest first (<https://docs.stripe.com/api/pagination>).",
+        "required": [
+          "object",
+          "url",
+          "has_more",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEndpointObject"
+            },
+            "description": "The endpoints."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more endpoints follow in the direction of this page."
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `list`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The list's path, `/v1/webhook_endpoints`."
+          }
+        }
+      },
+      "WebhookEndpointObject": {
+        "type": "object",
+        "description": "A webhook endpoint (design D11): where the account's events of one mode are delivered, signed\nwith the account's webhook key of that mode.",
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "url",
+          "enabled_events",
+          "status",
+          "metadata",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, Unix seconds."
+          },
+          "deleted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` in the `webhook_endpoint.deleted` event; absent otherwise."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Your description."
+          },
+          "disabled_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`gone` when Phala Pay disabled the endpoint because it answered `410 Gone`; `null`\notherwise. Failing deliveries never disable an endpoint: they are retried until delivered."
+          },
+          "enabled_events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The event types delivered, or `[\"*\"]` for all. Account events (`account.*`, `api_key.*`,\n`webhook_endpoint.*`) are delivered to every enabled endpoint whatever this lists."
+          },
+          "id": {
+            "type": "string",
+            "description": "Endpoint id, `we_…`."
+          },
+          "livemode": {
+            "type": "boolean",
+            "description": "The endpoint's mode."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "object": {
+            "type": "string",
+            "description": "Always `webhook_endpoint`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`enabled` or `disabled`."
+          },
+          "url": {
+            "type": "string",
+            "description": "Where events are delivered."
+          }
+        }
       },
       "WebhookKeyObject": {
         "type": "object",

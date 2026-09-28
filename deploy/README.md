@@ -9,7 +9,7 @@ are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Inciden
 
 | Where | What | Deployed by |
 |---|---|---|
-| topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
+| topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `smokescreen` (the [webhook egress](#webhook-egress) proxy), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
 | Staging reference-product CVM | [product/docker-compose.yml](product/docker-compose.yml), port 8089 | Deploy, target `product` |
 | Object storage (Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | Sentry project `phala-network/crypto-topup-service` | errors, alerts, Crons and Uptime monitors | the service itself |
@@ -385,8 +385,46 @@ evidence](#custom-domain), and that PostgreSQL and topup's port 8080 are unreach
 verifies every signed `@target-uri` against `TOPUP_PUBLIC_ORIGIN`, so a correctly signed request
 answered `401` usually means the URL differs from it. **Egress** (HUMAN-ONLY, cloud network
 authority; dstack has no hostname allow-list): restrict outbound traffic to the two RPC hosts,
-the price sources, the object storage host, the product's webhook host, the Sentry ingest
-host, DNS, and the Phala/dstack platform endpoints, and record the rules.
+the price sources, the object storage host, the Sentry ingest host, DNS, the Phala/dstack
+platform endpoints, and public addresses on ports 443 and 80 for webhooks (merchants register
+their own endpoints, so their hosts cannot be listed; [webhook egress](#webhook-egress) filters
+the addresses), and record the rules.
+
+### Webhook egress
+
+Merchants register their own webhook URLs (`/v1/webhook_endpoints`), so a URL may name any
+address, including the CVM's own network or a cloud metadata service. Every delivery therefore
+leaves through the `smokescreen` sidecar (`TOPUP_WEBHOOK_PROXY=http://smokescreen:4750`), Stripe's
+[smokescreen](https://github.com/stripe/smokescreen) and the only IP filter (design §8): it resolves
+the host itself and refuses, with `407` before connecting, every address that is not publicly
+routable. The service checks only a URL's scheme and port when it is registered (`https` on 443;
+in test mode also `http` on 80), follows no redirect, and times out after 20 s; `run` refuses to
+start without the proxy unless its own origin is `http` (local stacks).
+
+- **Binary.** Stripe publishes no image, so the phala-pay [Dockerfile](../Dockerfile) builds
+  smokescreen v0.1.0 (commit `609eb8931420453daf5893509be0b25b21bd9edb`) with its vendored
+  modules in `golang:1.27-trixie` pinned by digest, reproducibly, and the sidecar runs it from
+  `TOPUP_IMAGE`: it is pinned and attested with the service's digest.
+- **Policy.** Its defaults refuse loopback, private (`10/8`, `172.16/12`, `192.168/16`,
+  `fc00::/7`, which holds AWS's IPv6 metadata `fd00:ec2::254`), link-local (`169.254/16` with the
+  metadata address `169.254.169.254`, `fe80::/10`), CGNAT (`100.64/10`, with Alibaba's metadata
+  `100.100.100.200`), multicast, unspecified, and IPv6 that embeds IPv4 (NAT64 `64:ff9b::/96`,
+  6to4, Teredo); an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is checked as the IPv4 address it
+  maps. The compose adds `--deny-range` for what those defaults count as global: `0.0.0.0/8`,
+  `192.0.0.0/24`, `198.18.0.0/15`, and `240.0.0.0/4`, and repeats `100.64.0.0/10` and
+  `169.254.0.0/16`. A `--deny-range` of `::ffff:0:0/96` must never be added: Go matches it against
+  every IPv4 address and it would refuse all webhooks. No allow-range, ACL, or
+  `--unsafe-allow-private-ranges` is set, and
+  [validate-compose.sh](validate-compose.sh) fails if one is.
+- **Test.** [tests/smokescreen.sh](tests/smokescreen.sh) runs the sidecar from an image with the
+  compose's own command and checks, through plain requests and CONNECT tunnels, that private,
+  loopback, metadata, CGNAT, `0/8`, IPv4-mapped, NAT64, and unique-local targets are refused and a
+  public address is not; CI runs it on every image build.
+- **Local stacks** (`make up`, the sandbox, the CVM rehearsal) deliver directly
+  (`TOPUP_WEBHOOK_PROXY=""`), because their receivers listen on private compose addresses.
+- A merchant's URL that resolves to a refused address fails like an unreachable one: retried with
+  backoff (probed about once an hour), never disabled, and visible to the merchant as
+  `pending_webhooks` in `GET /v1/events`.
 
 ### Sweeping
 
@@ -409,19 +447,19 @@ transfer failed stays unswept and is recorded in `flush_failures`.
 ## Account credentials
 
 Accounts are created only by the operator, after due diligence done offline (design D8). `POST
-/v1/admin/accounts {"name", "contact", "due_diligence", "charges_enabled", "reason",
-"webhook_url"}` creates a merchant account and records its `contact` (`name`, security `email`)
-and the `due_diligence` record (`reference`, `reviewed_at`, `reviewed_by`); `charges_enabled`
-decides live mode (design D12; `false` on staging: Sepolia routes are test routes), and
-`webhook_url`, optional until merchants register endpoints through the API (design PR 8), is
-registered in each enabled mode. The answer is `200` with the account's id, `acct_…`, and in
+/v1/admin/accounts {"name", "contact", "due_diligence", "charges_enabled", "reason"}` creates a
+merchant account and records its `contact` (`name`, security `email`) and the `due_diligence`
+record (`reference`, `reviewed_at`, `reviewed_by`); `charges_enabled` decides live mode (design
+D12; `false` on staging: Sepolia routes are test routes). The operator does not register or
+change a merchant's webhook endpoints, nor resend its events: the merchant does, with its key
+(`/v1/webhook_endpoints`, `POST /v1/events/{id}/resend`; docs/integration.md §5.11). The answer is `200` with the account's id, `acct_…`, and in
 `api_keys` its first secret key of test mode (`ppay_sk_test_…`) and, with live mode, of live mode,
 each `secret` shown only in this answer; or `400`. Send the keys to the contact through an
 encrypted channel; the merchant rolls them on receipt and manages its keys through
 `/v1/api_keys`. Each call creates a new account; creation and each key are audited.
 
-`POST /v1/admin/accounts/{account} {"charges_enabled"?, "restricted"?, "contact"?,
-"webhook_url"?, "reason"}` updates an account; enabling live mode for an account without a live
+`POST /v1/admin/accounts/{account} {"charges_enabled"?, "restricted"?, "contact"?, "reason"}`
+updates an account; enabling live mode for an account without a live
 key answers with its first live key, and every change is audited and announced to the account as
 `account.updated`. `POST /v1/admin/accounts/{account}/api_keys {"livemode", "revoke_existing",
 "reason"}` issues a recovery key after the operator verified the request with the recorded
@@ -437,8 +475,7 @@ export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/staging-v1   # the CVM's TOPU
 jq -cjn '{name: "Phala Cloud", contact: {name: "<name>", email: "<security email>"},
     due_diligence: {reference: "<review reference>", reviewed_at: "<YYYY-MM-DD>",
                     reviewed_by: "<reviewer>"},
-    charges_enabled: false, reason: "<why>",
-    webhook_url: "https://product.example/topup/webhooks"}' > /tmp/topup-account.json
+    charges_enabled: false, reason: "<why>"}' > /tmp/topup-account.json
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST \
   "$TOPUP_PUBLIC_ORIGIN/v1/admin/accounts" /tmp/topup-account.json \
   "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
@@ -483,8 +520,9 @@ at startup, or on the first webhook when the key is sealed later (until then it 
 and topup retries). Its preflight
 ([product/preflight.sh](product/preflight.sh)) requires `PRODUCT_RPC_URL` to be a keyless Sepolia
 RPC (it is published and the product seals no RPC key); the deposit driver pays through it.
-Switching staging to Phala Cloud's backend is a `POST /v1/admin/accounts/{account}` with its
-webhook URL ([Account credentials](#account-credentials)); the route stays as it is. A product
+Switching staging to Phala Cloud's backend is a change of the account's webhook endpoint with its
+test key (`POST /v1/webhook_endpoints/{id} {"url"}`, docs/integration.md §5.11); the route stays
+as it is. A product
 CVM provisioned before its settings were attested still allows all five names: seal `.env.product`
 with only `PRODUCT_API_KEY`, then Deploy `upgrade`, once.
 
@@ -512,9 +550,11 @@ Setup, in order (each step **HUMAN-ONLY** unless it is a workflow run):
    uv run --locked topup-sdk keygen --keyid driver/v1 --seed-out ~/staging/driver.seed
    ```
 
-2. Create the product's account in topup ([Account credentials](#account-credentials)) with
-   `<product URL>/webhooks`, set the product's `product_slug` to the new `acct_…` id, and keep
-   its test key (`api_keys[0].secret`) for the next step. **HUMAN-ONLY, treasury Safe owners:**
+2. Create the product's account in topup ([Account credentials](#account-credentials)), set the
+   product's `product_slug` to the new `acct_…` id, and keep its test key
+   (`api_keys[0].secret`) for the next step. With that key, register the product's endpoint as
+   any merchant does: `POST /v1/webhook_endpoints {"url": "<product URL>/webhooks",
+   "enabled_events": ["*"]}`. **HUMAN-ONLY, treasury Safe owners:**
    set the account's Sepolia treasury through the API (the product's `treasury`, the finance
    Safe): request `POST /v1/treasuries/challenge`, sign the message as a Safe message, and submit
    it to `POST /v1/treasuries` ([Treasury change](runbooks/treasury-change.md)). Quotes need it

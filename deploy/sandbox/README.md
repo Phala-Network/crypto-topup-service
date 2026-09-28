@@ -64,14 +64,15 @@ until the product acknowledges it, and a deposit is credited once.
 
 Credential issuance is a human step on both sides.
 
-1. Send the operator, through the agreed support channel: your company's name, a security
-   contact (name and email), and the public HTTPS URL of your webhook receiver.
+1. Send the operator, through the agreed support channel: your company's name and a security
+   contact (name and email).
 2. The operator creates your sandbox account (`acct_…`) and returns, to your contact through an
    encrypted channel, its first secret key (`ppay_sk_test_…`), the sandbox service URL, your
    route name, the chain id, the forwarder factory and implementation addresses, the test token
    and unsupported-token addresses, and the attestation instructions for pinning your account's
    test-mode webhook key (docs/integration.md §5.3). Roll the key at once (`POST /v1/api_keys/{id}/roll`) and keep
-   the new one in a mode-0600 file; use it only for the sandbox.
+   the new one in a mode-0600 file; use it only for the sandbox. Register your webhook receiver
+   with it (`POST /v1/webhook_endpoints`, docs/integration.md §5.11).
 
 Test tokens are free: `MockERC20.mint(address,uint256)` is public. You also need Sepolia ETH for
 gas from a public faucet.
@@ -120,7 +121,8 @@ gas from a public faucet.
 5. **HUMAN-ONLY, sandbox admin key holder:** create the integrator's account with
    `POST /v1/admin/accounts` against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
    [Account credentials](../README.md#account-credentials) describes: its name, contact, due
-   diligence record, and HTTPS webhook URL, with `charges_enabled: false`. The request is
+   diligence record, with `charges_enabled: false`; the integrator registers its own webhook
+   endpoint. The request is
    audited; send the returned test key to the contact through an encrypted channel.
 
 ## Running the scenarios against Sepolia (integrators)

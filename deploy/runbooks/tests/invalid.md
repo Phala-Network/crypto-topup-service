@@ -6,7 +6,7 @@ not an operator runbook.
 ```sh
 topup bogus
 topup route bogus deploy/config/routes/phala-cloud-sepolia-pha.yaml
-topup outbox
+topup route
 topup attest --bogus
 topup reconcile \
   --no-such-flag --route deploy/config/routes/phala-cloud-sepolia-pha.yaml

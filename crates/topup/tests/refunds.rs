@@ -1522,12 +1522,12 @@ async fn deliver_events(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Vec<Val
         Arc::new(WebhookSigner(SigningKey::from_bytes(&[11; 32]))),
         true,
         DeliveryConfig {
-            batch_size: 10,
             request_timeout: StdDuration::from_secs(2),
             claim_lease: StdDuration::from_secs(30),
             poll_interval: StdDuration::from_millis(10),
             response_body_limit: 16,
             age_alert_threshold: StdDuration::from_secs(60),
+            ..DeliveryConfig::default()
         },
     )?;
     for _ in 0..20 {

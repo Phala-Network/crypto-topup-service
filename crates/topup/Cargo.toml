@@ -26,6 +26,7 @@ chrono.workspace = true
 clap.workspace = true
 crc.workspace = true
 ed25519-dalek.workspace = true
+futures-util.workspace = true
 hex.workspace = true
 rand.workspace = true
 reqwest.workspace = true

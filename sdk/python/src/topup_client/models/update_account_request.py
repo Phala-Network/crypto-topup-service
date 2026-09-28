@@ -29,14 +29,12 @@ class UpdateAccountRequest:
             account's first live key.
         contact (Contact | None | Unset):
         restricted (bool | None | Unset): Marks the account restricted for review.
-        webhook_url (None | str | Unset): Replaces the URL of the account's webhook endpoints (until design PR 8).
     """
 
     reason: str
     charges_enabled: bool | None | Unset = UNSET
     contact: Contact | None | Unset = UNSET
     restricted: bool | None | Unset = UNSET
-    webhook_url: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.contact import Contact  # noqa: PLC0415
@@ -63,12 +61,6 @@ class UpdateAccountRequest:
         else:
             restricted = self.restricted
 
-        webhook_url: None | str | Unset
-        if isinstance(self.webhook_url, Unset):
-            webhook_url = UNSET
-        else:
-            webhook_url = self.webhook_url
-
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -82,8 +74,6 @@ class UpdateAccountRequest:
             field_dict["contact"] = contact
         if restricted is not UNSET:
             field_dict["restricted"] = restricted
-        if webhook_url is not UNSET:
-            field_dict["webhook_url"] = webhook_url
 
         return field_dict
 
@@ -129,21 +119,11 @@ class UpdateAccountRequest:
 
         restricted = _parse_restricted(d.pop("restricted", UNSET))
 
-        def _parse_webhook_url(data: object) -> None | str | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(None | str | Unset, data)
-
-        webhook_url = _parse_webhook_url(d.pop("webhook_url", UNSET))
-
         update_account_request = cls(
             reason=reason,
             charges_enabled=charges_enabled,
             contact=contact,
             restricted=restricted,
-            webhook_url=webhook_url,
         )
 
         return update_account_request

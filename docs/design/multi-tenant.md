@@ -16,6 +16,12 @@ offline; merchants manage everything else through the API and SDKs with secret k
 login, passkeys, members, sessions, and email are removed; PRs 1–3 are implemented and the plan
 (§16) is re-numbered.
 
+**Amendment of 2026-09-28 (owner ruling, PR 8 review): webhooks are never auto-disabled.** The
+3-day retry limit followed by disabling the endpoint (Stripe's live mode) is reversed: deliveries
+retry until delivered, with backoff capped at 1 h, and only the receiver's `410 Gone` or the
+merchant disables an endpoint. With no email channel, a disabled single endpoint would fail
+silently and a paid deposit would never be credited (§11, D11).
+
 ## 1. Context
 
 Before this design (architecture before PR 1): a **product** was the tenant, registered by the
@@ -53,7 +59,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D8 | Onboarding | The operator creates each account through the admin API (RFC 9421), recording offline due diligence and issuing the first key; no dashboard, users, or signup | Stripe Connect API onboarding with no Stripe Dashboard |
 | D9 | Test/live | One deployment; key selects mode; `livemode` on every row, object, and event; Sepolia = test | Stripe test mode |
 | D10 | Treasury | Set through the API with an EIP-4361 proof (EOA) or EIP-1271 (deployed Safe); live changes time-locked 48 h, cancellable, announced as events | EIP-4361, EIP-1271; timelock; Stripe `account.external_account.updated` |
-| D11 | Webhooks | Standard Webhooks `v1a` with one key **per account and mode**; endpoints per account; bounded retries | Standard Webhooks; Stripe endpoints |
+| D11 | Webhooks | Standard Webhooks `v1a` with one key **per account and mode**; endpoints per account; retries until delivered, never auto-disabled (owner decision, 2026-09-28); only `410 Gone` or the merchant stops an endpoint | Standard Webhooks; Stripe endpoints |
 | D12 | Go-live | The operator sets `charges_enabled` when creating the account (or later, same endpoint); third parties only after legal sign-off | Stripe `charges_enabled` |
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
@@ -575,14 +581,21 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   and an endpoint that is updated or deleted receives the event about itself first, as GitHub's
   `meta` event tells a webhook "The webhook was deleted"
   ([GitHub](https://docs.github.com/en/webhooks/webhook-events-and-payloads#meta)).
-- **Delivery.** At least once, full-jitter backoff, per endpoint, with per-endpoint concurrency 4
-  and round-robin scheduling across endpoints (one slow receiver cannot block others) and separate
-  test and live workers. Retries span 3 days, as Stripe's live mode ("up to three days",
-  [webhooks](https://docs.stripe.com/webhooks)); then the endpoint is disabled and
-  `webhook_endpoint.updated` goes to the account's other endpoints, the in-band channel the spec
-  asks for ("notify the consumers using other channels … and … disable future delivery"). A
-  `410 Gone` disables at once (spec). Undelivered events stay readable in `GET /v1/events`; the
-  merchant re-enables the endpoint and resends events through the API
+- **Delivery.** At least once, full-jitter backoff capped at 1 h, per endpoint, with
+  per-endpoint concurrency 4 and round-robin scheduling across endpoints (one slow receiver cannot
+  block others) and separate test and live workers. **Retries continue until the event is
+  delivered; a failing endpoint is never disabled automatically** (owner decision of 2026-09-28,
+  reversing the 3-day disable first adopted here after Stripe's live mode, "up to three days",
+  [webhooks](https://docs.stripe.com/webhooks)). Reason: there is no email channel (§13), so the
+  only notice of a disabled endpoint would be a webhook, which a merchant with a single endpoint
+  never receives; a paid deposit would then never be credited, silently. Only an explicit
+  `410 Gone` from the receiver (the spec's opt-out) disables an endpoint at once, announced as
+  `webhook_endpoint.updated` to the account's other endpoints, and the merchant disabling or
+  deleting it stops its deliveries. A permanently failing endpoint's cost is bounded without
+  giving up: after a failure it cools down on the same backoff and is then probed one delivery at
+  a time until one succeeds, so it holds at most one slot and is attempted about once an hour
+  however many events it has queued, and its slots never delay another endpoint. Undelivered
+  events stay readable in `GET /v1/events`; the merchant resends events through the API
   (`POST /v1/events/{id}/resend {webhook_endpoint}`, as the Stripe CLI's `events resend`).
 
 ## 12. Isolation, limits, abuse
@@ -808,8 +821,9 @@ change takes effect on that chain, keeping the old network credited (§5a). Test
 
 **PR 8 — webhook endpoints.** Endpoints API, `enabled_events`, test event, smokescreen sidecar
 (scheme, port, and no-redirect checks in the service), fair per-endpoint scheduling, account
-events always delivered and self-notice on update or delete, 3-day disable with
-`webhook_endpoint.updated` to the other endpoints, `410`, resend, `/v1/events` with `type` filter.
+events always delivered and self-notice on update or delete, retries until delivered with no
+automatic disable (owner decision of 2026-09-28, §11), `410` disabling with
+`webhook_endpoint.updated` to the other endpoints, resend, `/v1/events` with `type` filter.
 Tests: fan-out, smokescreen refusing private, CGNAT, and IPv4-mapped IPv6 targets, redirects
 refused, a slow endpoint not delaying another, a deleted endpoint receiving its own deletion.
 

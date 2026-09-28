@@ -37,7 +37,6 @@ use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN};
 #[cfg(feature = "dev-signer")]
 use topup_core::{Signer as _, WebhookKeyId};
 use tracing_subscriber::util::SubscriberInitExt as _;
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "topup", version, about = "Phala Pay service")]
@@ -53,10 +52,6 @@ enum TopupCommand {
     Route {
         #[command(subcommand)]
         command: RouteCommand,
-    },
-    Outbox {
-        #[command(subcommand)]
-        command: OutboxCommand,
     },
     /// Run one reconciliation pass and exit.
     Reconcile(ReconcileArgs),
@@ -183,21 +178,6 @@ struct HealthcheckArgs {
 }
 
 #[derive(Subcommand)]
-enum OutboxCommand {
-    Replay {
-        /// Replay one event by its `webhook-id`: `evt_…`, or the UUID of an older event.
-        #[arg(long, conflicts_with = "since", required_unless_present = "since", value_parser = parse_event_id)]
-        id: Option<Uuid>,
-        /// Replay events created at or after this RFC 3339 timestamp.
-        #[arg(long, conflicts_with = "id", required_unless_present = "id")]
-        since: Option<String>,
-        /// Redeliver events that were already marked delivered.
-        #[arg(long)]
-        force: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum RouteCommand {
     Validate {
         /// Permit zero factory and implementation placeholders in deployment templates.
@@ -248,9 +228,6 @@ async fn main() -> ExitCode {
         TopupCommand::Route {
             command: RouteCommand::Show { template, file },
         } => return show_route(&file, template),
-        TopupCommand::Outbox {
-            command: OutboxCommand::Replay { id, since, force },
-        } => replay_outbox(id, since.as_deref(), force).await,
         TopupCommand::Reconcile(args) => reconcile(&args).await,
         TopupCommand::Attest(args) => {
             return match attest(&args).await {
@@ -607,9 +584,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .ok()
         .zip(u32::try_from(scanner_count).ok())
         .and_then(|(pumps, scanners)| pumps.checked_add(scanners))
-        // Each mode's outbox worker renders an event's object on a second connection while it
-        // holds the claim.
-        .and_then(|count| count.checked_add(6))
+        // The API, and each mode's outbox worker, whose concurrent deliveries each hold a
+        // connection only for a statement at a time, never during a request.
+        .and_then(|count| count.checked_add(10))
         .context("route count is too large")?;
     let pool = connect("DATABASE_URL", "run", connection_count)
         .await
@@ -618,6 +595,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     };
     let signer = Arc::new(spawn_signer().context("failed to start signer actor")?);
+    let delivery_config = topup::outbox::DeliveryConfig {
+        proxy: webhook_proxy(&public_origin)?,
+        ..topup::outbox::DeliveryConfig::default()
+    };
     // Test and live events have separate workers, so test traffic cannot delay live deliveries.
     let delivery_workers = [false, true].map(|livemode| {
         topup::outbox::DeliveryWorker::new(
@@ -625,7 +606,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             Arc::clone(&routes),
             Arc::clone(&signer),
             livemode,
-            topup::outbox::DeliveryConfig::default(),
+            delivery_config.clone(),
         )
     });
     let [test_delivery, live_delivery] = delivery_workers;
@@ -1057,6 +1038,25 @@ fn load_routes(paths: &[PathBuf]) -> anyhow::Result<RouteSet> {
     RouteSet::new(routes).map_err(anyhow::Error::msg)
 }
 
+/// The egress proxy of webhook deliveries, `TOPUP_WEBHOOK_PROXY`: the smokescreen sidecar, the
+/// only filter of the addresses a merchant's URL may reach (design §8). It is required unless the
+/// service's own origin is `http`, which only local stacks use.
+fn webhook_proxy(public_origin: &topup::api::PublicOrigin) -> anyhow::Result<Option<reqwest::Url>> {
+    match std::env::var("TOPUP_WEBHOOK_PROXY")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => reqwest::Url::parse(&value)
+            .map(Some)
+            .context("TOPUP_WEBHOOK_PROXY must be a URL such as http://smokescreen:4750"),
+        None if public_origin.to_string().starts_with("http://") => Ok(None),
+        None => bail!(
+            "TOPUP_WEBHOOK_PROXY is required for run: webhooks reach merchants only through the \
+             egress proxy"
+        ),
+    }
+}
+
 fn required_env(name: &'static str) -> anyhow::Result<String> {
     std::env::var(name)
         .ok()
@@ -1089,40 +1089,6 @@ const SIGNER_TIMEOUT: Duration = Duration::from_secs(15);
 /// Starts the dstack webhook signer actor.
 fn spawn_signer() -> std::io::Result<SignerHandle> {
     SignerHandle::spawn(DstackSigner::new(), SIGNER_QUEUE, SIGNER_TIMEOUT)
-}
-
-fn parse_event_id(value: &str) -> Result<Uuid, String> {
-    topup::ids::parse_event(value).ok_or_else(|| "expected an evt_ id or a UUID".to_owned())
-}
-
-async fn replay_outbox(
-    id: Option<Uuid>,
-    since: Option<&str>,
-    force: bool,
-) -> anyhow::Result<ExitCode> {
-    let selector = match (id, since) {
-        (Some(id), None) => topup::outbox::ReplaySelector::Id(id),
-        (None, Some(since)) => topup::outbox::ReplaySelector::Since(
-            DateTime::parse_from_rfc3339(since)
-                .context("--since must be an RFC 3339 timestamp")?
-                .with_timezone(&Utc),
-        ),
-        _ => bail!("exactly one of --id or --since is required"),
-    };
-    let pool = connect("DATABASE_URL", "outbox replay", 1)
-        .await
-        .context("failed to connect to database")?;
-    let reason = if force {
-        "manual CLI replay with delivered state reset"
-    } else {
-        "manual CLI replay of pending events"
-    };
-    let actor = topup::audit::Actor::system("cli");
-    let count = topup::outbox::replay(&pool, selector, force, &actor, reason)
-        .await
-        .context("failed to schedule outbox replay")?;
-    tracing::info!(count, force, "outbox replay scheduled");
-    Ok(ExitCode::SUCCESS)
 }
 
 async fn migrate() -> anyhow::Result<ExitCode> {

@@ -96,6 +96,10 @@ services:
       TOPUP_PUBLIC_ORIGIN: http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}
       # The attested file reads SENTRY_DSN from the shell; local stacks never report to Sentry.
       SENTRY_DSN: ""
+      # Local receivers (the mock product, the sandbox's product) listen on the compose network's
+      # private addresses, which smokescreen refuses by design, so local stacks deliver directly;
+      # deploy/tests/smokescreen.sh tests the proxy's policy.
+      TOPUP_WEBHOOK_PROXY: ""
     # Routes come from a directory so the sandbox and the restore drill can supply their own.
     volumes: !override
       - dstack_socket:/var/run
@@ -115,6 +119,9 @@ services:
   # A profile no local stack enables (see the header).
   dstack-ingress:
     profiles: [cvm]
+
+  smokescreen:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
 
   heartbeat:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}

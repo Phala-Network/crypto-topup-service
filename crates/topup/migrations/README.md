@@ -65,6 +65,18 @@ mode, chain, and address, with the message issued. It indexes deposit address ne
 mode, and chain for the replacement a treasury change makes, and allows `treasury` event objects.
 It refuses to run, and so does its down migration, while any treasury exists.
 
+`20261013000000_webhook_endpoints` (design PR 8, numbered after design PR 7's
+`20261012000000_treasuries`) lets merchants manage their endpoints:
+`webhook_endpoints.description`, `metadata` (Stripe's, `metadata_is_valid`), and `deleted_at` (a
+deleted endpoint is kept for the notice of its deletion), `disabled_reason` limited to `gone` (a failing
+endpoint is never disabled), and one to 100 `enabled_events`. `webhook_deliveries` gains
+`failed_at` (delivery stopped: a `410`, or the endpoint disabled or deleted), and `url` (an
+endpoint's notice of its own change, sent to its previous URL whatever its status), with the
+pending index per endpoint. `events.object_type` admits `webhook_endpoint` beside PR 7's
+`treasury`, and
+`events_scope_type_created_idx` serves `GET /v1/events?type=`. Its down migration discards
+endpoint events and deleted endpoints.
+
 **Staging reset, HUMAN-ONLY (design §16 PR 11).** An operator with the staging owner credentials
 stops the service, drops and recreates the staging database (or restores an empty volume), runs
 `topup migrate`, starts the service, and re-creates each account with `POST /v1/admin/accounts`
@@ -128,8 +140,9 @@ service can only read it.
   cursor instead.
 - `deposits.confirmations_at` is when the transfer reached the required confirmation and was
   recorded; `final_at` when both providers showed it at `finalized`.
-- `events.data` is `{}` until the first delivery attempt renders the object; it is never
-  re-rendered, so every endpoint, retry, and replay sends the same body.
+- `events.data` is `{}` until the first delivery attempt or `GET /v1/events` read renders the
+  object; it is never re-rendered, so every endpoint, retry, and resend sends the same body.
+  Webhook endpoint events are stored rendered, a snapshot of the endpoint when they happened.
 - `pending_transfers` is display-only, written by the head scan and cleared by the finalized
   scanner's cursor advance. Nothing that affects money reads it.
 - `quotes.metadata`, `deposits.metadata`, and `refunds.metadata` (`20261006080000_metadata`) are

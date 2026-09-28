@@ -709,11 +709,6 @@ pub struct CreateAccountRequest {
     pub charges_enabled: bool,
     /// Why the account is created, 1 to 1024 bytes.
     pub reason: String,
-    /// Absolute `https` URL of the account's webhook receiver, registered in each enabled mode;
-    /// `http` only when the service's own public origin uses `http` (local stacks). Until
-    /// merchants register endpoints through the API (design PR 8).
-    #[serde(default)]
-    pub webhook_url: Option<String>,
 }
 
 /// `POST /v1/admin/accounts/{account}` body; absent fields stay as they are.
@@ -730,9 +725,6 @@ pub struct UpdateAccountRequest {
     /// Replaces the merchant's contact.
     #[serde(default)]
     pub contact: Option<Contact>,
-    /// Replaces the URL of the account's webhook endpoints (until design PR 8).
-    #[serde(default)]
-    pub webhook_url: Option<String>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
@@ -1005,18 +997,6 @@ pub struct ReconciliationBlockLiftResponse {
     pub lifted_at: DateTime<Utc>,
 }
 
-/// A webhook event queued for delivery again.
-#[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct OutboxReplayResponse {
-    /// Stable event identifier, sent as the `webhook-id` header: `evt_…`.
-    pub event_id: String,
-    /// Event type, such as `deposit.credited`.
-    pub event_type: String,
-    /// When the delivery worker next attempts the event, or `null` when the account has no
-    /// webhook endpoint to deliver it to.
-    pub next_attempt_at: Option<DateTime<Utc>>,
-}
-
 /// Per-route daily finance report produced by C12.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct RouteDailyReport {
@@ -1185,4 +1165,152 @@ pub struct RollWebhookKeyRequest {
     /// default, stops it at once.
     #[serde(default)]
     pub expires_in: u32,
+}
+
+/// A webhook endpoint (design D11): where the account's events of one mode are delivered, signed
+/// with the account's webhook key of that mode.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WebhookEndpointObject {
+    /// Endpoint id, `we_…`.
+    pub id: String,
+    /// Always `webhook_endpoint`.
+    pub object: String,
+    /// The endpoint's mode.
+    pub livemode: bool,
+    /// Where events are delivered.
+    pub url: String,
+    /// The event types delivered, or `["*"]` for all. Account events (`account.*`, `api_key.*`,
+    /// `webhook_endpoint.*`) are delivered to every enabled endpoint whatever this lists.
+    pub enabled_events: Vec<String>,
+    /// `enabled` or `disabled`.
+    pub status: String,
+    /// `gone` when Phala Pay disabled the endpoint because it answered `410 Gone`; `null`
+    /// otherwise. Failing deliveries never disable an endpoint: they are retried until delivered.
+    pub disabled_reason: Option<String>,
+    /// Your description.
+    pub description: Option<String>,
+    /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
+    pub metadata: std::collections::BTreeMap<String, String>,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// `true` in the `webhook_endpoint.deleted` event; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(required = false)]
+    pub deleted: Option<bool>,
+}
+
+/// A page of webhook endpoints, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct WebhookEndpointList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/webhook_endpoints`.
+    pub url: String,
+    /// Whether more endpoints follow in the direction of this page.
+    pub has_more: bool,
+    /// The endpoints.
+    pub data: Vec<WebhookEndpointObject>,
+}
+
+/// `POST /v1/webhook_endpoints` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateWebhookEndpointRequest {
+    /// Where to deliver events, up to 2048 characters, without credentials or fragment: `https` on
+    /// port 443; in test mode also `http` on port 80. Redirects are not followed.
+    pub url: String,
+    /// The event types to deliver, such as `deposit.credited`, or `["*"]` for all.
+    pub enabled_events: Vec<String>,
+    /// Your description, up to 5000 characters.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40
+    /// characters without square brackets, values of up to 500 characters.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// `POST /v1/webhook_endpoints/{id}` body; parameters not sent are left unchanged.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateWebhookEndpointRequest {
+    /// A new URL, as on creation.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// New event types, or `["*"]`.
+    #[serde(default)]
+    pub enabled_events: Option<Vec<String>>,
+    /// A new description; `""` unsets it.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// `true` disables the endpoint, `false` enables it. A disabled endpoint receives nothing and
+    /// its pending deliveries stop; resend missed events with `POST /v1/events/{id}/resend`.
+    #[serde(default)]
+    pub disabled: Option<bool>,
+    /// Merged into the endpoint's metadata: a key set to `""` is unset, and `metadata: ""` unsets
+    /// every key.
+    #[serde(default, deserialize_with = "super::metadata::present")]
+    #[schema(value_type = MetadataParam, required = false)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A deleted webhook endpoint.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct DeletedWebhookEndpoint {
+    /// Endpoint id, `we_…`.
+    pub id: String,
+    /// Always `webhook_endpoint`.
+    pub object: String,
+    /// Always `true`.
+    pub deleted: bool,
+}
+
+/// An event (<https://docs.stripe.com/api/events/object>): what happened to an object of the
+/// account in one mode, and who caused it. The same object is the body of every webhook delivery;
+/// `GET /v1/events` is also the account's audit log.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct EventObjectResponse {
+    /// Event id, `evt_…`, also the `webhook-id` header of its deliveries.
+    pub id: String,
+    /// Always `event`.
+    pub object: String,
+    /// The account, `acct_…`.
+    pub account: String,
+    /// The event's mode.
+    pub livemode: bool,
+    /// Event type, such as `deposit.credited`.
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Creation time, Unix seconds.
+    pub created: i64,
+    /// Who caused it: an API key id (`key_…`), `admin` (the operator), or `system`.
+    pub actor: String,
+    /// `{"object": …}`, the object's API representation when the event was first delivered or
+    /// read, never re-rendered; `webhook_endpoint.updated` adds `previous_attributes`.
+    #[schema(value_type = Object)]
+    pub data: serde_json::Value,
+    /// Deliveries to webhook endpoints that are neither delivered nor stopped.
+    pub pending_webhooks: i64,
+}
+
+/// A page of events, newest first (<https://docs.stripe.com/api/pagination>).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct EventList {
+    /// Always `list`.
+    pub object: String,
+    /// The list's path, `/v1/events`.
+    pub url: String,
+    /// Whether more events follow in the direction of this page.
+    pub has_more: bool,
+    /// The events.
+    pub data: Vec<EventObjectResponse>,
+}
+
+/// `POST /v1/events/{id}/resend` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResendEventRequest {
+    /// The enabled endpoint to deliver the event to again, `we_…`.
+    pub webhook_endpoint: String,
 }

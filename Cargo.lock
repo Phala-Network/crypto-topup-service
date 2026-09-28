@@ -5669,6 +5669,7 @@ dependencies = [
  "clap",
  "crc",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "rand 0.10.3",
  "reqwest 0.13.5",

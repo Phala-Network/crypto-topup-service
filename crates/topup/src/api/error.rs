@@ -339,6 +339,27 @@ impl ApiError {
         )
     }
 
+    /// Returns a new webhook endpoint over the 16 of the account's mode.
+    #[must_use]
+    pub fn webhook_endpoint_cap() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "webhook_endpoint_cap_exceeded",
+            "the account has 16 webhook endpoints in this mode; delete one first",
+        )
+    }
+
+    /// Returns a resend to a disabled webhook endpoint.
+    #[must_use]
+    pub fn webhook_endpoint_disabled() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "webhook_endpoint_disabled",
+            "the webhook endpoint is disabled; enable it first",
+        )
+        .with_param("webhook_endpoint")
+    }
+
     /// Returns a rotation of an already retired deposit address.
     #[must_use]
     pub fn deposit_address_retired() -> Self {

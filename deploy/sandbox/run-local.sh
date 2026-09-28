@@ -98,10 +98,10 @@ wait_for "GET /healthz" curl -fsS "$service_url/healthz"
 echo "== creating the sandbox account through POST /v1/admin/accounts"
 # Signed for the service's public origin (http://topup:8080), sent to its published port. The
 # response carries the account's first test key, shown once.
-jq -n --arg name "$slug" --arg webhook_url "$public_url/webhooks" --arg today "$(date -u +%F)" \
+jq -n --arg name "$slug" --arg today "$(date -u +%F)" \
     '{name: $name, contact: {name: "Sandbox", email: "sandbox@example.com"},
       due_diligence: {reference: "sandbox", reviewed_at: $today, reviewed_by: "run-local.sh"},
-      charges_enabled: false, reason: "local sandbox", webhook_url: $webhook_url}' \
+      charges_enabled: false, reason: "local sandbox"}' \
     >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
     http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" \
@@ -116,6 +116,13 @@ echo "created $account"
 "$root/deploy/sandbox/set-treasury.sh" --api "$service_url" --key-file "$tmp/product.key" \
     --chain-id 11155111 --private-key "$ANVIL_PRIVATE_KEY" >"$tmp/treasury.json"
 echo "treasury $(jq -er .address "$tmp/treasury.json") is $(jq -er .status "$tmp/treasury.json")"
+
+echo "== registering the product's webhook endpoint through POST /v1/webhook_endpoints"
+# The merchant registers its endpoints with its key; the header file keeps the key out of argv.
+(umask 077 && printf 'authorization: Bearer %s\n' "$(<"$tmp/product.key")" >"$tmp/auth.header")
+jq -n --arg url "$public_url/webhooks" '{url: $url, enabled_events: ["*"]}' >"$tmp/endpoint.json"
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H @"$tmp/auth.header" \
+    --data-binary @"$tmp/endpoint.json" "$service_url/v1/webhook_endpoints" >/dev/null
 
 # Addresses as seen from the product container on the compose network.
 jq -n \

@@ -20,7 +20,10 @@ pub use deposits::{
     TransitionWrites, apply_transition, claim_deposit, get_deposit, insert_deposit,
     release_deposit_lease,
 };
-pub use outbox::{EventObject, NewOutboxEvent, SYSTEM_ACTOR, enqueue_in};
+pub use outbox::{
+    EventObject, NewOutboxEvent, Notice, SYSTEM_ACTOR, enqueue_in, enqueue_rendered_in,
+    is_account_event,
+};
 pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,
 };

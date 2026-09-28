@@ -1,11 +1,10 @@
-//! Standard Webhooks delivery and administrative replay.
+//! Standard Webhooks delivery.
 
 mod delivery;
 mod envelope;
-mod replay;
 mod signature;
 
 pub use delivery::{DeliveryConfig, DeliveryError, DeliveryWorker};
+pub(crate) use envelope::event_data;
 pub use envelope::{Event, webhook_id};
-pub use replay::{ReplaySelector, replay};
 pub use signature::SignedWebhook;
