@@ -1275,7 +1275,10 @@ merchants received imported as delivered, so a deposit rebuilt from the chain ke
 `deposit.credited` event id and delivered body and is never re-emitted with a re-valued amount; a
 differing amount is flagged. `POST /v1/admin/restore/unfreeze` lifts the freeze once every chain
 has finalized past the restore's detection with every address backfilled, recording the reason
-and checklist in `audit`. A deposit not imported is credited again with the same event id, so the
+and checklist in `audit`. The unfinalized-credit cap and a deposit's `amount_refunded` and
+`amount_reversed` are computed from ledger rows, so they hold after a restore: a deposit credited in
+the window is credited again within the cap, and the finality watch settles every restored
+credited deposit that is not final. A deposit not imported is credited again with the same event id, so the
 product ignores the repeat and keeps its first credit (§11). The restore drill runs weekly in CI
 on a local stack, including the freeze and the reconciliation; the staging drill restores
 staging's real backups. Ingress via the

@@ -55,6 +55,12 @@ receiver's store, its database, or an `export_account` taken before the loss):
 5. every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event it received, as
    delivered (the JSON body).
 
+Refunds it created or marked paid after the restore point are gone too: after the unfreeze it
+creates them again and marks them paid with the same transaction. Their `deposit.refunded` carries
+a new id, but the deposit's cumulative `amount_refunded` is the same, so the balance rule of the
+[integration guide](../../docs/integration.md#the-balance-rule-and-event-ordering) takes nothing
+back twice.
+
 Keys and endpoints it created after the restore point are gone; it creates them again after the
 unfreeze (a merchant left without a working key gets a recovery key,
 [API key compromise](api-key-compromise.md#recovery-by-the-operator)).

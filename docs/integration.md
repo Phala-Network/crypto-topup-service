@@ -1488,7 +1488,9 @@ own records since then, for:
 
 Keep these records (the webhook bodies you store for obligation 2 of §2.3, and your keys'
 prefixes and last four characters). Keys and endpoints you created after the restore point are
-gone: create them again after the freeze lifts. You can also register a lost deposit address
+gone: create them again after the freeze lifts. So are refunds you created or marked paid after
+it: create them again and mark them paid with the same transaction; the deposit's cumulative
+`amount_refunded` keeps the balance rule (§2.3) from taking anything back twice. You can also register a lost deposit address
 yourself after the freeze: `POST /v1/deposit_addresses` returns version 1 identically, and each
 `POST /v1/deposit_addresses/{id}/rotate` the next version, but payments made before you register
 it are then not found; give the operator your records instead.
