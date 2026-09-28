@@ -29,13 +29,14 @@ class EventList:
             '202510000000000000000', 'amount_refunded': 0, 'amount_refunded_atomic': '0', 'amount_reversed': 0, 'asset':
             'PHA', 'asset_contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_number': 21000000, 'chain_id': 1,
             'client_reference_id': 'team-42', 'created': 1790553624, 'currency': 'usd', 'deposit_address': None,
-            'exchange_rate': '0.12345679', 'final': False, 'from_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a',
-            'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False, 'log_index': 212, 'metadata': {'order_id':
-            'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10',
-            'refunded': False, 'rejection_reason': None, 'status': 'credited', 'swept': False, 'tx_hash':
-            '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}}, 'id':
-            'evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0', 'livemode': False, 'object': 'event', 'pending_webhooks': 0, 'request':
-            None, 'type': 'deposit.credited'}], 'has_more': False, 'object': 'list', 'url': '/v1/events'}
+            'exchange_rate': '0.12345679', 'final': False, 'final_at': 1790554572, 'from_address':
+            '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False,
+            'log_index': 212, 'metadata': {'order_id': 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote':
+            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'status': 'credited',
+            'swept': False, 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at':
+            1790553630}}, 'id': 'evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0', 'livemode': False, 'object': 'event',
+            'pending_webhooks': 0, 'request': None, 'type': 'deposit.credited'}], 'has_more': False, 'object': 'list',
+            'url': '/v1/events'}
 
     Attributes:
         data (list[EventObjectResponse]): The events.

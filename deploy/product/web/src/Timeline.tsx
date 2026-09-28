@@ -35,7 +35,7 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
     title: "Final",
     hint:
       "About 15 minutes on Ethereum. Until then a reorg that drops the transaction reverses the " +
-      "credit; only a final deposit can be refunded. The time shown is when this demo first saw it final.",
+      "credit; only a final deposit can be refunded. The time shown is the deposit's final_at.",
   },
   reversed: {
     title: "Reversed",

@@ -23,6 +23,7 @@ pub mod heartbeat;
 pub mod ids;
 pub mod jitter;
 pub mod keys;
+pub mod limits;
 pub mod locks;
 pub mod observability;
 pub mod outbox;

@@ -553,9 +553,11 @@ Invoice model, with this service's exception profile:
   `quote.amount_decimals` token decimals so the payer reads and types a short amount (the
   overpayment, below one unit of the last decimal, is the payer's; the credit is unchanged).
   `expires_at = now + window` *(policy)*. A quote's credit is reserved atomically at creation
-  against the route's open-exposure caps *(policy)*, `limits.max_open_minor`: `account` per
-  customer, `product` per account and mode, and `global` across the service (the keys keep their
-  names from before the tenant rename; `400 exposure_cap_exceeded`, naming what is left); a
+  against the account's caps in its mode (`account_limits`, design §12) *(policy)*: open quotes
+  (default 1 000 live, 100 test), their credit (default $50 000 live, $10 000 test), and one
+  customer's credit (default $5 000); the operator sets them per account and mode
+  (`POST /v1/admin/accounts/{account}`, `limits`). There is no global cap, and a test quote never
+  uses live headroom (`400 exposure_cap_exceeded`, naming what is left); a
   customer creates at most `quote.max_creations_per_minute` quotes a minute
   (`429 customer_rate_limit`). Repeating an `Idempotency-Key` with the same request within 24
   hours returns the first response (another request is `400 idempotency_key_reused`), also while
@@ -602,7 +604,8 @@ active or retired (below). Superseded networks and retired versions stay watched
 credited, and keep paying their old treasury, which the forwarder's clone argument fixes for good;
 a refund of their deposits is paid from that old treasury. A network is issued only on a chain
 where the account has a treasury (`400 treasury_not_set` when no issuable chain has one). Active addresses are capped per account and mode
-(`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000 test;
+(`account_limits.max_active_deposit_addresses`, default 100 000 live, 1 000 test, set by the
+operator with the other caps;
 `400 deposit_address_cap_exceeded`), a customer rotates at most 10 times per hour
 (`429 customer_rate_limit`, with `Retry-After`), none is issued while `quotes` is paused, and a frozen chain gets no new
 network.
@@ -927,10 +930,11 @@ cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and
 route's `confirmations` (a depth such as `"2"`, `"safe"`, or `"finalized"`), the typical credit
 time (`typical_credit_seconds`: 30 at depth 2), and the typical finality time; the confirmation
 and credit time are the stricter of the route's floor and the account's policy for the chain.
-`max_open_amount_per_account` is the smallest of the routes' `limits.max_open_minor.account`, the
-open exposure cap of one customer (`client_reference_id`; the field keeps its name from before the
-tenant rename), which also bounds any single quote. The remaining exposure is not served: a quote
-above it fails with `400 exposure_cap_exceeded`, whose message states the remaining amount. The
+`max_open_quotes`, `max_open_amount_per_account`, and `max_open_amount_per_customer` are the
+account's effective caps in the key's mode (§9): its open quotes, their credit, and one customer's
+(`client_reference_id`) credit, which also bounds any single quote. The remaining exposure is not
+served: a quote above it fails with `400 exposure_cap_exceeded`, whose message states the
+remaining amount. The
 forwarder factory and implementation are not served: the merchant pins them from the attested
 deployment (`deploy/CONTRACTS.md`), like its webhook keys and its own treasuries, because the
 service cannot vouch for its own addresses.
@@ -1231,7 +1235,7 @@ attested. The file names only what differs per route or environment: route name 
 `livemode` (false on a test network such as Sepolia or Anvil, true on a mainnet; startup checks it
 against a built-in list of test networks), chain id, forwarder factory, asset symbol,
 contract, and decimals, price sources, and the policy limits (minimum credit, maximum deposit,
-refund floor, exposure caps). A route names no product and no treasury: every account quotes on the routes of its
+refund floor). Exposure caps are the accounts' (`account_limits`, §9), not the route's. A route names no product and no treasury: every account quotes on the routes of its
 key's mode, paying its own treasury of the chain (§9).
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints

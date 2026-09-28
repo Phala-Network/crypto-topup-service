@@ -135,7 +135,6 @@ from topup_client.models import (
     DepositAddress,
     DepositAddressList,
     DepositList,
-    ErrorResponse,
     EventList,
     EventObjectResponse,
     Forwarder,
@@ -231,6 +230,7 @@ class TopupClient:
             timeout=timeout,
             follow_redirects=False,
             transport=transport,
+            event_hooks={"response": [_raise_error_response]},
         )
         self._client = AuthenticatedClient(
             base_url=base_url, token=api_key, raise_on_unexpected_status=False
@@ -958,17 +958,23 @@ class TopupClient:
         self,
         *,
         chain_id: int | None = None,
+        quote: str | None = None,
+        deposit_address: str | None = None,
         sweepable: str | None = None,
         page_size: int = 100,
     ) -> Iterator[Forwarder]:
         """Yields the account's forwarders with the `(factory, salt, treasury)` each address
-        derives from. With `sweepable` (a token contract), only those with a final unswept
-        balance of it that may be swept: pass them to `topup_sdk.flush_transaction`."""
+        derives from: all of them, or those of one `quote` (`qt_…`) or one `deposit_address`
+        (`da_…`, one per chain and treasury it has had). With `sweepable` (a token contract),
+        only those with a final unswept balance of it that may be swept: pass them to
+        `topup_sdk.flush_transaction`."""
         return self._paginate(
             lambda starting_after: partial(
                 list_forwarders.sync_detailed,
                 client=self._client,
                 chain_id=_unset(chain_id),
+                quote=_unset(quote),
+                deposit_address=_unset(deposit_address),
                 sweepable=_unset(sweepable),
                 limit=page_size,
                 starting_after=_unset(starting_after),
@@ -1078,24 +1084,44 @@ class TopupClient:
             except httpx.TransportError:
                 if attempt >= self._max_attempts:
                     raise
-            else:
-                parsed = response.parsed
-                if response.status_code == 200 and isinstance(parsed, expected):
-                    return parsed
-                error = _api_error(response)
-                retryable = response.status_code in RETRYABLE_STATUSES or (
+            except _ErrorResponseError as failed:
+                error = _api_error(failed.response)
+                retryable = error.status_code in RETRYABLE_STATUSES or (
                     error.code == "idempotency_key_in_use"
                 )
                 # A saved response is the request's outcome; asking again replays it.
-                replayed = response.headers.get("idempotent-replayed") == "true"
+                replayed = failed.response.headers.get("idempotent-replayed") == "true"
                 if not retryable or replayed or attempt >= self._max_attempts:
-                    raise error
+                    raise error from None
                 if error.retry_after is not None:
                     self._sleep(max(error.retry_after, self._initial_backoff))
                     attempt += 1
                     continue
+            else:
+                parsed = response.parsed
+                if response.status_code == 200 and isinstance(parsed, expected):
+                    return parsed
+                raise _unexpected(response.status_code, response.headers)
             self._sleep(self._initial_backoff * 2 ** (attempt - 1))
             attempt += 1
+
+
+class _ErrorResponseError(Exception):
+    """Carries an error response past the generated client, which parses only the bodies the
+    OpenAPI document describes."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        super().__init__(response.status_code)
+        self.response = response
+
+
+def _raise_error_response(response: httpx.Response) -> None:
+    """Raises on every error status before the generated client parses the body, so an error
+    body without an optional field, or no JSON at all (a proxy's `502` page), becomes an
+    `ApiError`, never a `KeyError` or `JSONDecodeError`."""
+    if response.status_code >= 400:
+        response.read()
+        raise _ErrorResponseError(response)
 
 
 def _idempotency_key(key: str | None) -> str:
@@ -1118,28 +1144,40 @@ def _metadata(metadata: Metadata | None) -> MetadataParamType0 | MetadataClear |
     return MetadataParamType0.from_dict(dict(metadata))
 
 
-def _api_error(response: Response[Any]) -> ApiError:
-    request_id = response.headers.get("request-id")
-    retry_after = _seconds(response.headers.get("retry-after"))
-    parsed = response.parsed
-    if isinstance(parsed, ErrorResponse):
-        error = parsed.error
-        return ApiError(
-            response.status_code,
-            error.code,
-            error.message,
-            error_type=error.type_,
-            param=error.param if isinstance(error.param, str) else None,
-            doc_url=error.doc_url,
-            request_id=request_id,
-            retry_after=retry_after,
-        )
+def _api_error(response: httpx.Response) -> ApiError:
+    """The service's error object, read leniently: a missing or malformed field is `None`, and a
+    body that is not an error object is `unexpected_response`."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or not isinstance(error.get("code"), str):
+        return _unexpected(response.status_code, response.headers)
+
+    def text(key: str) -> str | None:
+        value = error.get(key)
+        return value if isinstance(value, str) else None
+
     return ApiError(
         response.status_code,
+        error["code"],
+        text("message") or "",
+        error_type=text("type"),
+        param=text("param"),
+        doc_url=text("doc_url"),
+        request_id=response.headers.get("request-id"),
+        retry_after=_seconds(response.headers.get("retry-after")),
+    )
+
+
+def _unexpected(status_code: int, headers: Mapping[str, str]) -> ApiError:
+    return ApiError(
+        status_code,
         "unexpected_response",
         "undocumented response",
-        request_id=request_id,
-        retry_after=retry_after,
+        request_id=headers.get("request-id"),
+        retry_after=_seconds(headers.get("retry-after")),
     )
 
 

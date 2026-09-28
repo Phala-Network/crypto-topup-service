@@ -37,11 +37,6 @@ use crate::audit::{self, Actor};
 use crate::db::{Account, Customer};
 use crate::tenancy::Scope;
 
-/// Default cap on a live-mode account's active deposit addresses (design §12); the operator
-/// raises it per account in `account_limits.max_active_deposit_addresses`.
-pub const DEFAULT_MAX_ACTIVE_LIVE: i64 = 100_000;
-/// Default cap on a test-mode account's active deposit addresses.
-pub const DEFAULT_MAX_ACTIVE_TEST: i64 = 1_000;
 /// Rotations one customer may make in a rolling hour.
 pub const MAX_ROTATIONS_PER_HOUR: i64 = 10;
 
@@ -812,26 +807,22 @@ async fn check_cap(
         .bind(format!("{}:{}", scope.account_id(), scope.livemode()))
         .execute(&mut **transaction)
         .await?;
-    let (active, cap): (i64, Option<i32>) = sqlx::query_as(
-        r#"
-        SELECT (SELECT count(*) FROM deposit_addresses
-                WHERE account_id = $1 AND livemode = $2 AND status = 'active'),
-               (SELECT max_active_deposit_addresses FROM account_limits
-                WHERE account_id = $1 AND livemode = $2)
-        "#,
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM deposit_addresses \
+         WHERE account_id = $1 AND livemode = $2 AND status = 'active'",
     )
     .bind(scope.account_id())
     .bind(scope.livemode())
     .fetch_one(&mut **transaction)
     .await?;
-    let cap = cap.map_or(
-        if scope.livemode() {
-            DEFAULT_MAX_ACTIVE_LIVE
-        } else {
-            DEFAULT_MAX_ACTIVE_TEST
-        },
-        i64::from,
-    );
+    let cap = crate::limits::load(transaction, scope)
+        .await
+        .map_err(|error| match error {
+            crate::limits::LimitsError::Database(error) => DepositAddressError::Database(error),
+            _ => DepositAddressError::DatabaseInvariant,
+        })?
+        .max_active_deposit_addresses;
+    let cap = i64::try_from(cap).map_err(|_| DepositAddressError::DatabaseInvariant)?;
     if active >= cap {
         return Err(DepositAddressError::CapReached(cap));
     }

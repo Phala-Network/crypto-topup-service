@@ -28,14 +28,19 @@ class Config:
             '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'max_deposit_atomic': '1000000000000000000000000',
             'min_amount': 100, 'min_refund_atomic': '1000000000000000000', 'pricing': 'spot', 'quote_spread_bps': 50,
             'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900, 'typical_credit_seconds': 24, 'typical_finality_seconds':
-            900}], 'currency': 'usd', 'livemode': False, 'max_open_amount_per_account': 1000000, 'object': 'config'}
+            900}], 'currency': 'usd', 'livemode': False, 'max_open_amount_per_account': 1000000,
+            'max_open_amount_per_customer': 500000, 'max_open_quotes': 100, 'object': 'config'}
 
     Attributes:
         assets (list[ConfigAsset]): One entry per payable asset.
         currency (str): Credit currency, `usd`.
         livemode (bool): The mode of the key that reads it: `assets` lists that mode's routes.
-        max_open_amount_per_account (int): Per-account cap on the credit of open quotes, in cents; no single quote can
-            exceed it.
+        max_open_amount_per_account (int): Cap on the credit of your open quotes in this mode, in cents. Test-mode
+            quotes never
+            count against live mode's cap.
+        max_open_amount_per_customer (int): Cap on the credit of one customer's open quotes, in cents; no single quote
+            can exceed it.
+        max_open_quotes (int): Cap on the number of your open quotes in this mode.
         object_ (ConfigObject): Always `config`.
     """
 
@@ -43,6 +48,8 @@ class Config:
     currency: str
     livemode: bool
     max_open_amount_per_account: int
+    max_open_amount_per_customer: int
+    max_open_quotes: int
     object_: ConfigObject
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -60,6 +67,10 @@ class Config:
 
         max_open_amount_per_account = self.max_open_amount_per_account
 
+        max_open_amount_per_customer = self.max_open_amount_per_customer
+
+        max_open_quotes = self.max_open_quotes
+
         object_: str = self.object_
 
         field_dict: dict[str, Any] = {}
@@ -70,6 +81,8 @@ class Config:
                 "currency": currency,
                 "livemode": livemode,
                 "max_open_amount_per_account": max_open_amount_per_account,
+                "max_open_amount_per_customer": max_open_amount_per_customer,
+                "max_open_quotes": max_open_quotes,
                 "object": object_,
             }
         )
@@ -94,6 +107,10 @@ class Config:
 
         max_open_amount_per_account = d.pop("max_open_amount_per_account")
 
+        max_open_amount_per_customer = d.pop("max_open_amount_per_customer")
+
+        max_open_quotes = d.pop("max_open_quotes")
+
         object_ = check_config_object(d.pop("object"))
 
         config = cls(
@@ -101,6 +118,8 @@ class Config:
             currency=currency,
             livemode=livemode,
             max_open_amount_per_account=max_open_amount_per_account,
+            max_open_amount_per_customer=max_open_amount_per_customer,
+            max_open_quotes=max_open_quotes,
             object_=object_,
         )
 

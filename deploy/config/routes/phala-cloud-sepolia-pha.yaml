@@ -28,4 +28,3 @@ limits:
   min_credit_minor: 100
   max_deposit_atomic: "200000000000000000000000"
   min_refund_atomic: "20000000000000000000"
-  max_open_minor: { account: 500000, product: 5000000, global: 10000000 }

@@ -6,6 +6,19 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Added
+
+- `list_forwarders` / `pay.forwarders.list` take the API's `quote` and `deposit_address` filters.
+- `Deposit.final_at`; `Config.max_open_quotes` and `max_open_amount_per_customer`
+  (`max_open_amount_per_account` is now the account's cap in the mode).
+
+### Fixed
+
+- Error responses are read leniently: a body without `doc_url` (or any field but `code`), with an
+  unknown `type`, or not JSON at all (a proxy's `502` page) raises `ApiError` (`unexpected_response`
+  when there is no error object), never `KeyError` or `JSONDecodeError`, and a retryable status
+  is retried whatever its body.
+
 ### Changed (breaking)
 
 - Address checks derive every address from your pins, never from the response's `treasury`: a

@@ -277,13 +277,11 @@ jobs:
       - name: Render the compose from this commit with the release's digests and the settings
         run: |
           "$DIR/render-compose.sh" >"$COMPOSE"
-          # Production serves only an Ethereum mainnet route, never the Sepolia staging route. Only
-          # topup reaches production (the product target is staging-only) and only its compose
-          # carries routes.
-          if [[ "$DEPLOY_ENVIRONMENT" == production ]]; then
-            chains=$(grep -Eo '^[[:space:]]+chain_id: [0-9]+' "$COMPOSE" | awk '{print $2}' | sort -u | tr '\n' ' ')
-            [[ "$chains" == "1 " ]] ||
-              { echo "::error::production needs a compose whose routes are all on chain 1, not: $chains"; exit 1; }
+          # Every route's livemode must match its chain: production serves test mode on Sepolia
+          # beside live mode on mainnet, staging test mode only (deploy/check-route-modes.sh). Only
+          # topup's compose carries routes; the product target is staging-only.
+          if [[ "$TARGET" == topup ]]; then
+            deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
           fi
 
       # topup: both RPCs, the contracts, anonymous image pulls. product: its RPC's finality against

@@ -118,11 +118,6 @@ CREATE TABLE IF NOT EXISTS demo_refunds (
     deposit TEXT NOT NULL,
     created INTEGER NOT NULL
 );
--- When this demo first saw a deposit `final`: the API reports the flag, not its time.
-CREATE TABLE IF NOT EXISTS demo_final_observed (
-    deposit TEXT PRIMARY KEY,
-    observed_at REAL NOT NULL
-);
 """
 # A refund's `failure_reason`, explained to the visitor.
 REFUND_FAILURES = {
@@ -622,7 +617,6 @@ class DemoConsole:
         events = self._events(keys)
         with self.ledger.transaction() as db:
             ledger = None if deposit is None else _ledger(db, deposit["id"])
-            observed_final = None if deposit is None else self._observed_final(db, deposit)
         return {
             "kind": "quote" if quote is not None else "address",
             "quote": None if quote is None else _quote_view(quote),
@@ -636,7 +630,6 @@ class DemoConsole:
                 events=events,
                 ledger=ledger,
                 sent=sent,
-                observed_final=observed_final,
                 sweep=sweep,
                 now=self._clock(),
             ),
@@ -644,18 +637,6 @@ class DemoConsole:
             "ledger": None if deposit is None else _ledger_view(deposit, ledger),
             "events": events,
         }
-
-    def _observed_final(self, db: Any, deposit: dict[str, Any]) -> float | None:
-        if not deposit["final"]:
-            return None
-        db.execute(
-            "INSERT OR IGNORE INTO demo_final_observed (deposit, observed_at) VALUES (?, ?)",
-            (deposit["id"], self._clock()),
-        )
-        row = db.execute(
-            "SELECT observed_at FROM demo_final_observed WHERE deposit = ?", (deposit["id"],)
-        ).fetchone()
-        return float(row[0])
 
     def _events(self, keys: set[str]) -> list[dict[str, Any]]:
         """This product's verified webhook events about the quote, the deposit, or its refunds."""
@@ -931,7 +912,6 @@ def _steps(
     events: list[dict[str, Any]],
     ledger: dict[str, Any] | None,
     sent: dict[str, Any] | None,
-    observed_final: float | None,
     sweep: dict[str, Any] | None,
     now: float,
 ) -> list[dict[str, Any]]:
@@ -1061,7 +1041,7 @@ def _steps(
         step(
             "final",
             "complete",
-            observed_final,
+            deposit.get("final_at"),
             [{"label": "Block", "value": deposit["block_number"]}],
         )
     elif status != "reversed":

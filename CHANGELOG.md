@@ -9,6 +9,29 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed (breaking; nothing is live)
 
+- Open-quote caps are per account and mode only (design §12), set by the operator per account
+  and mode (defaults: 1 000 open quotes, $50 000 of open quotes per account, $5 000 per customer
+  in live mode; 100, $10 000, and $5 000 in test mode). There is no global cap, and test-mode
+  quotes never count against live mode. `GET /v1/config` reports the effective caps:
+  `max_open_quotes` and `max_open_amount_per_customer` are new, and `max_open_amount_per_account`
+  is now the account's cap in the mode (it was the per-customer cap). `400 exposure_cap_exceeded`
+  also answers a quote past `max_open_quotes`. Route files no longer take
+  `limits.max_open_minor`.
+- Admin: `POST /v1/admin/accounts/{account}` takes `limits {livemode, max_open_quotes,
+  max_open_amount_per_account, max_open_amount_per_customer, max_active_deposit_addresses}`, and
+  the admin account response carries the effective `limits` of both modes.
+- Deploy runs one production deployment for both modes: every route's `livemode` must match its
+  chain (live on a mainnet, test on a test network), and staging takes no live route
+  (`deploy/check-route-modes.sh`); production no longer requires every route to be on chain 1.
+
+### Added
+
+- Deposits carry `final_at` (Unix seconds; `null` until `final`), when the finality watch found
+  the deposit's block final, in the object and every `deposit.*` snapshot.
+- A path or method the API does not serve answers `404 resource_missing` with the error object
+  (it had an empty body). The error object's `doc_url` is optional in the OpenAPI schema, as in
+  Stripe's; every error of the service still carries it.
+
 - Staging is reset (deploy/README.md, "Staging reset"): its route `phala-cloud-sepolia-pha-usd`
   is version 3 on the deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`
   (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update

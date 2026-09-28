@@ -119,13 +119,12 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The staging route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) expects the #202 build's
+The staging route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) uses the #202 build's
 deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
-`0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`. Until they are deployed on Sepolia, `topup run`
-refuses to start with the route (its startup contract check reads the factory's
-`implementation()`). Deploying them is a **HUMAN-ONLY** step of
-the staging reset (`deploy/README.md`, "Staging reset"), before the Deploy `upgrade` that ships
-the route.
+`0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
+(`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
+`topup run` checks the factory's `implementation()` and both runtime code hashes at startup. The
+commands below are the record of that deployment and the procedure for any other test network.
 
 **HUMAN-ONLY**, with the deployer key in the environment only (the forge script reads
 `PRIVATE_KEY`; it never appears in argv):

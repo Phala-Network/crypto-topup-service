@@ -209,14 +209,17 @@ pub enum RateLockError {
         /// Seconds until the customer's oldest counted creation leaves the minute.
         retry_after: u64,
     },
-    /// An open exposure cap would be exceeded.
+    /// A cap on the credit of open quotes would be exceeded.
     #[error("the {scope} cap on open quotes leaves {remaining} cents")]
     ExposureCap {
-        /// `customer`, `account`, or `global`.
+        /// `customer` or `account` (the account in the quote's mode).
         scope: &'static str,
         /// Credit, in minor units, still available under the cap.
         remaining: u64,
     },
+    /// The account already holds its cap of open quotes in the mode.
+    #[error("the account holds its cap of {0} open quotes in this mode")]
+    QuoteCountCap(u64),
     /// The tenant-scoped lock does not exist.
     #[error("rate lock not found")]
     NotFound,
@@ -293,7 +296,7 @@ pub async fn create(
     let mut transaction = pool.begin().await?;
     lock_customer(&mut transaction, customer).await?;
     check_creation_rate(&mut transaction, customer.id, route).await?;
-    check_exposure(&mut transaction, account, customer, credit_minor, route).await?;
+    check_exposure(&mut transaction, account, customer, credit_minor).await?;
     // The account's current treasury of the chain; the shared lock, held to commit, keeps a
     // treasury change from applying meanwhile. The address keeps it for good, as the forwarder
     // does.
@@ -877,50 +880,59 @@ async fn lock_customer(
     Ok(())
 }
 
-/// Rejects a creation that would take any scope's open reserved lock credit past its cap, and
-/// raises `TopupLockExposureNearCap` when it takes the account's or global credit to 90 percent.
+/// Rejects a creation that would take the open reserved quotes of the account in its mode past
+/// the account's caps (`crate::limits`): their number, their credit, or one customer's credit.
+/// Raises `TopupLockExposureNearCap` when it takes the account's credit to 90 percent. Caps are
+/// per account and mode only (design §12): a test quote never uses live headroom, and there is no
+/// global cap.
 ///
-/// The route's `max_open_minor.account` caps one customer, `product` one account in one mode,
-/// and `global` every quote; the route file keeps those names until caps move to
-/// `account_limits` (design §12).
-///
-/// The transaction-level advisory lock serialises creations from this check to commit, and under
-/// `READ COMMITTED` the sum, a later statement, sees every creation committed before it. Closing a
-/// lock only lowers the sums, so cancellation, consumption, and expiry need no lock.
+/// The transaction-level advisory lock serialises creations of the account and mode from this
+/// check to commit, and under `READ COMMITTED` the sums, a later statement, see every creation
+/// committed before it. Closing a lock only lowers the sums, so cancellation, consumption, and
+/// expiry need no lock.
 async fn check_exposure(
     transaction: &mut Transaction<'_, Postgres>,
     account: &Account,
     customer: &Customer,
     amount: MinorAmount,
-    route: &RouteFile,
 ) -> Result<(), RateLockError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('rate-lock-exposure', 0))")
+    let scope = Scope::new(account.id, customer.livemode);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('rate-lock-exposure:' || $1, 0))")
+        .bind(format!("{}:{}", scope.account_id(), scope.livemode()))
         .execute(&mut **transaction)
         .await?;
+    let limits = crate::limits::load(transaction, scope)
+        .await
+        .map_err(|error| match error {
+            crate::limits::LimitsError::Database(error) => RateLockError::Database(error),
+            _ => RateLockError::DatabaseInvariant,
+        })?;
     let open = sqlx::query(
         r#"
-        SELECT coalesce(sum(credit_minor) FILTER (WHERE customer_id = $1), 0)::text AS customer,
-               coalesce(sum(credit_minor)
-                   FILTER (WHERE account_id = $2 AND livemode = $3), 0)::text AS account,
-               coalesce(sum(credit_minor), 0)::text AS global
+        SELECT count(*) AS quotes,
+               coalesce(sum(credit_minor) FILTER (WHERE customer_id = $3), 0)::text AS customer,
+               coalesce(sum(credit_minor), 0)::text AS account
         FROM quotes
-        WHERE status = 'open' AND exposure_reserved
+        WHERE account_id = $1 AND livemode = $2 AND status = 'open' AND exposure_reserved
         "#,
     )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
     .bind(customer.id)
-    .bind(account.id)
-    .bind(customer.livemode)
     .fetch_one(&mut **transaction)
     .await?;
-    let caps = &route.rate_lock.max_open_minor;
-    for (scope, cap) in [
-        ("customer", caps.account),
-        ("global", caps.global),
-        ("account", caps.product),
+    let quotes = u64::try_from(open.try_get::<i64, _>("quotes")?)
+        .map_err(|_| RateLockError::DatabaseInvariant)?;
+    if quotes >= limits.max_open_quotes {
+        return Err(RateLockError::QuoteCountCap(limits.max_open_quotes));
+    }
+    for (scope_name, cap) in [
+        ("customer", limits.max_open_amount_per_customer),
+        ("account", limits.max_open_amount_per_account),
     ] {
-        let current = parse_u64(open.try_get(scope)?)?;
+        let current = parse_u64(open.try_get(scope_name)?)?;
         let exceeded = RateLockError::ExposureCap {
-            scope,
+            scope: scope_name,
             remaining: cap.saturating_sub(current),
         };
         let Some(next) = current.checked_add(amount.value()) else {
@@ -929,16 +941,12 @@ async fn check_exposure(
         if next > cap {
             return Err(exceeded);
         }
-        if scope != "customer" && near_cap(next, cap) {
-            let id = if scope == "account" {
-                account.public_id.as_str()
-            } else {
-                "global"
-            };
+        if scope_name == "account" && near_cap(next, cap) {
             tracing::warn!(
                 tags.alert = "TopupLockExposureNearCap",
-                tags.scope = scope,
-                tags.id = id,
+                tags.scope = scope_name,
+                tags.id = account.public_id.as_str(),
+                tags.livemode = scope.livemode(),
                 open_minor = next,
                 cap_minor = cap,
                 "open rate-lock exposure is at least 90 percent of its cap"

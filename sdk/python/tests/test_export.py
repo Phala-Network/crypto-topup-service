@@ -61,7 +61,9 @@ def _service(request: httpx.Request) -> httpx.Response:
                 "object": "config",
                 "livemode": False,
                 "currency": "usd",
+                "max_open_quotes": 1,
                 "max_open_amount_per_account": 1,
+                "max_open_amount_per_customer": 1,
                 "assets": [],
             },
         )

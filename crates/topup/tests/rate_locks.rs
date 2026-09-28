@@ -546,18 +546,49 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         ensure!(response_json(window_closed).await?["error"]["code"] == "quote_window_closed");
         ensure!(quote_status(&database.app_pool, &lapsed_id).await? == "open");
 
-        let config = app
-            .oneshot(merchant_request(
+        let read_config = || {
+            app.clone().oneshot(merchant_request(
                 Method::GET,
                 "/v1/config",
                 Vec::new(),
                 &product_key,
             ))
-            .await?;
+        };
+        let config = read_config().await?;
         ensure!(config.status() == StatusCode::OK);
         let config = response_json(config).await?;
         ensure!(config["object"] == "config" && config["currency"] == "usd");
-        ensure!(config["max_open_amount_per_account"] == 500_000);
+        // The live defaults, until the operator sets the account's caps.
+        ensure!(config["max_open_quotes"] == 1_000, "{config}");
+        ensure!(config["max_open_amount_per_account"] == 5_000_000);
+        ensure!(config["max_open_amount_per_customer"] == 500_000);
+        set_limits(
+            &database.app_pool,
+            product.id,
+            false,
+            Some(7),
+            Some(700),
+            Some(70),
+        )
+        .await?;
+        let unchanged = response_json(read_config().await?).await?;
+        ensure!(
+            unchanged["max_open_amount_per_account"] == 5_000_000,
+            "{unchanged}"
+        );
+        set_limits(
+            &database.app_pool,
+            product.id,
+            true,
+            Some(3),
+            Some(300),
+            None,
+        )
+        .await?;
+        let adjusted = response_json(read_config().await?).await?;
+        ensure!(adjusted["max_open_quotes"] == 3, "{adjusted}");
+        ensure!(adjusted["max_open_amount_per_account"] == 300);
+        ensure!(adjusted["max_open_amount_per_customer"] == 500_000);
         ensure!(
             config["assets"].as_array().map(Vec::len) == Some(1),
             "{config}"
@@ -698,111 +729,123 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
 }
 
 #[tokio::test]
-async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<()> {
+async fn caps_are_per_account_and_mode_and_expiry_releases_them() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
     let result = async {
         let first = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let second = seed_product_without_key(&database.app_pool, "builder").await?;
-        let first_account = seed_account(&database.app_pool, first.id, "first").await?;
-        let second_account = seed_account(&database.app_pool, first.id, "second").await?;
-        let other_account = seed_account(&database.app_pool, second.id, "other").await?;
-        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
-
-        let mut account_route = test_route();
-        account_route.rate_lock.max_open_minor.account = 100;
-        account_route.rate_lock.max_open_minor.product = 1_000;
-        account_route.rate_lock.max_open_minor.global = 1_000;
-        let (first_lock, _) = locks::create(
+        seed::set_treasury(
             &database.app_pool,
-            &quotes,
-            &first,
-            &first_account,
-            &account_route,
-            MinorAmount::new(100),
-            &Default::default(),
+            first.id,
+            false,
+            1,
+            seed::FIXTURE_TREASURY,
         )
         .await?;
+        let first_customer = seed_account(&database.app_pool, first.id, "first").await?;
+        let second_customer = seed_account(&database.app_pool, first.id, "second").await?;
+        let other_customer = seed_account(&database.app_pool, second.id, "other").await?;
+        let test_customer = seed::create_customer(
+            &database.app_pool,
+            &NewCustomer {
+                id: Uuid::new_v4(),
+                account_id: first.id,
+                livemode: false,
+                client_reference_id: "tester".to_owned(),
+                paused_scopes: Vec::new(),
+            },
+        )
+        .await?;
+        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
+        let route = test_route();
+        let mut test_mode_route = test_route();
+        test_mode_route.livemode = false;
+        let create = |customer: &Customer, route: &RouteFile, credit: u64| {
+            let (pool, quotes, first, customer, route) = (
+                database.app_pool.clone(),
+                Arc::clone(&quotes),
+                first.clone(),
+                customer.clone(),
+                route.clone(),
+            );
+            async move {
+                let account = if customer.account_id == first.id {
+                    first
+                } else {
+                    seed_account_row(&pool, customer.account_id).await?
+                };
+                Ok::<_, anyhow::Error>(
+                    locks::create(
+                        &pool,
+                        &quotes,
+                        &account,
+                        &customer,
+                        &route,
+                        MinorAmount::new(credit),
+                        &Default::default(),
+                    )
+                    .await,
+                )
+            }
+        };
+
+        // One customer's open credit is capped.
+        set_limits(
+            &database.app_pool,
+            first.id,
+            true,
+            None,
+            Some(1_000),
+            Some(100),
+        )
+        .await?;
+        let (customer_lock, _) = create(&first_customer, &route, 100).await??;
         ensure!(matches!(
-            locks::create(
-                &database.app_pool,
-                &quotes,
-                &first,
-                &first_account,
-                &account_route,
-                MinorAmount::new(1),
-                &Default::default(),
-            )
-            .await,
+            create(&first_customer, &route, 1).await?,
             Err(RateLockError::ExposureCap {
                 scope: "customer",
                 ..
             })
         ));
-        cancel_lock(&database.app_pool, &first, first_lock.id).await?;
+        cancel_lock(&database.app_pool, &first, customer_lock.id).await?;
 
-        let mut product_route = account_route.clone();
-        product_route.rate_lock.max_open_minor.account = 1_000;
-        product_route.rate_lock.max_open_minor.product = 100;
-        let (product_lock, _) = locks::create(
+        // The account's open credit is capped per mode, and a test quote never uses live
+        // headroom: the test cap fills first, and the live cap then still admits its own.
+        set_limits(
             &database.app_pool,
-            &quotes,
-            &first,
-            &first_account,
-            &product_route,
-            MinorAmount::new(100),
-            &Default::default(),
+            first.id,
+            true,
+            None,
+            Some(100),
+            Some(1_000),
         )
         .await?;
+        set_limits(&database.app_pool, first.id, false, None, Some(100), None).await?;
+        create(&test_customer, &test_mode_route, 100).await??;
+        let (expiring, _) = create(&first_customer, &route, 100).await??;
+        for (customer, route) in [
+            (&second_customer, &route),
+            (&test_customer, &test_mode_route),
+        ] {
+            ensure!(matches!(
+                create(customer, route, 1).await?,
+                Err(RateLockError::ExposureCap {
+                    scope: "account",
+                    ..
+                })
+            ));
+        }
+        // No cap spans accounts.
+        create(&other_customer, &route, 1).await??;
+        // Nor is the number of open quotes shared: the other account's cap is its own.
+        set_limits(&database.app_pool, second.id, true, Some(1), None, None).await?;
         ensure!(matches!(
-            locks::create(
-                &database.app_pool,
-                &quotes,
-                &first,
-                &second_account,
-                &product_route,
-                MinorAmount::new(1),
-                &Default::default(),
-            )
-            .await,
-            Err(RateLockError::ExposureCap {
-                scope: "account",
-                ..
-            })
+            create(&other_customer, &route, 1).await?,
+            Err(RateLockError::QuoteCountCap(1))
         ));
-        cancel_lock(&database.app_pool, &first, product_lock.id).await?;
 
-        let mut global_route = account_route.clone();
-        global_route.rate_lock.max_open_minor.account = 1_000;
-        global_route.rate_lock.max_open_minor.product = 1_000;
-        global_route.rate_lock.max_open_minor.global = 100;
-        let (expiring, _) = locks::create(
-            &database.app_pool,
-            &quotes,
-            &first,
-            &first_account,
-            &global_route,
-            MinorAmount::new(100),
-            &Default::default(),
-        )
-        .await?;
-        ensure!(matches!(
-            locks::create(
-                &database.app_pool,
-                &quotes,
-                &second,
-                &other_account,
-                &global_route,
-                MinorAmount::new(1),
-                &Default::default(),
-            )
-            .await,
-            Err(RateLockError::ExposureCap {
-                scope: "global",
-                ..
-            })
-        ));
         sqlx::query("UPDATE quotes SET expires_at = now() - interval '1 second' WHERE id = $1")
             .bind(expiring.id)
             .execute(&database.app_pool)
@@ -827,12 +870,13 @@ async fn customer_account_global_caps_and_expiry_release_are_atomic() -> Result<
                 == Some("quote")
         );
         ensure!(event.try_get::<Option<Uuid>, _>("object_id")? == Some(expiring.id));
-        ensure!(exposure(&database.app_pool, "global").await? == 0);
-        let first_status: String = sqlx::query_scalar("SELECT status FROM quotes WHERE id = $1")
-            .bind(first_lock.id)
+        // The expiry released the live headroom.
+        create(&second_customer, &route, 100).await??;
+        let customer_status: String = sqlx::query_scalar("SELECT status FROM quotes WHERE id = $1")
+            .bind(customer_lock.id)
             .fetch_one(&database.app_pool)
             .await?;
-        ensure!(first_status == "cancelled");
+        ensure!(customer_status == "cancelled");
         Ok(())
     }
     .await;
@@ -1049,17 +1093,22 @@ async fn a_creation_reaching_ninety_percent_of_the_account_cap_raises_an_alert()
     let result = async {
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "exposed").await?;
-        let mut route = test_route();
-        route.rate_lock.max_open_minor.account = 110;
-        route.rate_lock.max_open_minor.product = 110;
-        route.rate_lock.max_open_minor.global = 1_000_000;
+        let route = test_route();
+        set_limits(
+            &database.app_pool,
+            product.id,
+            true,
+            None,
+            Some(110),
+            Some(110),
+        )
+        .await?;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         create_lock(&database, &quotes, &product, &account, &route).await?;
 
         ensure!(logs_contain("TopupLockExposureNearCap"));
         ensure!(logs_contain("tags.scope=\"account\""));
         ensure!(!logs_contain("tags.scope=\"customer\""));
-        ensure!(!logs_contain("tags.scope=\"global\""));
         Ok(())
     }
     .await;
@@ -1075,11 +1124,16 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
     let result = async {
         const ATTEMPTS: usize = 12;
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
-        let mut route = test_route();
-        route.rate_lock.max_open_minor.account = 1_000;
-        route.rate_lock.max_open_minor.product = 500;
-        route.rate_lock.max_open_minor.global = 1_000;
-        let route = Arc::new(route);
+        set_limits(
+            &database.app_pool,
+            product.id,
+            true,
+            None,
+            Some(500),
+            Some(1_000),
+        )
+        .await?;
+        let route = Arc::new(test_route());
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         let mut tasks = tokio::task::JoinSet::new();
         for index in 0..ATTEMPTS {
@@ -1114,7 +1168,7 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
                 Err(error) => anyhow::bail!("unexpected creation failure: {error}"),
             }
         }
-        ensure!(successes * 100 <= route.rate_lock.max_open_minor.product);
+        ensure!(successes * 100 <= 500);
         ensure!(successes == 5);
         let open: String = sqlx::query_scalar(
             "SELECT coalesce(sum(credit_minor), 0)::text FROM quotes WHERE status = 'open'",
@@ -1276,11 +1330,16 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
     let result = async {
         const ACCOUNTS: usize = 4;
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
-        let mut route = test_route();
-        route.rate_lock.max_open_minor.account = 1_000_000;
-        route.rate_lock.max_open_minor.product = 1_000_000;
-        route.rate_lock.max_open_minor.global = 1_000_000;
-        let route = Arc::new(route);
+        set_limits(
+            &database.app_pool,
+            product.id,
+            true,
+            None,
+            Some(1_000_000),
+            Some(1_000_000),
+        )
+        .await?;
+        let route = Arc::new(test_route());
         let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
         let mut accounts = Vec::new();
         for index in 0..ACCOUNTS {
@@ -1639,6 +1698,37 @@ async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, Strin
 
 async fn seed_product_without_key(pool: &sqlx::PgPool, name: &str) -> Result<Account> {
     Ok(seed_product(pool, name).await?.0)
+}
+
+/// Sets the caps of `account_id` in one mode; `None` keeps the mode's default.
+async fn set_limits(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    quotes: Option<u64>,
+    account_minor: Option<u64>,
+    customer_minor: Option<u64>,
+) -> Result<()> {
+    let mut connection = pool.acquire().await?;
+    topup::limits::update(
+        &mut connection,
+        Scope::new(account_id, livemode),
+        &topup::limits::LimitsChange {
+            max_open_quotes: quotes,
+            max_open_amount_per_account: account_minor,
+            max_open_amount_per_customer: customer_minor,
+            max_active_deposit_addresses: None,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// The account `account_id`.
+async fn seed_account_row(pool: &sqlx::PgPool, account_id: Uuid) -> Result<Account> {
+    topup::db::get_account(pool, account_id)
+        .await?
+        .context("account")
 }
 
 /// A live customer of `account_id`.

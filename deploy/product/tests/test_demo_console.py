@@ -115,6 +115,7 @@ def _deposit(customer: str = "acct", **fields: Any) -> dict[str, Any]:
         "deposit_address": None,
         "status": "credited",
         "final": True,
+        "final_at": NOW + 780,
         "swept": False,
         "metadata": {"order_id": "order_1"},
         "rejection_reason": None,
@@ -338,7 +339,7 @@ def test_a_credited_deposit_waits_for_the_webhook_finality_and_the_sweep(
     console, service = demo
     cookie = _account(console)
     _create_quote(console, cookie)
-    service.deposits = [_deposit(_customer(cookie), final=False)]
+    service.deposits = [_deposit(_customer(cookie), final=False, final_at=None)]
     status, view = _get(console, cookie, f"quotes/{QUOTE}")
     assert status == HTTPStatus.OK
     steps = {step["key"]: step for step in view["steps"]}
@@ -352,8 +353,8 @@ def test_a_credited_deposit_waits_for_the_webhook_finality_and_the_sweep(
     service.deposits = [_deposit(_customer(cookie), final=True)]
     steps = {step["key"]: step for step in _get(console, cookie, f"quotes/{QUOTE}")[1]["steps"]}
     assert steps["final"]["state"] == "complete"
-    # When the demo first saw it final: the API reports the flag, not a time.
-    assert steps["final"]["at"] == NOW
+    # The deposit's `final_at`, set by the service's finality watch.
+    assert steps["final"]["at"] == NOW + 780
     assert steps["swept"]["state"] == "current"
 
 

@@ -340,9 +340,16 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .with_state(state)
         .route("/openapi.json", get(serve_openapi))
         .route("/openapi.admin.json", get(serve_admin_openapi))
+        // Stripe's error object for any other path or method too, never an empty body.
+        .fallback(unrecognized_request)
+        .method_not_allowed_fallback(unrecognized_request)
         .layer(middleware::from_fn(crate::observability::request_context))
         .layer(Extension(Arc::new(docs.clone())));
     (router, docs)
+}
+
+async fn unrecognized_request() -> Response {
+    error::ApiError::unrecognized_request().into_response()
 }
 
 /// Seconds `Retry-After` asks a client to wait before retrying a write refused while the service

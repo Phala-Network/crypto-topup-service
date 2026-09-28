@@ -147,8 +147,9 @@ class FakeTopup:
                     self.record(transfer)
             for deposit in self.deposits.values():
                 deep = head - deposit["block_number"] + 1 >= FINAL_DEPTH
-                if deep and deposit["status"] != "reversed":
+                if deep and deposit["status"] != "reversed" and not deposit["final"]:
                     deposit["final"] = True
+                    deposit["final_at"] = int(time.time())
         self.verify_refunds(head)
         self.index_sweeps(head)
         self.deliver()
@@ -218,6 +219,7 @@ class FakeTopup:
             "deposit_address": forwarder["deposit_address"],
             "status": "credited",
             "final": False,
+            "final_at": None,
             "swept": False,
             "metadata": dict(owner["metadata"]),
             "rejection_reason": None,

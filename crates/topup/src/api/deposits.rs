@@ -833,6 +833,7 @@ struct DepositRow {
     deposit_address_id: Option<Uuid>,
     state: String,
     is_final: bool,
+    final_at: Option<DateTime<Utc>>,
     swept: bool,
     reason: Option<String>,
     chain_id: i64,
@@ -860,7 +861,7 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
         SELECT deposit.id, deposit.livemode, customer.client_reference_id,
                address.quote_id,
                address.deposit_address_id,
-               deposit.state, deposit.final_at IS NOT NULL AS is_final,
+               deposit.state, deposit.final_at IS NOT NULL AS is_final, deposit.final_at,
                deposit.state = 'swept' OR EXISTS (
                    SELECT 1 FROM flushed
                    WHERE flushed.address_id = deposit.address_id
@@ -933,6 +934,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
             .map(crate::deposit_addresses::public_id),
         status: status.to_owned(),
         is_final: row.is_final,
+        final_at: row.final_at.map(|at| at.timestamp()),
         swept: row.swept,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,

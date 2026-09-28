@@ -430,8 +430,7 @@ mod tests {
 
     use super::*;
     use crate::route::{
-        CheckPriceConfig, ExposureCaps, FxPriceConfig, PricingConfig, PricingMode,
-        PrimaryPriceConfig,
+        CheckPriceConfig, FxPriceConfig, PricingConfig, PricingMode, PrimaryPriceConfig,
     };
 
     fn price(value: u64) -> ScaledPrice {
@@ -496,11 +495,6 @@ mod tests {
                     lock_tolerance_bps: bps(tolerance_bps),
                     amount_decimals: 4,
                     max_creations_per_minute: 10,
-                    max_open_minor: ExposureCaps {
-                        account: u64::MAX,
-                        product: u64::MAX,
-                        global: u64::MAX,
-                    },
                 },
             }
         }

@@ -41,11 +41,12 @@ class Deposit:
                 '202510000000000000000', 'amount_refunded': 0, 'amount_refunded_atomic': '0', 'amount_reversed': 0, 'asset':
                 'PHA', 'asset_contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_number': 21000000, 'chain_id': 1,
                 'client_reference_id': 'team-42', 'created': 1790553624, 'currency': 'usd', 'deposit_address': None,
-                'exchange_rate': '0.12345679', 'final': True, 'from_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a',
-                'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False, 'log_index': 212, 'metadata': {'order_id':
-                'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10',
-                'refunded': False, 'rejection_reason': None, 'status': 'credited', 'swept': False, 'tx_hash':
-                '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}
+                'exchange_rate': '0.12345679', 'final': True, 'final_at': 1790554572, 'from_address':
+                '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False,
+                'log_index': 212, 'metadata': {'order_id': 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote':
+                'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'status': 'credited',
+                'swept': False, 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at':
+                1790553630}
 
         Attributes:
             address (str): Receiving forwarder address.
@@ -96,6 +97,9 @@ class Deposit:
                 for a quote's address. Payments to a deposit address, active or retired, are credited at
                 spot.
             exchange_rate (None | str | Unset): USD per token, a decimal string with 8 places, once valued.
+            final_at (int | None | Unset): When the finality watch found the deposit's block final on both providers, Unix
+                seconds;
+                `null` until `final`.
             price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
             quote (None | Quote | str | Unset):
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
@@ -131,6 +135,7 @@ class Deposit:
     asset: None | str | Unset = UNSET
     deposit_address: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
+    final_at: int | None | Unset = UNSET
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
     rejection_reason: None | str | Unset = UNSET
@@ -218,6 +223,12 @@ class Deposit:
         else:
             exchange_rate = self.exchange_rate
 
+        final_at: int | None | Unset
+        if isinstance(self.final_at, Unset):
+            final_at = UNSET
+        else:
+            final_at = self.final_at
+
         price_source: None | str | Unset
         if isinstance(self.price_source, Unset):
             price_source = UNSET
@@ -282,6 +293,8 @@ class Deposit:
             field_dict["deposit_address"] = deposit_address
         if exchange_rate is not UNSET:
             field_dict["exchange_rate"] = exchange_rate
+        if final_at is not UNSET:
+            field_dict["final_at"] = final_at
         if price_source is not UNSET:
             field_dict["price_source"] = price_source
         if quote is not UNSET:
@@ -397,6 +410,15 @@ class Deposit:
 
         exchange_rate = _parse_exchange_rate(d.pop("exchange_rate", UNSET))
 
+        def _parse_final_at(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        final_at = _parse_final_at(d.pop("final_at", UNSET))
+
         def _parse_price_source(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -469,6 +491,7 @@ class Deposit:
             asset=asset,
             deposit_address=deposit_address,
             exchange_rate=exchange_rate,
+            final_at=final_at,
             price_source=price_source,
             quote=quote,
             rejection_reason=rejection_reason,

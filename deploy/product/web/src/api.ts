@@ -89,6 +89,8 @@ export interface Deposit {
   id: string;
   status: string;
   final: boolean;
+  /** When the service's finality watch found it final, Unix seconds; null until final. */
+  final_at?: number | null;
   swept: boolean;
   amount: number | null;
   amount_atomic: string;

@@ -372,6 +372,9 @@ pub struct Deposit {
     /// confirmation, before it is final (`GET /v1/config` `typical_finality_seconds`).
     #[serde(rename = "final")]
     pub is_final: bool,
+    /// When the finality watch found the deposit's block final on both providers, Unix seconds;
+    /// `null` until `final`.
+    pub final_at: Option<i64>,
     /// Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of
     /// its token to the treasury (`GET /v1/sweeps`), whoever sent the flush.
     pub swept: bool,
@@ -702,8 +705,13 @@ pub struct Config {
     pub livemode: bool,
     /// Credit currency, `usd`.
     pub currency: String,
-    /// Per-account cap on the credit of open quotes, in cents; no single quote can exceed it.
+    /// Cap on the number of your open quotes in this mode.
+    pub max_open_quotes: u64,
+    /// Cap on the credit of your open quotes in this mode, in cents. Test-mode quotes never
+    /// count against live mode's cap.
     pub max_open_amount_per_account: u64,
+    /// Cap on the credit of one customer's open quotes, in cents; no single quote can exceed it.
+    pub max_open_amount_per_customer: u64,
     /// One entry per payable asset.
     pub assets: Vec<ConfigAsset>,
 }
@@ -805,8 +813,40 @@ pub struct UpdateAccountRequest {
     /// once final instead. Default 100 000 ($1 000); `0` credits every deposit at finality.
     #[serde(default)]
     pub max_unfinalized_credit: Option<u64>,
+    /// Changes the account's caps in one mode (design §12); absent caps stay.
+    #[serde(default)]
+    pub limits: Option<UpdateLimitsRequest>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
+}
+
+/// The caps of one mode an operator changes; absent fields stay.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLimitsRequest {
+    /// The mode whose caps change: test mode's caps never limit live mode, nor the reverse.
+    pub livemode: bool,
+    /// Open quotes the account may hold in the mode, at least 1.
+    #[serde(default)]
+    pub max_open_quotes: Option<u64>,
+    /// Cap on the credit of the account's open quotes in the mode, in cents.
+    #[serde(default)]
+    pub max_open_amount_per_account: Option<u64>,
+    /// Cap on the credit of one customer's open quotes, in cents.
+    #[serde(default)]
+    pub max_open_amount_per_customer: Option<u64>,
+    /// Active deposit addresses the account may hold in the mode, at least 1.
+    #[serde(default)]
+    pub max_active_deposit_addresses: Option<u64>,
+}
+
+/// An account's effective caps in each mode: the operator's values over the defaults.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AccountLimits {
+    /// Live mode's caps.
+    pub live: crate::limits::Limits,
+    /// Test mode's caps.
+    pub test: crate::limits::Limits,
 }
 
 /// An account as the operator sees it.
@@ -831,6 +871,8 @@ pub struct AccountResponse {
     /// Cap, in cents and per mode, on the credit of the account's deposits credited before they
     /// are final; a deposit past it is credited once final.
     pub max_unfinalized_credit: u64,
+    /// The account's caps per mode.
+    pub limits: AccountLimits,
     /// Creation time, Unix seconds.
     pub created: i64,
     /// The secret keys this request issued, each with its `secret` shown only here: at creation

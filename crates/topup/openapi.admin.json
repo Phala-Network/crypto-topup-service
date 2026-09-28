@@ -1,6 +1,24 @@
 {
   "components": {
     "schemas": {
+      "AccountLimits": {
+        "description": "An account's effective caps in each mode: the operator's values over the defaults.",
+        "properties": {
+          "live": {
+            "$ref": "#/components/schemas/Limits",
+            "description": "Live mode's caps."
+          },
+          "test": {
+            "$ref": "#/components/schemas/Limits",
+            "description": "Test mode's caps."
+          }
+        },
+        "required": [
+          "live",
+          "test"
+        ],
+        "type": "object"
+      },
       "AccountPauseRequest": {
         "additionalProperties": false,
         "description": "Administrative pause or resume of a whole account, in both modes.",
@@ -61,6 +79,20 @@
             "reviewed_by": "operator@phala.network"
           },
           "id": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "limits": {
+            "live": {
+              "max_active_deposit_addresses": 100000,
+              "max_open_amount_per_account": 5000000,
+              "max_open_amount_per_customer": 500000,
+              "max_open_quotes": 1000
+            },
+            "test": {
+              "max_active_deposit_addresses": 1000,
+              "max_open_amount_per_account": 1000000,
+              "max_open_amount_per_customer": 500000,
+              "max_open_quotes": 100
+            }
+          },
           "max_unfinalized_credit": 100000,
           "name": "Example Cloud",
           "object": "account",
@@ -95,6 +127,10 @@
           "id": {
             "description": "Account id, `acct_…`.",
             "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/AccountLimits",
+            "description": "The account's caps per mode."
           },
           "max_unfinalized_credit": {
             "description": "Cap, in cents and per mode, on the credit of the account's deposits credited before they\nare final; a deposit past it is credited once final.",
@@ -135,6 +171,7 @@
           "restricted",
           "paused_scopes",
           "max_unfinalized_credit",
+          "limits",
           "created",
           "api_keys"
         ],
@@ -663,6 +700,7 @@
           "deposit_address": null,
           "exchange_rate": "0.12345679",
           "final": true,
+          "final_at": 1790554572,
           "from_address": "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a",
           "id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
           "livemode": false,
@@ -778,6 +816,14 @@
           "final": {
             "description": "Whether the deposit's block is final on both providers: a final deposit can no longer be\nreversed, and only a final deposit can be refunded. A deposit is credited at the route's\nconfirmation, before it is final (`GET /v1/config` `typical_finality_seconds`).",
             "type": "boolean"
+          },
+          "final_at": {
+            "description": "When the finality watch found the deposit's block final on both providers, Unix seconds;\n`null` until `final`.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "from_address": {
             "description": "Sender of the transfer.",
@@ -1277,7 +1323,7 @@
             "type": "string"
           },
           "doc_url": {
-            "description": "The documentation of `code` in the API reference.",
+            "description": "The documentation of `code` in the API reference. Every error of this service carries it;\nit is optional in the schema, as in Stripe's, so a client never fails on an error without\nit.",
             "type": "string"
           },
           "message": {
@@ -1299,8 +1345,7 @@
         "required": [
           "type",
           "code",
-          "message",
-          "doc_url"
+          "message"
         ],
         "type": "object"
       },
@@ -1470,6 +1515,42 @@
         "required": [
           "livemode",
           "reason"
+        ],
+        "type": "object"
+      },
+      "Limits": {
+        "description": "The caps of one account in one mode.",
+        "properties": {
+          "max_active_deposit_addresses": {
+            "description": "Active deposit addresses the account may hold in the mode.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_open_amount_per_account": {
+            "description": "Cap on the credit of the account's open quotes in the mode, in cents.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_open_amount_per_customer": {
+            "description": "Cap on the credit of one customer's open quotes, in cents.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_open_quotes": {
+            "description": "Open quotes the account may hold in the mode.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_open_quotes",
+          "max_open_amount_per_account",
+          "max_open_amount_per_customer",
+          "max_active_deposit_addresses"
         ],
         "type": "object"
       },
@@ -1924,6 +2005,7 @@
                   "deposit_address": null,
                   "exchange_rate": "0.12345679",
                   "final": true,
+                  "final_at": 1790554572,
                   "from_address": "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a",
                   "id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
                   "livemode": false,
@@ -2638,6 +2720,17 @@
               }
             ]
           },
+          "limits": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UpdateLimitsRequest",
+                "description": "Changes the account's caps in one mode (design §12); absent caps stay."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "max_unfinalized_credit": {
             "description": "Sets the cap, in cents and per mode, on the credit of the account's deposits credited\nbefore they are final: a deposit whose credit would take that total past it is credited\nonce final instead. Default 100 000 ($1 000); `0` credits every deposit at finality.",
             "format": "int64",
@@ -2661,6 +2754,56 @@
         },
         "required": [
           "reason"
+        ],
+        "type": "object"
+      },
+      "UpdateLimitsRequest": {
+        "additionalProperties": false,
+        "description": "The caps of one mode an operator changes; absent fields stay.",
+        "properties": {
+          "livemode": {
+            "description": "The mode whose caps change: test mode's caps never limit live mode, nor the reverse.",
+            "type": "boolean"
+          },
+          "max_active_deposit_addresses": {
+            "description": "Active deposit addresses the account may hold in the mode, at least 1.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_open_amount_per_account": {
+            "description": "Cap on the credit of the account's open quotes in the mode, in cents.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_open_amount_per_customer": {
+            "description": "Cap on the credit of one customer's open quotes, in cents.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_open_quotes": {
+            "description": "Open quotes the account may hold in the mode, at least 1.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "livemode"
         ],
         "type": "object"
       }
@@ -2904,7 +3047,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nthe contact, or the cap on credit before finality. Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
+        "summary": "Updates an account: live mode (enabling it returns the first live key), the restricted flag,\nthe contact, the cap on credit before finality, or the caps of one mode (`limits`). Audited, and announced to the account as `account.updated`. The operator does\nnot manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.",
         "tags": [
           "admin"
         ]

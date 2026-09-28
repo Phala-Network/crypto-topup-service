@@ -45,7 +45,7 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "exposure_cap_exceeded",
         400,
-        "Open quotes of the customer, the account, or the platform would exceed their cap; wait for quotes to be paid, expire, or be canceled.",
+        "The quote would take the open quotes of your account in this mode past a cap: their number (`max_open_quotes` of `GET /v1/config`), their credit (`max_open_amount_per_account`), or one customer's credit (`max_open_amount_per_customer`). Wait for quotes to be paid, expire, or be canceled, or ask the operator to raise the cap.",
     ),
     (
         "paused",
@@ -289,7 +289,10 @@ pub struct ErrorDetail {
     /// The request parameter the error is about, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// The documentation of `code` in the API reference.
+    /// The documentation of `code` in the API reference. Every error of this service carries it;
+    /// it is optional in the schema, as in Stripe's, so a client never fails on an error without
+    /// it.
+    #[schema(required = false)]
     pub doc_url: String,
 }
 
@@ -410,6 +413,17 @@ impl ApiError {
             StatusCode::NOT_FOUND,
             "resource_missing",
             "resource not found",
+        )
+    }
+
+    /// Returns a request for a path, or a method on it, the API does not serve, answered as
+    /// Stripe answers one: `404 resource_missing`.
+    #[must_use]
+    pub fn unrecognized_request() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "resource_missing",
+            "unrecognized request URL or method",
         )
     }
 

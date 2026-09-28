@@ -1253,6 +1253,43 @@ async fn openapi_snapshot() -> Result<()> {
     Ok(())
 }
 
+/// A path or method the API does not serve answers Stripe's error object, with its `doc_url`,
+/// never an empty body.
+#[tokio::test]
+async fn unrecognized_requests_answer_the_error_object() -> Result<()> {
+    let admin_key = SigningKey::from_bytes(&[29; 32]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+    let router = test_router(&pool, &admin_key);
+    for (method, path) in [
+        (Method::GET, "/v1/no_such_resource"),
+        (Method::DELETE, "/v1/config"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure!(
+            response.status() == StatusCode::NOT_FOUND,
+            "{method} {path}"
+        );
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 65_536).await?)?;
+        let error = &body["error"];
+        ensure!(error["type"] == "invalid_request_error" && error["code"] == "resource_missing");
+        ensure!(
+            error["doc_url"]
+                == "https://phala-network.github.io/phala-pay/#section/Errors/resource_missing",
+            "{body}"
+        );
+    }
+    Ok(())
+}
+
 fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> axum::Router {
     topup::api::router(app_state(pool.clone(), admin_key)).0
 }

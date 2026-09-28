@@ -23,27 +23,29 @@ class ErrorDetail:
 
     Attributes:
         code (str): Stable machine-readable code.
-        doc_url (str): The documentation of `code` in the API reference.
         message (str): Human-readable summary without internal details; it may change.
         type_ (ErrorType): Error category of [`ErrorDetail`].
+        doc_url (str | Unset): The documentation of `code` in the API reference. Every error of this service carries it;
+            it is optional in the schema, as in Stripe's, so a client never fails on an error without
+            it.
         param (None | str | Unset): The request parameter the error is about, when there is one.
     """
 
     code: str
-    doc_url: str
     message: str
     type_: ErrorType
+    doc_url: str | Unset = UNSET
     param: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         code = self.code
 
-        doc_url = self.doc_url
-
         message = self.message
 
         type_: str = self.type_
+
+        doc_url = self.doc_url
 
         param: None | str | Unset
         if isinstance(self.param, Unset):
@@ -56,11 +58,12 @@ class ErrorDetail:
         field_dict.update(
             {
                 "code": code,
-                "doc_url": doc_url,
                 "message": message,
                 "type": type_,
             }
         )
+        if doc_url is not UNSET:
+            field_dict["doc_url"] = doc_url
         if param is not UNSET:
             field_dict["param"] = param
 
@@ -71,11 +74,11 @@ class ErrorDetail:
         d = dict(src_dict)
         code = d.pop("code")
 
-        doc_url = d.pop("doc_url")
-
         message = d.pop("message")
 
         type_ = check_error_type(d.pop("type"))
+
+        doc_url = d.pop("doc_url", UNSET)
 
         def _parse_param(data: object) -> None | str | Unset:
             if data is None:
@@ -88,9 +91,9 @@ class ErrorDetail:
 
         error_detail = cls(
             code=code,
-            doc_url=doc_url,
             message=message,
             type_=type_,
+            doc_url=doc_url,
             param=param,
         )
 

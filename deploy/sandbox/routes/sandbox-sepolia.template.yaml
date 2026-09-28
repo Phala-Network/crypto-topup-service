@@ -30,7 +30,6 @@ limits:
   min_credit_minor: 100
   max_deposit_atomic: "50000000000000000000000"
   min_refund_atomic: "20000000000000000000"
-  max_open_minor: { account: 50000, product: 200000, global: 200000 }
 
 quote:
   window_s: ${RATE_LOCK_WINDOW_S}

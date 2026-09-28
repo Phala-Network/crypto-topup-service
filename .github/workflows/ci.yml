@@ -232,6 +232,7 @@ jobs:
           deploy/tests/walg-restore.sh
           deploy/tests/render-compose.sh
           deploy/tests/render-route.sh
+          deploy/tests/check-route-modes.sh
           deploy/tests/preflight.sh
           deploy/tests/preflight-phala.sh
           deploy/tests/product-preflight.sh

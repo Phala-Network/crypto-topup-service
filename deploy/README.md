@@ -125,10 +125,14 @@ every deploy, and uploads the rendered compose and the verification as the run's
 
 **Production** additionally needs the factory deployed on mainnet at its deterministic address
 ([CONTRACTS.md](CONTRACTS.md#mainnet), HUMAN-ONLY) and a reviewed route PR putting the mainnet
-route into the compose (Deploy refuses a `production` compose with any route off chain 1). After
+route into the compose. One production deployment serves both modes: live routes on mainnets
+and test routes (`livemode: false`) on test networks such as Sepolia. Deploy runs
+[check-route-modes.sh](check-route-modes.sh) on the rendered compose and refuses a route whose
+`livemode` does not match its chain, a chain on neither of its lists, a local development chain,
+and any live route in `staging`. After
 the first deploy, in order: seal the secrets; [verify the attestation](#attestation-ingress-and-egress);
-have Finance, Risk, and Operations approve the pilot limits (route bounds and exposure caps, each
-account's `max_unfinalized_credit`; architecture §17) and a passed restore drill
+have Finance, Risk, and Operations approve the pilot limits (route bounds, each account's caps
+(`limits`: open quotes and their credit per account and per customer) and `max_unfinalized_credit`; architecture §17) and a passed restore drill
 ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) Phala's own accounts with
 `charges_enabled` (third-party merchants only after the legal review, design §17).
 
@@ -609,12 +613,14 @@ HUMAN-ONLY except the workflow runs, which the staging owner dispatches; agents 
 them. In order:
 
 1. **Merge and build.** This change is on `main`; run Release images and note its run id.
-2. **Deploy the factory on Sepolia** ([Contracts](#contracts)) and confirm `verify-deployment.sh`
-   passed and Verify contracts is green.
-3. **Treasury Safe.** Its owners set the staging finance Safe's (`0x936c…4504`) fallback handler to
-   the `CompatibilityFallbackHandler` (a Safe transaction `setFallbackHandler(0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99)`),
-   without which it cannot prove itself as a treasury; then a PR updates `fallback_handler` in
-   [contracts/safe-expectations.json](contracts/safe-expectations.json) and
+2. **Factory on Sepolia: done.** The factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its
+   implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified
+   ([Contracts](#contracts)); confirm Verify contracts is green.
+3. **Treasury Safe: done.** The staging finance Safe `0x936c1991f8dA9a919fa11b557a3514719f5A4504`
+   (v1.4.1, 1-of-1) has the `CompatibilityFallbackHandler` v1.4.1
+   `0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99` as its fallback handler (Sepolia transaction
+   `0xc63baf595bd13f9f27c27ba2a370c602bb2008c8703ab9629095af8844f10812`), so it can prove itself as
+   a treasury; [contracts/safe-expectations.json](contracts/safe-expectations.json) records it, and
    `deploy/contracts/verify-safe.sh` passes on both providers.
 4. **Stop the old service.** `npx --yes phala@1.1.22 cvms stop "$TOPUP_CVM_ID"` and the same for
    `$STAGING_PRODUCT_CVM_ID`. Keep both CVMs and the old backup prefix for the retention period: they
