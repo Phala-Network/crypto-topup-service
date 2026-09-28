@@ -14,7 +14,9 @@ use chrono::Utc;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
+use topup::audit::Actor;
 use topup::db;
+use topup::deposit_addresses;
 use topup::finality::FinalityWatch;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, StepSet};
 use topup::routes::RouteSet;
@@ -22,6 +24,7 @@ use topup::scanner::{ChainRoutes, chain_routes, confirmed_scan_once, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup::steps::sweep::SweepStep;
+use topup::tenancy::Scope;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, ReceiptLookup, TransferLog,
 };
@@ -177,6 +180,63 @@ async fn a_transaction_replaced_with_the_same_nonce_is_reversed_once() -> Result
             ensure!(again.watched == 0, "{again:?}");
             ensure!(chain.pump.run_once().await? == RunOnceResult::Idle);
             ensure!(chain.events("deposit.reversed").await?.len() == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot() -> Result<()> {
+    run(&[], |chain| {
+        Box::pin(async move {
+            let (account, customer) = seed::create_account_and_customer(
+                &chain.pool,
+                &NewAccount {
+                    livemode: false,
+                    ..NewAccount::named("deposit-address-merchant")
+                },
+                "team-da",
+            )
+            .await?;
+            let (retired, created) =
+                deposit_addresses::create(&chain.pool, &account, &customer, &chain.route, None)
+                    .await?;
+            ensure!(created);
+            let active = deposit_addresses::rotate(
+                &chain.pool,
+                &account,
+                Scope::new(account.id, false),
+                &Actor::system("test"),
+                retired.id,
+                &chain.route,
+            )
+            .await?;
+
+            let to_retired = chain.pay_to(retired.address, AMOUNT)?;
+            let to_active = chain.pay_to(active.address, AMOUNT)?;
+            chain.anvil.mine(1)?;
+            // The fast scan watches deposit addresses, active and retired, like open quotes.
+            ensure!(chain.scan().await? == 2);
+            chain.settle().await?;
+            for (tx, address) in [(to_retired, &retired), (to_active, &active)] {
+                let deposit = chain.deposit(tx).await?;
+                ensure!(
+                    deposit.state == DepositState::Credited,
+                    "{:?}",
+                    deposit.state
+                );
+                ensure!(deposit.price_source.as_deref() == Some("spot"));
+                ensure!(deposit.address_id == address.address_id);
+                ensure!(deposit.customer_id == customer.id);
+                ensure!(deposit.account_id == account.id && !deposit.livemode);
+                ensure!(
+                    chain
+                        .events("deposit.credited")
+                        .await?
+                        .contains(&credited_event_id(deposit.id))
+                );
+            }
             Ok(())
         })
     })
@@ -437,13 +497,18 @@ impl FastChain {
 
     /// Transfers `amount` from the payer to the quote's address and waits for its receipt.
     fn pay(&self, amount: u64) -> Result<B256> {
+        self.pay_to(self.address, amount)
+    }
+
+    /// Transfers `amount` from the payer to `to` and waits for its receipt.
+    fn pay_to(&self, to: Address, amount: u64) -> Result<B256> {
         let output = send(
             &self.anvil,
             PAYER_KEY,
             &[
                 &format!("{:#x}", self.token),
                 "transfer(address,uint256)",
-                &format!("{:#x}", self.address),
+                &format!("{to:#x}"),
                 &amount.to_string(),
             ],
         )?;

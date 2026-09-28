@@ -1,6 +1,6 @@
 //! Deterministic salt derivation and CREATE2 address prediction for forwarder clones.
 
-use alloy_primitives::{Address, B256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::SolValue;
 
 /// Derives the salt for a quote's single-use deposit address; a quote's `lock_ref` is its id.
@@ -8,6 +8,37 @@ use alloy_sol_types::SolValue;
 pub fn lock_salt(product_slug: &str, external_id: &str, lock_ref: &str) -> B256 {
     keccak256(
         (product_slug, external_id, "lock", lock_ref)
+            .abi_encode_params()
+            .as_slice(),
+    )
+}
+
+/// Derives the salt of a customer's persistent deposit address:
+/// `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", chain_id,
+/// asset, version))`, with the types `(string, bool, string, string, uint256, string, uint256)`.
+///
+/// `account` is the merchant's `acct_` id, `asset` the route's asset code (such as `pha`), and
+/// `version` counts the customer's addresses for the chain and asset from 1; each rotation takes
+/// the next version, so a merchant recomputes every address it was ever given.
+#[must_use]
+pub fn deposit_address_salt(
+    account: &str,
+    livemode: bool,
+    client_reference_id: &str,
+    chain_id: u64,
+    asset: &str,
+    version: u64,
+) -> B256 {
+    keccak256(
+        (
+            account,
+            livemode,
+            client_reference_id,
+            "deposit_address",
+            U256::from(chain_id),
+            asset,
+            U256::from(version),
+        )
             .abi_encode_params()
             .as_slice(),
     )

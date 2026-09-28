@@ -92,8 +92,9 @@ def sync_detailed(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST
-            /v1/refunds/{id}` body: the
+        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
+            /v1/refunds/{id}`, and
+            `POST /v1/deposit_addresses/{id}` body: the
             object's updatable parameters, of which `metadata` is the one.
 
     Raises:
@@ -129,8 +130,9 @@ def sync(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST
-            /v1/refunds/{id}` body: the
+        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
+            /v1/refunds/{id}`, and
+            `POST /v1/deposit_addresses/{id}` body: the
             object's updatable parameters, of which `metadata` is the one.
 
     Raises:
@@ -161,8 +163,9 @@ async def asyncio_detailed(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST
-            /v1/refunds/{id}` body: the
+        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
+            /v1/refunds/{id}`, and
+            `POST /v1/deposit_addresses/{id}` body: the
             object's updatable parameters, of which `metadata` is the one.
 
     Raises:
@@ -196,8 +199,9 @@ async def asyncio(
     Args:
         id (str):
         idempotency_key (None | str | Unset):
-        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST
-            /v1/refunds/{id}` body: the
+        body (UpdateMetadataRequest): `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST
+            /v1/refunds/{id}`, and
+            `POST /v1/deposit_addresses/{id}` body: the
             object's updatable parameters, of which `metadata` is the one.
 
     Raises:

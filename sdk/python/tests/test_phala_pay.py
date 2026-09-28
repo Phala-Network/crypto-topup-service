@@ -9,9 +9,16 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from phala_pay import Deposit, PhalaPay, Quote, SignatureVerificationError, Webhook
+from phala_pay import (
+    AddressMismatchError,
+    Deposit,
+    PhalaPay,
+    Quote,
+    SignatureVerificationError,
+    Webhook,
+)
 from topup_client.models import DepositMetadata, QuoteMetadata
-from topup_sdk import load_public_key, sign_webhook
+from topup_sdk import deposit_address, load_public_key, sign_webhook
 
 API_KEY = "ppay_sk_test_" + "B" * 43 + "000000"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([9] * 32))
@@ -171,6 +178,115 @@ def test_deposits_list_follows_every_page() -> None:
     with _client(httpx.MockTransport(handler)) as client:
         deposits = list(client.deposits.list(account_id="team-42"))
     assert [d.log_index for d in deposits] == [3, 2, 1]
+
+
+ACCOUNT = "acct_" + "0c" * 16
+FACTORY = "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d"
+IMPLEMENTATION = "0xfeb1871c9897251C74b39DFC74e577888290faE6"
+TREASURY = "0x0000000000000000000000000000000000007EA5"
+DEPOSIT_ADDRESS_ID = "da_" + "0d" * 16
+
+
+def _deposit_address(version: int = 1, **fields: object) -> dict[str, object]:
+    address = deposit_address(
+        FACTORY,
+        IMPLEMENTATION,
+        TREASURY,
+        account=ACCOUNT,
+        livemode=False,
+        client_reference_id="team-42",
+        chain_id=11155111,
+        asset="pha",
+        version=version,
+    )
+    return {
+        "id": DEPOSIT_ADDRESS_ID,
+        "object": "deposit_address",
+        "livemode": False,
+        "client_reference_id": "team-42",
+        "chain_id": 11155111,
+        "asset": "pha",
+        "address": address.lower(),
+        "payment_uri": f"ethereum:0x{'22' * 20}@11155111/transfer?address={address.lower()}",
+        "treasury": TREASURY.lower(),
+        "version": version,
+        "salt": "0x" + "00" * 32,
+        "status": "active",
+        "created": 1_790_000_000,
+        "retired_at": None,
+        "metadata": {},
+        **fields,
+    }
+
+
+def test_deposit_addresses_create_rotate_and_list_check_every_active_address() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/v1/deposit_addresses" and request.method == "POST":
+            return httpx.Response(200, json=_deposit_address(metadata={"team": "42"}))
+        if request.url.path == f"/v1/deposit_addresses/{DEPOSIT_ADDRESS_ID}":
+            return httpx.Response(200, json=_deposit_address(metadata={}))
+        if request.url.path.endswith("/rotate"):
+            assert request.headers["idempotency-key"]
+            return httpx.Response(200, json=_deposit_address(2))
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "url": "/v1/deposit_addresses",
+                "has_more": False,
+                "data": [
+                    _deposit_address(2),
+                    _deposit_address(1, status="retired", treasury="0x" + "99" * 20),
+                ],
+            },
+        )
+
+    with PhalaPay(
+        "http://service.test",
+        API_KEY,
+        account=ACCOUNT,
+        forwarder=(FACTORY, IMPLEMENTATION, TREASURY),
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        created = client.deposit_addresses.create(
+            client_reference_id="team-42", chain_id=11155111, asset="pha", metadata={"team": "42"}
+        )
+        cleared = client.deposit_addresses.update(created.id, metadata="")
+        rotated = client.deposit_addresses.rotate(created.id)
+        listed = list(client.deposit_addresses.list(client_reference_id="team-42"))
+    assert created.version == 1
+    assert rotated.version == 2
+    assert [address.status for address in listed] == ["active", "retired"]
+    assert json.loads(seen[0].content) == {
+        "client_reference_id": "team-42",
+        "chain_id": 11155111,
+        "asset": "pha",
+        "metadata": {"team": "42"},
+    }
+    assert created.metadata.to_dict() == {"team": "42"}
+    assert json.loads(seen[1].content) == {"metadata": ""}
+    assert cleared.metadata.to_dict() == {}
+    assert seen[3].url.params["client_reference_id"] == "team-42"
+
+
+def test_a_deposit_address_the_account_cannot_derive_is_refused() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_deposit_address(address="0x" + "11" * 20))
+
+    with (
+        PhalaPay(
+            "http://service.test",
+            API_KEY,
+            account=ACCOUNT,
+            forwarder=(FACTORY, IMPLEMENTATION, TREASURY),
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(AddressMismatchError, match=DEPOSIT_ADDRESS_ID),
+    ):
+        client.deposit_addresses.retrieve(DEPOSIT_ADDRESS_ID)
 
 
 def test_the_key_must_be_a_secret_key() -> None:

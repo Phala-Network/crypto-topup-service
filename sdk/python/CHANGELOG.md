@@ -14,6 +14,15 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
   unsets all); `TopupClient` gains the same `metadata=` and `update_quote`, `update_deposit`, and
   `update_refund`. The regenerated `Quote`, `Deposit`, and `Refund` carry `metadata`, so a webhook
   deposit carries its quote's.
+- Deposit addresses: `PhalaPay.deposit_addresses.create(client_reference_id=, chain_id=, asset=,
+  metadata=)`, `.retrieve(id)`, `.list(client_reference_id=, status=, chain_id=)`, `.update(id,
+  metadata=)`, and `.rotate(id)`, with the
+  matching `TopupClient` methods and the generated `DepositAddress` model. With a pinned
+  `forwarder`, every active deposit address is recomputed and `AddressMismatchError` raised on a
+  mismatch. `topup_sdk.deposit_address_salt(account, livemode=, client_reference_id=, chain_id=,
+  asset=, version=)` and `topup_sdk.deposit_address(factory, implementation, treasury, …)`
+  recompute any version offline; `Deposits.list` and `TopupClient.list_deposits` take
+  `deposit_address`, and `Deposit.deposit_address` names the address a deposit reached.
 
 ### Changed
 

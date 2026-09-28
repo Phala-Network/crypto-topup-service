@@ -15,7 +15,7 @@
 request signatures) and `topup_client` the client generated from the OpenAPI document.
 """
 
-from topup_client.models import ClientQuote, Config, Deposit, Quote, Refund
+from topup_client.models import ClientQuote, Config, Deposit, DepositAddress, Quote, Refund
 from topup_sdk import AddressMismatchError, ApiError, TopupError
 
 from ._client import PhalaPay
@@ -27,6 +27,7 @@ __all__ = [
     "ClientQuote",
     "Config",
     "Deposit",
+    "DepositAddress",
     "Event",
     "EventData",
     "PhalaPay",

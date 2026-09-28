@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::types::{parse_address, parse_b256, to_i64, to_u64};
 
-/// A stored quote forwarder address.
+/// A stored forwarder address, a quote's or a deposit address's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Address {
     /// Address row identifier.
@@ -15,8 +15,10 @@ pub struct Address {
     pub livemode: bool,
     /// EVM chain identifier.
     pub chain_id: u64,
-    /// The quote the address was issued for.
-    pub quote_id: Uuid,
+    /// The quote the address was issued for; `None` for a deposit address.
+    pub quote_id: Option<Uuid>,
+    /// The deposit address this forwarder is; `None` for a quote's address.
+    pub deposit_address_id: Option<Uuid>,
     /// CREATE2 salt.
     pub salt: B256,
     /// The treasury the forwarder pays, its clone argument.
@@ -31,7 +33,8 @@ struct AddressRecord {
     account_id: Uuid,
     livemode: bool,
     chain_id: i64,
-    quote_id: Uuid,
+    quote_id: Option<Uuid>,
+    deposit_address_id: Option<Uuid>,
     salt: String,
     treasury: String,
     address: String,
@@ -47,6 +50,7 @@ impl TryFrom<AddressRecord> for Address {
             livemode: record.livemode,
             chain_id: to_u64(record.chain_id, "addresses.chain_id")?,
             quote_id: record.quote_id,
+            deposit_address_id: record.deposit_address_id,
             salt: parse_b256(&record.salt)?,
             treasury: parse_address(&record.treasury)?,
             address: parse_address(&record.address)?,
@@ -59,7 +63,8 @@ pub async fn get_address(pool: &PgPool, id: Uuid) -> Result<Option<Address>, sql
     let record = sqlx::query_as!(
         AddressRecord,
         r#"
-        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address
+        SELECT id, account_id, livemode, chain_id, quote_id, deposit_address_id, salt, treasury,
+               address
         FROM addresses
         WHERE id = $1
         "#,
@@ -78,7 +83,8 @@ pub async fn list_chain_addresses(
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
     let records = sqlx::query_as::<_, AddressRecord>(
         r#"
-        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address
+        SELECT id, account_id, livemode, chain_id, quote_id, deposit_address_id, salt, treasury,
+               address
         FROM addresses
         WHERE chain_id = $1
         ORDER BY address, id

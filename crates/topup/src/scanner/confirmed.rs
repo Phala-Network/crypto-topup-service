@@ -1,10 +1,10 @@
 //! Fast scan at the route's confirmation (design D1, architecture §8): transfers to watched
-//! addresses (open quotes, until an hour after expiry) in blocks that reached the route's depth or
+//! addresses (open quotes, until an hour after expiry, and every deposit address) in blocks that reached the route's depth or
 //! `safe` head on provider A become `detected` deposits at once, and the pump confirms them on both
 //! providers.
 //!
 //! The scan covers `(max(finalized cursor, fast cursor), horizon]`, at most one scan window below
-//! the horizon. A transfer it does not record (to an address no quote watches, in a block it
+//! the horizon. A transfer it does not record (to an address no quote or deposit address watches, in a block it
 //! skipped, or introduced below its cursor by a reorg deeper than the confirmation) is recorded
 //! by the finalized scanner, whose insert is keyed by the same identity.
 

@@ -17,6 +17,18 @@ contract GenerateCreate2Vectors is Script {
         address predictedAddress;
     }
 
+    struct DepositAddressVector {
+        string account;
+        bool livemode;
+        string clientReferenceId;
+        uint256 chainId;
+        string asset;
+        uint256 version;
+        address treasury;
+        bytes32 salt;
+        address predictedAddress;
+    }
+
     address private constant DEPLOYER = 0x000000000000000000000000000000000000a11c;
     address private constant TREASURY = 0x0000000000000000000000000000000000007EA5;
     address private constant OTHER_TREASURY = 0x936c1991f8dA9a919fa11b557a3514719f5A4504;
@@ -49,6 +61,12 @@ contract GenerateCreate2Vectors is Script {
             lockJson[i] = _lockEntryJson(locks[i], i);
         }
 
+        DepositAddressVector[3] memory depositAddresses = _depositAddressVectors(factory);
+        string[] memory depositAddressJson = new string[](depositAddresses.length);
+        for (uint256 i; i < depositAddresses.length; ++i) {
+            depositAddressJson[i] = _depositAddressEntryJson(depositAddresses[i], i);
+        }
+
         string memory json = string.concat(
             "{\"factory\":\"",
             vm.toString(address(factory)),
@@ -58,6 +76,8 @@ contract GenerateCreate2Vectors is Script {
             _array(forwarders),
             ",\"lock\":",
             _array(lockJson),
+            ",\"deposit_address\":",
+            _array(depositAddressJson),
             "}"
         );
         vm.writeJson(json, string.concat(vm.projectRoot(), "/test-vectors/create2.json"));
@@ -111,6 +131,80 @@ contract GenerateCreate2Vectors is Script {
         vm.serializeString(key, "product_slug", vector.productSlug);
         vm.serializeString(key, "external_id", vector.externalId);
         vm.serializeString(key, "lock_ref", vector.lockRef);
+        vm.serializeAddress(key, "treasury", vector.treasury);
+        vm.serializeBytes32(key, "salt", vector.salt);
+        return vm.serializeAddress(key, "predicted_address", vector.predictedAddress);
+    }
+
+    function _depositAddressVectors(ForwarderFactory factory)
+        private
+        view
+        returns (DepositAddressVector[3] memory vectors)
+    {
+        vectors[0] = _depositAddress(
+            factory, TREASURY, "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10", true, "team-42", 1, "pha", 1
+        );
+        vectors[1] = _depositAddress(
+            factory,
+            OTHER_TREASURY,
+            "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+            false,
+            "team-42",
+            11_155_111,
+            "pha",
+            2
+        );
+        vectors[2] = _depositAddress(
+            factory,
+            TREASURY,
+            "acct_ffffffffffffffffffffffffffffffff",
+            true,
+            unicode"客户 42 with a long reference that spans more than one 32-byte ABI word",
+            8453,
+            "usdc",
+            7
+        );
+    }
+
+    function _depositAddress(
+        ForwarderFactory factory,
+        address treasury,
+        string memory account,
+        bool livemode,
+        string memory clientReferenceId,
+        uint256 chainId,
+        string memory asset,
+        uint256 version
+    ) private view returns (DepositAddressVector memory vector) {
+        bytes32 salt = keccak256(
+            abi.encode(
+                account, livemode, clientReferenceId, "deposit_address", chainId, asset, version
+            )
+        );
+        vector = DepositAddressVector({
+            account: account,
+            livemode: livemode,
+            clientReferenceId: clientReferenceId,
+            chainId: chainId,
+            asset: asset,
+            version: version,
+            treasury: treasury,
+            salt: salt,
+            predictedAddress: factory.addressOf(treasury, salt)
+        });
+    }
+
+    function _depositAddressEntryJson(DepositAddressVector memory vector, uint256 index)
+        private
+        returns (string memory)
+    {
+        string memory key = string.concat("deposit-address-", vm.toString(index));
+        vm.serializeString(key, "account", vector.account);
+        vm.serializeBool(key, "livemode", vector.livemode);
+        vm.serializeString(key, "client_reference_id", vector.clientReferenceId);
+        vm.serializeUint(key, "chain_id", vector.chainId);
+        vm.serializeString(key, "asset", vector.asset);
+        vm.serializeUint(key, "version", vector.version);
         vm.serializeAddress(key, "treasury", vector.treasury);
         vm.serializeBytes32(key, "salt", vector.salt);
         return vm.serializeAddress(key, "predicted_address", vector.predictedAddress);

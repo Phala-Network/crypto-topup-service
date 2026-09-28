@@ -8,6 +8,8 @@ failures, transient statuses, and `409 idempotency_key_in_use`:
   retry, so a retry returns the quote the first attempt created.
 - `cancel_quote`: canceling a canceled quote returns it unchanged.
 - `create_refund`: sends an `Idempotency-Key` like `create_quote`.
+- `create_deposit_address`: returns the customer's active address, so a repeat returns the same
+  one; `rotate_deposit_address` sends an `Idempotency-Key` like `create_quote`.
 - `update_quote`, `update_deposit`, `update_refund`: merging the same `metadata` again leaves the
   object as the first attempt did.
 
@@ -17,7 +19,8 @@ brackets, values of up to 500 characters. On an update a key set to `""` is unse
 store sensitive information in it.
 
 With a pinned `forwarder`, `create_quote` and `get_quote` recompute an open quote's address from
-the factory, the implementation, the treasury, the account, and the quote id, and raise
+the factory, the implementation, the treasury, the account, and the quote id, and the deposit
+address methods recompute every active deposit address from its salt inputs; both raise
 `AddressMismatchError` rather than return an address the merchant did not derive.
 
 `Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
@@ -38,6 +41,13 @@ from topup_client import AuthenticatedClient
 from topup_client.api.account import get_account
 from topup_client.api.attestation import get_attestation
 from topup_client.api.config import get_config
+from topup_client.api.deposit_addresses import (
+    create_deposit_address,
+    get_deposit_address,
+    list_deposit_addresses,
+    rotate_deposit_address,
+    update_deposit_address,
+)
 from topup_client.api.deposits import get_deposit, list_deposits, update_deposit
 from topup_client.api.quotes import cancel_quote, create_quote, get_quote, update_quote
 from topup_client.api.refunds import create_refund, get_refund, update_refund
@@ -45,9 +55,12 @@ from topup_client.models import (
     AccountObject,
     AttestationResponse,
     Config,
+    CreateDepositAddressRequest,
     CreateQuoteRequest,
     CreateRefundRequest,
     Deposit,
+    DepositAddress,
+    DepositAddressList,
     DepositList,
     ErrorResponse,
     MetadataClear,
@@ -58,7 +71,7 @@ from topup_client.models import (
 )
 from topup_client.types import UNSET, Response, Unset
 
-from .addresses import forwarder_address, lock_salt, same_address
+from .addresses import deposit_address, forwarder_address, lock_salt, same_address
 from .attestation import verify_attestation_binding
 from .errors import AddressMismatchError, ApiError
 from .signing import sf_string
@@ -194,6 +207,7 @@ class TopupClient:
         *,
         account_id: str | None = None,
         quote: str | None = None,
+        deposit_address: str | None = None,
         status: str | None = None,
         tx_hash: str | None = None,
         created_gte: int | None = None,
@@ -211,6 +225,7 @@ class TopupClient:
                     client=self._client,
                     account_id=_unset(account_id),
                     quote=_unset(quote),
+                    deposit_address=_unset(deposit_address),
                     status=_unset(status),
                     tx_hash=_unset(tx_hash),
                     createdgte=_unset(created_gte),
@@ -242,6 +257,97 @@ class TopupClient:
             lambda: update_deposit.sync_detailed(deposit_id, client=self._client, body=body),
             Deposit,
         )
+
+    def create_deposit_address(
+        self,
+        client_reference_id: str,
+        *,
+        chain_id: int,
+        asset: str,
+        metadata: Metadata | None = None,
+    ) -> DepositAddress:
+        """Returns the customer's active deposit address for `asset` on `chain_id`, issuing one
+        the first time. Any amount sent to it is credited at spot when it arrives. `metadata` is
+        merged into the address's, and each deposit to it starts with a copy."""
+        body = CreateDepositAddressRequest(
+            client_reference_id=client_reference_id,
+            chain_id=chain_id,
+            asset=asset,
+            metadata=_metadata(metadata),
+        )
+        address = self._call(
+            lambda: create_deposit_address.sync_detailed(client=self._client, body=body),
+            DepositAddress,
+        )
+        return self._checked_deposit_address(address)
+
+    def get_deposit_address(self, deposit_address_id: str) -> DepositAddress:
+        """Returns one deposit address, active or retired."""
+        address = self._call(
+            lambda: get_deposit_address.sync_detailed(deposit_address_id, client=self._client),
+            DepositAddress,
+        )
+        return self._checked_deposit_address(address)
+
+    def list_deposit_addresses(
+        self,
+        *,
+        client_reference_id: str | None = None,
+        status: str | None = None,
+        chain_id: int | None = None,
+        page_size: int = 100,
+    ) -> Iterator[DepositAddress]:
+        """Yields the matching deposit addresses, newest first, following every page."""
+        starting_after: str | None = None
+        while True:
+            page = self._call(
+                partial(
+                    list_deposit_addresses.sync_detailed,
+                    client=self._client,
+                    client_reference_id=_unset(client_reference_id),
+                    status=_unset(status),
+                    chain_id=_unset(chain_id),
+                    limit=page_size,
+                    starting_after=_unset(starting_after),
+                ),
+                DepositAddressList,
+            )
+            for address in page.data:
+                yield self._checked_deposit_address(address)
+            if not page.has_more or not page.data:
+                return
+            starting_after = page.data[-1].id
+
+    def update_deposit_address(
+        self, deposit_address_id: str, *, metadata: Metadata | None = None
+    ) -> DepositAddress:
+        """Merges `metadata` into the deposit address's, active or retired; deposits already
+        recorded keep their own copy."""
+        body = UpdateMetadataRequest(metadata=_metadata(metadata))
+        address = self._call(
+            lambda: update_deposit_address.sync_detailed(
+                deposit_address_id, client=self._client, body=body
+            ),
+            DepositAddress,
+        )
+        return self._checked_deposit_address(address)
+
+    def rotate_deposit_address(
+        self, deposit_address_id: str, *, idempotency_key: str | None = None
+    ) -> DepositAddress:
+        """Retires an active deposit address and returns the customer's new one. Payments to the
+        retired address are still credited; stop showing it.
+
+        Retries reuse one `Idempotency-Key`, so a retry never rotates twice.
+        """
+        key = sf_string(idempotency_key or str(uuid.uuid4()))
+        address = self._call(
+            lambda: rotate_deposit_address.sync_detailed(
+                deposit_address_id, client=self._client, idempotency_key=key
+            ),
+            DepositAddress,
+        )
+        return self._checked_deposit_address(address)
 
     def create_refund(
         self,
@@ -310,6 +416,29 @@ class TopupClient:
         if not same_address(derived, quote.address):
             raise AddressMismatchError(f"quote {quote.id} has an address the account cannot derive")
         return quote
+
+    def _checked_deposit_address(self, address: DepositAddress) -> DepositAddress:
+        """Raises unless an active deposit address is the one derived from the pinned forwarder.
+        A retired one may pay a treasury the account has since replaced, so it is not checked."""
+        if self.forwarder is None or address.status != "active":
+            return address
+        factory, implementation, treasury = self.forwarder
+        derived = deposit_address(
+            factory,
+            implementation,
+            treasury,
+            account=self.account_id(),
+            livemode=address.livemode,
+            client_reference_id=address.client_reference_id,
+            chain_id=address.chain_id,
+            asset=address.asset,
+            version=address.version,
+        )
+        if not same_address(derived, address.address):
+            raise AddressMismatchError(
+                f"deposit address {address.id} is not one the account can derive"
+            )
+        return address
 
     def _call(self, operation: Callable[[], Response[Any]], expected: type[T]) -> T:
         attempt = 1

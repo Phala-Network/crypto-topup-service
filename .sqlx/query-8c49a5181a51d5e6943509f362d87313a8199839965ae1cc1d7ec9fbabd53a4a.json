@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, account_id, livemode, chain_id, quote_id, salt, treasury, address\n        FROM addresses\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT id, account_id, livemode, chain_id, quote_id, deposit_address_id, salt, treasury,\n               address\n        FROM addresses\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -60,6 +60,17 @@
       },
       {
         "ordinal": 5,
+        "name": "deposit_address_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "addresses",
+            "name": "deposit_address_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "salt",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "treasury",
         "type_info": "Text",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "address",
         "type_info": "Text",
         "origin": {
@@ -102,11 +113,12 @@
       false,
       false,
       false,
-      false,
+      true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "986cd7da0d0c2822217992b5c6e19445a4b1f31c158b644084a341d661208023"
+  "hash": "8c49a5181a51d5e6943509f362d87313a8199839965ae1cc1d7ec9fbabd53a4a"
 }

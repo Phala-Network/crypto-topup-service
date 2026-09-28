@@ -6,7 +6,7 @@ from collections.abc import Iterator, Mapping
 
 import httpx
 
-from topup_client.models import Config, Deposit, Quote, Refund
+from topup_client.models import Config, Deposit, DepositAddress, Quote, Refund
 from topup_sdk import TopupClient
 from topup_sdk.client import Metadata
 
@@ -54,6 +54,7 @@ class PhalaPay:
         )
         self.quotes = Quotes(self._client)
         self.deposits = Deposits(self._client)
+        self.deposit_addresses = DepositAddresses(self._client)
         self.refunds = Refunds(self._client)
         self.config = ConfigResource(self._client)
         self.webhooks = Webhook
@@ -133,6 +134,7 @@ class Deposits:
         *,
         account_id: str | None = None,
         quote: str | None = None,
+        deposit_address: str | None = None,
         status: str | None = None,
         tx_hash: str | None = None,
         created_gte: int | None = None,
@@ -143,11 +145,68 @@ class Deposits:
         return self._client.list_deposits(
             account_id=account_id,
             quote=quote,
+            deposit_address=deposit_address,
             status=status,
             tx_hash=tx_hash,
             created_gte=created_gte,
             created_lte=created_lte,
             expand=expand,
+        )
+
+
+class DepositAddresses:
+    """A customer's persistent deposit address per chain and asset: show it like a bank account
+    number; any amount sent to it is credited at the market rate when it arrives.
+
+    `topup_sdk.deposit_address(...)` recomputes any version offline from its salt inputs.
+    """
+
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def create(
+        self,
+        *,
+        client_reference_id: str,
+        chain_id: int,
+        asset: str,
+        metadata: Metadata | None = None,
+    ) -> DepositAddress:
+        """Returns the customer's active address for `asset` on `chain_id`; the same call keeps
+        returning it until it is rotated. `metadata` is merged into the address's; each deposit
+        to it starts with a copy, and a rotation carries it to the next address."""
+        return self._client.create_deposit_address(
+            client_reference_id, chain_id=chain_id, asset=asset, metadata=metadata
+        )
+
+    def update(
+        self, deposit_address_id: str, *, metadata: Metadata | None = None
+    ) -> DepositAddress:
+        """Merges `metadata` into the address's (a key set to `""` is unset, `""` unsets all)."""
+        return self._client.update_deposit_address(deposit_address_id, metadata=metadata)
+
+    def retrieve(self, deposit_address_id: str) -> DepositAddress:
+        return self._client.get_deposit_address(deposit_address_id)
+
+    def list(
+        self,
+        *,
+        client_reference_id: str | None = None,
+        status: str | None = None,
+        chain_id: int | None = None,
+    ) -> Iterator[DepositAddress]:
+        """Yields every matching deposit address, newest first, fetching pages as it goes."""
+        return self._client.list_deposit_addresses(
+            client_reference_id=client_reference_id, status=status, chain_id=chain_id
+        )
+
+    def rotate(
+        self, deposit_address_id: str, *, idempotency_key: str | None = None
+    ) -> DepositAddress:
+        """Retires the address and returns the customer's new one; the retired address is still
+        credited, so stop showing it rather than telling the customer it is invalid."""
+        return self._client.rotate_deposit_address(
+            deposit_address_id, idempotency_key=idempotency_key
         )
 
 

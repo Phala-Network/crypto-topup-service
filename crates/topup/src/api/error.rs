@@ -287,6 +287,36 @@ impl ApiError {
         )
     }
 
+    /// Returns a deposit address rotation over the customer's hourly limit.
+    #[must_use]
+    pub fn rotation_rate_limited() -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit",
+            "deposit address rotation limit exceeded; retry later",
+        )
+    }
+
+    /// Returns a new deposit address over the account's cap of active addresses in the mode.
+    #[must_use]
+    pub fn deposit_address_cap(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "deposit_address_cap_exceeded",
+            message,
+        )
+    }
+
+    /// Returns a rotation of an already retired deposit address.
+    #[must_use]
+    pub fn deposit_address_retired() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "deposit_address_retired",
+            "the deposit address is retired; rotate the customer's active address",
+        )
+    }
+
     /// Returns a replayed request signature.
     #[must_use]
     pub fn signature_replayed() -> Self {

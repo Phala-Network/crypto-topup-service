@@ -11,6 +11,8 @@ pub const API_KEY: &str = "key_";
 pub const WEBHOOK_ENDPOINT: &str = "we_";
 /// Quote ids.
 pub const QUOTE: &str = "qt_";
+/// Deposit address ids.
+pub const DEPOSIT_ADDRESS: &str = "da_";
 /// Deposit ids; the UUID is the deterministic deposit id (architecture §0).
 pub const DEPOSIT: &str = "dep_";
 /// Refund ids.

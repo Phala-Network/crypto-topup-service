@@ -48,6 +48,7 @@ describe("quoteTransfer", () => {
     ["another chain", quote({ payment_uri: quote({ chain_id: 1 }).payment_uri })],
     ["a native transfer", quote({ payment_uri: `ethereum:${ADDRESS}@11155111?value=1` })],
     ["no chain", quote({ payment_uri: `ethereum:${TOKEN}/transfer?address=${ADDRESS}&uint256=1` })],
+    ["no amount", quote({ payment_uri: `ethereum:${TOKEN}@11155111/transfer?address=${ADDRESS}` })],
     ["a scientific amount", quote({ payment_uri: `ethereum:${TOKEN}@11155111/transfer?address=${ADDRESS}&uint256=1e20` })],
   ])("refuses a payment URI with %s", (_, value) => {
     expect(() => quoteTransfer(value)).toThrow(TypeError);

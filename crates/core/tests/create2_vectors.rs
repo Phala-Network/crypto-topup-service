@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256};
 use serde::Deserialize;
-use topup_core::address::{forwarder_address, lock_salt};
+use topup_core::address::{deposit_address_salt, forwarder_address, lock_salt};
 
 #[derive(Deserialize)]
 struct Vectors {
@@ -16,6 +16,7 @@ struct Vectors {
     implementation: String,
     forwarders: Vec<ForwarderVector>,
     lock: Vec<LockVector>,
+    deposit_address: Vec<DepositAddressVector>,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +31,19 @@ struct LockVector {
     product_slug: String,
     external_id: String,
     lock_ref: String,
+    treasury: String,
+    salt: String,
+    predicted_address: String,
+}
+
+#[derive(Deserialize)]
+struct DepositAddressVector {
+    account: String,
+    livemode: bool,
+    client_reference_id: String,
+    chain_id: u64,
+    asset: String,
+    version: u64,
     treasury: String,
     salt: String,
     predicted_address: String,
@@ -58,6 +72,28 @@ fn reproduces_all_foundry_create2_vectors() -> Result<(), Box<dyn Error>> {
     assert!(!vectors.lock.is_empty());
     for vector in vectors.lock {
         let salt = lock_salt(&vector.product_slug, &vector.external_id, &vector.lock_ref);
+        assert_eq!(salt, B256::from_str(&vector.salt)?);
+        assert_eq!(
+            forwarder_address(
+                factory,
+                implementation,
+                Address::from_str(&vector.treasury)?,
+                salt
+            ),
+            Address::from_str(&vector.predicted_address)?
+        );
+    }
+
+    assert!(!vectors.deposit_address.is_empty());
+    for vector in vectors.deposit_address {
+        let salt = deposit_address_salt(
+            &vector.account,
+            vector.livemode,
+            &vector.client_reference_id,
+            vector.chain_id,
+            &vector.asset,
+            vector.version,
+        );
         assert_eq!(salt, B256::from_str(&vector.salt)?);
         assert_eq!(
             forwarder_address(

@@ -941,7 +941,8 @@ struct DepositViewRow {
     block_time: DateTime<Utc>,
     final_at: Option<DateTime<Utc>>,
     address: String,
-    quote_id: Uuid,
+    quote_id: Option<Uuid>,
+    deposit_address_id: Option<Uuid>,
     route: Option<String>,
     route_version: Option<i64>,
     asset_contract: String,
@@ -1066,7 +1067,10 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             block_time: row.block_time,
             final_at: row.final_at,
             address: row.address,
-            lock_ref: Some(crate::locks::quote_id(row.quote_id)),
+            lock_ref: row.quote_id.map(crate::locks::quote_id),
+            deposit_address: row
+                .deposit_address_id
+                .map(crate::deposit_addresses::public_id),
             route: row.route,
             route_version: row
                 .route_version
@@ -1094,7 +1098,7 @@ fn deposit_query() -> QueryBuilder<Postgres> {
                customer.client_reference_id AS external_id, deposit.chain_id, deposit.tx_hash,
                deposit.receipt_log_index, deposit.log_index,
                deposit.block_number, deposit.block_time, deposit.final_at, address.address,
-               address.quote_id,
+               address.quote_id, address.deposit_address_id,
                deposit.route, deposit.route_version, deposit.asset_contract,
                deposit.from_address, deposit.amount_atomic::text AS amount_atomic,
                deposit.state, deposit.valuation_at, deposit.price_scaled::text AS price_scaled,

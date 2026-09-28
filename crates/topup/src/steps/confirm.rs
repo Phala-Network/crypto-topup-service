@@ -400,7 +400,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
                quote.credit_minor::text AS credit_minor,
                quote.expires_at, quote.consumed_by, quote.status AS lock_status
         FROM addresses AS address
-        JOIN quotes AS quote ON quote.id = address.quote_id
+        LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         WHERE address.id = $1
         "#,
     )

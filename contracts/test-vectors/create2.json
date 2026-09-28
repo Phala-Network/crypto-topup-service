@@ -78,5 +78,40 @@
       "salt": "0x783ed98ce1738f83a61c34dd5786bf0fd6b08669dff4fd95f54eac1e4d31aa69",
       "treasury": "0x0000000000000000000000000000000000007EA5"
     }
+  ],
+  "deposit_address": [
+    {
+      "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+      "asset": "pha",
+      "chain_id": 1,
+      "client_reference_id": "team-42",
+      "livemode": true,
+      "predicted_address": "0x503B358E81312bD075a13Fd33F098Ad63A45Aaa3",
+      "salt": "0xe6a6b97caa999765fec86392d919fa253c32ce7583020c441df87c34e317cf09",
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "version": 1
+    },
+    {
+      "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+      "asset": "pha",
+      "chain_id": 11155111,
+      "client_reference_id": "team-42",
+      "livemode": false,
+      "predicted_address": "0xf63Fa4D84267A9Bde31D4940a30A94aB4642b7B9",
+      "salt": "0xdcf0e3da1d509d2dbf50d1316ba9a001069b572b73feb992e400199effc63693",
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "version": 2
+    },
+    {
+      "account": "acct_ffffffffffffffffffffffffffffffff",
+      "asset": "usdc",
+      "chain_id": 8453,
+      "client_reference_id": "客户 42 with a long reference that spans more than one 32-byte ABI word",
+      "livemode": true,
+      "predicted_address": "0x7A62524E65AAe38cda83f61898212e025a2F43D7",
+      "salt": "0x1f97a881ca4c019d32fcab98fae7a72d5f94f6aeaddf52b1e63f53c7b4b5f871",
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "version": 7
+    }
   ]
 }
