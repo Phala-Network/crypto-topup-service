@@ -70,26 +70,46 @@ fn parse_codes<S: AsRef<str>>(codes: &[S]) -> Result<PauseScopes, sqlx::Error> {
     PauseScopes::from_codes(codes).map_err(|error| sqlx::Error::Decode(error.to_string().into()))
 }
 
+/// Whose pause of a whole account a mutation edits: the operator's (`paused_scopes`) or the
+/// merchant's own (`self_paused_scopes`, design §12). Both apply; neither lifts the other.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PauseOwner {
+    /// The operator's pauses: `quotes`, `settlement`, `refunds`.
+    Operator,
+    /// The merchant's own pause, through `POST /v1/account/pause`: `quotes` only.
+    Merchant,
+}
+
 /// Adds (`pause`) or removes `scopes` of the whole account, in the caller's transaction, with an
 /// audit row naming `reason` and, when the scopes changed, an `account.updated` event in each mode
-/// the account uses (test, and live once enabled). Returns the account's scopes, or `None` for an
+/// the account uses (test, and live once enabled). Returns the scopes of `owner`, or `None` for an
 /// unknown account.
 pub(crate) async fn mutate_account_scopes_in(
     transaction: &mut Transaction<'_, Postgres>,
     account_id: Uuid,
+    owner: PauseOwner,
     scopes: &[&str],
     pause: bool,
     actor: &Actor,
     reason: &str,
 ) -> Result<Option<Vec<String>>, sqlx::Error> {
-    let Some((current, public_id, charges_enabled)) =
-        sqlx::query_as::<_, (Vec<String>, String, bool)>(
+    let (select, update) = match owner {
+        PauseOwner::Operator => (
             "SELECT paused_scopes, public_id, charges_enabled FROM accounts WHERE id = $1 \
              FOR UPDATE",
-        )
-        .bind(account_id)
-        .fetch_optional(&mut **transaction)
-        .await?
+            "UPDATE accounts SET paused_scopes = $2 WHERE id = $1",
+        ),
+        PauseOwner::Merchant => (
+            "SELECT self_paused_scopes, public_id, charges_enabled FROM accounts WHERE id = $1 \
+             FOR UPDATE",
+            "UPDATE accounts SET self_paused_scopes = $2 WHERE id = $1",
+        ),
+    };
+    let Some((current, public_id, charges_enabled)) =
+        sqlx::query_as::<_, (Vec<String>, String, bool)>(select)
+            .bind(account_id)
+            .fetch_optional(&mut **transaction)
+            .await?
     else {
         return Ok(None);
     };
@@ -118,7 +138,7 @@ pub(crate) async fn mutate_account_scopes_in(
     if updated == before {
         return Ok(Some(updated));
     }
-    sqlx::query("UPDATE accounts SET paused_scopes = $2 WHERE id = $1")
+    sqlx::query(update)
         .bind(account_id)
         .bind(&updated)
         .execute(&mut **transaction)

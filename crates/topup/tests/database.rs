@@ -588,6 +588,10 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("reconciliation_findings", &["SELECT", "INSERT"]),
     ("heartbeat", &["SELECT", "INSERT"]),
     ("reconciliation_blocks", &["SELECT", "INSERT", "DELETE"]),
+    (
+        "deposit_address_client_secrets",
+        &["SELECT", "INSERT", "DELETE"],
+    ),
     ("flushed", &["SELECT", "INSERT"]),
     ("flush_failures", &["SELECT", "INSERT"]),
     (

@@ -44,7 +44,7 @@ const DEPOSIT_STATES: [&str; 6] = [
     get,
     path = "/v1/deposits",
     params(
-        ("account_id" = Option<String>, Query, description = "Only this account's deposits"),
+        ("client_reference_id" = Option<String>, Query, description = "Only this customer's deposits"),
         ("quote" = Option<String>, Query, description = "Only deposits to this quote's address"),
         ("deposit_address" = Option<String>, Query, description = "Only deposits to this deposit address, `da_…`"),
         ("status" = Option<String>, Query, description = "Only deposits in this status"),
@@ -78,10 +78,10 @@ pub(crate) async fn list_deposits(
     let expand = expansions(&pairs, &["data.quote"])?;
     let filters = ListFilters::parse(&pairs)?;
     let mut builder = scoped_deposit_query(merchant.scope);
-    if let Some(account_id) = &filters.account_id {
+    if let Some(client_reference_id) = &filters.client_reference_id {
         builder
             .push(" AND customer.client_reference_id = ")
-            .push_bind(account_id.clone());
+            .push_bind(client_reference_id.clone());
     }
     if let Some(quote) = filters.quote {
         builder.push(" AND address.quote_id = ").push_bind(quote);
@@ -662,10 +662,11 @@ struct RefundRow {
 struct DepositRow {
     id: Uuid,
     livemode: bool,
-    external_id: String,
+    client_reference_id: String,
     quote_id: Option<Uuid>,
     deposit_address_id: Option<Uuid>,
     state: String,
+    is_final: bool,
     reason: Option<String>,
     chain_id: i64,
     route: Option<String>,
@@ -689,10 +690,10 @@ struct DepositRow {
 fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
     let mut builder = QueryBuilder::new(
         r#"
-        SELECT deposit.id, deposit.livemode, customer.client_reference_id AS external_id,
+        SELECT deposit.id, deposit.livemode, customer.client_reference_id,
                address.quote_id,
                address.deposit_address_id,
-               deposit.state, deposit.reason, deposit.chain_id, deposit.route,
+               deposit.state, deposit.final_at IS NOT NULL AS is_final, deposit.reason, deposit.chain_id, deposit.route,
                deposit.asset_contract, deposit.amount_atomic::text AS amount_atomic,
                deposit.credit_minor::text AS credit_minor,
                deposit.price_scaled::text AS price_scaled, deposit.price_source,
@@ -729,7 +730,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         id: ids::format(ids::DEPOSIT, row.id),
         object: "deposit".to_owned(),
         livemode: row.livemode,
-        account_id: row.external_id,
+        client_reference_id: row.client_reference_id,
         quote: row
             .quote_id
             .map(|quote| ExpandableQuote::Id(ids::format(ids::QUOTE, quote))),
@@ -737,6 +738,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
             .deposit_address_id
             .map(crate::deposit_addresses::public_id),
         status: row.state,
+        is_final: row.is_final,
         rejection_reason: row.reason,
         chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
         asset,
@@ -774,7 +776,7 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
 }
 
 struct ListFilters {
-    account_id: Option<String>,
+    client_reference_id: Option<String>,
     quote: Option<Uuid>,
     deposit_address: Option<Uuid>,
     status: Option<String>,
@@ -789,7 +791,7 @@ struct ListFilters {
 impl ListFilters {
     fn parse(pairs: &[(String, String)]) -> ApiResult<Self> {
         let mut filters = Self {
-            account_id: None,
+            client_reference_id: None,
             quote: None,
             deposit_address: None,
             status: None,
@@ -802,7 +804,7 @@ impl ListFilters {
         };
         for (name, value) in pairs {
             match name.as_str() {
-                "account_id" => filters.account_id = Some(value.clone()),
+                "client_reference_id" => filters.client_reference_id = Some(value.clone()),
                 "quote" => {
                     filters.quote = Some(
                         ids::parse(ids::QUOTE, value)

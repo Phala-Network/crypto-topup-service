@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, public_id AS \"public_id!\", name, paused_scopes FROM accounts WHERE id = $1",
+  "query": "\n        SELECT id, public_id AS \"public_id!\", name,\n               ARRAY(\n                   SELECT DISTINCT scope\n                   FROM unnest(paused_scopes || self_paused_scopes) AS scope\n                   ORDER BY scope\n               ) AS \"paused_scopes!\"\n        FROM accounts\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -38,14 +38,9 @@
       },
       {
         "ordinal": 3,
-        "name": "paused_scopes",
+        "name": "paused_scopes!",
         "type_info": "TextArray",
-        "origin": {
-          "Table": {
-            "table": "accounts",
-            "name": "paused_scopes"
-          }
-        }
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -57,8 +52,8 @@
       false,
       true,
       false,
-      false
+      null
     ]
   },
-  "hash": "fd4e4cdc7c40e32946339d2dd2dcdf84f01123827d96f4dc1eee7099ea894850"
+  "hash": "25c6affcd5adc58dea9941c6e3a0d2ac515cfc64452111041ef2b4c302b1f9d2"
 }

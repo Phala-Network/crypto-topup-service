@@ -218,7 +218,7 @@ pub(crate) async fn resume_account(
     path = "/v1/admin/accounts/{account}/customers/{customer}/pause",
     params(
         ("account" = String, Path, description = "Account id, `acct_…`"),
-        ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
+        ("customer" = String, Path, description = "The account's identifier of its customer, its `client_reference_id`")
     ),
     request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
@@ -239,7 +239,7 @@ pub(crate) async fn pause_customer(
     path = "/v1/admin/accounts/{account}/customers/{customer}/resume",
     params(
         ("account" = String, Path, description = "Account id, `acct_…`"),
-        ("customer" = String, Path, description = "The account's identifier of its customer, the quotes' `account_id`")
+        ("customer" = String, Path, description = "The account's identifier of its customer, its `client_reference_id`")
     ),
     request_body = CustomerPauseRequest,
     responses((status = 200, description = "OK", body = PauseResponse), (status = 400, description = "Bad Request", body = ErrorResponse), (status = 404, description = "Not Found", body = ErrorResponse)),
@@ -388,7 +388,7 @@ pub(super) async fn ensure_customer(
     scope: Scope,
     client_reference_id: &str,
 ) -> ApiResult<Customer> {
-    validate_external_id(client_reference_id)?;
+    validate_client_reference_id(client_reference_id)?;
     repository::ensure_customer(&state.pool, scope, client_reference_id).await
 }
 
@@ -408,6 +408,7 @@ async fn mutate_account_scopes(
     let updated = crate::pause::mutate_account_scopes_in(
         &mut transaction,
         account_id,
+        crate::pause::PauseOwner::Operator,
         &scopes,
         pause,
         &admin_actor(state),
@@ -476,11 +477,11 @@ async fn mutate_route_scopes(
 
 /// The customer identifier is stored as `customers.client_reference_id`: 1 to 200 characters
 /// (design D6).
-pub(super) fn validate_external_id(external_id: &str) -> ApiResult<()> {
-    if external_id.is_empty() || external_id.chars().count() > 200 {
+pub(super) fn validate_client_reference_id(client_reference_id: &str) -> ApiResult<()> {
+    if client_reference_id.is_empty() || client_reference_id.chars().count() > 200 {
         return Err(ApiError::invalid_param(
-            "account_id",
-            "account_id must contain 1 to 200 characters",
+            "client_reference_id",
+            "client_reference_id must contain 1 to 200 characters",
         ));
     }
     Ok(())

@@ -83,7 +83,7 @@ impl Merchant {
 
 fn quote_body(metadata: Option<Value>) -> Value {
     let mut body = json!({
-        "account_id": "team-42", "amount": 100, "currency": "usd", "chain_id": 1, "asset": "pha"
+        "client_reference_id": "team-42", "amount": 100, "currency": "usd", "chain_id": 1, "asset": "pha"
     });
     if let Some(metadata) = metadata {
         body["metadata"] = metadata;

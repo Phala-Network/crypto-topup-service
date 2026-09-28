@@ -799,7 +799,7 @@ struct DepositViewRow {
     id: Uuid,
     account: String,
     livemode: bool,
-    external_id: String,
+    client_reference_id: String,
     chain_id: i64,
     tx_hash: String,
     receipt_log_index: i64,
@@ -903,7 +903,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             id: crate::ids::format(crate::ids::DEPOSIT, row.id),
             account: row.account,
             livemode: row.livemode,
-            external_id: row.external_id,
+            client_reference_id: row.client_reference_id,
             chain_id: u64::try_from(row.chain_id).map_err(|_| ApiError::internal())?,
             tx_hash: row.tx_hash,
             receipt_log_index: u64::try_from(row.receipt_log_index)
@@ -913,7 +913,7 @@ impl TryFrom<DepositViewRow> for DepositResponse {
             block_time: row.block_time,
             final_at: row.final_at,
             address: row.address,
-            lock_ref: row.quote_id.map(crate::locks::quote_id),
+            quote: row.quote_id.map(crate::locks::quote_id),
             deposit_address: row
                 .deposit_address_id
                 .map(crate::deposit_addresses::public_id),
@@ -941,7 +941,7 @@ fn deposit_query() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         r#"
         SELECT deposit.id, account.public_id AS account, deposit.livemode,
-               customer.client_reference_id AS external_id, deposit.chain_id, deposit.tx_hash,
+               customer.client_reference_id, deposit.chain_id, deposit.tx_hash,
                deposit.receipt_log_index, deposit.log_index,
                deposit.block_number, deposit.block_time, deposit.final_at, address.address,
                address.quote_id, address.deposit_address_id,

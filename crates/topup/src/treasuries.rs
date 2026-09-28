@@ -926,6 +926,7 @@ pub async fn rescreen_due(
                 crate::pause::mutate_account_scopes_in(
                     &mut transaction,
                     account_id,
+                    crate::pause::PauseOwner::Operator,
                     &["quotes", "settlement"],
                     true,
                     &actor,

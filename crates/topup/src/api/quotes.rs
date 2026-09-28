@@ -19,7 +19,7 @@ use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
-use super::handlers::{ensure_customer, validate_external_id};
+use super::handlers::ensure_customer;
 use super::metadata::{self, Object};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteView,
@@ -41,7 +41,8 @@ use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
     security(("api_key" = [])),
     tag = "config"
 )]
-/// The assets, limits, and quote terms of the attested routes in the credential's mode.
+/// The assets, limits, and quote terms of the attested routes in the credential's mode, with the
+/// confirmation your account's policy requires.
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -53,6 +54,8 @@ pub(crate) async fn get_config(
         .routes
         .current_in(merchant.scope.livemode())
         .collect::<Vec<_>>();
+    let policies =
+        super::account::confirmation_policies(&state.pool, merchant.scope.account_id()).await?;
     let max_open_amount_per_account = routes
         .iter()
         .map(|route| route.rate_lock.max_open_minor.account)
@@ -60,29 +63,32 @@ pub(crate) async fn get_config(
         .unwrap_or_default();
     let assets = routes
         .iter()
-        .map(|route| ConfigAsset {
-            chain_id: route.chain.chain_id,
-            asset: route.asset.symbol.clone(),
-            contract: format!("{:#x}", route.asset.contract),
-            decimals: route.asset.decimals,
-            pricing: match route.pricing.mode {
-                PricingMode::Spot => "spot",
-                PricingMode::Stablecoin => "stablecoin",
+        .map(|route| {
+            let floor = route.chain.confirmations;
+            let confirmations = policies
+                .get(&route.chain.chain_id)
+                .map_or(Some(floor), |policy| floor.stricter(*policy))
+                .unwrap_or(Confirmations::Finalized);
+            ConfigAsset {
+                chain_id: route.chain.chain_id,
+                asset: route.asset.symbol.clone(),
+                contract: format!("{:#x}", route.asset.contract),
+                decimals: route.asset.decimals,
+                pricing: match route.pricing.mode {
+                    PricingMode::Spot => "spot",
+                    PricingMode::Stablecoin => "stablecoin",
+                }
+                .to_owned(),
+                min_amount: route.screening.min_credit_minor,
+                max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
+                min_refund_atomic: route.asset.min_refund_atomic.value().to_string(),
+                quote_ttl_seconds: route.rate_lock.window_s,
+                quote_spread_bps: route.rate_lock.spread_bps.value(),
+                quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
+                confirmations: confirmations.policy_value(),
+                typical_credit_seconds: confirmations.typical_credit_seconds(),
+                typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
             }
-            .to_owned(),
-            min_amount: route.screening.min_credit_minor,
-            max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
-            min_refund_atomic: route.asset.min_refund_atomic.value().to_string(),
-            quote_ttl_seconds: route.rate_lock.window_s,
-            quote_spread_bps: route.rate_lock.spread_bps.value(),
-            quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
-            confirmations: match route.chain.confirmations {
-                Confirmations::Depth(depth) => depth.to_string(),
-                Confirmations::Safe => "safe".to_owned(),
-                Confirmations::Finalized => "finalized".to_owned(),
-            },
-            typical_credit_seconds: route.chain.confirmations.typical_credit_seconds(),
-            typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
         })
         .collect();
     Ok(Json(Config {
@@ -132,7 +138,6 @@ pub(crate) async fn create_quote(
     merchant
         .require(&state.pool, Permission::QuotesWrite)
         .await?;
-    validate_external_id(&request.account_id)?;
     if request.currency != "usd" {
         return Err(ApiError::invalid_param("currency", "currency must be usd"));
     }
@@ -156,7 +161,7 @@ pub(crate) async fn create_quote(
     }
     let credit = MinorAmount::new(request.amount);
     let metadata = metadata::on_create(request.metadata.as_ref())?;
-    let customer = ensure_customer(&state, merchant.scope, &request.account_id).await?;
+    let customer = ensure_customer(&state, merchant.scope, &request.client_reference_id).await?;
     if crate::reconciler::chain_is_blocked(&state.pool, route.chain.chain_id).await? {
         return Err(ApiError::chain_frozen());
     }
@@ -344,6 +349,10 @@ async fn client_quote(
         })?;
     let payment = super::pending::quote_payment(&state.pool, route, &lock).await?;
     let (payment_status, confirmations) = match payment {
+        // A reversed deposit is no payment; the page says so rather than ask for one again.
+        None if address_has_reversed_deposit(&state.pool, lock.address_id).await? => {
+            ("reversed", None)
+        }
         None => ("none", None),
         Some(payment) if payment.status == "seen" => ("seen", payment.confirmations),
         Some(payment) => {
@@ -357,6 +366,7 @@ async fn client_quote(
             let status = match deposit_state.as_str() {
                 "credited" | "swept" => "credited",
                 "rejected" => "rejected",
+                "reversed" => "reversed",
                 _ => "confirming",
             };
             (status, None)
@@ -365,6 +375,7 @@ async fn client_quote(
     Ok(ClientQuote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
+        livemode: lock.livemode,
         status: status(lock.status).to_owned(),
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),
@@ -378,6 +389,15 @@ async fn client_quote(
         payment_status: payment_status.to_owned(),
         confirmations,
     })
+}
+
+async fn address_has_reversed_deposit(pool: &PgPool, address_id: Uuid) -> ApiResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1 AND state = 'reversed')",
+    )
+    .bind(address_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[utoipa::path(
@@ -484,7 +504,7 @@ pub(crate) async fn quote_object(
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
         livemode: lock.livemode,
-        account_id: lock.client_reference_id,
+        client_reference_id: lock.client_reference_id,
         amount: lock.credit_minor.value(),
         currency: "usd".to_owned(),
         chain_id: lock.chain_id,

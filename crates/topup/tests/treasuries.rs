@@ -1240,14 +1240,15 @@ impl Fixture {
         self.post(
             key,
             "/v1/quotes",
-            json!({"account_id": "team-1", "amount": 100, "currency": "usd",
+            json!({"client_reference_id": "team-1", "amount": 100, "currency": "usd",
                    "chain_id": chain_id, "asset": "pha"}),
         )
         .await
     }
 
+    /// The customer's deposit address, without the `client_secret` each create issues anew.
     async fn deposit_address(&self, key: &str, customer: &str) -> Result<Value> {
-        let (status, body) = self
+        let (status, mut body) = self
             .post(
                 key,
                 "/v1/deposit_addresses",
@@ -1255,6 +1256,9 @@ impl Fixture {
             )
             .await?;
         ensure!(status == StatusCode::OK, "{status}: {body}");
+        body.as_object_mut()
+            .and_then(|object| object.remove("client_secret"))
+            .context("client_secret")?;
         Ok(body)
     }
 

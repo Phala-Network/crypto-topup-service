@@ -233,6 +233,47 @@ impl Confirmations {
         block <= self.horizon(heads)
     }
 
+    /// The stricter of two confirmations of one chain (design D1): `finalized` over anything, the
+    /// deeper of two depths, `safe` over `safe`. `None` for a depth and `safe`, which no chain
+    /// family accepts together.
+    #[must_use]
+    pub fn stricter(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Finalized, _) | (_, Self::Finalized) => Some(Self::Finalized),
+            (Self::Depth(left), Self::Depth(right)) => Some(Self::Depth(left.max(right))),
+            (Self::Safe, Self::Safe) => Some(Self::Safe),
+            (Self::Depth(_), Self::Safe) | (Self::Safe, Self::Depth(_)) => None,
+        }
+    }
+
+    /// Parses an account policy's value: a depth of 1 to 999 999 blocks as decimal digits,
+    /// `safe`, or `finalized`, as `GET /v1/config` reports a route's.
+    #[must_use]
+    pub fn parse_policy(value: &str) -> Option<Self> {
+        match value {
+            "safe" => Some(Self::Safe),
+            "finalized" => Some(Self::Finalized),
+            depth
+                if (1..=6).contains(&depth.len())
+                    && depth.bytes().all(|byte| byte.is_ascii_digit())
+                    && !depth.starts_with('0') =>
+            {
+                depth.parse().ok().map(Self::Depth)
+            }
+            _ => None,
+        }
+    }
+
+    /// The policy value of [`Confirmations::parse_policy`].
+    #[must_use]
+    pub fn policy_value(self) -> String {
+        match self {
+            Self::Depth(depth) => depth.to_string(),
+            Self::Safe => "safe".to_owned(),
+            Self::Finalized => "finalized".to_owned(),
+        }
+    }
+
     /// Typical seconds from paying to the `deposit.credited` event on a 12-second-slot chain: half
     /// a slot waiting for inclusion, the remaining blocks, then polling and delivery; for `safe`
     /// and `finalized`, the typical delay of those tags (about 15 minutes on Ethereum L1).
@@ -1169,6 +1210,27 @@ mod tests {
         assert!(Confirmations::Depth(10).validate(8_453).is_err());
         assert!(Confirmations::Finalized.validate(137).is_ok());
         assert!(Confirmations::Depth(2).validate(137).is_err());
+        assert_eq!(
+            Confirmations::Depth(2).stricter(Confirmations::Depth(5)),
+            Some(Confirmations::Depth(5))
+        );
+        assert_eq!(
+            Confirmations::Safe.stricter(Confirmations::Finalized),
+            Some(Confirmations::Finalized)
+        );
+        assert_eq!(Confirmations::Depth(2).stricter(Confirmations::Safe), None);
+        assert_eq!(
+            Confirmations::parse_policy("12"),
+            Some(Confirmations::Depth(12))
+        );
+        assert_eq!(
+            Confirmations::parse_policy("finalized"),
+            Some(Confirmations::Finalized)
+        );
+        for invalid in ["0", "012", "1234567", "latest", "", "+3"] {
+            assert_eq!(Confirmations::parse_policy(invalid), None, "{invalid}");
+        }
+        assert_eq!(Confirmations::Depth(12).policy_value(), "12");
         assert_eq!(Confirmations::Depth(2).typical_credit_seconds(), 30);
         assert_eq!(Confirmations::Finalized.typical_credit_seconds(), 900);
     }

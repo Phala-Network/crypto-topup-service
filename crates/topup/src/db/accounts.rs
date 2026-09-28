@@ -10,7 +10,7 @@ pub struct Account {
     pub public_id: String,
     /// Display name.
     pub name: String,
-    /// Runtime pause scopes of the whole account.
+    /// Runtime pause scopes of the whole account: the operator's and the merchant's own.
     pub paused_scopes: Vec<String>,
 }
 
@@ -33,7 +33,16 @@ pub struct Customer {
 pub async fn get_account(pool: &PgPool, id: Uuid) -> Result<Option<Account>, sqlx::Error> {
     sqlx::query_as!(
         Account,
-        r#"SELECT id, public_id AS "public_id!", name, paused_scopes FROM accounts WHERE id = $1"#,
+        r#"
+        SELECT id, public_id AS "public_id!", name,
+               ARRAY(
+                   SELECT DISTINCT scope
+                   FROM unnest(paused_scopes || self_paused_scopes) AS scope
+                   ORDER BY scope
+               ) AS "paused_scopes!"
+        FROM accounts
+        WHERE id = $1
+        "#,
         id
     )
     .fetch_optional(pool)
