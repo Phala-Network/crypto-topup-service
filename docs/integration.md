@@ -514,7 +514,7 @@ passes screening, in the same transaction that marks the deposit `credited`: the
 and owed to you, whatever you answer.
 
 ```http
-POST {webhook_url}
+POST {your webhook endpoint's url}
 content-type: application/json
 webhook-id: evt_26a20351ab10595a852f9c1aa0372d73
 webhook-timestamp: 1790409600
@@ -539,8 +539,8 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
   `data.object`, it is what the deposit held at the first delivery.
 - `webhook-id` is the event's `id`: `evt_` and the hex of
   `uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)`
-  (`topup_sdk.credited_event_id`), so every retry, operator replay, and re-emission after a
-  service restore carries the same id.
+  (`topup_sdk.credited_event_id`), so every retry, resend, and re-emission after a service
+  restore carries the same id.
 
 ### 2.2 The fulfillment function
 
@@ -615,7 +615,8 @@ Find-or-create an `Order` (`provider = crypto_topup`, `order_flow_code = 'crypto
 ### 2.6 Delivery and event types
 
 Every event, `deposit.credited` included, is Standard Webhooks with the asymmetric `v1a` scheme,
-signed with your account's key in the event's mode and `POST`ed to the registered webhook URL:
+signed with your account's key in the event's mode and `POST`ed to each enabled webhook endpoint of
+your account in that mode that subscribes to its type (§5.11):
 
 ```text
 webhook-id: evt_…
@@ -633,22 +634,22 @@ the service's public key.
 
 - Verify over the raw body bytes, never re-serialized JSON. Several space-separated signatures
   may appear during a key rotation; accept when one verifies.
-- Answer `2xx` only after the credit and the event are durably stored. Anything else, or no
-  answer within 20 s, is retried until delivered, with full-jitter backoff whose ceiling starts at
-  30 s and doubles to 1 h; there is no final attempt. The operator is warned about events
-  undelivered for 24 hours.
+- Answer `2xx` only after the credit and the event are durably stored. Anything else, a
+  redirect (never followed), or no answer within 20 s is retried with full-jitter backoff whose
+  ceiling starts at 30 s and doubles to 1 h, until delivered: an endpoint is never disabled for
+  failing, so a credit is never dropped. While your endpoint keeps failing it is probed about once
+  an hour, one event at a time; once it answers `2xx` its backlog is delivered. Answer `410 Gone`
+  only to stop deliveries for good: it disables the endpoint at once (`disabled_reason: "gone"`)
+  and your other endpoints get `webhook_endpoint.updated`. Every event stays in
+  `GET /v1/events`; resend any with §5.11.
 - Deduplicate by `webhook-id`; delivery is at least once.
 - There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
   payment. Act on fetched state (the deposit or quote), never on event order.
 - Only `deposit.credited` moves a balance up, and `deposit.reversed` and `deposit.refunded` move
   it back (§2); every other event is for notifications, history, and UI refresh.
 - Ignore unknown event types and unknown fields.
-- A lost event can be replayed by the operator with the admin-signed
-  `POST /v1/admin/outbox/{event_id}/replay {reason}`: same id, same body. An event delivered
-  before prefixed ids keeps its old envelope on replay (`event_id`, `created_at`, flat `data`);
-  the SDK parses it, and `CreditedDeposit.from_event` refuses it because it was fulfilled when
-  first delivered. The operator's
-  deposit view (`GET /v1/admin/deposits/{id}`) lists each deposit's `events` with `delivered_at`.
+- Resend a lost event yourself with `POST /v1/events/{id}/resend {webhook_endpoint}`: same id,
+  same body (§5.11). The operator does not manage your endpoints or resend your events.
 
 | Type | When | `data.object` |
 |---|---|---|
@@ -661,6 +662,14 @@ the service's public key.
 | `account.treasury.pending` | A live treasury change was proven and applies at `effective_at` (§1.6); sent to every enabled endpoint of the mode. Cancel it if you did not request it. | The treasury, `status: "pending"` |
 | `account.treasury.updated` | A treasury took effect (§1.6); sent to every enabled endpoint of the mode. | The treasury, `status: "active"` |
 | `account.treasury.canceled` | A pending change was canceled; sent to every enabled endpoint of the mode. | The treasury, `status: "canceled"` |
+| `account.updated` | The operator changed your account (live mode, restriction), or your account settings changed. | The account |
+| `api_key.created`, `api_key.updated`, `api_key.revoked` | A key of the mode was created, rolled, or revoked (§5.4). | The key, without its secret |
+| `webhook_endpoint.created`, `webhook_endpoint.updated`, `webhook_endpoint.deleted` | An endpoint of the mode changed; `updated` carries the replaced values in `data.previous_attributes` (§5.11). | The endpoint, as it was after the change |
+| `webhook_endpoint.test` | `POST /v1/webhook_endpoints/{id}/test`; sent to that endpoint only. | The endpoint |
+
+The account events (`account.*` including `account.treasury.*`, `api_key.*`, `webhook_endpoint.*`) are your security notices:
+every enabled endpoint of the mode receives them whatever its `enabled_events`. Every event names
+its `actor`: the key id (`key_…`) that caused it, `admin` for the operator, or `system`.
 
 Every object names its `account_id`. Before the route's confirmation nothing is sent: a checkout
 page shows the payment from the quote's `payment` (or the payer's `payment_status` read by
@@ -771,8 +780,8 @@ Staging's route, with its forwarder factory, implementation, and test PHA token
 (a `MockERC20` whose `mint(address,uint256)` is public), is
 [deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml).
 Staging's `phala-cloud` account is currently the reference product; switching staging to Phala
-Cloud's staging backend is an operator change of the account's webhook URL, and the route stays
-as it is. Your key selects the mode: `ppay_sk_test_` keys act on test routes (Sepolia), and
+Cloud's staging backend is a change of the account's webhook endpoint with its test key (§5.11),
+and the route stays as it is. Your key selects the mode: `ppay_sk_test_` keys act on test routes (Sepolia), and
 `ppay_sk_live_` keys, issued once the operator enables live mode, on live routes.
 
 ### 4.2 Testing your receiver
@@ -839,8 +848,8 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
 ### 5.1 Your account and first keys (done by the operator)
 
 There is no signup: the operator creates your account after due diligence done offline
-(design D8). Send the operator your company's details, a security contact (name and email), and
-your webhook URL (public `https`). The operator then:
+(design D8). Send the operator your company's details and a security contact (name and email).
+The operator then:
 
 1. creates the account with the admin-signed `POST /v1/admin/accounts`
    ([deploy/README.md](../deploy/README.md#account-credentials)), which returns its id, `acct_…`,
@@ -850,7 +859,7 @@ your webhook URL (public `https`). The operator then:
 
 Live mode is the operator's decision (`charges_enabled`); enabling it returns your first live key,
 `ppay_sk_live_…`, handed over and rolled the same way. Until then a live key answers
-`403 testmode_charges_only`.
+`403 testmode_charges_only`. You register your webhook endpoints yourself, per mode (§5.11).
 
 ### 5.2 Keys and modes
 
@@ -1021,6 +1030,8 @@ account's or the other mode's objects answer `404`, as a missing one does. `acco
 | `POST /v1/treasuries/{id}/cancel` | Cancel a pending change. | — |
 | `GET /v1/attestation?nonce=` | Your account's webhook keys in the key's mode, with evidence (§5.3). | `attestation` |
 | `POST /v1/account/webhook_keys/roll` `{expires_in?}` | Roll the mode's webhook key (§5.3). | `roll_webhook_key` |
+| `GET\|POST /v1/webhook_endpoints`, `GET\|POST\|DELETE /v1/webhook_endpoints/{id}`, `POST /v1/webhook_endpoints/{id}/test` | Your webhook endpoints (§5.11). | — |
+| `GET /v1/events`, `GET /v1/events/{id}`, `POST /v1/events/{id}/resend` | Your events and audit log; resend one to an endpoint (§5.11). | — |
 
 ### 5.8 Errors
 
@@ -1122,3 +1133,30 @@ cargo test -p topup --lib api::auth
 Also in this repository: the local sandbox, `make sandbox-local`, whose smoke check
 [deploy/sandbox/smoke.py](../deploy/sandbox/smoke.py) pins, quotes, recomputes, and verifies
 ([deploy/sandbox/README.md](../deploy/sandbox/README.md)).
+
+### 5.11 Webhook endpoints and events
+
+You manage your receivers with your secret key, per mode, as Stripe's
+[webhook endpoints](https://docs.stripe.com/api/webhook_endpoints): at most 16 per mode.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /v1/webhook_endpoints` `{url, enabled_events, description?, metadata?}` | Register an endpoint. `url` is `https` on port 443; in test mode also `http` on port 80; no credentials or fragment. `enabled_events` lists types (§2.6), or `["*"]` for all. `409 webhook_endpoint_cap_exceeded` past 16. |
+| `GET /v1/webhook_endpoints` | Your endpoints, newest first; `limit`, `starting_after`, `ending_before` (`we_…`). |
+| `GET /v1/webhook_endpoints/{id}` | One endpoint: `url`, `enabled_events`, `status` (`enabled` or `disabled`), `disabled_reason` (`gone` after a `410 Gone`, or `null` when you disabled it; failures never disable it), `description`, `metadata`. |
+| `POST /v1/webhook_endpoints/{id}` `{url?, enabled_events?, description?, disabled?, metadata?}` | Change it; `disabled: true` stops it and its pending deliveries, `false` re-enables it. `metadata` merges as in §1.4. |
+| `DELETE /v1/webhook_endpoints/{id}` | Delete it: `{id, object: "webhook_endpoint", deleted: true}`. |
+| `POST /v1/webhook_endpoints/{id}/test` | Send it a signed `webhook_endpoint.test`, enabled or not; there is no URL challenge. |
+| `GET /v1/events` | Every event of the mode, newest first, whether or not it was delivered: `type` (a type, or a group such as `deposit.*`), `created[gt\|gte\|lt\|lte]`, `limit`, `starting_after`, `ending_before` (`evt_…`). Each event carries `actor` and `pending_webhooks`: this is your account's audit log. |
+| `GET /v1/events/{id}` | One event, as it was delivered. |
+| `POST /v1/events/{id}/resend` `{webhook_endpoint}` | Deliver it again to one enabled endpoint (`409 webhook_endpoint_disabled` otherwise), with the same `webhook-id` and body, as the Stripe CLI's `events resend`. |
+
+- A change to an endpoint is announced as `webhook_endpoint.updated` or `.deleted` to every enabled
+  endpoint, and first to the changed one, at the URL it had before the change, even when the
+  change disables or deletes it. Treat an endpoint change you did not make like a leaked key:
+  roll your keys (§5.4) and restore the endpoint.
+- Deliveries leave through an egress proxy that refuses addresses that are not publicly routable
+  (private, loopback, link-local and cloud metadata, CGNAT); such a URL fails like an unreachable
+  one: retried, never disabled. Redirects are never followed.
+- Undelivered events stay in `GET /v1/events`. After re-enabling an endpoint, page through the
+  events it missed (`created[gte]`) and resend each; your receiver deduplicates by `webhook-id`.

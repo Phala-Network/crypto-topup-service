@@ -35,6 +35,26 @@ webhook receivers must ignore unknown fields. The format follows
 - Quotes carry `treasury`, the treasury their address pays.
 - Admin `POST /v1/admin/accounts/{account}/pause` and `/resume` `{scopes, reason}`: pause or resume
   scopes of a whole account in both modes, audited and announced as `account.updated`.
+- Webhook endpoints managed by the merchant (docs/design/multi-tenant.md D11, §11, §16 PR 8):
+  `POST /v1/webhook_endpoints {url, enabled_events, description?, metadata?}`,
+  `GET /v1/webhook_endpoints` (cursor pagination), `GET|POST|DELETE /v1/webhook_endpoints/{id}`
+  (`disabled: true|false` disables or re-enables), and `POST /v1/webhook_endpoints/{id}/test`
+  (a `webhook_endpoint.test` event to that endpoint only). At most 16 per account and mode
+  (`409 webhook_endpoint_cap_exceeded`); `url` is `https` on port 443, or in test mode also `http`
+  on port 80. The object carries `livemode`, `url`, `enabled_events` (types or `["*"]`), `status`
+  (`enabled`, `disabled`), `disabled_reason` (`gone`), `description`, and `metadata`.
+- Events API: `GET /v1/events?type&created[gt|gte|lt|lte]` (a type, or a group such as
+  `deposit.*`; cursor pagination), `GET /v1/events/{id}`, and
+  `POST /v1/events/{id}/resend {webhook_endpoint}` (the same event to one enabled endpoint;
+  `409 webhook_endpoint_disabled` otherwise). Events carry `actor` (`key_…`, `admin`, or
+  `system`) in the API and in webhook bodies, and `pending_webhooks` in the API: the audit log.
+- Account events `webhook_endpoint.created`, `webhook_endpoint.updated` (with
+  `data.previous_attributes`), and `webhook_endpoint.deleted`. Account events (`account.*`,
+  `api_key.*`, `webhook_endpoint.*`) reach every enabled endpoint of the mode whatever its
+  `enabled_events`, and a changed or deleted endpoint receives the event about itself first, at
+  its previous URL.
+  Permissions `endpoints.read`, `endpoints.write`, and `events.read` are enforced.
+
 - Deposit addresses (docs/design/multi-tenant.md "Deposit addresses"), restored per the owner's
   2026-09-21 requirement, with one address per customer for every supported token on every chain
   (the owner's 2026-09-28 decision, exchange practice). `POST /v1/deposit_addresses
@@ -77,6 +97,18 @@ webhook receivers must ignore unknown fields. The format follows
   treasury_not_set` when none has). Route files no longer have `chain.treasury` (a route file that
   still names it is refused), and the admin daily report drops `treasury_balance_atomic` and
   `treasury_balance_note`.
+- **Breaking**: webhook delivery (§16 PR 8). Retries still continue until delivered (backoff
+  capped at 1 h) and a failing endpoint is never disabled (owner decision); `410 Gone` from the
+  receiver disables its endpoint at once (`disabled_reason: gone`), announced to the account's
+  other endpoints as `webhook_endpoint.updated`. A disabled or deleted endpoint's pending
+  deliveries stop; resend them with `POST /v1/events/{id}/resend`. Each endpoint has at most 4
+  deliveries in flight, slots go round-robin across endpoints, a failing endpoint is probed one
+  delivery at a time after a backoff, and events are not ordered. Deliveries leave through an egress proxy (smokescreen) that refuses
+  addresses that are not publicly routable.
+- **Breaking**: the operator no longer manages merchants' webhooks: `webhook_url` is removed from
+  `POST /v1/admin/accounts` and `POST /v1/admin/accounts/{account}` (an unknown field is `400`),
+  and `POST /v1/admin/outbox/{event_id}/replay` and the `topup outbox replay` command are removed.
+  Existing endpoints are kept and are now managed through `/v1/webhook_endpoints`.
 - **Breaking**: webhooks are signed with a key per account and mode (docs/design/multi-tenant.md
   D11, §16 PR 6), derived in the attested CVM at `settlement/{acct}/{live|test}/v{n}`, instead of
   the one shared `settlement/v1` key: an event signed for one account never verifies at another.

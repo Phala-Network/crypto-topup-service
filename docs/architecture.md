@@ -277,11 +277,16 @@ refunds       id, account_id, livemode, chain_id, deposit_id, amount_atomic, des
               metadata jsonb, created_at   -- paid by the merchant from the address's treasury
               UNIQUE (chain_id, tx_hash, log_index) among pending and succeeded refunds
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
-events        id (evt_…), account_id, livemode, type, object_type (deposit|quote|api_key|account|refund),
+              (enabled|disabled), disabled_reason (failing|gone), description, metadata jsonb,
+              created_at, deleted_at   -- at most 16 not deleted per account and mode
+events        id (evt_…), account_id, livemode, type,
+              object_type (deposit|quote|api_key|account|refund|webhook_endpoint),
               object_id, actor (key_… | admin | system), data jsonb, created
-              -- data: the object, rendered at the first delivery attempt
-webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
-              PRIMARY KEY (event_id, endpoint_id)   -- one per enabled endpoint of the event's scope
+              -- data: the object, rendered at the first delivery attempt or read; endpoint
+              -- events store a snapshot when they happen
+webhook_deliveries  event_id, endpoint_id, next_attempt_at, attempts, created_at, delivered_at,
+              failed_at, url (an endpoint's notice of its own change), response jsonb
+              PRIMARY KEY (event_id, endpoint_id)   -- one per endpoint of the event's scope that takes it
 audit         id, account_id, actor_type (api_key|admin|system), actor_id, action, subject,
               reason, created_at
 ```
@@ -609,7 +614,7 @@ fulfills it once: the pattern of Stripe Checkout fulfillment. The deposit's stat
 on the product's answer; delivery is tracked on the outbox row.
 
 ```http
-POST {webhook_url}
+POST {webhook endpoint url}
 webhook-id: evt_<hex of uuid_v5(DEPOSIT_NAMESPACE, "deposit.credited:" + deposit UUID)>
 webhook-timestamp: <Unix seconds of this attempt>
 webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
@@ -626,22 +631,38 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 - The screen step writes the event in the transaction that moves the deposit `confirmed →
   credited` (§7), seconds after the transfer reaches the route's confirmation (§8). The outbox row names the product and the deposit; `data.object`, the deposit
   as `GET /v1/deposits/{id}` returns it, is rendered on the first delivery attempt and stored,
-  so retries and replays send the same body. `amount` is the quoted credit when `price_source`
+  so retries and resends send the same body. `amount` is the quoted credit when `price_source`
   is `quote`, otherwise the spot credit at finality (§9). `quote` is the receiving address's
   quote, also when a late or wrong-amount payment was valued at spot.
 - A credited deposit whose transaction leaves the chain before finality (§7) is `reversed`, and
   `deposit.reversed` follows, with the same derived-id rule. This is Stripe's pattern for a
   payment that fails after success (an ACH failure after `succeeded` becomes a dispute): rare,
   signed, and handled by the product like a refund.
-- Delivery is the outbox (§12): at least once, in no order, `2xx` acknowledges, anything else or
-  no answer within 20 s is retried with full-jitter backoff (ceiling 30 s doubling to 1 h),
-  forever; an undelivered event raises the outbox age warning after 24 hours and the operator
-  can replay it. Test and live events have separate delivery workers (`topup-outbox-test`,
-  `topup-outbox-live`), so test traffic cannot delay live deliveries (design §9). The daily
+- Delivery is the outbox (§12): at least once, in no order, to every enabled endpoint of the
+  account and mode that subscribes to the event (`enabled_events`, or `*`). `2xx` acknowledges;
+  a redirect (never followed), anything else, or no answer within 20 s is retried with
+  full-jitter backoff (ceiling 30 s doubling to 1 h) until delivered, forever: a failing
+  endpoint is never disabled automatically, since without an email channel a disabled endpoint
+  would leave a paid deposit uncredited silently (owner decision, design §11). Only `410 Gone`
+  disables an endpoint (`disabled_reason: gone`), as Standard Webhooks asks, announced to the
+  account's other endpoints as `webhook_endpoint.updated`. A disabled or deleted endpoint's
+  pending deliveries stop; the merchant re-enables it and resends what it missed
+  (`POST /v1/events/{id}/resend`). Each endpoint has at most 4 deliveries in flight and free
+  slots go round-robin across endpoints, so a slow receiver holds only its own slots; after a
+  failure an endpoint cools down on the same backoff and is then probed one delivery at a time
+  until one succeeds, so a dead endpoint costs one slot and about one attempt an hour whatever
+  its queue; test and live events have separate delivery workers
+  (`topup-outbox-test`, `topup-outbox-live`), so test traffic cannot delay live deliveries
+  (design §9). An undelivered event raises the outbox age warning after 24 hours. The daily
   report counts undelivered `deposit.credited` per route.
-- The event id is derived from the deposit id, so every retry, replay, and re-emission after a
+- Every delivery leaves through the smokescreen sidecar (`TOPUP_WEBHOOK_PROXY`), the only filter
+  of the addresses a merchant's URL may reach: it refuses loopback, private, link-local and cloud
+  metadata, CGNAT, and IPv4-embedding IPv6 addresses, and IPv4-mapped IPv6 as the IPv4 it maps
+  (design §8; deploy/README.md, "Webhook egress"). The service itself checks only the URL's
+  scheme and port (§12).
+- The event id is derived from the deposit id, so every retry, resend, and re-emission after a
   restore carries the same `webhook-id`, and the outbox stores one row per deposit. Every
-  delivery, including a replay, is signed at send time with the account's current keys.
+  delivery, including a resend, is signed at send time with the account's current keys.
 
 Product obligations:
 
@@ -714,8 +735,9 @@ up to 7 days, or is revoked at once), and revoke, except the mode's last key tha
 revoked nor expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
 admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live
-mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, lifts
-reconciliation blocks (§13), and replays webhook events; each change writes
+mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, and lifts
+reconciliation blocks (§13); it never registers or replays a merchant's webhooks. Each change
+writes
 `audit`, and each key or account change is also an `api_key.*` or `account.updated` event with
 its actor.
 
@@ -745,16 +767,21 @@ GET    /v1/refunds/{id}
 POST   /v1/refunds/{id} {metadata}                                update metadata
 GET    /v1/attestation?nonce=…                                    the key's account's webhook keys (§14)
 POST   /v1/account/webhook_keys/roll {expires_in}                 next webhook key version (§10)
+GET|POST /v1/webhook_endpoints {url, enabled_events, description?, metadata?}   at most 16 per mode
+GET|POST|DELETE /v1/webhook_endpoints/{id} {url?, enabled_events?, description?, disabled?, metadata?}
+POST   /v1/webhook_endpoints/{id}/test                            a webhook_endpoint.test event to it alone
+GET    /v1/events?type&created[gt|gte|lt|lte]&limit&starting_after&ending_before   notifications and audit log
+GET    /v1/events/{id}
+POST   /v1/events/{id}/resend {webhook_endpoint}                  deliver it again to an enabled endpoint
 
-POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason, webhook_url?}   + first keys
-POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, webhook_url?, reason}   enabling live → first live key
+POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason}   + first keys
+POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, reason}   enabling live → first live key
 POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   recovery key
 GET    /v1/admin/deposits/{id}            stored facts, transitions, and webhook events (support)
 POST   /v1/admin/accounts/{acct}/customers/{account_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
 POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
 POST   /v1/admin/reconciliation-blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
-POST   /v1/admin/outbox/{event_id}/replay {reason}   redeliver an existing event unchanged
 GET    /v1/admin/report/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
 ```
@@ -864,8 +891,9 @@ The SDK retries `429`, `5xx`, transport errors, and `idempotency_key_in_use`, wi
 `Idempotency-Key`.
 
 **Events** (Standard Webhooks, signed with the account's webhook key in the event's mode) are
-Stripe's Event object, `{id: "evt_…", object: "event", account, livemode, type, created, data:
-{object}}`; every object carries `livemode`. The SDK's `construct_event` fails closed unless a
+Stripe's Event object, `{id: "evt_…", object: "event", account, livemode, type, created, actor,
+data: {object}}`; every object carries `livemode`, and `actor` names who caused the event (an API
+key id, `admin`, or `system`). The SDK's `construct_event` fails closed unless a
 signature verifies with a pinned key and `account` and `livemode` are the receiver's: `deposit.credited`,
 `deposit.rejected`, `deposit.reversed` (the deposit's transaction left the chain before finality;
 sent for a deposit reported as credited or rejected), and `deposit.refunded` (one per final
@@ -873,7 +901,8 @@ refund) carry the deposit, `refund.failed` (the attached transaction is final bu
 refund; one per refund) the refund with its `failure_reason`, `quote.expired` the quote, and
 `account.treasury.pending`, `.updated`, and `.canceled` the treasury (§9; random event ids, like
 `api_key.*`). `data.object` is the object as the API returns it, rendered on the first
-delivery attempt and stored, so every retry and replay sends the same body. Every event id is
+delivery attempt (or read through `GET /v1/events`) and stored, so every retry and resend sends
+the same body. Every event id is
 `uuid_v5(NS, "{type}:{object UUID}")`, the object being the refund for `deposit.refunded` and
 `refund.failed`, so a
 re-emission after a restore deduplicates for every type. `deposit.credited` is the fulfillment
@@ -883,6 +912,18 @@ checkout page reads the quote's `payment`. The outbox does not order events, so
 `quote.expired` can arrive after the `deposit.credited` of a late payment; receivers must act on
 state (the deposit or quote they fetch), never on event order. Object changes are additive;
 receivers must ignore unknown fields.
+
+**Account events** (`account.updated`, `api_key.created|updated|revoked`,
+`webhook_endpoint.created|updated|deleted`, and design PR 7's `account.treasury.*`) are the
+account's security notices and reach every enabled endpoint of the mode whatever its
+`enabled_events`, GitHub's `meta` precedent (design §11). A change to an endpoint is announced to
+that endpoint first, at the URL it had before, even when the change disables or deletes it, so a
+leaked key cannot redirect or silence an endpoint unseen; `webhook_endpoint.updated` carries the
+replaced values in `data.previous_attributes`. `GET /v1/events` lists every event of the mode,
+filterable by `type` (or a group, `deposit.*`) and `created`: the merchant's notifications and its
+audit log (design §13). `POST /v1/webhook_endpoints/{id}/test` sends `webhook_endpoint.test` to
+one endpoint. Endpoint URLs are `https` on port 443, or in test mode also `http` on 80; the
+egress proxy decides which addresses they may reach (§11).
 
 OpenAPI comes from `utoipa`; the SDKs are generated from it and ship with a runnable integration
 example, a signing helper, and a versioning and deprecation policy. A sandbox (Sepolia, test
@@ -1238,7 +1279,7 @@ Ownership: **S** service, **P** product (Phala Cloud UI and billing), **F** fina
 | Pause scopes with customer-facing effect; status page and incident communications | S+P | ✓ | | |
 | Localization, currency and time display | P | | ✓ | |
 | SDK with signing helper, idempotent client, examples; versioning policy; sandbox | S | ✓ | | |
-| Webhook delivery log, test send, replay | S | admin replay | ✓ | |
+| Webhook delivery log, test send, replay | S | events API, test send, resend | ✓ | |
 | Multi-product tenancy administration; self-serve product onboarding | S | | | ✓ |
 | Sender address book and source whitelisting | S+P | | | ✓ |
 | Built-in token purchase, withdrawal, trading account | — | | | never |

@@ -167,6 +167,8 @@ jobs:
           --tag phala-pay:ci .
       - name: Smoke test runtime image
         run: docker run --rm phala-pay:ci topup --help
+      - name: The webhook egress proxy refuses private, CGNAT, and IPv4-mapped targets
+        run: deploy/tests/smokescreen.sh phala-pay:ci
       - name: Build and smoke test the reference-product image
         run: |
           docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \

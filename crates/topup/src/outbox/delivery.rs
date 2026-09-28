@@ -1,12 +1,15 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use reqwest::Client;
+use futures_util::future::{Fuse, FusedFuture as _, FutureExt as _};
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
+use reqwest::{Client, Proxy, Url};
 use serde_json::{Value, json};
+use sqlx::Row;
 use sqlx::postgres::PgPool;
-use sqlx::{PgConnection, Postgres, Row, Transaction};
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use topup_core::{Signer, retry::backoff};
 use tracing::Instrument as _;
@@ -17,35 +20,45 @@ use crate::db::EventObject;
 use crate::jitter::{JitterSource, OsJitter};
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
+use crate::webhook_endpoints;
 
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
+/// Endpoints considered by one scheduling pass.
+const MAX_ENDPOINTS_PER_PASS: i64 = 1000;
 
 /// Runtime limits for the webhook delivery loop.
 #[derive(Clone, Debug)]
 pub struct DeliveryConfig {
-    /// Maximum number of due deliveries reserved by one polling pass.
-    pub batch_size: u32,
+    /// Deliveries in flight at once, across endpoints.
+    pub max_in_flight: usize,
+    /// Deliveries in flight at once to one endpoint (design §11: 4).
+    pub endpoint_concurrency: usize,
     /// Complete HTTP request timeout, including reading the response body.
     pub request_timeout: Duration,
-    /// Reservation duration; this must exceed the whole batch request timeout.
+    /// Reservation of a claimed delivery; this must exceed the request timeout.
     pub claim_lease: Duration,
-    /// Delay between empty polls or database failures.
+    /// Delay between polls that find nothing to do, or after a database failure.
     pub poll_interval: Duration,
     /// Maximum response body bytes retained in `webhook_deliveries.response`.
     pub response_body_limit: usize,
     /// Pending age after which every claimed event emits a warning.
     pub age_alert_threshold: Duration,
+    /// The egress proxy every delivery goes through: smokescreen, the only IP filter (design §8).
+    /// `None` connects directly, only for local stacks and tests.
+    pub proxy: Option<Url>,
 }
 
 impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
-            batch_size: 8,
+            max_in_flight: 32,
+            endpoint_concurrency: 4,
             request_timeout: Duration::from_secs(20),
             claim_lease: Duration::from_secs(5 * 60),
             poll_interval: Duration::from_secs(1),
             response_body_limit: 4 * 1024,
             age_alert_threshold: Duration::from_secs(24 * 60 * 60),
+            proxy: None,
         }
     }
 }
@@ -62,6 +75,9 @@ pub enum DeliveryError {
     /// PostgreSQL could not claim or persist a delivery.
     #[error("webhook delivery database operation failed: {0}")]
     Database(#[from] sqlx::Error),
+    /// An endpoint could not be disabled.
+    #[error("failed to disable webhook endpoint: {0}")]
+    Endpoint(#[from] webhook_endpoints::EndpointError),
 }
 
 /// One event's delivery to one endpoint, reserved by a claim lease.
@@ -70,9 +86,12 @@ struct ClaimedEvent {
     id: Uuid,
     endpoint_id: Uuid,
     url: String,
+    /// The endpoint's own notice, sent to `url` whatever the endpoint's status.
+    notice: bool,
     scope: Scope,
     account: String,
     event_type: String,
+    actor: String,
     data: Value,
     object: Option<EventObject>,
     attempts: i32,
@@ -80,22 +99,63 @@ struct ClaimedEvent {
     claim_until: DateTime<Utc>,
 }
 
-struct ClaimedDelivery {
-    transaction: Transaction<'static, Postgres>,
-    event: ClaimedEvent,
+/// What one attempt came to.
+/// What one attempt says about its endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reach {
+    /// The endpoint acknowledged it.
+    Reached,
+    /// The endpoint failed it: an error status, a redirect, a timeout, or no connection.
+    Failed,
+    /// The service failed before sending it.
+    Unknown,
 }
 
-enum ClaimResult {
-    Empty,
-    Deferred,
-    Ready(Box<ClaimedDelivery>),
+/// A failing endpoint's cooldown: while it runs the endpoint is not claimed, and after it the
+/// endpoint gets one probe delivery at a time until one succeeds. The cooldown is the delivery
+/// backoff over the endpoint's consecutive failures (full jitter, ceiling 30 s doubling to 1 h),
+/// so a dead endpoint costs about one attempt per hour, however many deliveries it has queued.
+#[derive(Clone, Copy, Debug)]
+struct Cooldown {
+    failures: u32,
+    until: Instant,
+}
+
+enum Outcome {
+    Delivered(Value),
+    Failed {
+        status: Option<u16>,
+        body: Option<String>,
+        error: &'static str,
+        /// Whether the endpoint caused it, as opposed to the service failing to render or sign.
+        endpoint_fault: bool,
+    },
+}
+
+impl Outcome {
+    const fn internal(error: &'static str) -> Self {
+        Self::Failed {
+            status: None,
+            body: None,
+            error,
+            endpoint_fault: false,
+        }
+    }
 }
 
 /// PostgreSQL-backed Standard Webhooks sender of one mode's events.
 ///
 /// Test and live events have separate workers (design §9), so test traffic cannot delay live
-/// deliveries. Each delivery is signed with the event's account key in the event's mode, once per
-/// key version still signing during a rotation (design D11).
+/// deliveries. Deliveries run concurrently, at most `endpoint_concurrency` to one endpoint, and
+/// free slots are shared round-robin across the endpoints with due deliveries, so a slow endpoint
+/// holds only its own slots and never delays another (design §11). No database connection is held
+/// while a request is in flight: a delivery is reserved by its lease. Each delivery is signed with
+/// the event's account key in the event's mode, once per key version still signing during a
+/// rotation (design D11). A delivery that fails is retried with full-jitter backoff capped at an
+/// hour until it is delivered: nothing gives up on a timer, since a disabled endpoint would drop a
+/// merchant's credits silently (owner decision, design §11). Only `410 Gone` from the receiver, or
+/// the merchant disabling or deleting the endpoint, stops deliveries. A permanently failing
+/// endpoint costs at most its `endpoint_concurrency` slots and one claim per slot per backoff.
 pub struct DeliveryWorker<S> {
     pool: PgPool,
     routes: Arc<RouteSet>,
@@ -110,8 +170,8 @@ impl<S> DeliveryWorker<S>
 where
     S: Signer,
 {
-    /// Builds a worker of the `livemode` events with redirects disabled and a bounded request
-    /// timeout.
+    /// Builds a worker of the `livemode` events with redirects disabled, a bounded request
+    /// timeout, and every request sent through `config.proxy`.
     pub fn new(
         pool: PgPool,
         routes: Arc<RouteSet>,
@@ -120,11 +180,17 @@ where
         config: DeliveryConfig,
     ) -> Result<Self, DeliveryError> {
         validate_config(&config)?;
-        let client = Client::builder()
+        // Stripe counts a redirect as a failure; following one would also leave the proxy's
+        // decision to the redirect target.
+        let builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(config.request_timeout)
-            .build()
-            .map_err(DeliveryError::Client)?;
+            .timeout(config.request_timeout);
+        let builder = match &config.proxy {
+            Some(proxy) => builder.proxy(Proxy::all(proxy.clone()).map_err(DeliveryError::Client)?),
+            // Never an ambient HTTP_PROXY: without the configured proxy, connect directly.
+            None => builder.no_proxy(),
+        };
+        let client = builder.build().map_err(DeliveryError::Client)?;
         Ok(Self {
             pool,
             routes,
@@ -136,62 +202,245 @@ where
         })
     }
 
-    /// Polls until shutdown, retaining failed deliveries for unlimited retries. The worker's
-    /// monitor is `topup-outbox-live` or `topup-outbox-test`.
+    /// Delivers until shutdown. The worker's monitor is `topup-outbox-live` or
+    /// `topup-outbox-test`.
     pub async fn run(&self, shutdown: CancellationToken) {
         let mode = if self.livemode { "live" } else { "test" };
         self.run_with_instance(mode.to_owned(), shutdown).await;
     }
 
-    /// Polls one named delivery worker until shutdown.
+    /// Runs one named delivery worker until shutdown: claims due deliveries whenever slots are
+    /// free, again at once after a claim that found some or a delivery that completed, else every
+    /// `poll_interval`. Claims and deliveries in flight are polled together, so neither waits on
+    /// the other. Deliveries in flight at shutdown are abandoned; their leases expire and they are
+    /// retried.
     pub async fn run_with_instance(&self, instance: String, shutdown: CancellationToken) {
         let monitor = crate::observability::CronMonitor::outbox(&instance);
+        let mut in_flight = FuturesUnordered::new();
+        let mut busy = HashMap::<Uuid, usize>::new();
+        let mut cooldowns = HashMap::<Uuid, Cooldown>::new();
+        let claiming = Fuse::terminated();
+        tokio::pin!(claiming);
+        let mut next_claim = Instant::now();
         loop {
             if shutdown.is_cancelled() {
                 return;
             }
-            monitor.check_in(true);
-
-            let should_pause = match self.run_once().await {
-                Ok(claimed) => claimed == 0,
-                Err(error) => {
-                    tracing::error!(%error, "outbox delivery poll failed");
-                    true
+            let free = self.config.max_in_flight.saturating_sub(in_flight.len());
+            if claiming.is_terminated() && free > 0 && Instant::now() >= next_claim {
+                monitor.check_in(true);
+                let now = Instant::now();
+                let cooling = cooldowns
+                    .iter()
+                    .filter(|(_, cooldown)| cooldown.until > now)
+                    .map(|(id, _)| *id)
+                    .collect();
+                let probing = cooldowns.keys().copied().collect();
+                claiming.set(self.claim(busy.clone(), cooling, probing, free).fuse());
+            }
+            let idle = claiming.is_terminated() && free > 0;
+            tokio::select! {
+                Some((endpoint_id, result)) = in_flight.next(), if !in_flight.is_empty() => {
+                    release(&mut busy, endpoint_id);
+                    match result {
+                        Ok(Reach::Reached) => {
+                            cooldowns.remove(&endpoint_id);
+                        }
+                        Ok(Reach::Failed) => {
+                            let failures = cooldowns
+                                .get(&endpoint_id)
+                                .map_or(0, |cooldown| cooldown.failures);
+                            let delay = retry_delay(
+                                i32::try_from(failures).unwrap_or(i32::MAX),
+                                self.entropy.as_ref(),
+                            );
+                            cooldowns.insert(endpoint_id, Cooldown {
+                                failures: failures.saturating_add(1),
+                                until: Instant::now() + delay,
+                            });
+                        }
+                        Ok(Reach::Unknown) => {}
+                        Err(error) => tracing::error!(%error, "outbox delivery failed"),
+                    }
+                    next_claim = Instant::now();
                 }
-            };
-
-            if should_pause {
-                tokio::select! {
-                    () = sleep(self.config.poll_interval) => {}
-                    () = shutdown.cancelled() => return,
-                }
+                claimed = &mut claiming, if !claiming.is_terminated() => match claimed {
+                    Ok(claimed) if !claimed.is_empty() => {
+                        for event in claimed {
+                            *busy.entry(event.endpoint_id).or_default() += 1;
+                            in_flight.push(self.attempt(event));
+                        }
+                    }
+                    Ok(_) => next_claim = Instant::now() + self.config.poll_interval,
+                    Err(error) => {
+                        tracing::error!(%error, "outbox delivery claim failed");
+                        next_claim = Instant::now() + self.config.poll_interval;
+                    }
+                },
+                () = sleep_until(next_claim), if idle => {}
+                () = shutdown.cancelled() => return,
             }
         }
     }
 
-    /// Claims one small batch and attempts each delivery once.
+    /// Claims the due deliveries that fit one pass and attempts each once, concurrently; returns
+    /// how many were claimed.
     pub async fn run_once(&self) -> Result<usize, DeliveryError> {
-        let mut claimed = 0_usize;
-        for _ in 0..self.config.batch_size {
-            match claim_next(&self.pool, self.livemode, &self.config).await? {
-                ClaimResult::Empty => break,
-                ClaimResult::Deferred => {
-                    claimed = claimed.saturating_add(1);
-                }
-                ClaimResult::Ready(delivery) => {
-                    claimed = claimed.saturating_add(1);
-                    self.warn_if_old(&delivery.event);
-                    let span = crate::observability::outbox_delivery_span(
-                        delivery.event.id,
-                        &delivery.event.event_type,
-                        delivery.event.object.map(EventObject::id),
-                        delivery.event.attempts,
-                    );
-                    self.deliver_claimed(*delivery).instrument(span).await?;
-                }
+        let claimed = self
+            .claim(
+                HashMap::new(),
+                Vec::new(),
+                HashSet::new(),
+                self.config.max_in_flight,
+            )
+            .await?;
+        let count = claimed.len();
+        let mut attempts: FuturesUnordered<_> = claimed
+            .into_iter()
+            .map(|event| self.attempt(event))
+            .collect();
+        let mut first_error = None;
+        while let Some((_, result)) = attempts.next().await {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
             }
         }
+        first_error.map_or(Ok(count), Err)
+    }
+
+    /// Reserves up to `free` due deliveries, handing the slots out round-robin across endpoints
+    /// in order of their oldest due delivery, each endpoint up to `endpoint_concurrency` including
+    /// its deliveries already in flight (`busy`), a `probing` endpoint up to one, and a `cooling`
+    /// endpoint none.
+    async fn claim(
+        &self,
+        busy: HashMap<Uuid, usize>,
+        cooling: Vec<Uuid>,
+        probing: HashSet<Uuid>,
+        free: usize,
+    ) -> Result<Vec<ClaimedEvent>, sqlx::Error> {
+        let endpoints: Vec<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT delivery.endpoint_id
+            FROM webhook_deliveries AS delivery
+            JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
+            WHERE delivery.delivered_at IS NULL
+              AND delivery.failed_at IS NULL
+              AND delivery.next_attempt_at <= now()
+              AND endpoint.livemode = $1
+              AND ((endpoint.status = 'enabled' AND endpoint.deleted_at IS NULL)
+                   OR delivery.url IS NOT NULL)
+              AND NOT (delivery.endpoint_id = ANY($3))
+            GROUP BY delivery.endpoint_id
+            ORDER BY min(delivery.next_attempt_at), delivery.endpoint_id
+            LIMIT $2
+            "#,
+        )
+        .bind(self.livemode)
+        .bind(MAX_ENDPOINTS_PER_PASS)
+        .bind(&cooling)
+        .fetch_all(&self.pool)
+        .await?;
+        let concurrency = self.config.endpoint_concurrency;
+        let capacity = |id: &Uuid| if probing.contains(id) { 1 } else { concurrency };
+        let shares = round_robin(&endpoints, &busy, capacity, free);
+        let mut claimed = Vec::new();
+        for (endpoint_id, share) in shares {
+            claimed.extend(self.claim_endpoint(endpoint_id, share).await?);
+        }
         Ok(claimed)
+    }
+
+    /// Reserves up to `limit` due deliveries of one endpoint, its own notices first.
+    async fn claim_endpoint(
+        &self,
+        endpoint_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<ClaimedEvent>, sqlx::Error> {
+        let lease_seconds = i32::try_from(self.config.claim_lease.as_secs()).unwrap_or(i32::MAX);
+        let rows = sqlx::query(
+            r#"
+            WITH picked AS (
+                SELECT delivery.event_id
+                FROM webhook_deliveries AS delivery
+                JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
+                WHERE delivery.endpoint_id = $1
+                  AND delivery.delivered_at IS NULL
+                  AND delivery.failed_at IS NULL
+                  AND delivery.next_attempt_at <= now()
+                  AND ((endpoint.status = 'enabled' AND endpoint.deleted_at IS NULL)
+                       OR delivery.url IS NOT NULL)
+                ORDER BY delivery.url IS NULL, delivery.next_attempt_at, delivery.event_id
+                LIMIT $2
+                FOR UPDATE OF delivery SKIP LOCKED
+            )
+            UPDATE webhook_deliveries AS delivery
+            SET next_attempt_at = now() + make_interval(secs => $3)
+            FROM picked, events AS event, webhook_endpoints AS endpoint, accounts AS account
+            WHERE delivery.event_id = picked.event_id
+              AND delivery.endpoint_id = $1
+              AND event.id = delivery.event_id
+              AND endpoint.id = delivery.endpoint_id
+              AND account.id = event.account_id
+            RETURNING delivery.event_id, delivery.endpoint_id,
+                      COALESCE(delivery.url, endpoint.url) AS url,
+                      delivery.url IS NOT NULL AS notice, event.account_id, account.public_id,
+                      event.livemode, event.type, event.actor, event.data, event.object_type,
+                      event.object_id, delivery.attempts,
+                      event.created, delivery.next_attempt_at
+            "#,
+        )
+        .bind(endpoint_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(lease_seconds)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let object_type: String = row.try_get("object_type")?;
+                Ok(ClaimedEvent {
+                    id: row.try_get("event_id")?,
+                    endpoint_id: row.try_get("endpoint_id")?,
+                    url: row.try_get("url")?,
+                    notice: row.try_get("notice")?,
+                    scope: Scope::new(row.try_get("account_id")?, row.try_get("livemode")?),
+                    account: row.try_get("public_id")?,
+                    event_type: row.try_get("type")?,
+                    actor: row.try_get("actor")?,
+                    data: row.try_get("data")?,
+                    object: EventObject::from_parts(&object_type, row.try_get("object_id")?),
+                    attempts: row.try_get("attempts")?,
+                    created_at: row.try_get("created")?,
+                    claim_until: row.try_get("next_attempt_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Attempts one claimed delivery and records its outcome; returns its endpoint.
+    async fn attempt(&self, event: ClaimedEvent) -> (Uuid, Result<Reach, DeliveryError>) {
+        self.warn_if_old(&event);
+        let span = crate::observability::outbox_delivery_span(
+            event.id,
+            &event.event_type,
+            event.object.map(EventObject::id),
+            event.attempts,
+        );
+        let result = async {
+            let outcome = self.send(&event).await?;
+            let reach = match &outcome {
+                Outcome::Delivered(_) => Reach::Reached,
+                Outcome::Failed {
+                    endpoint_fault: true,
+                    ..
+                } => Reach::Failed,
+                Outcome::Failed { .. } => Reach::Unknown,
+            };
+            self.record(&event, outcome).await.map(|()| reach)
+        }
+        .instrument(span)
+        .await;
+        (event.endpoint_id, result)
     }
 
     fn warn_if_old(&self, event: &ClaimedEvent) {
@@ -210,39 +459,20 @@ where
         }
     }
 
-    async fn deliver_claimed(&self, delivery: ClaimedDelivery) -> Result<(), DeliveryError> {
-        let ClaimedDelivery {
-            mut transaction,
-            event,
-        } = delivery;
-        self.deliver_in_transaction(&mut transaction, &event)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    async fn deliver_in_transaction(
-        &self,
-        connection: &mut PgConnection,
-        event: &ClaimedEvent,
-    ) -> Result<(), DeliveryError> {
-        let (webhook_id, body) = match self.event_body(connection, event).await? {
+    /// Renders, signs, and sends the event; no database connection is held during the request.
+    async fn send(&self, event: &ClaimedEvent) -> Result<Outcome, DeliveryError> {
+        let (webhook_id, body) = match self.event_body(event).await? {
             Ok(rendered) => rendered,
-            Err(error) => {
-                self.record_failure(connection, event, None, None, error)
-                    .await?;
-                return Ok(());
-            }
+            Err(error) => return Ok(Outcome::internal(error)),
         };
-        let keys = crate::webhook_keys::active(connection, event.scope)
-            .await?
-            .and_then(|keys| keys.ids());
-        let Some(keys) = keys else {
-            self.record_failure(connection, event, None, None, "signing_failed")
-                .await?;
-            return Ok(());
+        let keys = {
+            let mut connection = self.pool.acquire().await?;
+            crate::webhook_keys::active(&mut connection, event.scope).await?
         };
-        let signed = match SignedWebhook::new(
+        let Some(keys) = keys.and_then(|keys| keys.ids()) else {
+            return Ok(Outcome::internal("signing_failed"));
+        };
+        let Ok(signed) = SignedWebhook::new(
             self.signer.as_ref(),
             &keys,
             &webhook_id,
@@ -250,13 +480,8 @@ where
             &body,
         )
         .await
-        {
-            Ok(signed) => signed,
-            Err(_) => {
-                self.record_failure(connection, event, None, None, "signing_failed")
-                    .await?;
-                return Ok(());
-            }
+        else {
+            return Ok(Outcome::internal("signing_failed"));
         };
 
         let response = self
@@ -269,69 +494,51 @@ where
             .body(body)
             .send()
             .await;
-
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                self.record_failure(connection, event, None, None, request_error_code(&error))
-                    .await?;
-                return Ok(());
+                return Ok(Outcome::Failed {
+                    status: None,
+                    body: None,
+                    error: request_error_code(&error),
+                    endpoint_fault: true,
+                });
             }
         };
-
         let status = response.status();
         let (body, body_error) =
             read_response_body(response, self.config.response_body_limit).await;
-
-        if status.is_success() {
-            let stored = response_value(Some(status.as_u16()), body, body_error);
-            mark_delivered(connection, event, &stored).await?;
+        Ok(if status.is_success() {
+            Outcome::Delivered(response_value(Some(status.as_u16()), body, body_error))
         } else {
-            self.record_failure(
-                connection,
-                event,
-                Some(status.as_u16()),
+            Outcome::Failed {
+                status: Some(status.as_u16()),
                 body,
-                body_error.unwrap_or("non_2xx_status"),
-            )
-            .await?;
-        }
-        Ok(())
+                error: body_error.unwrap_or("non_2xx_status"),
+                endpoint_fault: true,
+            }
+        })
     }
 
     /// Returns the `webhook-id` and body. The event's `data` is rendered on its first attempt at
-    /// any endpoint and stored with that attempt's outcome, so every endpoint, retry, and replay
-    /// sends it unchanged.
+    /// any endpoint (or first read) and stored, so every endpoint, retry, and resend sends it
+    /// unchanged.
     async fn event_body(
         &self,
-        connection: &mut PgConnection,
         event: &ClaimedEvent,
     ) -> Result<Result<(String, Vec<u8>), &'static str>, DeliveryError> {
-        let Some(object) = event.object else {
-            return Ok(Err("missing_object"));
-        };
-        let data = if event.data.get("object").is_some() {
-            event.data.clone()
-        } else {
-            match crate::api::event_data(&self.pool, &self.routes, event.scope, object).await {
-                Ok(Some(data)) => {
-                    // Another endpoint's delivery may have rendered it first: keep that one.
-                    sqlx::query_scalar::<_, Value>(
-                        r#"
-                        UPDATE events
-                        SET data = CASE WHEN data = '{}'::jsonb THEN $2 ELSE data END
-                        WHERE id = $1
-                        RETURNING data
-                        "#,
-                    )
-                    .bind(event.id)
-                    .bind(&data)
-                    .fetch_one(&mut *connection)
-                    .await?
-                }
-                Ok(None) => return Ok(Err("object_not_found")),
-                Err(()) => return Ok(Err("render_failed")),
-            }
+        let data = match super::envelope::event_data(
+            &self.pool,
+            &self.routes,
+            event.scope,
+            event.id,
+            event.object,
+            &event.data,
+        )
+        .await?
+        {
+            Ok(data) => data,
+            Err(error) => return Ok(Err(error)),
         };
         let id = webhook_id(event.id);
         let envelope = Event {
@@ -341,6 +548,7 @@ where
             livemode: event.scope.livemode(),
             event_type: event.event_type.clone(),
             created: event.created_at.timestamp(),
+            actor: event.actor.clone(),
             data,
         };
         Ok(serde_json::to_vec(&envelope)
@@ -348,27 +556,87 @@ where
             .map_err(|_| "envelope_serialization"))
     }
 
-    async fn record_failure(
-        &self,
-        connection: &mut PgConnection,
-        event: &ClaimedEvent,
-        status: Option<u16>,
-        body: Option<String>,
-        error: &'static str,
-    ) -> Result<(), DeliveryError> {
-        let delay = retry_delay(event.attempts, self.entropy.as_ref());
-        record_failure_on(connection, event, status, body, error, delay).await?;
+    /// Records the outcome under the claim's lease. A failure is retried with backoff, forever; a
+    /// `410 Gone` stops the delivery and disables its endpoint, except for an endpoint's own notice
+    /// sent to its previous URL, which only stops.
+    async fn record(&self, event: &ClaimedEvent, outcome: Outcome) -> Result<(), DeliveryError> {
+        let (status, body, error, endpoint_fault) = match outcome {
+            Outcome::Delivered(response) => {
+                mark_delivered(&self.pool, event, &response).await?;
+                return Ok(());
+            }
+            Outcome::Failed {
+                status,
+                body,
+                error,
+                endpoint_fault,
+            } => (status, body, error, endpoint_fault),
+        };
+        let response = response_value(status, body, Some(error));
+        let gone = endpoint_fault && status == Some(410);
+        if !gone {
+            let delay = retry_delay(event.attempts, self.entropy.as_ref());
+            schedule_retry(&self.pool, event, &response, delay).await?;
+            return Ok(());
+        }
+        let stopped = stop(&self.pool, event, &response).await?;
+        if stopped && !event.notice {
+            let mut connection = self.pool.acquire().await?;
+            webhook_endpoints::disable_gone(&mut connection, event.endpoint_id).await?;
+        }
         Ok(())
     }
 }
 
-fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
-    if config.batch_size == 0 {
-        return Err(DeliveryError::InvalidConfig("batch_size must be positive"));
+/// Hands out `free` slots one at a time to each endpoint in turn, in `endpoints`' order, each up
+/// to its `capacity` including its deliveries in flight; returns each endpoint's share.
+fn round_robin(
+    endpoints: &[Uuid],
+    busy: &HashMap<Uuid, usize>,
+    capacity: impl Fn(&Uuid) -> usize,
+    free: usize,
+) -> Vec<(Uuid, usize)> {
+    let mut shares: Vec<(Uuid, usize)> = endpoints.iter().map(|id| (*id, 0)).collect();
+    let mut remaining = free;
+    loop {
+        let mut granted = false;
+        for (id, share) in &mut shares {
+            if remaining == 0 {
+                break;
+            }
+            let in_flight = busy.get(id).copied().unwrap_or(0);
+            if in_flight.saturating_add(*share) < capacity(id) {
+                *share = share.saturating_add(1);
+                remaining = remaining.saturating_sub(1);
+                granted = true;
+            }
+        }
+        if !granted || remaining == 0 {
+            break;
+        }
     }
-    if config.batch_size > 100 {
+    shares.retain(|(_, share)| *share > 0);
+    shares
+}
+
+fn release(busy: &mut HashMap<Uuid, usize>, endpoint_id: Uuid) {
+    if let Some(count) = busy.get_mut(&endpoint_id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            busy.remove(&endpoint_id);
+        }
+    }
+}
+
+fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
+    if config.max_in_flight == 0 || config.max_in_flight > 1024 {
         return Err(DeliveryError::InvalidConfig(
-            "batch_size must not exceed 100",
+            "max_in_flight must be between 1 and 1024",
+        ));
+    }
+    if config.endpoint_concurrency == 0 || config.endpoint_concurrency > config.max_in_flight {
+        return Err(DeliveryError::InvalidConfig(
+            "endpoint_concurrency must be between 1 and max_in_flight",
         ));
     }
     if config.request_timeout.is_zero() {
@@ -376,14 +644,9 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
             "request_timeout must be positive",
         ));
     }
-    let Some(batch_timeout) = config.request_timeout.checked_mul(config.batch_size) else {
+    if config.claim_lease <= config.request_timeout {
         return Err(DeliveryError::InvalidConfig(
-            "batch request timeout is too large",
-        ));
-    };
-    if config.claim_lease <= batch_timeout {
-        return Err(DeliveryError::InvalidConfig(
-            "claim_lease must exceed the whole batch request timeout",
+            "claim_lease must exceed the request timeout",
         ));
     }
     if config.claim_lease.as_secs() > MAX_POSTGRES_INTERVAL_SECONDS {
@@ -392,113 +655,17 @@ fn validate_config(config: &DeliveryConfig) -> Result<(), DeliveryError> {
     Ok(())
 }
 
-async fn claim_next(
-    pool: &PgPool,
-    livemode: bool,
-    config: &DeliveryConfig,
-) -> Result<ClaimResult, sqlx::Error> {
-    let lease_seconds = i32::try_from(config.claim_lease.as_secs()).unwrap_or(i32::MAX);
-    let mut transaction = pool.begin().await?;
-    let row = sqlx::query(
-        r#"
-        WITH candidates AS (
-            SELECT delivery.event_id, delivery.endpoint_id
-            FROM webhook_deliveries AS delivery
-            JOIN webhook_endpoints AS endpoint ON endpoint.id = delivery.endpoint_id
-            JOIN events AS event ON event.id = delivery.event_id
-            WHERE delivery.delivered_at IS NULL
-              AND delivery.next_attempt_at <= now()
-              AND endpoint.status = 'enabled'
-              AND event.livemode = $2
-            ORDER BY delivery.next_attempt_at, delivery.event_id, delivery.endpoint_id
-            FOR UPDATE OF delivery SKIP LOCKED
-            LIMIT 1
-        )
-        UPDATE webhook_deliveries AS delivery
-        SET next_attempt_at = now() + make_interval(secs => $1)
-        FROM candidates, events AS event, webhook_endpoints AS endpoint, accounts AS account
-        WHERE delivery.event_id = candidates.event_id
-          AND delivery.endpoint_id = candidates.endpoint_id
-          AND event.id = delivery.event_id
-          AND endpoint.id = delivery.endpoint_id
-          AND account.id = event.account_id
-        RETURNING delivery.event_id, delivery.endpoint_id, endpoint.url, event.account_id,
-                  account.public_id, event.livemode, event.type, event.data, event.object_type, event.object_id,
-                  delivery.attempts, event.created, delivery.next_attempt_at
-        "#,
-    )
-    .bind(lease_seconds)
-    .bind(livemode)
-    .fetch_optional(&mut *transaction)
-    .await?;
-    let Some(row) = row else {
-        transaction.commit().await?;
-        return Ok(ClaimResult::Empty);
-    };
-    let object_type: String = row.try_get("object_type")?;
-    let event = ClaimedEvent {
-        id: row.try_get("event_id")?,
-        endpoint_id: row.try_get("endpoint_id")?,
-        url: row.try_get("url")?,
-        scope: Scope::new(row.try_get("account_id")?, row.try_get("livemode")?),
-        account: row.try_get("public_id")?,
-        event_type: row.try_get("type")?,
-        data: row.try_get("data")?,
-        object: EventObject::from_parts(&object_type, row.try_get("object_id")?),
-        attempts: row.try_get("attempts")?,
-        created_at: row.try_get("created")?,
-        claim_until: row.try_get("next_attempt_at")?,
-    };
-    // One delivery at a time per endpoint keeps each endpoint's events in order.
-    let locked =
-        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(event.endpoint_id.to_string())
-            .fetch_one(&mut *transaction)
-            .await?;
-    if !locked {
-        release_claim(&mut transaction, &event, config.poll_interval).await?;
-        transaction.commit().await?;
-        return Ok(ClaimResult::Deferred);
-    }
-
-    Ok(ClaimResult::Ready(Box::new(ClaimedDelivery {
-        transaction,
-        event,
-    })))
-}
-
-async fn release_claim(
-    connection: &mut PgConnection,
-    event: &ClaimedEvent,
-    poll_interval: Duration,
-) -> Result<(), sqlx::Error> {
-    let delay_seconds = i32::try_from(poll_interval.as_secs().max(1)).unwrap_or(i32::MAX);
-    sqlx::query(
-        r#"
-        UPDATE webhook_deliveries
-        SET next_attempt_at = now() + make_interval(secs => $4)
-        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
-          AND next_attempt_at = $3
-        "#,
-    )
-    .bind(event.id)
-    .bind(event.endpoint_id)
-    .bind(event.claim_until)
-    .bind(delay_seconds)
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
+/// Marks the delivery delivered. A success after the delivery was stopped (its endpoint disabled
+/// while the request was in flight) is still recorded as delivered.
 async fn mark_delivered(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     event: &ClaimedEvent,
     response: &Value,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         UPDATE webhook_deliveries
-        SET delivered_at = now(), response = $4
+        SET delivered_at = now(), failed_at = NULL, response = $4
         WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
           AND next_attempt_at = $3
         "#,
@@ -507,28 +674,25 @@ async fn mark_delivered(
     .bind(event.endpoint_id)
     .bind(event.claim_until)
     .bind(response)
-    .execute(connection)
+    .execute(pool)
     .await?;
     Ok(())
 }
 
-async fn record_failure_on(
-    connection: &mut PgConnection,
+async fn schedule_retry(
+    pool: &PgPool,
     event: &ClaimedEvent,
-    status: Option<u16>,
-    body: Option<String>,
-    error: &'static str,
+    response: &Value,
     delay: Duration,
 ) -> Result<(), sqlx::Error> {
     let delay_seconds = i32::try_from(delay.as_secs()).unwrap_or(i32::MAX);
-    let response = response_value(status, body, Some(error));
     sqlx::query(
         r#"
         UPDATE webhook_deliveries
         SET attempts = CASE WHEN attempts < 2147483647 THEN attempts + 1 ELSE attempts END,
             next_attempt_at = now() + make_interval(secs => $4),
             response = $5
-        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL
+        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL AND failed_at IS NULL
           AND next_attempt_at = $3
         "#,
     )
@@ -537,9 +701,31 @@ async fn record_failure_on(
     .bind(event.claim_until)
     .bind(delay_seconds)
     .bind(response)
-    .execute(connection)
+    .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Stops the delivery after its last failed attempt; returns whether this call stopped it.
+async fn stop(pool: &PgPool, event: &ClaimedEvent, response: &Value) -> Result<bool, sqlx::Error> {
+    let stopped = sqlx::query(
+        r#"
+        UPDATE webhook_deliveries
+        SET attempts = CASE WHEN attempts < 2147483647 THEN attempts + 1 ELSE attempts END,
+            failed_at = now(),
+            response = $4
+        WHERE event_id = $1 AND endpoint_id = $2 AND delivered_at IS NULL AND failed_at IS NULL
+          AND next_attempt_at = $3
+        "#,
+    )
+    .bind(event.id)
+    .bind(event.endpoint_id)
+    .bind(event.claim_until)
+    .bind(response)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(stopped > 0)
 }
 
 fn response_value(status: Option<u16>, body: Option<String>, error: Option<&str>) -> Value {
@@ -630,5 +816,29 @@ mod tests {
             retry_delay(i32::MAX, &entropy),
             Duration::from_secs(60 * 60)
         );
+    }
+
+    #[test]
+    fn slots_go_round_robin_up_to_each_endpoints_concurrency() {
+        let [a, b, c] = [1_u128, 2, 3].map(Uuid::from_u128);
+        // Three endpoints share five slots one at a time, in order.
+        assert_eq!(
+            round_robin(&[a, b, c], &HashMap::new(), |_| 4, 5),
+            vec![(a, 2), (b, 2), (c, 1)]
+        );
+        // A busy endpoint gets only what its concurrency leaves; the rest go to the others.
+        let busy = HashMap::from([(a, 4), (b, 3)]);
+        assert_eq!(
+            round_robin(&[a, b, c], &busy, |_| 4, 10),
+            vec![(b, 1), (c, 4)]
+        );
+        assert!(round_robin(&[a], &HashMap::from([(a, 4)]), |_| 4, 10).is_empty());
+        // A probing endpoint, one whose last attempt failed, gets one slot at a time.
+        let probing = |id: &Uuid| if *id == a { 1 } else { 4 };
+        assert_eq!(
+            round_robin(&[a, b], &HashMap::new(), probing, 10),
+            vec![(a, 1), (b, 4)]
+        );
+        assert!(round_robin(&[a], &HashMap::from([(a, 1)]), probing, 10).is_empty());
     }
 }

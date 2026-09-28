@@ -79,6 +79,12 @@ pub enum Permission {
     TreasuryRead,
     /// Prove, change, and cancel changes of the treasuries of the account and mode.
     TreasuryWrite,
+    /// List and read webhook endpoints.
+    EndpointsRead,
+    /// Create, update, delete, and test webhook endpoints, and resend events to them.
+    EndpointsWrite,
+    /// List and read events.
+    EventsRead,
 }
 
 impl Permission {
@@ -100,6 +106,9 @@ impl Permission {
             Self::ApiKeysWrite => "api_keys.write",
             Self::TreasuryRead => "treasury.read",
             Self::TreasuryWrite => "treasury.write",
+            Self::EndpointsRead => "endpoints.read",
+            Self::EndpointsWrite => "endpoints.write",
+            Self::EventsRead => "events.read",
         }
     }
 }

@@ -3,8 +3,6 @@
 mod support;
 
 use std::collections::VecDeque;
-use std::env;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration as StdDuration;
@@ -235,20 +233,6 @@ impl ReferenceReceiver {
             .collect()
     }
 
-    async fn wait_for_count(&self, expected: usize) -> Result<()> {
-        tokio::time::timeout(StdDuration::from_secs(2), async {
-            loop {
-                if self.count().await >= expected {
-                    return;
-                }
-                sleep(StdDuration::from_millis(5)).await;
-            }
-        })
-        .await
-        .context("timed out waiting for webhook request")?;
-        Ok(())
-    }
-
     fn maximum_in_flight(&self) -> usize {
         self.max_in_flight.load(Ordering::SeqCst)
     }
@@ -397,13 +381,41 @@ fn mode_worker(
         signer,
         livemode,
         DeliveryConfig {
-            batch_size: 1,
+            max_in_flight: 1,
+            endpoint_concurrency: 1,
             request_timeout,
-            claim_lease: StdDuration::from_secs(30),
-            poll_interval: StdDuration::from_millis(10),
-            response_body_limit: 16,
-            age_alert_threshold: StdDuration::from_secs(60),
+            ..test_config()
         },
+    )
+    .map_err(Into::into)
+}
+
+/// Test limits: one pass claims every due delivery, 4 at a time per endpoint.
+fn test_config() -> DeliveryConfig {
+    DeliveryConfig {
+        max_in_flight: 16,
+        endpoint_concurrency: 4,
+        request_timeout: StdDuration::from_secs(2),
+        claim_lease: StdDuration::from_secs(30),
+        poll_interval: StdDuration::from_millis(10),
+        response_body_limit: 16,
+        age_alert_threshold: StdDuration::from_secs(60),
+        proxy: None,
+    }
+}
+
+/// A live-mode worker with `config`.
+fn configured_worker(
+    pool: &PgPool,
+    signer: Arc<TestSigner>,
+    config: DeliveryConfig,
+) -> Result<DeliveryWorker<TestSigner>> {
+    DeliveryWorker::new(
+        pool.clone(),
+        Arc::new(RouteSet::new(Vec::new()).map_err(anyhow::Error::msg)?),
+        signer,
+        true,
+        config,
     )
     .map_err(Into::into)
 }
@@ -758,85 +770,6 @@ async fn racing_workers_do_not_double_send_one_row() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cancelled_delivery_releases_the_endpoint_lock() -> Result<()> {
-    let Some(context) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let signer = Arc::new(TestSigner::fixed());
-    let account = Uuid::new_v4();
-    let receiver = ReferenceReceiver::start_with_plans(
-        signer.verifying_key(account),
-        vec![
-            ResponsePlan::new(StatusCode::OK, StdDuration::from_secs(5)),
-            ResponsePlan::new(StatusCode::OK, StdDuration::ZERO),
-        ],
-    )
-    .await?;
-    let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
-    let first = worker(&context.app_pool, Arc::clone(&signer))?;
-    let first_task = tokio::spawn(async move { first.run_once().await });
-
-    receiver.wait_for_count(1).await?;
-    first_task.abort();
-    let cancelled = first_task.await;
-    ensure!(cancelled.is_err_and(|error| error.is_cancelled()));
-
-    let second = worker(&context.app_pool, signer)?;
-    let claimed = tokio::time::timeout(StdDuration::from_secs(2), second.run_once())
-        .await
-        .context("second worker remained blocked after cancellation")??;
-    ensure!(claimed == 1);
-    receiver.wait_for_count(2).await?;
-    let delivered_at: Option<chrono::DateTime<Utc>> =
-        sqlx::query_scalar("SELECT delivered_at FROM webhook_deliveries WHERE event_id = $1")
-            .bind(event_id)
-            .fetch_one(&context.app_pool)
-            .await?;
-    ensure!(delivered_at.is_some());
-
-    receiver.stop().await;
-    context.cleanup().await
-}
-
-#[tokio::test]
-async fn different_events_for_one_endpoint_are_delivered_sequentially() -> Result<()> {
-    let Some(context) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let signer = Arc::new(TestSigner::fixed());
-    let account = Uuid::new_v4();
-    let receiver = ReferenceReceiver::start(
-        signer.verifying_key(account),
-        StatusCode::OK,
-        StdDuration::from_millis(150),
-    )
-    .await?;
-    let account_id = seed_account(&context.app_pool, account, &receiver.url).await?;
-    let first_event = Uuid::new_v4();
-    let second_event = Uuid::new_v4();
-    seed_account_event(&context.app_pool, account_id, first_event).await?;
-    seed_account_event(&context.app_pool, account_id, second_event).await?;
-    let first = worker(&context.app_pool, Arc::clone(&signer))?;
-    let second = worker(&context.app_pool, Arc::clone(&signer))?;
-
-    let (first_count, second_count) = tokio::join!(first.run_once(), second.run_once());
-    ensure!(first_count? + second_count? == 2);
-    sqlx::query(
-        "UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second' \
-         WHERE delivered_at IS NULL",
-    )
-    .execute(&context.app_pool)
-    .await?;
-    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
-    ensure!(receiver.count().await == 2);
-    ensure!(receiver.maximum_in_flight() == 1);
-
-    receiver.stop().await;
-    context.cleanup().await
-}
-
-#[tokio::test]
 async fn request_timeout_is_recorded_as_a_retry() -> Result<()> {
     let Some(context) = TestDatabase::create().await? else {
         return Ok(());
@@ -952,51 +885,6 @@ async fn successful_retry_keeps_the_same_webhook_id_and_body() -> Result<()> {
     context.cleanup().await
 }
 
-#[tokio::test]
-async fn forced_cli_replay_redelivers_with_the_same_webhook_id() -> Result<()> {
-    let Some(context) = TestDatabase::create().await? else {
-        return Ok(());
-    };
-    let signer = Arc::new(TestSigner::fixed());
-    let account = Uuid::new_v4();
-    let receiver = ReferenceReceiver::start(
-        signer.verifying_key(account),
-        StatusCode::OK,
-        StdDuration::ZERO,
-    )
-    .await?;
-    let event_id = Uuid::new_v4();
-    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
-    let delivery = worker(&context.app_pool, signer)?;
-    ensure!(delivery.run_once().await? == 1);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["outbox", "replay", "--id", &evt(event_id), "--force"])
-        .env("DATABASE_URL", &context.app_url)
-        .output()
-        .context("run topup outbox replay")?;
-    ensure!(
-        output.status.success(),
-        "replay failed: {}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    ensure!(delivery.run_once().await? == 1);
-    ensure!(receiver.ids().await == vec![evt(event_id), evt(event_id)]);
-    let audit_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM audit WHERE action = 'outbox.replay' AND subject = $1",
-    )
-    .bind(format!("event:{event_id}"))
-    .fetch_one(&context.app_pool)
-    .await?;
-    ensure!(audit_count == 1);
-
-    receiver.stop().await;
-    context.cleanup().await
-}
-
-/// Each delivery names its account and mode and is signed with that account's key in that mode
-/// only: a receiver that pinned another account's key, or the other mode's key, refuses it.
 #[tokio::test]
 async fn deliveries_verify_only_with_their_accounts_key_in_their_mode() -> Result<()> {
     let Some(context) = TestDatabase::create().await? else {
@@ -1158,5 +1046,569 @@ async fn a_rolled_key_signs_beside_the_new_one_until_its_overlap_ends() -> Resul
 
     old.stop().await;
     new.stop().await;
+    context.cleanup().await
+}
+
+/// Adds a live endpoint of `account_id` subscribed to `events`; returns its id.
+async fn add_subscribed_endpoint(
+    pool: &PgPool,
+    account_id: Uuid,
+    url: &str,
+    events: &[&str],
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO webhook_endpoints (id, account_id, livemode, url, enabled_events) \
+         VALUES ($1, $2, true, $3, $4)",
+    )
+    .bind(id)
+    .bind(account_id)
+    .bind(url)
+    .bind(events)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+async fn endpoint_id(pool: &PgPool, url: &str) -> Result<Uuid> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM webhook_endpoints WHERE url = $1")
+            .bind(url)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// The `type` of every event the receiver got, in order.
+async fn types(receiver: &ReferenceReceiver) -> Vec<String> {
+    receiver
+        .bodies()
+        .await
+        .iter()
+        .filter_map(|body| serde_json::from_slice::<Value>(body).ok())
+        .filter_map(|body| body["type"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Runs passes until nothing is due.
+async fn drain(worker: &DeliveryWorker<TestSigner>) -> Result<()> {
+    for _ in 0..20 {
+        if worker.run_once().await? == 0 {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("deliveries kept coming")
+}
+
+async fn wait_until_count(
+    receiver: &ReferenceReceiver,
+    expected: usize,
+    within: StdDuration,
+) -> Result<()> {
+    tokio::time::timeout(within, async {
+        while receiver.count().await < expected {
+            sleep(StdDuration::from_millis(5)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("timed out waiting for {expected} webhook requests"))
+}
+
+fn merchant_actor() -> topup::audit::Actor {
+    topup::audit::Actor::api_key(topup::ids::format(topup::ids::API_KEY, Uuid::new_v4()))
+}
+
+/// An event reaches every enabled endpoint subscribed to its type or to `*`, and no other.
+#[tokio::test]
+async fn events_fan_out_to_every_endpoint_subscribed_to_them() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let start = || {
+        ReferenceReceiver::start(
+            signer.verifying_key(account),
+            StatusCode::OK,
+            StdDuration::ZERO,
+        )
+    };
+    let (all, credited, refunds, disabled) = (
+        start().await?,
+        start().await?,
+        start().await?,
+        start().await?,
+    );
+    let account_id = seed_account(pool, account, &all.url).await?;
+    add_subscribed_endpoint(
+        pool,
+        account_id,
+        &credited.url,
+        &["deposit.credited", "quote.expired"],
+    )
+    .await?;
+    add_subscribed_endpoint(pool, account_id, &refunds.url, &["refund.failed"]).await?;
+    let off = add_subscribed_endpoint(pool, account_id, &disabled.url, &["*"]).await?;
+    sqlx::query("UPDATE webhook_endpoints SET status = 'disabled' WHERE id = $1")
+        .bind(off)
+        .execute(pool)
+        .await?;
+    let event_id = Uuid::new_v4();
+    seed_account_event(pool, account_id, event_id).await?;
+
+    ensure!(
+        configured_worker(pool, signer, test_config())?
+            .run_once()
+            .await?
+            == 2
+    );
+    ensure!(all.ids().await == vec![evt(event_id)]);
+    ensure!(credited.ids().await == vec![evt(event_id)]);
+    ensure!(refunds.count().await == 0 && disabled.count().await == 0);
+
+    for receiver in [all, credited, refunds, disabled] {
+        receiver.stop().await;
+    }
+    context.cleanup().await
+}
+
+/// Account events reach every enabled endpoint of the mode whatever it subscribes to, and an
+/// endpoint's change is announced to that endpoint first, at the URL it had before the change,
+/// even when the change disables or deletes it.
+#[tokio::test]
+async fn account_events_bypass_filters_and_changed_endpoints_hear_of_it_first() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let start = || {
+        ReferenceReceiver::start(
+            signer.verifying_key(account),
+            StatusCode::OK,
+            StdDuration::ZERO,
+        )
+    };
+    let (first, moved, second) = (start().await?, start().await?, start().await?);
+    seed_account(pool, account, "").await?;
+    let scope = topup::tenancy::Scope::new(account, true);
+    let actor = merchant_actor();
+    let create = |url: String, events: Vec<String>| async move {
+        topup::webhook_endpoints::create(
+            pool,
+            scope,
+            &topup::webhook_endpoints::NewEndpoint {
+                url: &url,
+                enabled_events: &events,
+                description: None,
+                metadata: Default::default(),
+            },
+            &merchant_actor(),
+        )
+        .await
+    };
+    let a = create(first.url.clone(), vec!["deposit.credited".to_owned()]).await?;
+    let b = create(second.url.clone(), vec!["refund.failed".to_owned()]).await?;
+    let delivery = configured_worker(pool, Arc::clone(&signer), test_config())?;
+    drain(&delivery).await?;
+    // Subscribed to neither, both hear of every endpoint created after them.
+    ensure!(types(&first).await == ["webhook_endpoint.created"; 2]);
+    ensure!(types(&second).await == ["webhook_endpoint.created"]);
+    let key = topup::api_keys::create(pool, scope, "rotated", &actor, "").await;
+    ensure!(key.is_ok(), "api key creation failed");
+    drain(&delivery).await?;
+    ensure!(types(&first).await.last().map(String::as_str) == Some("api_key.created"));
+    ensure!(types(&second).await.last().map(String::as_str) == Some("api_key.created"));
+
+    // A new URL: the notice goes where the endpoint listened, not to the new URL.
+    let changes = topup::webhook_endpoints::Changes {
+        url: Some(&moved.url),
+        ..Default::default()
+    };
+    topup::webhook_endpoints::update(pool, scope, a.id, &changes, &actor).await?;
+    drain(&delivery).await?;
+    ensure!(types(&first).await.last().map(String::as_str) == Some("webhook_endpoint.updated"));
+    ensure!(moved.count().await == 0);
+    let notice = first.bodies().await.pop().context("missing notice")?;
+    let notice: Value = serde_json::from_slice(&notice)?;
+    ensure!(notice["data"]["object"]["url"] == moved.url.as_str());
+    ensure!(
+        notice["data"]["previous_attributes"]["url"] == first.url.as_str(),
+        "{notice}"
+    );
+    ensure!(notice["actor"] == actor.id.as_str());
+
+    // Disabling: the endpoint still hears of it, at its URL; then it hears nothing more.
+    let disable = topup::webhook_endpoints::Changes {
+        disabled: Some(true),
+        ..Default::default()
+    };
+    topup::webhook_endpoints::update(pool, scope, a.id, &disable, &actor).await?;
+    drain(&delivery).await?;
+    ensure!(types(&moved).await == ["webhook_endpoint.updated"]);
+
+    // Deletion: the deleted endpoint hears of it; then nothing more reaches it.
+    topup::webhook_endpoints::delete(pool, scope, b.id, &actor).await?;
+    drain(&delivery).await?;
+    ensure!(types(&second).await.last().map(String::as_str) == Some("webhook_endpoint.deleted"));
+    let deleted: Value =
+        serde_json::from_slice(&second.bodies().await.pop().context("missing deletion")?)?;
+    ensure!(deleted["data"]["object"]["deleted"] == true);
+    let (first_count, moved_count, second_count) = (
+        first.count().await,
+        moved.count().await,
+        second.count().await,
+    );
+    seed_account_event(pool, account, Uuid::new_v4()).await?;
+    topup::webhook_endpoints::update(pool, scope, a.id, &changes, &actor)
+        .await
+        .map(|_| ())?;
+    drain(&delivery).await?;
+    ensure!(first.count().await == first_count);
+    ensure!(moved.count().await == moved_count && second.count().await == second_count);
+
+    for receiver in [first, moved, second] {
+        receiver.stop().await;
+    }
+    context.cleanup().await
+}
+
+/// A slow endpoint holds at most 4 deliveries in flight and never delays another endpoint.
+#[tokio::test]
+async fn a_slow_endpoint_does_not_delay_another() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let slow = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::from_secs(5),
+    )
+    .await?;
+    let fast = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let account_id = seed_account(pool, account, &slow.url).await?;
+    add_endpoint(pool, account_id, true, &fast.url).await?;
+    for _ in 0..8 {
+        seed_account_event(pool, account_id, Uuid::new_v4()).await?;
+    }
+    let delivery = configured_worker(
+        pool,
+        signer,
+        DeliveryConfig {
+            request_timeout: StdDuration::from_secs(10),
+            ..test_config()
+        },
+    )?;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { delivery.run(shutdown).await })
+    };
+
+    // Every fast delivery lands while the slow endpoint's first four are still in flight.
+    wait_until_count(&fast, 8, StdDuration::from_secs(4)).await?;
+    ensure!(slow.count().await <= 4);
+    wait_until_count(&slow, 8, StdDuration::from_secs(20)).await?;
+    ensure!(
+        slow.maximum_in_flight() == 4,
+        "{}",
+        slow.maximum_in_flight()
+    );
+    shutdown.cancel();
+    running.await?;
+
+    slow.stop().await;
+    fast.stop().await;
+    context.cleanup().await
+}
+
+/// A failing endpoint is retried forever with backoff capped at an hour and never disabled: with
+/// no email channel, a disabled endpoint would drop a credit silently (owner decision, design
+/// §11). Nothing is announced and its other deliveries stay pending.
+#[tokio::test]
+async fn a_failing_endpoint_is_retried_forever_and_never_disabled() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let failing = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::SERVICE_UNAVAILABLE,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let healthy = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let account_id = seed_account(pool, account, &failing.url).await?;
+    add_endpoint(pool, account_id, true, &healthy.url).await?;
+    let failing_id = endpoint_id(pool, &failing.url).await?;
+    let event_id = Uuid::new_v4();
+    seed_account_event(pool, account_id, event_id).await?;
+    let delivery = configured_worker(pool, signer, test_config())?;
+    ensure!(delivery.run_once().await? == 2);
+
+    // Weeks of failures later, the delivery is still retried within the hour.
+    sqlx::query(
+        "UPDATE webhook_deliveries SET attempts = 500, next_attempt_at = now() \
+         WHERE endpoint_id = $1",
+    )
+    .bind(failing_id)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE events SET created = now() - interval '30 days' WHERE id = $1")
+        .bind(event_id)
+        .execute(pool)
+        .await?;
+    let before = Utc::now();
+    ensure!(delivery.run_once().await? == 1);
+    let row = sqlx::query(
+        "SELECT endpoint.status, endpoint.disabled_reason, delivery.failed_at, \
+         delivery.attempts, delivery.next_attempt_at \
+         FROM webhook_endpoints AS endpoint JOIN webhook_deliveries AS delivery \
+         ON delivery.endpoint_id = endpoint.id WHERE endpoint.id = $1 AND delivery.event_id = $2",
+    )
+    .bind(failing_id)
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?;
+    ensure!(row.try_get::<String, _>("status")? == "enabled");
+    ensure!(
+        row.try_get::<Option<String>, _>("disabled_reason")?
+            .is_none()
+    );
+    ensure!(
+        row.try_get::<Option<chrono::DateTime<Utc>>, _>("failed_at")?
+            .is_none()
+    );
+    ensure!(row.try_get::<i32, _>("attempts")? == 501);
+    let next: chrono::DateTime<Utc> = row.try_get("next_attempt_at")?;
+    ensure!(
+        next <= before + Duration::hours(1) + Duration::seconds(5),
+        "{next}"
+    );
+    let announced: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE type = 'webhook_endpoint.updated'")
+            .fetch_one(pool)
+            .await?;
+    ensure!(announced == 0);
+    ensure!(types(&healthy).await == ["deposit.credited"]);
+    ensure!(failing.count().await == 2);
+
+    failing.stop().await;
+    healthy.stop().await;
+    context.cleanup().await
+}
+
+/// A dead endpoint's cost is bounded whatever its queue: once it fails it cools down and is then
+/// probed one delivery at a time, while another endpoint's deliveries all go through.
+#[tokio::test]
+async fn a_dead_endpoint_is_probed_one_delivery_at_a_time() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let dead = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let healthy = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let account_id = seed_account(pool, account, &dead.url).await?;
+    add_endpoint(pool, account_id, true, &healthy.url).await?;
+    let dead_id = endpoint_id(pool, &dead.url).await?;
+    for _ in 0..20 {
+        seed_account_event(pool, account_id, Uuid::new_v4()).await?;
+    }
+    let delivery = configured_worker(pool, signer, test_config())?;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { delivery.run(shutdown).await })
+    };
+    wait_until_count(&healthy, 20, StdDuration::from_secs(15)).await?;
+    sleep(StdDuration::from_secs(1)).await;
+    shutdown.cancel();
+    running.await?;
+
+    // The first claim sends at most its 4 slots; then cooldowns (full jitter up to 30 s, then up
+    // to 60 s, doubling to an hour) hold it to single probes. Its other deliveries wait unattempted.
+    ensure!(dead.count().await <= 8, "{}", dead.count().await);
+    ensure!(dead.maximum_in_flight() <= 4);
+    let untouched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_deliveries WHERE endpoint_id = $1 AND attempts = 0",
+    )
+    .bind(dead_id)
+    .fetch_one(pool)
+    .await?;
+    ensure!(untouched >= 12, "{untouched}");
+    let status: String = sqlx::query_scalar("SELECT status FROM webhook_endpoints WHERE id = $1")
+        .bind(dead_id)
+        .fetch_one(pool)
+        .await?;
+    ensure!(status == "enabled");
+
+    dead.stop().await;
+    healthy.stop().await;
+    context.cleanup().await
+}
+
+/// `410 Gone` disables the endpoint at once.
+#[tokio::test]
+async fn gone_disables_the_endpoint_at_once() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let gone = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::GONE,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let first_event = Uuid::new_v4();
+    let account_id = seed_event(pool, account, &gone.url, first_event).await?;
+    let second_event = Uuid::new_v4();
+    seed_account_event(pool, account_id, second_event).await?;
+    let gone_id = endpoint_id(pool, &gone.url).await?;
+
+    ensure!(worker(pool, signer)?.run_once().await? == 1);
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("SELECT status, disabled_reason FROM webhook_endpoints WHERE id = $1")
+            .bind(gone_id)
+            .fetch_one(pool)
+            .await?;
+    ensure!(status == "disabled" && reason.as_deref() == Some("gone"));
+    // Its other pending delivery stops too; both stay readable and resendable.
+    let stopped: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM webhook_deliveries WHERE endpoint_id = $1 AND failed_at IS NOT NULL",
+    )
+    .bind(gone_id)
+    .fetch_one(pool)
+    .await?;
+    ensure!(stopped == 2);
+    ensure!(gone.count().await == 1);
+
+    gone.stop().await;
+    context.cleanup().await
+}
+
+/// A resend delivers the event again with the same `webhook-id` and body, to an endpoint that
+/// got it, and to one that was never sent it; a disabled endpoint is refused.
+#[tokio::test]
+async fn a_resend_redelivers_the_same_event() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let start = || {
+        ReferenceReceiver::start(
+            signer.verifying_key(account),
+            StatusCode::OK,
+            StdDuration::ZERO,
+        )
+    };
+    let (subscribed, other) = (start().await?, start().await?);
+    let event_id = Uuid::new_v4();
+    let account_id = seed_event(pool, account, &subscribed.url, event_id).await?;
+    let other_id =
+        add_subscribed_endpoint(pool, account_id, &other.url, &["refund.failed"]).await?;
+    let subscribed_id = endpoint_id(pool, &subscribed.url).await?;
+    let delivery = configured_worker(pool, signer, test_config())?;
+    drain(&delivery).await?;
+
+    let scope = topup::tenancy::Scope::new(account_id, true);
+    let actor = merchant_actor();
+    for endpoint in [subscribed_id, other_id] {
+        topup::webhook_endpoints::resend(pool, scope, event_id, endpoint, &actor).await?;
+    }
+    drain(&delivery).await?;
+    ensure!(subscribed.ids().await == vec![evt(event_id), evt(event_id)]);
+    ensure!(other.ids().await == vec![evt(event_id)]);
+    let bodies = subscribed.bodies().await;
+    ensure!(bodies.first() == bodies.get(1) && bodies.first() == other.bodies().await.first());
+
+    sqlx::query("UPDATE webhook_endpoints SET status = 'disabled' WHERE id = $1")
+        .bind(other_id)
+        .execute(pool)
+        .await?;
+    let refused = topup::webhook_endpoints::resend(pool, scope, event_id, other_id, &actor).await;
+    ensure!(matches!(
+        refused,
+        Err(topup::webhook_endpoints::EndpointError::Disabled)
+    ));
+    let elsewhere = topup::tenancy::Scope::new(Uuid::new_v4(), true);
+    let foreign =
+        topup::webhook_endpoints::resend(pool, elsewhere, event_id, subscribed_id, &actor).await;
+    ensure!(matches!(
+        foreign,
+        Err(topup::webhook_endpoints::EndpointError::EventNotFound)
+    ));
+
+    subscribed.stop().await;
+    other.stop().await;
+    context.cleanup().await
+}
+
+/// With a proxy configured, every delivery goes through it: the proxy, not the service, decides
+/// which addresses a URL may reach.
+#[tokio::test]
+async fn deliveries_go_through_the_configured_proxy() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let pool = &context.app_pool;
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    // The reference receiver stands in for the proxy: it gets the absolute-form request.
+    let proxy = ReferenceReceiver::start(
+        signer.verifying_key(account),
+        StatusCode::OK,
+        StdDuration::ZERO,
+    )
+    .await?;
+    let event_id = Uuid::new_v4();
+    seed_event(pool, account, "http://merchant.invalid/webhooks", event_id).await?;
+    let proxy_url = proxy.url.trim_end_matches("/webhooks").parse()?;
+    let delivery = configured_worker(
+        pool,
+        signer,
+        DeliveryConfig {
+            proxy: Some(proxy_url),
+            ..test_config()
+        },
+    )?;
+
+    ensure!(delivery.run_once().await? == 1);
+    ensure!(proxy.ids().await == vec![evt(event_id)]);
+
+    proxy.stop().await;
     context.cleanup().await
 }

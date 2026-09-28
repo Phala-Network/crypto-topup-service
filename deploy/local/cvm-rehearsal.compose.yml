@@ -56,6 +56,9 @@ services:
   topup:
     environment:
       TOPUP_PUBLIC_ORIGIN: http://topup:8080
+      # The reference product listens on a private compose address, which smokescreen refuses
+      # by design: the rehearsal delivers directly (deploy/tests/smokescreen.sh tests the proxy).
+      TOPUP_WEBHOOK_PROXY: ""
     volumes: !override
       - dstack_socket:/var/run
       - db_app:/run/db-app:ro

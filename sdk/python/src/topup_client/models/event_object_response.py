@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar, BinaryIO, TextIO, TYPE_CHECKING, Generator
+
+from attrs import define as _attrs_define
+from attrs import field as _attrs_field
+
+from ..types import UNSET, Unset
+
+from typing import cast
+
+if TYPE_CHECKING:
+    from ..models.event_object_response_data import EventObjectResponseData
+
+
+T = TypeVar("T", bound="EventObjectResponse")
+
+
+@_attrs_define
+class EventObjectResponse:
+    """An event (<https://docs.stripe.com/api/events/object>): what happened to an object of the
+    account in one mode, and who caused it. The same object is the body of every webhook delivery;
+    `GET /v1/events` is also the account's audit log.
+
+        Attributes:
+            account (str): The account, `acct_…`.
+            actor (str): Who caused it: an API key id (`key_…`), `admin` (the operator), or `system`.
+            created (int): Creation time, Unix seconds.
+            data (EventObjectResponseData): `{"object": …}`, the object's API representation when the event was first
+                delivered or
+                read, never re-rendered; `webhook_endpoint.updated` adds `previous_attributes`.
+            id (str): Event id, `evt_…`, also the `webhook-id` header of its deliveries.
+            livemode (bool): The event's mode.
+            object_ (str): Always `event`.
+            pending_webhooks (int): Deliveries to webhook endpoints that are neither delivered nor stopped.
+            type_ (str): Event type, such as `deposit.credited`.
+    """
+
+    account: str
+    actor: str
+    created: int
+    data: EventObjectResponseData
+    id: str
+    livemode: bool
+    object_: str
+    pending_webhooks: int
+    type_: str
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        from ..models.event_object_response_data import EventObjectResponseData  # noqa: PLC0415
+
+        account = self.account
+
+        actor = self.actor
+
+        created = self.created
+
+        data = self.data.to_dict()
+
+        id = self.id
+
+        livemode = self.livemode
+
+        object_ = self.object_
+
+        pending_webhooks = self.pending_webhooks
+
+        type_ = self.type_
+
+        field_dict: dict[str, Any] = {}
+        field_dict.update(self.additional_properties)
+        field_dict.update(
+            {
+                "account": account,
+                "actor": actor,
+                "created": created,
+                "data": data,
+                "id": id,
+                "livemode": livemode,
+                "object": object_,
+                "pending_webhooks": pending_webhooks,
+                "type": type_,
+            }
+        )
+
+        return field_dict
+
+    @classmethod
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.event_object_response_data import EventObjectResponseData  # noqa: PLC0415
+
+        d = dict(src_dict)
+        account = d.pop("account")
+
+        actor = d.pop("actor")
+
+        created = d.pop("created")
+
+        data = EventObjectResponseData.from_dict(d.pop("data"))
+
+        id = d.pop("id")
+
+        livemode = d.pop("livemode")
+
+        object_ = d.pop("object")
+
+        pending_webhooks = d.pop("pending_webhooks")
+
+        type_ = d.pop("type")
+
+        event_object_response = cls(
+            account=account,
+            actor=actor,
+            created=created,
+            data=data,
+            id=id,
+            livemode=livemode,
+            object_=object_,
+            pending_webhooks=pending_webhooks,
+            type_=type_,
+        )
+
+        event_object_response.additional_properties = d
+        return event_object_response
+
+    @property
+    def additional_keys(self) -> list[str]:
+        return list(self.additional_properties.keys())
+
+    def __getitem__(self, key: str) -> Any:
+        return self.additional_properties[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.additional_properties[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self.additional_properties[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.additional_properties

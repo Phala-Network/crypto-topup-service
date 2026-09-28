@@ -8,6 +8,7 @@ mod client_limit;
 mod deposit_addresses;
 mod deposits;
 pub(crate) mod error;
+mod events;
 mod extract;
 mod handlers;
 mod idempotency;
@@ -19,6 +20,7 @@ mod quotes;
 mod rate_limit;
 mod repository;
 mod treasuries;
+mod webhook_endpoints;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -107,7 +109,9 @@ impl AppState {
 
 /// Renders an event's `data`, `{"object": …}`: the API representation of the object the event is
 /// about, as returned by `GET /v1/deposits/{id}`, `GET /v1/quotes/{id}`, `GET /v1/refunds/{id}`,
-/// `GET /v1/api_keys/{id}`, `GET /v1/treasuries/{id}`, or `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not exist in `scope`; `Err(())` means rendering
+/// `GET /v1/api_keys/{id}`, `GET /v1/treasuries/{id}`, `GET /v1/webhook_endpoints/{id}`, or
+/// `GET /v1/account` to the event's account and mode. `Ok(None)` means the object does not
+/// exist in `scope`; `Err(())` means rendering
 /// failed and was logged.
 pub(crate) async fn event_data(
     pool: &PgPool,
@@ -143,6 +147,12 @@ pub(crate) async fn event_data(
                 .map_err(error::ApiError::from)
         }
         crate::db::EventObject::Account(_) => Ok(None),
+        crate::db::EventObject::WebhookEndpoint(id) => {
+            crate::webhook_endpoints::get_any(pool, scope, id)
+                .await
+                .map(|endpoint| endpoint.map(|endpoint| serde_json::to_value(endpoint.object())))
+                .map_err(error::ApiError::from)
+        }
     };
     match rendered {
         Ok(Some(Ok(value))) => Ok(Some(serde_json::json!({ "object": value }))),
@@ -193,6 +203,19 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         ))
         .routes(routes!(treasuries::get_treasury))
         .routes(routes!(treasuries::cancel_treasury))
+        .routes(routes!(
+            webhook_endpoints::list_webhook_endpoints,
+            webhook_endpoints::create_webhook_endpoint
+        ))
+        .routes(routes!(
+            webhook_endpoints::get_webhook_endpoint,
+            webhook_endpoints::update_webhook_endpoint,
+            webhook_endpoints::delete_webhook_endpoint
+        ))
+        .routes(routes!(webhook_endpoints::test_webhook_endpoint))
+        .routes(routes!(events::list_events))
+        .routes(routes!(events::get_event))
+        .routes(routes!(events::resend_event))
         // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -216,7 +239,6 @@ pub fn router(state: AppState) -> (Router, OpenApi) {
         .routes(routes!(handlers::resume_route))
         .routes(routes!(handlers::nudge_deposit))
         .routes(routes!(handlers::lift_reconciliation_block))
-        .routes(routes!(handlers::replay_outbox_event))
         .routes(routes!(handlers::daily_report))
         .routes(routes!(handlers::metrics))
         .route_layer(middleware::from_fn_with_state(

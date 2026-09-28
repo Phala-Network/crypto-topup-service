@@ -14,7 +14,7 @@ against the CLI and every API call against `crates/topup/openapi.json`.
 | Deposit view, admin-signed `GET /v1/admin/deposits/{id}` (`dep_…` or the UUID) | the deposit's stored facts with its transition timeline (each step's evidence) and its webhook `events` (`id`, `event_type`, `delivered_at`). The product finds deposits with its product-signed `GET /v1/deposits?tx_hash=…` or `?account_id=…` |
 | Attestation, `GET /v1/attestation?nonce=`, with an account's API key | that account's webhook keys in the key's mode ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
-| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`; outbox event `replay` |
+| Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; deposit `nudge` (`dep_…` or the UUID); product issue and key replacement; reconciliation block `lift`. Merchants manage their webhook endpoints and resend their events themselves |
 | Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
 
 Database rows the API does not expose (reconciliation findings, `flushed` and `flush_failures`,

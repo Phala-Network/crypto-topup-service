@@ -83,7 +83,8 @@ def sync_detailed(
     body: UpdateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
     """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
+    or the contact. Audited, and announced to the account as `account.updated`. The operator does
+    not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 
     Args:
         account (str):
@@ -117,7 +118,8 @@ def sync(
     body: UpdateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
     """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
+    or the contact. Audited, and announced to the account as `account.updated`. The operator does
+    not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 
     Args:
         account (str):
@@ -146,7 +148,8 @@ async def asyncio_detailed(
     body: UpdateAccountRequest,
 ) -> Response[AccountResponse | ErrorResponse]:
     """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
+    or the contact. Audited, and announced to the account as `account.updated`. The operator does
+    not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 
     Args:
         account (str):
@@ -178,7 +181,8 @@ async def asyncio(
     body: UpdateAccountRequest,
 ) -> AccountResponse | ErrorResponse | None:
     """Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-    the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
+    or the contact. Audited, and announced to the account as `account.updated`. The operator does
+    not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 
     Args:
         account (str):

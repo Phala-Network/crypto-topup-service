@@ -309,7 +309,7 @@ fi
 expected=(
     'unknown topup subcommand: bogus'
     'unknown topup subcommand: route bogus'
-    'missing nested subcommand for topup outbox'
+    'missing nested subcommand for topup route'
     'unknown flag --bogus for topup attest'
     'unknown flag --no-such-flag for topup reconcile'
     'unknown flag --once for topup restore-check'

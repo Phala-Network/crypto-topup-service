@@ -19,9 +19,8 @@ use super::extract::{ApiJson, ApiPath};
 use super::models::{
     AccountPauseRequest, AccountResponse, AdminReasonRequest, ApiKeyObject, Contact,
     CreateAccountRequest, CustomerPauseRequest, DailyReportResponse, IssueApiKeyRequest,
-    NudgeResponse, OutboxReplayResponse, PauseRequest, PauseResponse,
-    ReconciliationBlockLiftResponse, RoutePauseResponse, SupportDepositResponse,
-    UpdateAccountRequest,
+    NudgeResponse, PauseRequest, PauseResponse, ReconciliationBlockLiftResponse,
+    RoutePauseResponse, SupportDepositResponse, UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -56,9 +55,6 @@ pub(crate) async fn create_account(
         &request.due_diligence.reviewed_by,
     )?;
     validate_reason(&request.reason)?;
-    if let Some(url) = &request.webhook_url {
-        validate_webhook_url(url, local_stack(&state))?;
-    }
     let account = repository::create_account(
         &state.pool,
         &repository::NewAccount {
@@ -66,7 +62,6 @@ pub(crate) async fn create_account(
             contact: to_json(&request.contact)?,
             due_diligence: to_json(&request.due_diligence)?,
             charges_enabled: request.charges_enabled,
-            webhook_url: request.webhook_url.as_deref(),
         },
         &admin_actor(&state),
         &request.reason,
@@ -90,7 +85,8 @@ pub(crate) async fn create_account(
     tag = "admin"
 )]
 /// Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-/// the contact, or the webhook URL. Audited, and announced to the account as `account.updated`.
+/// or the contact. Audited, and announced to the account as `account.updated`. The operator does
+/// not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 pub(crate) async fn update_account(
     State(state): State<AppState>,
     ApiPath(account): ApiPath<String>,
@@ -100,9 +96,6 @@ pub(crate) async fn update_account(
     if let Some(contact) = &request.contact {
         validate_contact(contact)?;
     }
-    if let Some(url) = &request.webhook_url {
-        validate_webhook_url(url, local_stack(&state))?;
-    }
     validate_reason(&request.reason)?;
     let account = repository::update_account(
         &state.pool,
@@ -111,7 +104,6 @@ pub(crate) async fn update_account(
             charges_enabled: request.charges_enabled,
             restricted: request.restricted,
             contact: request.contact.as_ref().map(to_json).transpose()?,
-            webhook_url: request.webhook_url.as_deref(),
         },
         &admin_actor(&state),
         &request.reason,
@@ -351,42 +343,6 @@ pub(crate) async fn lift_reconciliation_block(
 }
 
 #[utoipa::path(
-    post,
-    path = "/v1/admin/outbox/{event_id}/replay",
-    params((
-        "event_id" = String,
-        Path,
-        description = "The `webhook-id` header, `evt_…`"
-    )),
-    request_body = AdminReasonRequest,
-    responses(
-        (status = 200, description = "OK: queued for delivery", body = OutboxReplayResponse),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 404, description = "Not Found", body = ErrorResponse)
-    ),
-    security(("http_message_signature" = [])),
-    tag = "admin"
-)]
-pub(crate) async fn replay_outbox_event(
-    State(state): State<AppState>,
-    ApiPath(event_id): ApiPath<String>,
-    ApiJson(request): ApiJson<AdminReasonRequest>,
-) -> ApiResult<Json<OutboxReplayResponse>> {
-    let event_id =
-        crate::ids::parse(crate::ids::EVENT, &event_id).ok_or_else(ApiError::not_found)?;
-    validate_reason(&request.reason)?;
-    Ok(Json(
-        repository::replay_outbox_event(
-            &state.pool,
-            event_id,
-            &admin_actor(&state),
-            &request.reason,
-        )
-        .await?,
-    ))
-}
-
-#[utoipa::path(
     get,
     path = "/v1/admin/metrics",
     responses((
@@ -537,31 +493,6 @@ fn validate_reason(reason: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Whether the service's own public origin is `http`, which only local stacks use.
-fn local_stack(state: &AppState) -> bool {
-    state.public_origin.to_string().starts_with("http://")
-}
-
-/// Requires an absolute `https` URL without credentials or fragment. `http` is accepted only
-/// when the service's own public origin is `http`, which only local stacks use.
-fn validate_webhook_url(webhook_url: &str, allow_http: bool) -> ApiResult<()> {
-    const MESSAGE: &str = "webhook_url must be an absolute https URL without credentials";
-    if webhook_url.len() > 2048 {
-        return Err(ApiError::bad_request(MESSAGE));
-    }
-    let url = url::Url::parse(webhook_url).map_err(|_| ApiError::bad_request(MESSAGE))?;
-    let scheme_allowed = url.scheme() == "https" || (allow_http && url.scheme() == "http");
-    if !scheme_allowed
-        || url.host_str().is_none_or(str::is_empty)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(ApiError::bad_request(MESSAGE));
-    }
-    Ok(())
-}
-
 fn validate_scopes(scopes: Vec<String>) -> ApiResult<Vec<String>> {
     if scopes.is_empty() {
         return Err(ApiError::bad_request("at least one scope is required"));
@@ -648,24 +579,4 @@ fn parse_account_id(id: &str) -> ApiResult<Uuid> {
 
 fn admin_actor(state: &AppState) -> Actor {
     Actor::admin(state.admin_key.kid.clone())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_webhook_url;
-
-    #[test]
-    fn webhook_urls_use_https_unless_the_service_origin_is_http() {
-        assert!(validate_webhook_url("https://product.example/webhooks", false).is_ok());
-        assert!(validate_webhook_url("http://product.example/webhooks", false).is_err());
-        assert!(validate_webhook_url("http://product:8089/webhooks", true).is_ok());
-        for url in [
-            "product.example/webhooks",
-            "ftp://product.example/webhooks",
-            "https://user@product.example/webhooks",
-            "https://product.example/webhooks#fragment",
-        ] {
-            assert!(validate_webhook_url(url, true).is_err(), "{url}");
-        }
-    }
 }
