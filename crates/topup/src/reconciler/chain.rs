@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::time::Duration;
 
@@ -30,26 +29,6 @@ pub trait ReconciliationChain: Send + Sync {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ReconciliationError>;
-
-    /// Returns finalized transfers of `tokens` to any of `recipients`: a provider reader requests
-    /// every transfer of the tokens, one request per window whatever the recipient count, and
-    /// keeps those to `recipients` locally.
-    async fn token_transfers(
-        &self,
-        tokens: &[Address],
-        recipients: &BTreeSet<Address>,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<TransferLog>, ReconciliationError> {
-        let addresses = recipients.iter().copied().collect::<Vec<_>>();
-        let logs = self
-            .transfer_logs_to(&addresses, from_block, to_block)
-            .await?;
-        Ok(logs
-            .into_iter()
-            .filter(|log| tokens.contains(&log.token))
-            .collect())
-    }
 
     /// Returns token balances at one block in bounded JSON-RPC batches.
     async fn token_balances(
@@ -98,23 +77,6 @@ impl ReconciliationChain for FinalizedReader {
                 self,
                 "transfer log fetch",
                 ChainReader::transfer_logs_to(self, addresses, from_block, to_block),
-            )
-        })
-        .await?)
-    }
-
-    async fn token_transfers(
-        &self,
-        tokens: &[Address],
-        recipients: &BTreeSet<Address>,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<TransferLog>, ReconciliationError> {
-        Ok(backing_off(|| {
-            bounded(
-                self,
-                "token transfer log fetch",
-                ChainReader::token_transfers(self, tokens, recipients, from_block, to_block),
             )
         })
         .await?)

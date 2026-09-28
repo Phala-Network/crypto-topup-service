@@ -765,7 +765,7 @@ workspace, and checks the deposit state, the verified webhooks, and the product 
 |---|---|---|
 | underpayment | `--pay-bps 9700` | `credited` at spot for what arrived, then `swept`; the lock later expires |
 | after the quote window | `--pay-after-expiry` | `quote.expired`, then `credited` at spot and `swept` |
-| unsupported token | `--token T --until rejected` | once confirmed `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
+| unsupported token | `--token T --until rejected` | once final, at the next reconciliation round, `rejected(unsupported_asset)`; the tokens stay in the forwarder; `TopupUnsupportedInflows` |
 | refund | `--pay-bps N --until refunded --refund-to A` | a payment of N/10000 of the quote above `max_deposit_atomic` (200000 test PHA): `rejected(out_of_bounds)`, swept; once the deposit is final the driver requests a refund and waits while the treasury Safe's owners, as the merchant, pay it from the treasury of the deposit's address and attaches the transaction with `POST /v1/refunds/{id}/mark_paid`, until `succeeded` and one `deposit.refunded` |
 
 Each row adds its options to the step-5 driver command: `T` is the Sepolia unsupported test token

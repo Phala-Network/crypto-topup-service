@@ -227,6 +227,39 @@ async fn repairs_missing_deposits_incrementally_and_sweeps_with_audit() -> Resul
     .await
 }
 
+/// In token mode the scanner requests only routed tokens, so the missing-deposit check is what
+/// finds another token sent to an issued address.
+#[tokio::test]
+async fn missing_deposit_check_records_unrouted_tokens_in_token_mode() -> Result<()> {
+    with_database(|pool| async move {
+        let route = route()?;
+        ensure!(route.asset.backstop == topup_core::route::Backstop::Token);
+        let seed = seed_identity(&pool, &route, 1).await?;
+        let chain = Arc::new(MockChain::at(5));
+        chain.derive(&[&seed]);
+        let other_token = Address::from([201; 20]);
+        chain.logs.lock().unwrap().push(transfer(
+            12,
+            0,
+            3,
+            other_token,
+            Address::from([13; 20]),
+            seed.address,
+            500,
+        ));
+        let reconciler = reconciler(&pool, route.clone(), chain.clone())?;
+        scanned_through(&pool, 5).await?;
+
+        let missing = reconciler.check(CheckName::MissingDeposit).await?;
+        ensure!(missing.len() == 1 && missing[0].repair_applied);
+        let recorded = deposit(&pool, deposit_id(CHAIN_ID, B256::from([12; 32]), 0)).await?;
+        ensure!(recorded.state == DepositState::Rejected);
+        ensure!(recorded.reason == Some(topup_core::deposit::RejectReason::UnsupportedAsset));
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn missing_deposit_scan_never_passes_the_scanner() -> Result<()> {
     with_database(|pool| async move {
@@ -657,9 +690,9 @@ async fn first_round_after_restart_completes_against_a_rate_limiting_provider() 
         .fetch_one(&pool)
         .await?;
         ensure!(deposit_cursor == 301);
-        // The route is in token mode: each window is one request for every transfer of the
-        // token, whatever the number of addresses ever issued, never one per address batch.
-        ensure!(node.by_recipient.load(Ordering::SeqCst) == 0);
+        // Even in token mode the check reads by recipient, any token, so it also finds transfers
+        // of tokens the scanner does not request.
+        ensure!(node.by_recipient.load(Ordering::SeqCst) > 0);
         Ok(())
     })
     .await

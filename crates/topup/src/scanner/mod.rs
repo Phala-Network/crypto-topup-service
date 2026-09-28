@@ -138,11 +138,6 @@ impl ChainRoutes {
     pub fn token_mode(&self) -> bool {
         self.backstop == Backstop::Token
     }
-
-    /// The routed token contracts of the chain.
-    pub(crate) fn tokens(&self) -> Vec<Address> {
-        self.routes.keys().copied().collect()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -605,15 +600,20 @@ fn record_committed(
     committed: ScanCommit,
 ) -> Result<(), ScannerError> {
     stats.record_inserted(committed.inserted)?;
-    if committed.unsupported_inserted > 0 {
+    report_unsupported_inflows(chain_id, committed.unsupported_inserted);
+    Ok(())
+}
+
+/// Raises `TopupUnsupportedInflows` for newly recorded transfers of unrouted tokens.
+pub(crate) fn report_unsupported_inflows(chain_id: u64, count: u64) {
+    if count > 0 {
         tracing::warn!(
             tags.alert = "TopupUnsupportedInflows",
             tags.chain_id = chain_id,
-            count = committed.unsupported_inserted,
+            count,
             "unsupported finalized inflows observed"
         );
     }
-    Ok(())
 }
 
 fn address_index(addresses: &[ScanAddress]) -> BTreeMap<Address, ScanAddress> {

@@ -589,3 +589,10 @@ happens only from two-provider finalized data.
   always null placeholders; route exposure now comes from the report-level `exposure_minor`, and
   PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
   the endpoint is admin-only and no service has been deployed.
+
+### Fixed
+
+- A token without a route sent to an issued address is again recorded as
+  `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block
+  scanning change, routes in token mode (the default) never saw such transfers: the missing-deposit
+  check now reads every issued address's transfers of any token in both modes.
