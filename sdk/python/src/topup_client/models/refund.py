@@ -29,8 +29,8 @@ class Refund:
         Example:
             {'amount_atomic': '202510000000000000000', 'created': 1790557200, 'deposit':
                 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'destination_address': '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a',
-                'failure_reason': None, 'id': 're_3c9e7a1b5d2f4a6c8e0b1d3f5a7c9e02', 'livemode': False, 'log_index': 41,
-                'metadata': {'ticket': 'support-311'}, 'object': 'refund', 'status': 'pending', 'transaction_hash':
+                'failure_reason': None, 'id': 're_3c9e7a1b5d2f4a6c8e0b1d3f5a7c9e02', 'livemode': False, 'metadata': {'ticket':
+                'support-311'}, 'object': 'refund', 'receipt_log_index': 0, 'status': 'pending', 'transaction_hash':
                 '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c', 'treasury':
                 '0x936c1991f8da9a919fa11b557a3514719f5a4504'}
 
@@ -46,16 +46,20 @@ class Refund:
             object_ (RefundObject): Always `refund`.
             status (str): `pending` (awaiting payment, or its transaction's finality), `succeeded` (the transfer is
                 final), `failed` (the attached transaction does not pay the refund; see
-                `failure_reason`), or `canceled`.
+                `failure_reason`), or `canceled` (only before a transaction is attached). A refund marked
+                paid stays `pending`, reserving its amount of the deposit, until it is `succeeded` or
+                `failed`.
             treasury (str): The treasury the refund must be paid from: the one the deposit's address pays, which may
                 differ from the account's current treasury.
             failure_reason (None | str | Unset): Why the refund failed: `transaction_failed`, `transfer_not_found`,
                 `sender_mismatch`,
-                `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`. New values may be
-                added.
-            log_index (int | None | Unset): Block-wide index of the paying `Transfer` log: as named when marked paid, or
-                found at
-                verification.
+                `destination_mismatch`, `amount_mismatch`, `transfer_already_used`,
+                `transaction_dropped` (in no block while, at `finalized` on both providers, its sender's
+                nonce was used by another transaction), or `transaction_not_found` (no provider returned
+                it within 24 hours of `mark_paid`). New values may be added.
+            receipt_log_index (int | None | Unset): Position of the paying `Transfer` log among the logs of the
+                transaction's receipt: as named
+                when marked paid, or found at verification.
             transaction_hash (None | str | Unset): The attached refund transaction, once marked paid.
     """
 
@@ -70,7 +74,7 @@ class Refund:
     status: str
     treasury: str
     failure_reason: None | str | Unset = UNSET
-    log_index: int | None | Unset = UNSET
+    receipt_log_index: int | None | Unset = UNSET
     transaction_hash: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -108,11 +112,11 @@ class Refund:
         else:
             failure_reason = self.failure_reason
 
-        log_index: int | None | Unset
-        if isinstance(self.log_index, Unset):
-            log_index = UNSET
+        receipt_log_index: int | None | Unset
+        if isinstance(self.receipt_log_index, Unset):
+            receipt_log_index = UNSET
         else:
-            log_index = self.log_index
+            receipt_log_index = self.receipt_log_index
 
         transaction_hash: None | str | Unset
         if isinstance(self.transaction_hash, Unset):
@@ -138,8 +142,8 @@ class Refund:
         )
         if failure_reason is not UNSET:
             field_dict["failure_reason"] = failure_reason
-        if log_index is not UNSET:
-            field_dict["log_index"] = log_index
+        if receipt_log_index is not UNSET:
+            field_dict["receipt_log_index"] = receipt_log_index
         if transaction_hash is not UNSET:
             field_dict["transaction_hash"] = transaction_hash
 
@@ -191,14 +195,14 @@ class Refund:
 
         failure_reason = _parse_failure_reason(d.pop("failure_reason", UNSET))
 
-        def _parse_log_index(data: object) -> int | None | Unset:
+        def _parse_receipt_log_index(data: object) -> int | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
             return cast(int | None | Unset, data)
 
-        log_index = _parse_log_index(d.pop("log_index", UNSET))
+        receipt_log_index = _parse_receipt_log_index(d.pop("receipt_log_index", UNSET))
 
         def _parse_transaction_hash(data: object) -> None | str | Unset:
             if data is None:
@@ -221,7 +225,7 @@ class Refund:
             status=status,
             treasury=treasury,
             failure_reason=failure_reason,
-            log_index=log_index,
+            receipt_log_index=receipt_log_index,
             transaction_hash=transaction_hash,
         )
 

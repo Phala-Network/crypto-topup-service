@@ -46,6 +46,8 @@ const REFUND_DESTINATION: &str = "0x4444444444444444444444444444444444444444";
 const REFUND_TX: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const OTHER_TX: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const SANCTIONED: &str = "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+/// The account that sends every refund transaction [`refund_rpc`] knows.
+const REFUND_SENDER: &str = "0x5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
 
 /// A `POST /v1/refunds` body.
 fn refund_body(deposit: Uuid, destination: &str, amount: &str) -> Result<Vec<u8>> {
@@ -210,7 +212,7 @@ async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Resul
             .await?;
         ensure!(status == StatusCode::OK);
         ensure!(
-            refund["status"] == "succeeded" && refund["log_index"] == 7,
+            refund["status"] == "succeeded" && refund["receipt_log_index"] == 7,
             "{refund}"
         );
         ensure!(
@@ -526,7 +528,9 @@ async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
         let (status, _) = merchant
             .post(
                 &format!("/v1/refunds/{first}/mark_paid"),
-                serde_json::to_vec(&json!({"transaction_hash": REFUND_TX, "log_index": 7}))?,
+                serde_json::to_vec(
+                    &json!({"transaction_hash": REFUND_TX, "receipt_log_index": 7}),
+                )?,
             )
             .await?;
         ensure!(status == StatusCode::OK);
@@ -534,7 +538,9 @@ async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
         let (status, error) = merchant
             .post(
                 &format!("/v1/refunds/{second}/mark_paid"),
-                serde_json::to_vec(&json!({"transaction_hash": REFUND_TX, "log_index": 7}))?,
+                serde_json::to_vec(
+                    &json!({"transaction_hash": REFUND_TX, "receipt_log_index": 7}),
+                )?,
             )
             .await?;
         ensure!(status == StatusCode::BAD_REQUEST, "{error}");
@@ -569,7 +575,7 @@ async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
             .call(Method::GET, &format!("/v1/refunds/{first}"), Vec::new())
             .await?;
         ensure!(
-            refund["status"] == "succeeded" && refund["log_index"] == 7,
+            refund["status"] == "succeeded" && refund["receipt_log_index"] == 7,
             "{refund}"
         );
         let (_, refund) = merchant
@@ -588,7 +594,7 @@ async fn a_transfer_log_pays_only_one_refund() -> Result<()> {
 }
 
 #[tokio::test]
-async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
+async fn only_an_unpaid_refund_is_canceled_and_a_dropped_payment_fails() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -631,7 +637,8 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
             "{error}"
         );
 
-        // A refund already marked paid can still be canceled; verification then skips it.
+        // Once marked paid, a refund cannot be canceled: its transaction could still pay it, and
+        // a new refund would pay the deposit back twice. It keeps its reservation.
         let second = merchant.refund(deposit, "150").await?;
         let (status, _) = merchant
             .post(
@@ -640,15 +647,49 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
             )
             .await?;
         ensure!(status == StatusCode::OK);
-        let (status, canceled) = merchant
+        let (status, error) = merchant
             .post(&format!("/v1/refunds/{second}/cancel"), Vec::new())
             .await?;
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
         ensure!(
-            status == StatusCode::OK && canceled["status"] == "canceled",
-            "{canceled}"
+            error["error"]["code"] == "refund_unexpected_state",
+            "{error}"
         );
-        let worker = test_worker(pool, Vec::new(), Vec::new());
-        ensure!(worker.check_once().await? == Verification::Idle);
+        let (status, error) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "1")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
+        ensure!(error["error"]["code"] == "amount_too_large", "{error}");
+
+        // Its transaction is dropped: no provider has a receipt, and at `finalized` both show the
+        // sender's nonce used by another transaction. Until then it waits; then it fails, which
+        // releases the deposit for a new refund.
+        let sender = Address::repeat_byte(0x5e);
+        let missing = || vec![RefundReceipt::Missing];
+        let worker = test_worker_with(pool, missing(), missing(), Some((sender, 7)), 7);
+        ensure!(worker.check_once().await? == Verification::Waiting);
+        let second_id = topup::ids::parse(topup::ids::REFUND, &second).context("re_ id")?;
+        ensure!(refund_status(pool, second_id).await? == "pending");
+        let origin: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT tx_from, tx_nonce::text FROM refunds WHERE id = $1")
+                .bind(second_id)
+                .fetch_one(pool)
+                .await?;
+        ensure!(origin == (Some(format!("{sender:#x}")), Some("7".to_owned())));
+        // The nonce kept when the transaction was first seen proves the drop, even once no
+        // provider returns the transaction any more.
+        let worker = test_worker_with(pool, missing(), missing(), None, 8);
+        ensure!(worker.check_once().await? == Verification::Failed);
+        let (_, dropped) = merchant
+            .call(Method::GET, &format!("/v1/refunds/{second}"), Vec::new())
+            .await?;
+        ensure!(
+            dropped["status"] == "failed" && dropped["failure_reason"] == "transaction_dropped",
+            "{dropped}"
+        );
         let third = merchant.refund(deposit, "150").await?;
         // The list pages newest first and filters by deposit and status.
         let deposit_id = format!("dep_{}", deposit.simple());
@@ -677,17 +718,13 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
                 Vec::new(),
             )
             .await?;
-        ensure!(canceled["has_more"] == true && canceled["data"][0]["id"] == second);
-        let (_, next) = merchant
-            .call(
-                Method::GET,
-                &format!("/v1/refunds?status=canceled&starting_after={second}"),
-                Vec::new(),
-            )
+        ensure!(canceled["has_more"] == false && canceled["data"][0]["id"] == first);
+        let (_, failed) = merchant
+            .call(Method::GET, "/v1/refunds?status=failed", Vec::new())
             .await?;
         ensure!(
-            next["has_more"] == false && next["data"][0]["id"] == first,
-            "{next}"
+            failed["has_more"] == false && failed["data"][0]["id"] == second,
+            "{failed}"
         );
         let (status, _) = merchant
             .call(Method::GET, "/v1/refunds?status=done", Vec::new())
@@ -703,7 +740,7 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
                 .iter()
                 .filter(|action| *action == "refund.cancel")
                 .count()
-                == 2
+                == 1
         );
         ensure!(
             actions
@@ -711,6 +748,140 @@ async fn canceling_a_pending_refund_releases_its_reservation() -> Result<()> {
                 .filter(|action| *action == "refund.mark_paid")
                 .count()
                 == 1
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_refund_transaction_no_provider_ever_returned_fails_after_a_day() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[49; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_rejected_deposit(pool, merchant.account.id, "unseen", 100).await?;
+        let id = merchant.refund(deposit, "100").await?;
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        let refund_id = topup::ids::parse(topup::ids::REFUND, &id).context("re_ id")?;
+        let missing = || vec![RefundReceipt::Missing];
+
+        // Unknown to both providers, and without a sender to prove it dropped: it waits.
+        let worker = test_worker(pool, missing(), missing());
+        ensure!(worker.check_once().await? == Verification::Waiting);
+        ensure!(refund_status(pool, refund_id).await? == "pending");
+
+        // A day after `mark_paid`, still never seen, it fails and releases the deposit.
+        sqlx::query("UPDATE refunds SET paid_at = now() - interval '25 hours' WHERE id = $1")
+            .bind(refund_id)
+            .execute(pool)
+            .await?;
+        let worker = test_worker(pool, missing(), missing());
+        ensure!(worker.check_once().await? == Verification::Failed);
+        let (_, refund) = merchant
+            .call(Method::GET, &format!("/v1/refunds/{id}"), Vec::new())
+            .await?;
+        ensure!(
+            refund["status"] == "failed" && refund["failure_reason"] == "transaction_not_found",
+            "{refund}"
+        );
+        merchant.refund(deposit, "100").await?;
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn refunds_take_back_the_credit_pro_rata_in_each_deposit_snapshot() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[51; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_deposit(
+            pool,
+            merchant.account.id,
+            "partial",
+            300,
+            DepositState::Credited,
+            None,
+        )
+        .await?;
+        sqlx::query("UPDATE deposits SET credit_minor = 1000 WHERE id = $1")
+            .bind(deposit)
+            .execute(pool)
+            .await?;
+
+        // A third of the tokens takes back a third of the credit, rounded down: 333 of 1000.
+        let first = merchant.refund(deposit, "100").await?;
+        merchant.mark_paid(&first, REFUND_TX).await?;
+        let paying = finalized(vec![transfer(
+            FIXTURE_TREASURY,
+            REFUND_DESTINATION,
+            100,
+            0,
+        )?]);
+        let worker = test_worker(pool, vec![paying.clone()], vec![paying]);
+        ensure!(worker.check_once().await? == Verification::Succeeded);
+        // The rest, paid by a second log of the same transaction, takes back all of it.
+        let second = merchant.refund(deposit, "200").await?;
+        merchant.mark_paid(&second, REFUND_TX).await?;
+        let both = finalized(vec![
+            transfer(FIXTURE_TREASURY, REFUND_DESTINATION, 100, 0)?,
+            transfer(FIXTURE_TREASURY, REFUND_DESTINATION, 200, 1)?,
+        ]);
+        let worker = test_worker(pool, vec![both.clone()], vec![both]);
+        ensure!(worker.check_once().await? == Verification::Succeeded);
+
+        // Each `deposit.refunded` carries the cumulative amounts at its refund.
+        let snapshots: Vec<Value> = sqlx::query_scalar(
+            "SELECT data -> 'object' FROM events WHERE type = 'deposit.refunded' \
+             ORDER BY created, id",
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut cumulative: Vec<(Value, Value, Value)> = snapshots
+            .iter()
+            .map(|deposit| {
+                (
+                    deposit["amount_refunded_atomic"].clone(),
+                    deposit["amount_refunded"].clone(),
+                    deposit["amount_reversed"].clone(),
+                )
+            })
+            .collect();
+        cumulative.sort_by_key(|(atomic, _, _)| atomic.to_string());
+        ensure!(
+            cumulative
+                == [
+                    (json!("100"), json!(333), json!(0)),
+                    (json!("300"), json!(1000), json!(0)),
+                ],
+            "{snapshots:?}"
+        );
+        let (_, current) = merchant
+            .call(
+                Method::GET,
+                &format!("/v1/deposits/dep_{}", deposit.simple()),
+                Vec::new(),
+            )
+            .await?;
+        ensure!(
+            current["amount"] == 1000
+                && current["amount_refunded"] == 1000
+                && current["refunded"] == true,
+            "{current}"
         );
         Ok(())
     }
@@ -1011,10 +1182,28 @@ async fn evm_reader_reads_every_transfer_only_at_finality_and_times_out() -> Res
         let [transfer] = transfers.as_slice() else {
             anyhow::bail!("scenario {scenario}: expected one transfer");
         };
-        ensure!(transfer.log_index == 7 && transfer.amount == U256::from(100_u64));
+        // The log's position in its receipt, not its block-wide `logIndex` (7).
+        ensure!(transfer.receipt_log_index == 0 && transfer.amount == U256::from(100_u64));
         ensure!((transfer.token == token) == (scenario != 1));
     }
     ensure!(reader.receipt(1, B256::from(U256::from(4_u64))).await? == RefundReceipt::Pending);
+    ensure!(reader.receipt(1, B256::from(U256::from(7_u64))).await? == RefundReceipt::Missing);
+    ensure!(
+        reader.origin(1, B256::from(U256::from(2_u64))).await?
+            == Some((Address::from_str(REFUND_SENDER)?, 5))
+    );
+    ensure!(
+        reader
+            .origin(1, B256::from(U256::from(7_u64)))
+            .await?
+            .is_none()
+    );
+    ensure!(
+        reader
+            .finalized_nonce(1, Address::from_str(REFUND_SENDER)?)
+            .await?
+            == 6
+    );
     ensure!(matches!(
         reader.receipt(1, B256::from(U256::from(6_u64))).await,
         Err(RefundReadError::Rpc(_))
@@ -1248,15 +1437,55 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
 async fn refund_rpc(Json(request): Json<Value>) -> Json<Value> {
     let id = request["id"].clone();
     let method = request["method"].as_str().unwrap_or_default();
+    let unknown = |tx_hash: &str| tx_hash == format!("{:#x}", B256::from(U256::from(7_u64)));
+    if method == "eth_getTransactionByHash" {
+        let tx_hash = request["params"][0].as_str().unwrap_or_default();
+        let transaction = json!({
+            "hash": tx_hash,
+            "nonce": "0x5",
+            "blockHash": format!("{:#x}", B256::from(U256::from(900_u64))),
+            "blockNumber": "0x5a",
+            "transactionIndex": "0x0",
+            "from": REFUND_SENDER,
+            "to": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+            "value": "0x0",
+            "gas": "0x0",
+            "maxFeePerGas": "0x0",
+            "maxPriorityFeePerGas": "0x0",
+            "gasPrice": "0x0",
+            "input": "0x",
+            "chainId": "0x1",
+            "type": "0x2",
+            "accessList": [],
+            "v": "0x0",
+            "yParity": "0x0",
+            "r": "0x1",
+            "s": "0x1",
+        });
+        let result = if unknown(tx_hash) {
+            Value::Null
+        } else {
+            transaction
+        };
+        return Json(json!({"jsonrpc": "2.0", "id": id, "result": result}));
+    }
+    if method == "eth_getTransactionCount" {
+        return Json(json!({"jsonrpc": "2.0", "id": id, "result": "0x6"}));
+    }
     if method == "eth_getTransactionReceipt" {
         let tx_hash = request["params"][0].as_str().unwrap_or_default();
         if tx_hash == format!("{:#x}", B256::from(U256::from(6_u64))) {
             tokio::time::sleep(StdDuration::from_millis(250)).await;
         }
+        let receipt = if unknown(tx_hash) {
+            Value::Null
+        } else {
+            refund_receipt(tx_hash)
+        };
         return Json(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": refund_receipt(tx_hash),
+            "result": receipt,
         }));
     }
     Json(json!({
@@ -1422,10 +1651,15 @@ fn mark_paid_body(transaction_hash: &str) -> Result<Vec<u8>> {
     )?)
 }
 
-/// A transfer of the route fixture's token.
-fn transfer(from: Address, to: &str, amount: u64, log_index: u64) -> Result<RefundTransfer> {
+/// A transfer of the route fixture's token, at `receipt_log_index` in its receipt.
+fn transfer(
+    from: Address,
+    to: &str,
+    amount: u64,
+    receipt_log_index: u64,
+) -> Result<RefundTransfer> {
     Ok(RefundTransfer {
-        log_index,
+        receipt_log_index,
         token: route_fixture().asset.contract,
         from,
         to: Address::from_str(to)?,
@@ -1451,8 +1685,13 @@ async fn refund_status(pool: &sqlx::PgPool, id: Uuid) -> Result<String> {
     )
 }
 
-/// One provider answering with a script of receipts, in order.
-struct ScriptedReader(Mutex<VecDeque<RefundReceipt>>);
+/// One provider answering with a script of receipts, in order, and with a fixed view of the
+/// transaction's sender and nonce and of the sender's nonce at `finalized`.
+struct ScriptedReader {
+    receipts: Mutex<VecDeque<RefundReceipt>>,
+    origin: Option<(Address, u64)>,
+    finalized_nonce: u64,
+}
 
 #[async_trait]
 impl RefundChainReader for ScriptedReader {
@@ -1463,11 +1702,30 @@ impl RefundChainReader for ScriptedReader {
     ) -> Result<RefundReceipt, RefundReadError> {
         assert_eq!(chain_id, 1);
         assert_eq!(tx_hash, B256::from_str(REFUND_TX).expect("valid refund tx"));
-        self.0
+        self.receipts
             .lock()
             .map_err(|_| RefundReadError::Rpc("script lock"))?
             .pop_front()
             .ok_or(RefundReadError::Rpc("script exhausted"))
+    }
+
+    async fn origin(
+        &self,
+        _chain_id: u64,
+        _tx_hash: B256,
+    ) -> Result<Option<(Address, u64)>, RefundReadError> {
+        Ok(self.origin)
+    }
+
+    async fn finalized_nonce(
+        &self,
+        _chain_id: u64,
+        account: Address,
+    ) -> Result<u64, RefundReadError> {
+        if let Some((from, _)) = self.origin {
+            assert_eq!(account, from);
+        }
+        Ok(self.finalized_nonce)
     }
 }
 
@@ -1485,6 +1743,22 @@ impl RefundChainReader for HangingReader {
         self.started.notify_one();
         std::future::pending().await
     }
+
+    async fn origin(
+        &self,
+        _chain_id: u64,
+        _tx_hash: B256,
+    ) -> Result<Option<(Address, u64)>, RefundReadError> {
+        std::future::pending().await
+    }
+
+    async fn finalized_nonce(
+        &self,
+        _chain_id: u64,
+        _account: Address,
+    ) -> Result<u64, RefundReadError> {
+        std::future::pending().await
+    }
 }
 
 fn test_worker(
@@ -1492,11 +1766,28 @@ fn test_worker(
     primary: Vec<RefundReceipt>,
     secondary: Vec<RefundReceipt>,
 ) -> RefundVerificationWorker<ScriptedReader, ScriptedReader> {
+    test_worker_with(pool, primary, secondary, None, 0)
+}
+
+/// [`test_worker`] whose providers both return the transaction as sent by `origin`, and the
+/// sender's nonce at `finalized` as `finalized_nonce`.
+fn test_worker_with(
+    pool: &sqlx::PgPool,
+    primary: Vec<RefundReceipt>,
+    secondary: Vec<RefundReceipt>,
+    origin: Option<(Address, u64)>,
+    finalized_nonce: u64,
+) -> RefundVerificationWorker<ScriptedReader, ScriptedReader> {
+    let reader = |receipts: Vec<RefundReceipt>| ScriptedReader {
+        receipts: Mutex::new(receipts.into()),
+        origin,
+        finalized_nonce,
+    };
     RefundVerificationWorker::new(
         pool.clone(),
         Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).expect("route fixture loads")),
-        ScriptedReader(Mutex::new(primary.into())),
-        ScriptedReader(Mutex::new(secondary.into())),
+        reader(primary),
+        reader(secondary),
         RefundVerificationConfig {
             poll_interval: StdDuration::ZERO,
             retry_interval: StdDuration::ZERO,

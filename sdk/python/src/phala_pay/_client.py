@@ -342,10 +342,14 @@ class Refunds:
         )
 
     def mark_paid(
-        self, refund_id: str, *, transaction_hash: str, log_index: int | None = None
+        self, refund_id: str, *, transaction_hash: str, receipt_log_index: int | None = None
     ) -> Refund:
-        """Attaches the transaction that pays the refund; it is verified at finality."""
-        return self._client.mark_refund_paid(refund_id, transaction_hash, log_index=log_index)
+        """Attaches the transaction that pays the refund; it is verified at finality. From then
+        on the refund cannot be canceled: it stays pending until it succeeds, or fails when the
+        transaction does not pay it or is proven dropped."""
+        return self._client.mark_refund_paid(
+            refund_id, transaction_hash, receipt_log_index=receipt_log_index
+        )
 
     def cancel(self, refund_id: str) -> Refund:
         """Cancels a pending refund."""

@@ -283,7 +283,6 @@ impl Pump {
         let Some(deposit) = db::claim_deposit(&self.pool, lease_token).await? else {
             return Ok(RunOnceResult::Idle);
         };
-        let deposit_id = deposit.id;
         let result = if crate::reconciler::chain_is_blocked(&self.pool, deposit.chain_id).await? {
             tracing::warn!(
                 deposit_id = %deposit.id,
@@ -299,6 +298,28 @@ impl Pump {
         } else {
             self.run_step(&deposit).await
         };
+        let mut result = result;
+        loop {
+            match self.persist(&deposit, lease_token, result).await? {
+                Persisted::Done(outcome) => return Ok(outcome),
+                // Another credit won the cap since the step checked it: the deposit waits for
+                // finality instead.
+                Persisted::Capped(exposure) => {
+                    let credit = deposit.credit_minor.map_or(0, |credit| credit.value());
+                    result = unfinalized_cap_wait(exposure, credit);
+                }
+            }
+        }
+    }
+
+    /// Validates the step's outcome and persists it in one transaction.
+    async fn persist(
+        &self,
+        deposit: &Deposit,
+        lease_token: Uuid,
+        result: StepResult,
+    ) -> Result<Persisted, PumpError> {
+        let deposit_id = deposit.id;
         let result = match next(deposit.state, &result.outcome) {
             Ok(transition) => (result, transition),
             Err(error) => {
@@ -381,7 +402,7 @@ impl Pump {
                     attempt,
                     "deposit step persisted"
                 );
-                Ok(RunOnceResult::Applied { deposit_id })
+                Ok(Persisted::Done(RunOnceResult::Applied { deposit_id }))
             }
             ApplyTransitionResult::Stale => {
                 transaction.commit().await?;
@@ -390,7 +411,7 @@ impl Pump {
                     state = ?deposit.state,
                     "discarded stale deposit step result"
                 );
-                Ok(RunOnceResult::Stale { deposit_id })
+                Ok(Persisted::Done(RunOnceResult::Stale { deposit_id }))
             }
             ApplyTransitionResult::LockUnavailable => {
                 transaction.rollback().await?;
@@ -399,7 +420,11 @@ impl Pump {
                     deposit_id = %deposit.id,
                     "rate lock was consumed concurrently; deposit will retry at spot"
                 );
-                Ok(RunOnceResult::Contended { deposit_id })
+                Ok(Persisted::Done(RunOnceResult::Contended { deposit_id }))
+            }
+            ApplyTransitionResult::UnfinalizedCreditCapped(exposure) => {
+                transaction.rollback().await?;
+                Ok(Persisted::Capped(exposure))
             }
         }
     }
@@ -433,6 +458,29 @@ impl Pump {
             }
         }
     }
+}
+
+enum Persisted {
+    Done(RunOnceResult),
+    /// The transition would credit past the unfinalized-credit cap; nothing was written.
+    Capped(db::UnfinalizedCredit),
+}
+
+/// The wait of a deposit whose credit, `credit` cents, would take its account's unfinalized
+/// credit past the cap: it is credited once final, or once earlier credits are.
+pub(crate) fn unfinalized_cap_wait(exposure: db::UnfinalizedCredit, credit: u64) -> StepResult {
+    StepResult::new(
+        StepOutcome::Wait {
+            reason: WaitReason::UnfinalizedCreditCap,
+        },
+        json!({
+            "outcome": "wait",
+            "reason": "unfinalized_credit_cap",
+            "credit_minor": credit,
+            "unfinalized_credit_minor": exposure.credited,
+            "max_unfinalized_credit": exposure.cap,
+        }),
+    )
 }
 
 /// Failure while claiming, scheduling, or persisting one pump iteration.

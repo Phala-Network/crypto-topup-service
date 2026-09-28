@@ -138,6 +138,11 @@ impl ChainRoutes {
     pub fn token_mode(&self) -> bool {
         self.backstop == Backstop::Token
     }
+
+    /// The routed token contracts of the chain.
+    pub(crate) fn tokens(&self) -> Vec<Address> {
+        self.routes.keys().copied().collect()
+    }
 }
 
 #[derive(Clone, Debug)]

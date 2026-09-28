@@ -323,6 +323,18 @@ async fn operator_onboards_accounts_enables_live_mode_and_recovers_keys() -> Res
         ensure!(repeated.status == StatusCode::OK);
         ensure!(repeated.body["api_keys"] == json!([]));
 
+        // The operator sets the cap on credit before finality, $1 000 by default.
+        ensure!(enabled.body["max_unfinalized_credit"] == 100_000);
+        let capped = harness
+            .admin(
+                Method::POST,
+                &account_path,
+                &json!({"max_unfinalized_credit": 0, "reason": "sells irreversible goods"}),
+            )
+            .await?;
+        ensure!(capped.status == StatusCode::OK, "{}", capped.body);
+        ensure!(capped.body["max_unfinalized_credit"] == 0);
+
         // Turning live mode off stops live keys at once.
         let disabled = harness
             .admin(
@@ -373,7 +385,8 @@ async fn operator_onboards_accounts_enables_live_mode_and_recovers_keys() -> Res
             .iter()
             .filter(|(action, _)| action == "account.update")
             .count();
-        ensure!(updates == 2, "the repeat is not audited: {audit:?}");
+        // Enabling live mode, the cap, and disabling it; the repeat is not audited.
+        ensure!(updates == 3, "the repeat is not audited: {audit:?}");
 
         let events = events(pool, account_id).await?;
         ensure!(

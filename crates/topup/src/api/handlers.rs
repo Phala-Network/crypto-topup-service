@@ -90,7 +90,7 @@ pub(crate) async fn create_account(
     tag = "admin"
 )]
 /// Updates an account: live mode (enabling it returns the first live key), the restricted flag,
-/// or the contact. Audited, and announced to the account as `account.updated`. The operator does
+/// the contact, or the cap on credit before finality. Audited, and announced to the account as `account.updated`. The operator does
 /// not manage the account's webhook endpoints: the merchant does, with `/v1/webhook_endpoints`.
 pub(crate) async fn update_account(
     State(state): State<AppState>,
@@ -111,6 +111,17 @@ pub(crate) async fn update_account(
             charges_enabled: request.charges_enabled,
             restricted: request.restricted,
             contact: request.contact.as_ref().map(to_json).transpose()?,
+            max_unfinalized_credit: request
+                .max_unfinalized_credit
+                .map(|cap| {
+                    i64::try_from(cap).map_err(|_| {
+                        ApiError::invalid_param(
+                            "max_unfinalized_credit",
+                            "max_unfinalized_credit is too large",
+                        )
+                    })
+                })
+                .transpose()?,
         },
         &actor,
         &request.reason,
@@ -666,6 +677,8 @@ fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {
         charges_enabled: account.charges_enabled,
         restricted: account.restricted,
         paused_scopes: account.paused_scopes,
+        max_unfinalized_credit: u64::try_from(account.max_unfinalized_credit)
+            .map_err(|_| ApiError::internal())?,
         created: account.created_at.timestamp(),
         api_keys: issued
             .api_keys

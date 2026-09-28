@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, B256};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use topup_core::deposit::{DepositState, RejectReason, Transition};
 use topup_core::identity::deposit_id;
 use topup_core::money::{AtomicAmount, MinorAmount};
@@ -228,6 +228,65 @@ pub enum ApplyTransitionResult {
     Stale,
     /// Another deposit consumed the selected rate lock before this transaction.
     LockUnavailable,
+    /// Crediting the deposit before it is final would take its account's unfinalized credit past
+    /// the cap; nothing was written and the caller rolls back.
+    UnfinalizedCreditCapped(UnfinalizedCredit),
+}
+
+/// A scope's credit that is not final yet: the `credit_minor` of its credited deposits whose
+/// block is not final on both providers, which a reorganization could still reverse, and the
+/// account's cap on it (`accounts.max_unfinalized_credit`, the same for each mode).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnfinalizedCredit {
+    /// Credit of the scope's credited deposits that are not final, in cents.
+    pub credited: u64,
+    /// The account's cap, in cents.
+    pub cap: u64,
+}
+
+impl UnfinalizedCredit {
+    /// Whether crediting `credit` more before finality stays within the cap.
+    #[must_use]
+    pub fn admits(self, credit: u64) -> bool {
+        self.credited
+            .checked_add(credit)
+            .is_some_and(|total| total <= self.cap)
+    }
+}
+
+/// The unfinalized credit of `account_id` in `livemode`, excluding deposit `excluding`.
+pub async fn unfinalized_credit<'e>(
+    executor: impl PgExecutor<'e>,
+    account_id: Uuid,
+    livemode: bool,
+    excluding: Uuid,
+) -> Result<UnfinalizedCredit, sqlx::Error> {
+    let (credited, cap): (String, i64) = sqlx::query_as(
+        r#"
+        SELECT (
+                   SELECT COALESCE(sum(credit_minor), 0)::text
+                   FROM deposits
+                   WHERE account_id = $1 AND livemode = $2 AND state = 'credited'
+                     AND final_at IS NULL AND id <> $3
+               ),
+               (SELECT max_unfinalized_credit FROM accounts WHERE id = $1)
+        "#,
+    )
+    .bind(account_id)
+    .bind(livemode)
+    .bind(excluding)
+    .fetch_one(executor)
+    .await?;
+    Ok(UnfinalizedCredit {
+        credited: credited
+            .parse()
+            .map_err(|_| decode_error("unfinalized credit"))?,
+        cap: to_u64(cap, "accounts.max_unfinalized_credit")?,
+    })
+}
+
+fn decode_error(what: &str) -> sqlx::Error {
+    sqlx::Error::Decode(format!("{what} is out of range").into())
 }
 
 /// Failure while validating or persisting a transition.
@@ -606,6 +665,12 @@ pub async fn apply_transition(
         .await?;
     }
 
+    if update.transition.to == DepositState::Credited
+        && let Some(capped) = exceeds_unfinalized_cap(transaction, deposit_id).await?
+    {
+        return Ok(ApplyTransitionResult::UnfinalizedCreditCapped(capped));
+    }
+
     sqlx::query!(
         r#"
         INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence)
@@ -632,6 +697,35 @@ pub async fn apply_transition(
     }
 
     Ok(ApplyTransitionResult::Applied)
+}
+
+/// The scope's unfinalized credit when crediting `deposit_id`, not final yet, would take it past
+/// the cap. A transaction-level advisory lock per account and mode serialises credits from this
+/// check to commit, and under `READ COMMITTED` the sum, a later statement, sees every credit
+/// committed before it. Finality and reversal only lower the sum, so they need no lock.
+async fn exceeds_unfinalized_cap(
+    transaction: &mut Transaction<'_, Postgres>,
+    deposit_id: Uuid,
+) -> Result<Option<UnfinalizedCredit>, sqlx::Error> {
+    let (account_id, livemode, credit, is_final): (Uuid, bool, Option<String>, bool) =
+        sqlx::query_as(
+            "SELECT account_id, livemode, credit_minor::text, final_at IS NOT NULL \
+             FROM deposits WHERE id = $1",
+        )
+        .bind(deposit_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+    if is_final {
+        return Ok(None);
+    }
+    let credit = parse_optional_minor_decimal(credit.as_deref())?
+        .ok_or_else(|| decode_error("a credited deposit's credit_minor"))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('unfinalized-credit:' || $1, 0))")
+        .bind(format!("{account_id}:{livemode}"))
+        .execute(&mut **transaction)
+        .await?;
+    let exposure = unfinalized_credit(&mut **transaction, account_id, livemode, deposit_id).await?;
+    Ok((!exposure.admits(credit.value())).then_some(exposure))
 }
 
 /// Releases a still-owned lease after an atomic rate-lock race is lost.

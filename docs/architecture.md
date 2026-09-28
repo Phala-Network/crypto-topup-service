@@ -284,9 +284,13 @@ flush_failures  chain_id, tx_hash, log_index, address_id, token, reason (revert 
               block_number, block_hash      PRIMARY KEY (chain_id, tx_hash, log_index)
               -- finalized FlushFailed events for a known address; its deposits stay unswept
 refunds       id, account_id, livemode, chain_id, deposit_id, amount_atomic, destination_address,
-              tx_hash, log_index, status (pending|succeeded|failed|canceled), failure_reason,
+              tx_hash, receipt_log_index, paid_at, tx_from, tx_nonce,
+              status (pending|succeeded|failed|canceled), failure_reason,
               metadata jsonb, created_at   -- paid by the merchant from the address's treasury
-              UNIQUE (chain_id, tx_hash, log_index) among pending and succeeded refunds
+              UNIQUE (chain_id, tx_hash, receipt_log_index) among pending and succeeded refunds
+              -- receipt_log_index: the log's position in its receipt, which survives
+              -- re-inclusion; tx_from, tx_nonce: kept when a provider first returns the
+              -- transaction, to prove it dropped
 webhook_endpoints  id (we_…), account_id, livemode, url, enabled_events text[], status
               (enabled|disabled), disabled_reason (gone), description, metadata jsonb,
               created_at, deleted_at, last_attempt_at, last_attempt_status
@@ -356,15 +360,34 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 | Step | Does |
 |---|---|
 | `detected → confirmed` | From both providers, by the transaction's receipt: the log at the deposit's receipt position, in the same block (same hash), and that block has reached the route's confirmation on each (§8, §14). Each check reads, per provider, the one head the confirmation needs and the transaction's receipt; the block time and the nonce come from the recorded deposit, which its block hash and transaction hash fix. A lagging provider is waited for every 2 s, 12 s for `finalized`. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality` until the finality watch decides; before finality it waits. For a `finalized` route, whose check reads `finalized`, the deposit is marked final (`final_at`) in the same transaction; otherwise the finality watch marks it. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
-| `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account, product, and route not paused for `settlement` (paused → `Wait`, never a rejection). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is owed to the product, whatever the product answers, unless the deposit is reversed before finality. |
+| `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account, product, and route not paused for `settlement` (paused → `Wait`, never a rejection); a deposit not final yet only while its credit keeps the account's unfinalized credit within `accounts.max_unfinalized_credit` (below; past it → `Wait` until final). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is owed to the product, whatever the product answers, unless the deposit is reversed before finality. |
 | `credited → swept` | The deposit is final and a `flushed` row (a finalized `Flushed` event for its address, token, and treasury, whoever sent it) exists at a log position `(block_number, log_index)` greater than the deposit's. Applied in SQL, with the finalized `Flushed` event as evidence, when the scanner indexes the event, when the deposit is credited or becomes final, and by the reconciler's repair pass; the pump's credited step only waits. |
 
+**Unfinalized credit cap.** Crediting before finality is the service's exposure to a
+reorganization: a credit it must later take back with `deposit.reversed`. Per account and mode, the
+`credit_minor` of credited deposits not final yet is capped by `accounts.max_unfinalized_credit`
+(cents, the same for each mode; 100 000 by default, set by the operator with
+`POST /v1/admin/accounts/{account} {max_unfinalized_credit}`; `0` credits everything at
+finality). The screen step checks it after screening passes, and the transition re-checks it under
+a transaction-level advisory lock per account and mode, so concurrent pumps cannot both pass it; a
+deposit past the cap waits (`unfinalized_credit_cap`, retried every wait interval) and is credited
+once final, whatever the cap, or once earlier credits become final. It is still credited, only
+later; nothing is rejected. A merchant selling what it cannot take back uses the `finalized`
+confirmation policy instead (§14), which credits nothing before finality.
+
 **Finality watch.** Whenever the head loop publishes an advance of provider A's `finalized` (§8),
-every deposit of the chain that is neither final nor reversed and whose recorded block is at or
-below it is re-read on both providers by its transaction's receipt, once per provider (the block
-time and nonce come from the deposit), plus provider B's `finalized` once per pass; nothing is
-read while no deposit is due. A deposit re-included in a later block is found at its recorded
-block's finality and waits for its new block's:
+and every minute besides, the deposits of the chain that are neither final nor reversed, whose
+recorded block is at or below it, and whose recheck time (`finality_check_at`) has come are
+re-read on both providers by their transaction's receipt, once per provider (the block time and
+nonce come from the deposit), plus provider B's `finalized` once per pass; nothing is read while
+no deposit is due. A pass claims deposits in pages of 500, oldest block first, at most 10 pages,
+with `FOR UPDATE SKIP LOCKED`, and moves each claimed deposit's recheck time a minute ahead as it
+claims it: a deposit the watch keeps waiting on (the providers disagree, the transaction is
+pending again, a read failed) comes back only at its own recheck time, so however many are stuck
+at the head of the backlog, the later ones are read in the same pass, and one deposit's failed
+read does not end the pass. A pass that stops at its page limit is followed by another at once. A
+deposit re-included in a later block is found at its recorded block's finality and waits for its
+new block's:
 
 | Both providers show | Then |
 |---|---|
@@ -373,13 +396,13 @@ block's finality and waits for its new block's:
 | The receipt at or below `finalized` without the transfer at that position | `reversed` (a `detected` deposit with other agreed evidence to its address is left to its confirm step). |
 | No receipt, and the transaction's sender's nonce at `finalized` is past its nonce | Proven dropped, another transaction consumed the nonce: `reversed`. |
 | No receipt, nonce unused | Pending again; wait, and `TopupDepositPendingAfterReorg` after an hour. |
-| Anything else (the providers disagree) | Wait for the next advance. |
+| Anything else (the providers disagree) | Wait for the deposit's recheck time. |
 
 A reversal is one transaction: the `reversed` transition with its evidence; `deposit.reversed`
 (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`) when the product was told of the
 deposit (`credited` or `rejected`); and a quote the deposit consumed opens again while its window
-lasts, or expires with `quote.expired`; its pending refunds are canceled, though none can exist
-while refunds require a final deposit (§12). The watch raises `TopupDepositReversed`. A reversed deposit is never claimed again,
+lasts, or expires with `quote.expired`; its pending refunds without a transaction are canceled,
+though none can exist while refunds require a final deposit (§12). The watch raises `TopupDepositReversed`. A reversed deposit is never claimed again,
 never swept, and not counted in custody reconciliation (§13).
 
 ## 8. Chain, valuation, screening
@@ -656,7 +679,8 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 - A credited deposit whose transaction leaves the chain before finality (§7) is `reversed`, and
   `deposit.reversed` follows, with the same derived-id rule. This is Stripe's pattern for a
   payment that fails after success (an ACH failure after `succeeded` becomes a dispute): rare,
-  signed, and handled by the product like a refund.
+  signed, and handled by the product like a refund: the snapshot's `amount_reversed` takes the
+  whole credit back.
 - Delivery is the outbox (§12): at least once, in no order, to every enabled endpoint of the
   account and mode that subscribes to the event (`enabled_events`, or `*`). `2xx` acknowledges;
   a redirect (never followed), anything else, or no answer within 20 s is retried with
@@ -698,9 +722,17 @@ Product obligations:
 3. Refuse by holding, never by failing the delivery: a credit for an unknown or closed
    workspace, a suspended account, or above the product's own caps is recorded as held, answered
    `2xx`, and returned through a refund request (§15).
-4. On `deposit.reversed`, claw back the credit applied for that deposit id, exactly as for
-   `deposit.refunded`, at most once per event id; a held credit was never applied. Until a
-   deposit is final (about 15 minutes on Ethereum), its credit can still be reversed.
+4. Apply `deposit.refunded` and `deposit.reversed` by the balance rule, from each event's deposit
+   snapshot: the deposit nets to `amount − amount_refunded − amount_reversed` while `credited` or
+   `reversed`, and 0 otherwise, where `amount_refunded` (the refunded share of the credit, pro
+   rata to the refunded tokens, rounded down, all of it once fully refunded) and
+   `amount_reversed` (all of `amount` once reversed) are cumulative and computed by the service.
+   Per deposit, serially, merge the snapshot into the stored view (the later status wins,
+   `pending` < `credited` = `rejected` < `reversed`; the larger cumulative amounts win) and move
+   the balance by the change in what it nets to. Events arrive in any order: the merge makes the
+   result independent of it, so a `deposit.reversed` before its `deposit.credited` nets to 0 and
+   the late credit changes nothing. A held credit was never applied. Until a deposit is final
+   (about 15 minutes on Ethereum), its credit can still be reversed.
 
 Optional hardening, each the product's choice: fetch `GET /v1/deposits/{id}` and require
 `status: "credited"` with the same amount; recompute the deposit UUID `uuid_v5(NS,
@@ -792,8 +824,8 @@ GET    /v1/deposits?client_reference_id&quote&deposit_address&status&tx_hash&cre
 GET    /v1/deposits/{id}                                          expand[]=quote
 POST   /v1/deposits/{id} {metadata}                               update metadata (`deposits.write`)
 POST   /v1/refunds {deposit, destination_address, amount_atomic?, metadata?}  pending; the merchant pays it from its treasury (§15)
-POST   /v1/refunds/{id}/mark_paid {transaction_hash, log_index?}  verified at finality: succeeded or failed
-POST   /v1/refunds/{id}/cancel                                    a pending refund
+POST   /v1/refunds/{id}/mark_paid {transaction_hash, receipt_log_index?}  verified at finality: succeeded or failed
+POST   /v1/refunds/{id}/cancel                                    a pending refund not marked paid
 GET    /v1/refunds?deposit&status&limit&starting_after&ending_before, GET /v1/refunds/{id}
 POST   /v1/refunds/{id} {metadata}                                update metadata
 GET    /v1/balance                                                unswept amounts per chain and token (Stripe's Balance)
@@ -890,12 +922,17 @@ minute).
 **Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
 status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
 currency, exchange_rate, price_source, valued_at, address, from_address, tx_hash, log_index,
-block_number, amount_refunded_atomic, refunded, created, metadata}`. `status` is the merchant's
+block_number, amount_refunded_atomic, refunded, amount_refunded, amount_reversed, created,
+metadata}`. `status` is the merchant's
 view of the state machine (§7): `pending` (`detected` or `confirmed`), `credited` (`credited` or
 `swept`), `rejected`, or `reversed`; `final` is whether its block is final and `swept` whether a
 finalized `Flushed` event after it moved its forwarder's balance; a refund is not a state, because it neither moves custody nor
 has to be whole: like Stripe's Charge, the deposit carries `amount_refunded_atomic` and
-`refunded`. `amount` and `exchange_rate` are set once valued; `price_source` is `quote` or `spot`;
+`refunded`. `amount_refunded` is the cents of `amount` the succeeded refunds take back,
+`floor(amount × amount_refunded_atomic / amount_atomic)` over the cumulative refunded amount (it
+never exceeds the refunded share, only grows, and is all of `amount` once fully refunded);
+`amount_reversed` is `amount` once `reversed`, else 0. Every `deposit.*` event carries them, so the
+merchant's balance follows the latest snapshot whatever the delivery order (§11). `amount` and `exchange_rate` are set once valued; `price_source` is `quote` or `spot`;
 `asset` is `null` for a token without a route; exactly one of `quote` and `deposit_address` is
 set, naming what the receiving address belongs to. Routes, versions, and valuation evidence are in the admin view.
 
@@ -917,13 +954,19 @@ deposit, and none paying a treasury the route's oracle names at request time (`5
 answer), so an SDK-built `flush` never sweeps a sanctioned deposit or pays a sanctioned treasury.
 
 **Refund.** `{id, object: "refund", deposit, amount_atomic, destination_address, treasury, status,
-failure_reason, transaction_hash, log_index, created}`, Stripe's Refund statuses in BTCPay's
+failure_reason, transaction_hash, receipt_log_index, created}`, Stripe's Refund statuses in BTCPay's
 payout flow (design D5). `amount_atomic` defaults to the unrefunded remainder and is reserved
 while the refund is `pending`. `treasury` is the one the deposit's address pays, which the merchant
 pays the refund from and attaches with `mark_paid`. At `finalized`, both providers must show a
 `Transfer` of the deposit's token from that treasury to the destination for exactly the amount, in
-a log no other refund holds; then `succeeded` and `deposit.refunded`, otherwise `failed` with
-`failure_reason` and the reservation released. An ineligible deposit is
+a log no other refund holds, named by its position in the receipt (`receipt_log_index`, which
+survives the transaction's re-inclusion, as a deposit's identity does); then `succeeded` and
+`deposit.refunded`, otherwise `failed` with `failure_reason` and the reservation released. Once
+`mark_paid` attaches a transaction the refund cannot be canceled, since the transaction may still
+be mined: it stays `pending` and reserved until verified, or `failed` as `transaction_dropped`
+(no receipt on either provider while, at `finalized` on both, the sender's nonce, kept when a
+provider first returned the transaction, is used by another) or `transaction_not_found` (no
+provider returned it within 24 hours of `mark_paid`); the merchant then requests a new refund. An ineligible deposit is
 `400 deposit_not_refundable`; one that is not final yet, and so could still be reversed, is
 `400 deposit_not_final`; an amount above the remainder is `400 amount_too_large`; a sanctioned
 destination is `400 destination_sanctioned`. A reversed deposit is not refundable.
@@ -1099,7 +1142,13 @@ stops (§7, the freeze) until an operator lifts it.
 The missing-deposit log check is incremental: it resumes from a durable cursor, reads at most 64 windows of 2 000 finalized blocks per
 round, and stores its progress after every window, so a round reads only what finalized since the
 last one, and a restart or a failed round resumes where the stored progress ends until the whole
-history has been covered once. A round's reads run one at a time on provider A. The first round
+history has been covered once. Each window is requested as the scanner requests it: for a chain in
+token mode (the default), one `eth_getLogs` for every transfer of the chain's routed tokens, kept
+locally for the chain's addresses, whatever the number of addresses ever issued; in address mode,
+one request per 1 000 addresses. So a round costs at most 64 requests per chain in token mode, and
+64 × ⌈addresses / 1 000⌉ in address mode, which is why address mode is for chains with few
+addresses. The address list itself (every address ever issued on the chain, about 100 bytes each)
+is read from the database once per round. A round's reads run one at a time on provider A. The first round
 after a restart runs while every other task starts on the same provider, so a provider refusal
 that asks for a retry (HTTP 429, JSON-RPC `-32005`, and the other rate-limit answers alloy
 classifies) is retried within the round with exponential backoff and jitter, up to six retries

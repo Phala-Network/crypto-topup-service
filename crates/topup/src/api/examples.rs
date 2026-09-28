@@ -76,7 +76,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "destination_address": PAYER,
             "metadata": {"ticket": "support-311"},
         }),
-        "MarkRefundPaidRequest" => json!({"transaction_hash": REFUND_TX, "log_index": 41}),
+        "MarkRefundPaidRequest" => json!({"transaction_hash": REFUND_TX, "receipt_log_index": 0}),
         "UpdateMetadataRequest" => json!({"metadata": {"order_id": "ord_1001", "note": ""}}),
         "Balance" => json!({
             "object": "balance",
@@ -257,6 +257,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "charges_enabled": false,
             "restricted": false,
             "paused_scopes": [],
+            "max_unfinalized_credit": 100_000,
             "created": CREATED - 2_592_000,
             "api_keys": [first_key()],
         }),
@@ -410,6 +411,8 @@ fn deposit() -> Value {
         "block_number": 21_000_000,
         "amount_refunded_atomic": "0",
         "refunded": false,
+        "amount_refunded": 0,
+        "amount_reversed": 0,
         "created": CREATED + 24,
         "metadata": {"order_id": "ord_1001"},
     })
@@ -456,7 +459,7 @@ fn refund() -> Value {
         "status": "pending",
         "failure_reason": null,
         "transaction_hash": REFUND_TX,
-        "log_index": 41,
+        "receipt_log_index": 0,
         "created": CREATED + 3_600,
         "metadata": {"ticket": "support-311"},
     })

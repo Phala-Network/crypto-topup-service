@@ -265,6 +265,155 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
     .await
 }
 
+#[tokio::test]
+async fn credit_past_the_unfinalized_cap_waits_for_finality() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let pool = &context.app_pool;
+            let seed = seed_account(pool).await?;
+            // Each deposit credits 37 cents; the account takes 50 before finality.
+            sqlx::query("UPDATE accounts SET max_unfinalized_credit = 50 WHERE id = $1")
+                .bind(seed.account_id)
+                .execute(pool)
+                .await?;
+            let first = insert_confirmed(pool, seed, 1, Address::repeat_byte(0x11), 123).await?;
+            let second = insert_confirmed(pool, seed, 2, Address::repeat_byte(0x12), 123).await?;
+            sqlx::query("UPDATE deposits SET final_at = NULL")
+                .execute(pool)
+                .await?;
+            let step = mock_screen_step(pool, Address::repeat_byte(0x22))?;
+            let state = |id| async move {
+                Ok::<_, anyhow::Error>(db::get_deposit(pool, id).await?.context("deposit")?.state)
+            };
+
+            let pump = Pump::new(
+                pool.clone(),
+                Arc::default(),
+                Arc::new(wait_steps().with_confirmed(Box::new(step))),
+                PumpConfig::default(),
+            )?;
+
+            // While crediting of the addresses' treasury is paused, deposits stay pending and
+            // take none of the cap.
+            let (livemode, treasury): (bool, String) =
+                sqlx::query_as("SELECT livemode, treasury FROM addresses WHERE id = $1")
+                    .bind(seed.address_id)
+                    .fetch_one(pool)
+                    .await?;
+            seed::set_treasury(pool, seed.account_id, livemode, 31_337, treasury.parse()?).await?;
+            let set_paused = |paused: &'static str| async move {
+                sqlx::query(
+                    "UPDATE treasuries SET crediting_paused_by = $2::text[] \
+                     WHERE account_id = $1 AND replaced_at IS NULL",
+                )
+                .bind(seed.account_id)
+                .bind(paused)
+                .execute(pool)
+                .await?;
+                sqlx::query("UPDATE deposits SET next_attempt_at = now() - interval '1 hour'")
+                    .execute(pool)
+                    .await?;
+                anyhow::Ok(())
+            };
+            set_paused("{merchant}").await?;
+            for _ in 0..2 {
+                ensure!(matches!(
+                    pump.run_once().await?,
+                    RunOnceResult::Applied { .. }
+                ));
+            }
+            ensure!(state(first).await? == DepositState::Confirmed);
+            ensure!(state(second).await? == DepositState::Confirmed);
+            let exposure =
+                db::unfinalized_credit(pool, seed.account_id, livemode, Uuid::nil()).await?;
+            ensure!(exposure.credited == 0 && exposure.cap == 50, "{exposure:?}");
+            set_paused("{}").await?;
+
+            // Resumed, the first fits under the cap and is credited before finality.
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id: first });
+            ensure!(state(first).await? == DepositState::Credited);
+
+            // The second would take the unfinalized credit to 74: it waits, still confirmed.
+            let step = mock_screen_step(pool, Address::repeat_byte(0x22))?;
+            let capped = step
+                .run(&db::get_deposit(pool, second).await?.context("second")?)
+                .await;
+            ensure!(
+                capped.outcome
+                    == StepOutcome::Wait {
+                        reason: WaitReason::UnfinalizedCreditCap,
+                    }
+            );
+            ensure!(capped.evidence["unfinalized_credit_minor"] == 37);
+            ensure!(capped.evidence["max_unfinalized_credit"] == 50);
+
+            // A step that checked the cap before a concurrent credit still cannot pass it: the
+            // commit re-checks under the account's lock and the deposit waits instead.
+            let racing = Pump::new(
+                pool.clone(),
+                Arc::default(),
+                Arc::new(wait_steps().with_confirmed(Box::new(AlwaysCredit))),
+                PumpConfig::default(),
+            )?;
+            ensure!(racing.run_once().await? == RunOnceResult::Applied { deposit_id: second });
+            ensure!(state(second).await? == DepositState::Confirmed);
+            let evidence: Value = sqlx::query_scalar(
+                "SELECT evidence FROM transitions WHERE deposit_id = $1 ORDER BY created_at DESC \
+                 LIMIT 1",
+            )
+            .bind(second)
+            .fetch_one(pool)
+            .await?;
+            ensure!(evidence["reason"] == "unfinalized_credit_cap", "{evidence}");
+            let due: bool = sqlx::query_scalar(
+                "SELECT next_attempt_at > now() + interval '30 seconds' FROM deposits \
+                 WHERE id = $1",
+            )
+            .bind(second)
+            .fetch_one(pool)
+            .await?;
+            ensure!(due, "a capped deposit is retried after the wait interval");
+            ensure!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM events WHERE type = 'deposit.credited' \
+                     AND object_id = $1"
+                )
+                .bind(second)
+                .fetch_one(pool)
+                .await?
+                    == 0
+            );
+
+            // Once final it is credited whatever the unfinalized credit.
+            sqlx::query(
+                "UPDATE deposits SET final_at = now(), next_attempt_at = now() - interval '1 hour' \
+                 WHERE id = $1",
+            )
+            .bind(second)
+            .execute(pool)
+            .await?;
+            ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id: second });
+            ensure!(state(second).await? == DepositState::Credited);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Credits every confirmed deposit without checking the cap, as a step that checked it before a
+/// concurrent credit committed.
+struct AlwaysCredit;
+
+#[async_trait]
+impl Step for AlwaysCredit {
+    async fn run(&self, _deposit: &db::Deposit) -> StepResult {
+        StepResult::new(
+            StepOutcome::Advance,
+            serde_json::json!({"outcome": "advance"}),
+        )
+    }
+}
+
 fn mock_screen_step(pool: &PgPool, sanctioned: Address) -> Result<ScreenStep> {
     Ok(ScreenStep::new(
         pool.clone(),

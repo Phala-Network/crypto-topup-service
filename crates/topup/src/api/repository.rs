@@ -78,6 +78,8 @@ pub struct AdminAccount {
     pub restricted: bool,
     /// Account-level pause scopes.
     pub paused_scopes: Vec<String>,
+    /// Cap, in cents and per mode, on the credit of deposits credited before they are final.
+    pub max_unfinalized_credit: i64,
     /// Creation time.
     pub created_at: DateTime<Utc>,
 }
@@ -86,7 +88,7 @@ pub struct AdminAccount {
 macro_rules! admin_account_columns {
     () => {
         "id, public_id, name, contact, due_diligence, charges_enabled, restricted, \
-         paused_scopes, created_at"
+         paused_scopes, max_unfinalized_credit, created_at"
     };
 }
 
@@ -182,6 +184,8 @@ pub struct AccountChanges {
     pub restricted: Option<bool>,
     /// `{name, email}`.
     pub contact: Option<Value>,
+    /// Cap on unfinalized credit, in cents.
+    pub max_unfinalized_credit: Option<i64>,
 }
 
 /// Applies `changes`, with an audit row and an `account.updated` event per enabled mode, in one
@@ -213,7 +217,8 @@ pub async fn update_account(
     }
     let after = sqlx::query_as::<_, AdminAccount>(concat!(
         "UPDATE accounts SET charges_enabled = COALESCE($2, charges_enabled), \
-         restricted = COALESCE($3, restricted), contact = COALESCE($4, contact) \
+         restricted = COALESCE($3, restricted), contact = COALESCE($4, contact), \
+         max_unfinalized_credit = COALESCE($5, max_unfinalized_credit) \
          WHERE id = $1 RETURNING ",
         admin_account_columns!()
     ))
@@ -221,11 +226,13 @@ pub async fn update_account(
     .bind(changes.charges_enabled)
     .bind(changes.restricted)
     .bind(&changes.contact)
+    .bind(changes.max_unfinalized_credit)
     .fetch_one(&mut *transaction)
     .await?;
     let unchanged = after.charges_enabled == before.charges_enabled
         && after.restricted == before.restricted
-        && after.contact == before.contact;
+        && after.contact == before.contact
+        && after.max_unfinalized_credit == before.max_unfinalized_credit;
     if unchanged {
         transaction.commit().await?;
         return Ok(IssuedAccount {
@@ -274,6 +281,7 @@ pub async fn update_account(
                     "charges_enabled": before.charges_enabled,
                     "restricted": before.restricted,
                     "contact": before.contact,
+                    "max_unfinalized_credit": before.max_unfinalized_credit,
                 },
             })
             .to_string(),
@@ -482,15 +490,15 @@ fn refund_subject(refund_id: Uuid) -> String {
 
 /// Attaches the merchant's refund transaction to a pending refund; the verification worker checks
 /// it at finality. Repeating the same transaction is a no-op; another one is
-/// `refund_unexpected_state`, since only the verification outcome or a cancel ends a pending
-/// refund. Audited, and announced as `refund.updated`.
+/// `refund_unexpected_state`, since only the verification outcome ends a refund with a
+/// transaction attached. Audited, and announced as `refund.updated`.
 pub async fn mark_refund_paid(
     pool: &PgPool,
     routes: &RouteSet,
     scope: Scope,
     refund_id: Uuid,
     tx_hash: B256,
-    log_index: Option<u64>,
+    receipt_log_index: Option<u64>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = pool.begin().await?;
@@ -498,14 +506,16 @@ pub async fn mark_refund_paid(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let tx_hash = format!("{tx_hash:#x}");
-    let log_index = log_index
+    let receipt_log_index = receipt_log_index
         .map(|index| {
-            i64::try_from(index)
-                .map_err(|_| ApiError::invalid_param("log_index", "log_index is too large"))
+            i64::try_from(index).map_err(|_| {
+                ApiError::invalid_param("receipt_log_index", "receipt_log_index is too large")
+            })
         })
         .transpose()?;
     if let Some(current) = current_hash {
-        let same = current == tx_hash && log_index.is_none_or(|index| current_log == Some(index));
+        let same =
+            current == tx_hash && receipt_log_index.is_none_or(|index| current_log == Some(index));
         if same && status != "canceled" {
             return Ok(());
         }
@@ -523,13 +533,14 @@ pub async fn mark_refund_paid(
     let updated = sqlx::query(
         r#"
         UPDATE refunds
-        SET tx_hash = $2, log_index = $3, next_check_at = now(), updated_at = now()
+        SET tx_hash = $2, receipt_log_index = $3, paid_at = now(), next_check_at = now(),
+            updated_at = now()
         WHERE id = $1
         "#,
     )
     .bind(refund_id)
     .bind(&tx_hash)
-    .bind(log_index)
+    .bind(receipt_log_index)
     .execute(&mut *transaction)
     .await;
     match updated {
@@ -556,8 +567,10 @@ pub async fn mark_refund_paid(
     Ok(())
 }
 
-/// Cancels a pending refund, releasing its reservation; canceling a canceled refund is a no-op.
-/// Audited, and announced as `refund.updated`.
+/// Cancels a pending refund without a transaction attached, releasing its reservation; canceling a
+/// canceled refund is a no-op. Once `mark_paid` attached a transaction, the refund stays reserved
+/// until verification ends it, so that the merchant cannot pay the deposit back twice. Audited,
+/// and announced as `refund.updated`.
 pub async fn cancel_refund(
     pool: &PgPool,
     routes: &RouteSet,
@@ -566,11 +579,16 @@ pub async fn cancel_refund(
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = pool.begin().await?;
-    let (status, _, _) = locked_refund(&mut transaction, scope, refund_id)
+    let (status, tx_hash, _) = locked_refund(&mut transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     match status.as_str() {
         "canceled" => return Ok(()),
+        "pending" if tx_hash.is_some() => {
+            return Err(ApiError::refund_unexpected_state(
+                "marked paid: it ends when its transaction is verified or proven dropped",
+            ));
+        }
         "pending" => {}
         _ => return Err(ApiError::refund_unexpected_state(status)),
     }
@@ -602,7 +620,7 @@ async fn locked_refund(
 ) -> Result<Option<(String, Option<String>, Option<i64>)>, ApiError> {
     Ok(sqlx::query_as(
         r#"
-        SELECT status, tx_hash, log_index
+        SELECT status, tx_hash, receipt_log_index
         FROM refunds
         WHERE id = $1 AND account_id = $2 AND livemode = $3
         FOR UPDATE

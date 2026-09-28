@@ -100,15 +100,16 @@ def sync_detailed(
     """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
     `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
     `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
-    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    (`receipt_log_index`, or any such log when absent). Then the refund is `succeeded` and
     `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
-    transaction returns the refund.
+    transaction returns the refund. From here on the refund cannot be canceled: it is `failed`
+    only when its transaction is proven not to pay it.
 
     Args:
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            refund transaction. Example: {'receipt_log_index': 0, 'transaction_hash':
             '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
@@ -142,15 +143,16 @@ def sync(
     """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
     `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
     `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
-    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    (`receipt_log_index`, or any such log when absent). Then the refund is `succeeded` and
     `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
-    transaction returns the refund.
+    transaction returns the refund. From here on the refund cannot be canceled: it is `failed`
+    only when its transaction is proven not to pay it.
 
     Args:
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            refund transaction. Example: {'receipt_log_index': 0, 'transaction_hash':
             '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
@@ -179,15 +181,16 @@ async def asyncio_detailed(
     """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
     `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
     `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
-    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    (`receipt_log_index`, or any such log when absent). Then the refund is `succeeded` and
     `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
-    transaction returns the refund.
+    transaction returns the refund. From here on the refund cannot be canceled: it is `failed`
+    only when its transaction is proven not to pay it.
 
     Args:
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            refund transaction. Example: {'receipt_log_index': 0, 'transaction_hash':
             '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:
@@ -219,15 +222,16 @@ async def asyncio(
     """Attaches the transaction that pays a pending refund, as BTCPay's payout `mark-paid`. At
     `finalized`, both providers must show a `Transfer` of the deposit's token from the refund's
     `treasury` to `destination_address` for exactly `amount_atomic`, in a log no other refund uses
-    (`log_index`, or any such log when absent). Then the refund is `succeeded` and
+    (`receipt_log_index`, or any such log when absent). Then the refund is `succeeded` and
     `deposit.refunded` is sent; otherwise it is `failed` with a `failure_reason`. Repeating the same
-    transaction returns the refund.
+    transaction returns the refund. From here on the refund cannot be canceled: it is `failed`
+    only when its transaction is proven not to pay it.
 
     Args:
         id (str):
         idempotency_key (None | str | Unset):
         body (MarkRefundPaidRequest): `POST /v1/refunds/{id}/mark_paid` body: the merchant's
-            refund transaction. Example: {'log_index': 41, 'transaction_hash':
+            refund transaction. Example: {'receipt_log_index': 0, 'transaction_hash':
             '0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c'}.
 
     Raises:

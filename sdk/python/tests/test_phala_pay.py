@@ -97,6 +97,8 @@ def _deposit(index: int = 1) -> dict[str, object]:
         "block_number": 1,
         "amount_refunded_atomic": "0",
         "refunded": False,
+        "amount_refunded": 0,
+        "amount_reversed": 0,
         "created": 1_790_000_300,
         "metadata": {"order_id": "6735"},
     }
@@ -151,7 +153,7 @@ def test_metadata_is_sent_on_create_and_merged_by_update() -> None:
         "status": "pending",
         "failure_reason": None,
         "transaction_hash": None,
-        "log_index": None,
+        "receipt_log_index": None,
         "created": 1_790_000_400,
         "metadata": {},
     }
@@ -471,7 +473,7 @@ def test_construct_event_parses_a_failed_refund() -> None:
         "status": "failed",
         "failure_reason": "sender_mismatch",
         "transaction_hash": "0x" + "dd" * 32,
-        "log_index": None,
+        "receipt_log_index": None,
         "created": 1_790_000_000,
         "metadata": {},
     }

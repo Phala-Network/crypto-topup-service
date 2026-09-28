@@ -96,6 +96,9 @@ pub enum WaitReason {
     Paused,
     /// No finalized `Flushed` event after the deposit has been indexed yet.
     FlushNotConfirmed,
+    /// Crediting the deposit before it is final would take the account's credit that is not
+    /// final yet past its cap; it is credited once final.
+    UnfinalizedCreditCap,
 }
 
 /// The domain result returned by one processing step.

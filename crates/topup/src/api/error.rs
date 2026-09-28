@@ -140,7 +140,7 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "refund_unexpected_state",
         400,
-        "The refund's status does not allow the action: it is not `pending`, or it is already marked paid with another transaction.",
+        "The refund's status does not allow the action: it is not `pending`, it is already marked paid with another transaction, or, being marked paid, it cannot be canceled.",
     ),
     (
         "api_key_inactive",
@@ -474,7 +474,7 @@ impl ApiError {
             "transfer_already_used",
             "the transfer log already pays another refund",
         )
-        .with_param("log_index")
+        .with_param("receipt_log_index")
     }
 
     /// Returns a refund action its status does not allow.

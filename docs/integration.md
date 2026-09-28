@@ -105,9 +105,9 @@ closed, showing nothing to pay, when the quote it reads names another one. Its w
 `new PhalaPay({ apiBase }).checkout(clientSecret, { expectedAddress })` gives the same live
 status.
 
-**3. Webhook: verify and fulfil once.** Credit `amount` cents to `client_reference_id` once per
-deposit id,
-commit, then answer `2xx`; `onSuccess` in the browser is display only (§2).
+**3. Webhook: verify, then apply the deposit.** Every `deposit.*` event carries the whole
+deposit; apply it to `client_reference_id`'s balance per deposit, serially, by the balance rule
+(§2.3), commit, then answer `2xx`; `onSuccess` in the browser is display only (§2).
 
 ```python
 from phala_pay import SignatureVerificationError
@@ -120,17 +120,18 @@ async def webhook(request: Request) -> Response:
         )
     except (SignatureVerificationError, ValueError):
         return Response(status_code=400)
-    if event.type == "deposit.credited":
-        credit_once(event.deposit.id, event.deposit.client_reference_id, event.deposit.amount)
-    elif event.type in ("deposit.reversed", "deposit.refunded"):
-        claw_back_once(event.id, event.deposit.id)
+    if event.type.startswith("deposit."):
+        # Credit, refund, and reversal alike: merge the snapshot and move the balance by the
+        # change in what the deposit nets to, in one transaction per deposit (§2.3).
+        apply_deposit(event.deposit)
     return Response(status_code=200)
 ```
 
 A Node backend verifies the same way with `constructEvent(rawBody, headers, WEBHOOK_KEYS,
 { expectedAccount: ACCOUNT, expectedLivemode: false })` from `@phala/pay/server`.
 [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) is this backend in full, with an
-idempotent SQLite ledger and tests; the staging reference product serves the Phala Pay demo, a
+idempotent, snapshot-driven SQLite ledger (`apply_deposit`) and tests of partial refunds,
+reversals, and out-of-order delivery; the staging reference product serves the Phala Pay demo, a
 cloud console's billing page, at `/demo/`.
 
 ## 1. Quotes
@@ -148,8 +149,8 @@ route's confirmation (two blocks on Ethereum), prices each deposit, and screens 
 passes is credited, typically **about 30 seconds after paying**, and the service tells Phala Cloud
 with a signed `deposit.credited` webhook. It keeps watching the deposit until it is final (about
 15 minutes on Ethereum); in the rare case that the payment's transaction is dropped from the
-chain before then, the deposit is reversed and a signed `deposit.reversed` tells you to claw the
-credit back, exactly as for a refund (§2.3). Phala Cloud owns the balance: it
+chain before then, the deposit is reversed and a signed `deposit.reversed`, whose deposit nets to
+zero, takes the credit back, as a refund's `deposit.refunded` takes back its share (§2.3). Phala Cloud owns the balance: it
 verifies the signature and credits the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
 addresses are CREATE2 forwarders that can only pay your treasury; you sweep them there when you
@@ -173,12 +174,12 @@ sequenceDiagram
     PP-->>UI: payment seen within seconds, then confirming
     Note over PP,ETH: two blocks, both RPC providers agree (about 30 s after paying)
     PP->>BE: webhook deposit.credited (signed, retried until 2xx)
-    BE->>BE: verify, credit once per dep_ id
+    BE->>BE: verify, apply the deposit snapshot (balance rule)
     BE-->>PP: 2xx
     PP-->>UI: credited
     Note over PP,ETH: watched until final, about 15 minutes
     opt Transaction dropped before finality (rare)
-        PP->>BE: webhook deposit.reversed: claw back like a refund
+        PP->>BE: webhook deposit.reversed: the snapshot nets the deposit to zero
     end
     BE->>ETH: sweep: factory flush to the treasury Safe (any wallet, pays gas)
     PP-->>PP: finalized Flushed event marks the deposit swept
@@ -348,7 +349,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Below `min_credit_minor` | `rejected(below_minimum)`. |
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
-| Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): claw back the credit as for `deposit.refunded`. A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
+| Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): its `amount_reversed` takes the whole credit back (§2.3). A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
 | You refuse the credit (for example a closed workspace) | Deposit `credited`; you hold it and request its refund (§2.4). Deposits refused under the retired settlement protocol show `rejected(product_refused)`. |
 
 User-facing copy per state and reason, including what never to show, is in
@@ -631,8 +632,17 @@ sign and execute it as any Safe transaction
   credits that chain's payments only at the stricter of the route's floor and your value: a depth
   such as `"12"`, `"safe"`, or `"finalized"`, never weaker than the route's (`400` otherwise);
   `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
-  `typical_credit_seconds`, and `GET /v1/account` lists your policies. Use `finalized` for goods
-  you cannot claw back; a deposit waits `pending` meanwhile.
+  `typical_credit_seconds`, and `GET /v1/account` lists your policies. **If you sell goods or
+  services you cannot take back (withdrawable balances, gift cards, anything delivered off
+  platform), use `finalized`**: a credit before finality can still be reversed by a
+  reorganization, and a reversal is recoverable only by clawing the credit back (§2.3); a deposit
+  waits `pending` until final meanwhile.
+- **The cap on credit before finality.** However you configure confirmations, the credit of your
+  deposits credited but not final yet is capped per mode: $1 000 by default
+  (`max_unfinalized_credit`, 100 000 cents), which the operator raises or lowers for your account on
+  request. A deposit whose credit would take that total past the cap is not rejected: it stays
+  `pending` and is credited as soon as it is final (about 15 minutes on Ethereum), or earlier once
+  other deposits become final and make room. Plan for it in your UI's waiting state (§1.3).
 - **Pause issuing.** `POST /v1/account/pause {"scopes": ["quotes"]}` (`pay.account.pause_quotes()`)
   stops new quotes, deposit addresses, and networks in both modes, for an emergency such as a
   leaked key during a treasury time-lock; payments to existing addresses keep being credited.
@@ -665,7 +675,8 @@ webhook-signature: v1a,<base64 ed25519 over "{webhook-id}.{webhook-timestamp}.{r
 - `data.object` is the deposit as `GET /v1/deposits/{id}` returned it when it was credited: a
   snapshot rendered in the transaction that credits it and never changed afterwards
   ([Stripe](https://docs.stripe.com/api/events/object)). Its `status` is `credited`; a later
-  sweep, refund, or reversal does not change it: fetch the deposit for its current state.
+  sweep, refund, or reversal does not change it, but sends its own `deposit.*` event with a new
+  snapshot: fetch the deposit for its current state.
 - `amount` is the credit in cents: exactly the quote's `amount` when `price_source` is `quote`,
   otherwise spot when the deposit is confirmed (§1.3).
 - `quote` is the quote of the receiving address, also when a late or wrong-amount payment was
@@ -720,7 +731,42 @@ is this on SQLite, with its tests in [deploy/product/tests](../deploy/product/te
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
 | 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)). |
-| 6 | On `deposit.reversed`, claw back the credit applied for that deposit id, as for `deposit.refunded`, once per event id (a held credit was never applied). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. |
+| 6 | Apply `deposit.refunded` and `deposit.reversed` by the balance rule below, from the snapshot, per deposit, serially (a held credit was never applied, so nothing is taken back from it). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. A partial refund takes back its share of the credit. |
+
+#### The balance rule and event ordering
+
+Every `deposit.*` event (`deposit.credited`, `deposit.refunded`, `deposit.reversed`,
+`deposit.rejected`) carries the whole deposit with cumulative amounts the service computes, so
+you never derive a claw-back yourself:
+
+- `amount`: the credit in cents.
+- `amount_refunded`: the cents of `amount` its succeeded refunds take back, pro rata to the
+  refunded tokens (`amount × amount_refunded_atomic / amount_atomic`), rounded down so it never
+  exceeds the refunded share, and all of `amount` once fully refunded. Computed from the
+  cumulative refunded amount, it only grows.
+- `amount_reversed`: all of `amount` once the deposit is `reversed`, else 0. Only a final deposit
+  is refunded and a final deposit is never reversed, so a deposit has one or the other.
+
+**A deposit nets to `amount − amount_refunded − amount_reversed` cents while its `status` is
+`credited` or `reversed`, and to 0 while it is `pending` or `rejected`.** Keep, per deposit, the
+latest view you applied and what it netted to; on each event, in one transaction that locks the
+deposit's row (so deliveries of one deposit apply one at a time):
+
+1. Merge the snapshot into your view: the later `status` wins (`pending`, then `credited` or
+   `rejected`, then `reversed`; a status never moves back), and the larger `amount_refunded` and
+   `amount_reversed` win (they never decrease).
+2. Compute what the merged view nets to, and move the customer's balance by the difference from
+   what the deposit netted to before; store both.
+
+Events may arrive in any order, late, or repeated, and each delivery is retried independently, so
+never act on the event type or on arrival order: the merge makes the result the same whatever the
+order, and a repeat changes nothing. A `deposit.reversed` that arrives before `deposit.credited`
+leaves the deposit netting to 0, and the late credit then changes nothing; a `deposit.refunded`
+that arrives first applies its claw-back together with the credit. Event `created` times order a
+deposit's events for display, but the merge, not `created`, decides the balance.
+[sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) (`apply_deposit`) and the reference
+product ([deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py))
+implement it, with tests of partial refunds, reversals, and out-of-order delivery.
 
 Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and require
 `status: "credited"` with the same amount; recompute the deposit id, `dep_` and the hex of
@@ -792,9 +838,11 @@ Standard Webhooks, not `Stripe-Signature`, because you hold only the service's p
   `GET /v1/events`; resend any with §5.11.
 - Deduplicate by `webhook-id`; delivery is at least once.
 - There is no ordering: `quote.expired` can arrive after the `deposit.credited` of a late
-  payment. Act on fetched state (the deposit or quote), never on event order.
-- Only `deposit.credited` moves a balance up, and `deposit.reversed` and `deposit.refunded` move
-  it back (§2); every other event is for notifications, history, and UI refresh.
+  payment, and a `deposit.reversed` before the `deposit.credited` of the same deposit. Act on
+  the snapshot or fetched state (the deposit or quote), never on event order.
+- Only `deposit.*` events move a balance, by the balance rule (§2.3): the deposit's
+  `amount − amount_refunded − amount_reversed`; every other event is for notifications, history,
+  and UI refresh.
 - Ignore unknown event types and unknown fields.
 - Resend a lost event yourself with `POST /v1/events/{id}/resend {webhook_endpoint}`: same id,
   same body (§5.11). The operator does not manage your endpoints or resend your events.
@@ -803,11 +851,11 @@ Standard Webhooks, not `Stripe-Signature`, because you hold only the service's p
 |---|---|---|
 | `deposit.credited` | At the route's confirmation, priced and screened: fulfill it (§2). | The deposit |
 | `deposit.rejected` | Rejected (§1.3); `rejection_reason` says why. | The deposit |
-| `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Claw back its credit as for `deposit.refunded` (§2.3). | The deposit, `status: "reversed"` |
-| `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its `amount_refunded_atomic` |
+| `deposit.reversed` | The deposit's transaction left the chain before finality; sent if you were told of the deposit (credited or rejected). Its `amount_reversed` takes its credit back (§2.3). | The deposit, `status: "reversed"` |
+| `deposit.refunded` | A refund transaction is final; one event per refund. | The deposit, with its cumulative `amount_refunded_atomic` and `amount_refunded` |
 | `refund.created` | A refund was requested (`POST /v1/refunds`, §3). | The refund, `status: "pending"` |
-| `refund.updated` | A refund changed: marked paid, canceled (by you, or by the deposit's reversal), succeeded or failed at finality, or its `metadata`; `data.previous_attributes` names what changed. | The refund |
-| `refund.failed` | The transaction attached with `mark_paid` is final but does not pay the refund (§3); one event per refund, beside its `refund.updated`. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
+| `refund.updated` | A refund changed: marked paid, canceled (by you before `mark_paid`), succeeded or failed, or its `metadata`; `data.previous_attributes` names what changed. | The refund |
+| `refund.failed` | The transaction attached with `mark_paid` does not pay the refund: final without paying it, dropped, or never seen (§3); one event per refund, beside its `refund.updated`. Create a new refund to try again. | The refund, `status: "failed"` with its `failure_reason` |
 | `quote.canceled` | A quote was canceled (`POST /v1/quotes/{id}/cancel`); later payments to its address are credited at spot. | The quote, `status: "canceled"` |
 | `quote.expired` | The finalized chain passed `expires_at` with the quote unpaid. | The quote |
 | `treasury.created` | A treasury was proven (§1.6): `active` at once for a chain's first one and in test mode, else `pending` until `effective_at`. Cancel a change you did not request. | The treasury |
@@ -855,9 +903,9 @@ Stripe, so the customer gets the same invoice and receipt as for a card top-up.
   idempotency keys alone are not enough: Stripe
   [keeps them 24 hours](https://docs.stripe.com/api/idempotent_requests), and a retry can come
   later.
-- On `deposit.refunded` and `deposit.reversed`, issue a
+- When a deposit's `amount_refunded` or `amount_reversed` grows (§2.3), issue a
   [credit note](https://docs.stripe.com/api/credit_notes/create) on that invoice with
-  `out_of_band_amount` for the reversed credit, once per event.
+  `out_of_band_amount` for the growth, once per change.
 - Do this from a queue, not inside the webhook's `2xx` path: a Stripe outage must not hold a
   credit (§2.3, obligation 3).
 
@@ -889,7 +937,8 @@ Idempotency-Key: "…"
 ```json
 {"id": "re_…", "object": "refund", "deposit": "dep_…", "amount_atomic": "…",
  "destination_address": "0x…", "treasury": "0x…", "status": "pending",
- "failure_reason": null, "transaction_hash": null, "log_index": null, "created": 1790500000,
+ "failure_reason": null, "transaction_hash": null, "receipt_log_index": null,
+ "created": 1790500000,
  "metadata": {"reason": "duplicate", "ticket": "T-1"}}
 ```
 
@@ -909,27 +958,42 @@ Then pay it: transfer exactly `amount_atomic` of the deposit's token from `treas
 ```http
 POST /v1/refunds/re_…/mark_paid
 
-{"transaction_hash": "0x…", "log_index": 123}
+{"transaction_hash": "0x…", "receipt_log_index": 0}
 ```
 
 - `treasury` is the treasury the deposit's own address pays, fixed when its quote was issued. It
   stays the sender to use even after you change your treasury; a transfer from any other address
   does not pay the refund.
-- `log_index` (optional) names the transfer's block-wide log index when one transaction pays
-  several refunds; without it, any matching transfer in the transaction counts. One transfer log
-  pays one refund: naming a log another refund holds is `400 transfer_already_used`.
+- `receipt_log_index` (optional) names the transfer when one transaction pays several refunds: its
+  position among the logs of the transaction's receipt (0 for the first), not the block-wide
+  `logIndex` explorers show, which changes if the transaction is re-included in another block
+  before finality. Without it, any matching transfer in the transaction counts. One transfer log
+  pays one refund: naming a log another refund holds is `400 transfer_already_used`. A
+  transaction re-included in another block keeps paying the refund.
 - Once the transaction is final on both of the service's providers (refunds need no speed), the
   refund is `succeeded`, `deposit.refunded` is sent, and the deposit's `amount_refunded_atomic`
   (and `refunded`, once whole) shows it. A final transaction that does not pay it makes the refund
   `failed` with a `failure_reason` (`transaction_failed`, `transfer_not_found`,
   `sender_mismatch`, `destination_mismatch`, `amount_mismatch`, or `transfer_already_used`) and
-  releases its reservation, and `refund.failed` is sent; create a new refund to try again. Attaching the same transaction again
-  returns the refund; another one is `400 refund_unexpected_state`.
-- `POST /v1/refunds/{id}/cancel` cancels a pending refund, attached or not, and releases its
-  reservation; a succeeded or failed refund cannot be canceled. A deposit that is reversed cancels
-  its pending refunds. `GET /v1/refunds/{id}` reads a refund.
-- When `deposit.refunded` arrives, reverse the credit you applied for that deposit (a held
-  credit was never applied), once per event id.
+  releases its reservation, and `refund.failed` is sent; create a new refund to try again.
+  Attaching the same transaction again returns the refund; another one is
+  `400 refund_unexpected_state`.
+- **Once marked paid, a refund cannot be canceled** (`400 refund_unexpected_state`): the attached
+  transaction may still be mined, and a second refund would pay the customer twice. It stays
+  `pending`, holding its reservation, until it `succeeded`, or `failed` because the transaction is
+  proven not to pay it: final without the transfer (above); `transaction_dropped`, when neither
+  provider has it in a block and, at `finalized` on both, its sender's nonce was used by another
+  transaction (you replaced or canceled it in your wallet), so it can never be mined; or
+  `transaction_not_found`, when neither provider has ever returned the transaction within 24 hours
+  of `mark_paid` (a mistyped hash, or one never broadcast; do not broadcast it afterwards). Then
+  request a new refund. To replace a stuck refund transaction, send the replacement with the same
+  nonce: once the replacement is final, the original is `transaction_dropped`, and a replacement
+  that pays the refund can be attached to the new refund.
+- `POST /v1/refunds/{id}/cancel` cancels a pending refund that has no transaction attached and
+  releases its reservation. `GET /v1/refunds/{id}` reads a refund.
+- When `deposit.refunded` arrives, apply its snapshot by the balance rule (§2.3): its
+  `amount_refunded` is the part of the credit to take back, cumulative over the deposit's refunds
+  (a held credit was never applied).
 
 ## 4. Testing and go-live
 
@@ -1004,9 +1068,10 @@ Sepolia deposits are credited about 30 seconds after paying and final about 15 m
       checkout resumes after a reload; "new payment" hidden while a payment is `seen` or
       `confirming`.
 - [ ] Refund path in your internal admin, by deposit id with a user-supplied address, also for
-      held credits and unknown accounts; `deposit.refunded` reverses the credit (§3).
-- [ ] `deposit.reversed` claws back the credit exactly as `deposit.refunded` does (§2.3,
-      obligation 6).
+      held credits and unknown accounts; a refund marked paid is never canceled (§3).
+- [ ] Every `deposit.*` event applied by the balance rule, per deposit, serially, from its
+      snapshot, tested with partial refunds, a reversal, and out-of-order delivery (§2.3).
+- [ ] Goods you cannot take back are sold only under a `finalized` confirmation policy (§1.8).
 - [ ] Alerts on your side: webhook signature failures (rate-limited, for example through error
       tracking rather than paging, since anyone can post to the URL), a repeated deposit id with a
       different amount, payments to unknown accounts, and held credits waiting for a refund.
@@ -1243,8 +1308,8 @@ method.
 | `GET /v1/deposits/{id}` | One deposit (`dep_…`); `expand[]=quote`. | `get_deposit` |
 | `POST /v1/deposits/{id}` `{metadata}` | Update the deposit's metadata (§1.4); the quote's is unchanged. | `update_deposit` |
 | `POST /v1/refunds` `{deposit, destination_address, amount_atomic?, metadata?}` | A `pending` refund of a final deposit (§3), paid by you from its `treasury`; `amount_atomic` defaults to the unrefunded remainder; `Idempotency-Key` as for quotes. | `create_refund` |
-| `POST /v1/refunds/{id}/mark_paid` `{transaction_hash, log_index?}` | Attach the transaction that pays the refund; verified at finality (§3). | `mark_refund_paid` |
-| `POST /v1/refunds/{id}/cancel` | Cancel a pending refund and release its reservation. | `cancel_refund` |
+| `POST /v1/refunds/{id}/mark_paid` `{transaction_hash, receipt_log_index?}` | Attach the transaction that pays the refund; verified at finality (§3). From then on it cannot be canceled. | `mark_refund_paid` |
+| `POST /v1/refunds/{id}/cancel` | Cancel a pending refund not yet marked paid and release its reservation. | `cancel_refund` |
 | `GET /v1/refunds` | Your refunds, newest first; filters `deposit`, `status`. | `list_refunds` |
 | `GET /v1/refunds/{id}` | One refund (`re_…`): `pending` until its transaction is final, then `succeeded` or `failed`, or `canceled`; `expand[]=deposit`. | `get_refund` |
 | `POST /v1/refunds/{id}` `{metadata}` | Update the refund's metadata (§1.4). | `update_refund` |
@@ -1284,7 +1349,7 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 | 400 | `deposit_address_cap_exceeded`, `deposit_address_retired` | The mode's cap of active deposit addresses; a rotation of a retired address (§1.5). |
 | 400 | `deposit_not_refundable`, `deposit_not_final` | The deposit is not eligible for a refund, or could still be reversed: request the refund once it is final (§3). |
 | 400 | `destination_sanctioned` | A sanctions list names the refund's `destination_address` (§3). |
-| 400 | `refund_unexpected_state`, `transfer_already_used` | `mark_paid` or cancel refused: the refund is not pending or already carries another transaction, or the named transfer log pays another refund (§3). |
+| 400 | `refund_unexpected_state`, `transfer_already_used` | `mark_paid` or cancel refused: the refund is not pending, already carries another transaction, or is marked paid (no cancel), or the named transfer log pays another refund (§3). |
 | 400 | `treasury_proof_invalid`, `treasury_challenge_expired`, `treasury_challenge_used`, `treasury_not_deployed`, `treasury_sanctioned`, `treasury_change_pending`, `treasury_unchanged`, `treasury_unexpected_state` | A treasury proof or change refused (§1.6). |
 | 400 | `api_key_inactive`, `last_api_key` | Roll of a revoked or already rolled key; revoke of the mode's last active key (§5.4). |
 | 400 | `webhook_endpoint_cap_exceeded`, `webhook_endpoint_disabled` | The mode's 16 endpoints; a resend to a disabled endpoint (§5.11). |

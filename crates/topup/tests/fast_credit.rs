@@ -185,6 +185,20 @@ async fn a_transaction_replaced_with_the_same_nonce_is_reversed_once() -> Result
             ensure!(
                 chain.events("deposit.reversed").await? == vec![reversed_event_id(credited.id)]
             );
+            // Its snapshot takes the whole credit back: the deposit nets to zero, whichever of
+            // `deposit.credited` and `deposit.reversed` a merchant receives first.
+            let snapshot: Value = sqlx::query_scalar(
+                "SELECT data -> 'object' FROM events WHERE type = 'deposit.reversed'",
+            )
+            .fetch_one(&chain.pool)
+            .await?;
+            ensure!(
+                snapshot["status"] == "reversed"
+                    && snapshot["amount"].as_u64().is_some_and(|amount| amount > 0)
+                    && snapshot["amount_reversed"] == snapshot["amount"]
+                    && snapshot["amount_refunded"] == 0,
+                "{snapshot}"
+            );
             let evidence: Value = sqlx::query_scalar(
                 "SELECT evidence FROM transitions \
                  WHERE deposit_id = $1 AND from_state = 'credited' AND to_state = 'reversed'",

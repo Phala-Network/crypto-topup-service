@@ -65,12 +65,15 @@ try:
 except (SignatureVerificationError, ValueError):
     return Response(status_code=400)
 
-if event.type == "deposit.credited":
-    deposit = event.deposit
-    credit_once(key=deposit.id, customer=deposit.client_reference_id, cents=deposit.amount)
-elif event.type in ("deposit.reversed", "deposit.refunded"):
-    claw_back_once(key=event.id, deposit=event.deposit.id)
+if event.type.startswith("deposit."):
+    # Credit, refund, and reversal alike: per deposit, serially, merge the snapshot and move the
+    # balance to `amount - amount_refunded - amount_reversed` (0 unless credited or reversed).
+    apply_deposit(event.deposit)
 ```
+
+Events arrive in any order; the snapshot's cumulative `amount_refunded` and `amount_reversed`
+make the result independent of it (docs/integration.md §2.3; `apply_deposit` in
+`sdk/examples/fastapi_app.py`).
 
 `WEBHOOK_PUBLIC_KEY` is your account's webhook key in the mode, pinned from `GET
 /v1/attestation` (docs/integration.md §5.3); pass a list of keys while a rotation overlaps.
@@ -95,7 +98,7 @@ an event your own request caused names it in `event.request` (`id`, `idempotency
 | `pay.deposit_addresses.retrieve(id)` / `.list(client_reference_id=, status=)` / `.rotate(id)` / `.update(id, metadata=)` | `GET /v1/deposit_addresses[/{id}]`, `POST /v1/deposit_addresses/{id}/rotate`, `POST /v1/deposit_addresses/{id}` |
 | `pay.deposits.list(client_reference_id=, quote=, deposit_address=, status=, tx_hash=, created_gt=, created_gte=, created_lt=, created_lte=)` | `GET /v1/deposits`, every page; `status` is `pending`, `credited`, `rejected`, or `reversed` |
 | `pay.deposits.retrieve(id)` / `.update(id, metadata=)` | `GET /v1/deposits/{id}`, `POST /v1/deposits/{id}` |
-| `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.mark_paid(id, transaction_hash=, log_index=)` / `.cancel(id)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `POST /v1/refunds/{id}/mark_paid`, `POST /v1/refunds/{id}/cancel`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
+| `pay.refunds.create(deposit=, destination_address=, amount_atomic=, metadata=)` / `.mark_paid(id, transaction_hash=, receipt_log_index=)` / `.cancel(id)` / `.retrieve(id)` / `.update(id, metadata=)` | `POST /v1/refunds`, `POST /v1/refunds/{id}/mark_paid`, `POST /v1/refunds/{id}/cancel`, `GET /v1/refunds/{id}`, `POST /v1/refunds/{id}` |
 | `pay.refunds.list(deposit=, status=)` | `GET /v1/refunds`, every page |
 | `pay.config.retrieve()` | `GET /v1/config` |
 | `pay.balance.retrieve()` / `pay.sweeps.list(chain_id=, forwarder=, token=)` / `pay.forwarders.list(chain_id=, sweepable=)` | `GET /v1/balance`, `GET /v1/sweeps`, `GET /v1/forwarders` |
