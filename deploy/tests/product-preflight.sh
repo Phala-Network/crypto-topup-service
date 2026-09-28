@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed or live
-# key, a stale render, a malformed rendered setting or account, an ingress domain other than the
-# public URL's host, and an RPC URL with an API key are
-# refused; an unsealed env file is accepted only with --unsealed, and a restricted or secret test
-# key without it.
+# key, a stale render, a malformed rendered setting, account, or website origin, an ingress domain
+# other than the public URL's host, and an RPC URL with an API key are refused; an unsealed env
+# file is accepted only with --unsealed, and a restricted or secret test key without it.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -35,6 +34,10 @@ printf 'PRODUCT_API_KEY=ppay_sk_test_%s\n' "$key_body" >"$tmp/secret.env"
 sed 's/"account": "acct_[0-9a-f]*",/"account": "phala-cloud",/' "$root/deploy/product/docker-compose.yml" \
     >"$tmp/slug-source.yml"
 "$root/deploy/product/render-compose.sh" "$tmp/slug-source.yml" >"$tmp/slug.yml"
+# A website origin with a path.
+sed 's|"web_origin": "https://pay.phala.com"|"web_origin": "https://pay.phala.com/"|' \
+    "$root/deploy/product/docker-compose.yml" >"$tmp/web-origin-source.yml"
+"$root/deploy/product/render-compose.sh" "$tmp/web-origin-source.yml" >"$tmp/web-origin.yml"
 
 expect_failure() {
     local name=$1 message=$2
@@ -59,6 +62,8 @@ expect_failure live-key "PRODUCT_API_KEY must be a Phala Pay test API key" \
     --env "$tmp/live-key.env" --compose "$tmp/compose.yml"
 expect_failure slug "account must be the product's acct_ id" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/slug.yml"
+expect_failure web-origin "web_origin must be the website's https://HOST" --unsealed \
+    --env "$tmp/unsealed.env" --compose "$tmp/web-origin.yml"
 expect_failure stale "differs from a fresh render" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/stale.yml"
 expect_failure other-domain "dstack-ingress must serve PRODUCT_DOMAIN" --unsealed \

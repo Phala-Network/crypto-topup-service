@@ -1,9 +1,9 @@
-"""The Phala Pay website and demo: a cloud console's "Billing → Add credits" page, on staging.
+"""The Phala Pay demo's API: a cloud console's "Billing → Add credits" page, on staging.
 
-With `demo_dir` configured, the product serves the built website of deploy/product/web: its one
-page at exactly `{public_url}/`, the page's assets at `{public_url}/assets/`, and the demo's JSON
-API at `{public_url}/api/`. The demo shows both ways to collect a payment, as the product's backend
-runs them with its API key:
+The website, deploy/product/web, is served elsewhere (pay.phala.com, on Cloudflare) and calls this
+JSON API at `{public_url}/api/` from its origin, `web_origin`, the only origin the API allows
+(CORS, with the visitor's cookie). The demo shows both ways to collect a payment, as the product's
+backend runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, the ledger lines behind it, and its payments;
@@ -47,7 +47,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -88,13 +87,6 @@ VERIFY_DOCS = (
     "https://github.com/Phala-Network/phala-pay/blob/main/deploy/README.md"
     "#attestation-ingress-and-egress"
 )
-CONTENT_TYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml",
-    ".woff2": "font/woff2",
-}
 # `demo_quotes.api` keeps the quote's creation request for the developer view.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS demo_quotes (
@@ -197,13 +189,12 @@ class ApiRecorder(httpx.BaseTransport):
 
 
 class DemoConsole:
-    """Serves the website and the demo's API; see the module docstring."""
+    """Serves the demo's API to the website; see the module docstring."""
 
     def __init__(
         self,
         config: ProductConfig,
         ledger: ProductLedger,
-        demo_dir: str | Path,
         *,
         recorder: ApiRecorder | None = None,
         http: httpx.Client | None = None,
@@ -213,25 +204,9 @@ class DemoConsole:
         self.ledger = ledger
         self.root = urlsplit(config.public_url).path.rstrip("/")
         self.api = self.root + "/api/"
-        root = Path(demo_dir)
-        # Only files present at startup are served, by exact name: no request path is resolved.
-        self.files = {
-            file.relative_to(root).as_posix(): file.read_bytes()
-            for file in root.rglob("*")
-            if file.is_file() and file.suffix in CONTENT_TYPES
-        }
-        if "index.html" not in self.files:
-            raise ValueError(f"{root} has no built website page (index.html)")
-        service = urlsplit(config.service_url)
-        # The page reads the public quote and deposit address views from the service, and sends
-        # the visitor's own wallet requests through the wallet's provider (no network access). Its
-        # typeface is bundled with its assets.
-        self.csp = (
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; font-src 'self'; "
-            f"connect-src 'self' {service.scheme}://{service.netloc}; "
-            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-        )
+        if config.web_origin is None:
+            raise ValueError("the demo's API needs web_origin, the website's origin")
+        self.web_origin = config.web_origin
         self.secure_cookie = urlsplit(config.public_url).scheme == "https"
         self.recorder = recorder or ApiRecorder()
         self._http = http or httpx.Client(timeout=10, follow_redirects=False)
@@ -256,20 +231,40 @@ class DemoConsole:
     # Routing ------------------------------------------------------------------------------------
 
     def handles(self, target: str) -> bool:
-        path = urlsplit(target).path
-        return path == self.root + "/" or path.startswith((self.root + "/assets/", self.api))
+        return urlsplit(target).path.startswith(self.api)
 
     def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         path = urlsplit(target).path
-        if path == self.root + "/":
-            return self._static(method, "index.html")
-        if path.startswith(self.root + "/assets/"):
-            return self._static(method, path.removeprefix(self.root + "/"))
         if not path.startswith(self.api):
             return Response(HTTPStatus.NOT_FOUND)
         lowered = {key.lower(): value for key, value in headers.items()}
+        origin = lowered.get("origin")
+        if method == "OPTIONS":
+            response = Response(HTTPStatus.NO_CONTENT)
+            if origin == self.web_origin:
+                # The page's requests: GETs, and POSTs with a JSON body.
+                response.headers["access-control-allow-methods"] = "GET, POST"
+                response.headers["access-control-allow-headers"] = "content-type"
+                response.headers["access-control-max-age"] = "600"
+        else:
+            response = self._handle_api(method, path.removeprefix(self.api), lowered, body)
+        response.headers.update(self.cors(origin))
+        return response
+
+    def cors(self, origin: str | None) -> dict[str, str]:
+        """The CORS headers of every API response, errors included: credentialed requests from
+        the website's origin only; other origins get none."""
+        if origin != self.web_origin:
+            return {"vary": "Origin"}
+        return {
+            "access-control-allow-origin": self.web_origin,
+            "access-control-allow-credentials": "true",
+            "vary": "Origin",
+        }
+
+    def _handle_api(self, method: str, name: str, headers: dict[str, str], body: bytes) -> Response:
         try:
-            return self._api(method, path.removeprefix(self.api), lowered, body)
+            return self._api(method, name, headers, body)
         except ApiError as error:
             # The service's documented code is public; its message and everything else are not.
             LOG.warning("demo: service answered %s %s", error.status_code, error.code)
@@ -309,7 +304,7 @@ class DemoConsole:
             return _json(HTTPStatus.UNAUTHORIZED, {"code": "no_demo_account"})
         self._ensure_account(account)
         if method == "POST":
-            # A JSON body forces a CORS preflight, which this API never answers, for other sites.
+            # A JSON body forces a CORS preflight, which this API allows only for the website.
             if not headers.get("content-type", "").startswith("application/json"):
                 return _json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"code": "json_required"})
             request = _json_body(body)
@@ -347,30 +342,14 @@ class DemoConsole:
             return _json(HTTPStatus.NOT_FOUND, {"code": "not_found"})
         return _json(HTTPStatus.OK, view)
 
-    def _static(self, method: str, name: str) -> Response:
-        if method != "GET":
-            return Response(HTTPStatus.METHOD_NOT_ALLOWED)
-        content = self.files.get(name)
-        if content is None:
-            return Response(HTTPStatus.NOT_FOUND)
-        page = name.endswith(".html")
-        headers = {
-            "content-type": CONTENT_TYPES[Path(name).suffix],
-            "x-content-type-options": "nosniff",
-            # Pages name their assets by content hash: those never change, the pages may.
-            "cache-control": "no-cache" if page else "public, max-age=31536000",
-        }
-        if page:
-            headers["content-security-policy"] = self.csp
-            headers["referrer-policy"] = "no-referrer"
-        return Response(HTTPStatus.OK, content, headers)
-
     # Accounts -----------------------------------------------------------------------------------
 
     def _set_cookie(self, account: str) -> str:
+        # Host-only on the API's origin. The website is same-site with it (both under phala.com),
+        # so a Lax cookie goes with the page's credentialed requests and with no other site's.
         cookie = (
             f"{ACCOUNT_COOKIE}={account}; Path={self.root}/; Max-Age={30 * 86_400}; "
-            "HttpOnly; SameSite=Strict"
+            "HttpOnly; SameSite=Lax"
         )
         return cookie + ("; Secure" if self.secure_cookie else "")
 

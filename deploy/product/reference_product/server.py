@@ -56,7 +56,7 @@ ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 class ProductServer:
     """Serves `POST /webhooks`, `GET /healthz`, and, given an `AccountApi`, `/accounts`, and,
-    given a `DemoConsole`, the website: `/`, `/assets/`, and `/api/`."""
+    given a `DemoConsole`, the demo's API for the website: `/api/`. It serves no web page."""
 
     def __init__(
         self,
@@ -97,10 +97,22 @@ class ProductServer:
                 else:
                     self._send(Answer(HTTPStatus.NOT_FOUND))
 
+            def do_OPTIONS(self) -> None:
+                # CORS preflights, for the demo's API only.
+                if server.demo is not None and server.demo.handles(self.path):
+                    headers = dict(self.headers.items())
+                    self._send_raw(server.demo.handle("OPTIONS", self.path, headers, b""))
+                else:
+                    self._send(Answer(HTTPStatus.NOT_FOUND))
+
             def _body(self) -> bytes | None:
                 length = int(self.headers.get("content-length") or 0)
                 if length > MAX_BODY_BYTES:
-                    self._send(Answer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
+                    if server.demo is not None and server.demo.handles(self.path):
+                        cors = server.demo.cors(self.headers.get("origin"))
+                        self._send_raw(Response(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, headers=cors))
+                    else:
+                        self._send(Answer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
                     return None
                 return self.rfile.read(length)
 
@@ -388,7 +400,7 @@ def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
 
 @contextmanager
 def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
-    """Runs the product: webhook receiver with fulfillment, account API, and demo checkout."""
+    """Runs the product: webhook receiver with fulfillment, account API, and the demo's API."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
     webhook_keys = WebhookKeys(config)
@@ -399,7 +411,7 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
     ledger = ProductLedger(config.ledger_path)
     fulfillment = Fulfillment(config, ledger, webhook_keys)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
-    demo = None if config.demo_dir is None else DemoConsole(config, ledger, config.demo_dir)
+    demo = None if config.web_origin is None else DemoConsole(config, ledger)
     try:
         with ProductServer(fulfillment, accounts, demo) as server:
             LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)

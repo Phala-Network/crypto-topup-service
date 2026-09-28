@@ -3,10 +3,10 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
-// The website the reference product serves (reference_product.demo): one page at `{public_url}/`
-// with its assets in `assets/`. Relative asset URLs, so it works under any `public_url` path.
-// Content hashes in file names come from the content only, so two builds of the same sources are
-// identical (the product image is reproducible).
+// The website, pay.phala.com: one page at `/` with its assets in `assets/`, served by Cloudflare
+// (wrangler.jsonc, with the headers of public/_headers). Its demo calls the reference product's API
+// at VITE_DEMO_API_ORIGIN (.env.production). Content hashes in file names come from the content
+// only, so two builds of the same sources are identical.
 export default defineConfig({
   base: "./",
   plugins: [react(), tailwindcss()],

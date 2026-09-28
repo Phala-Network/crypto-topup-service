@@ -1,0 +1,21 @@
+# Cloudflare's static-assets headers (developers.cloudflare.com/workers/static-assets/headers/).
+# A request inherits the headers of every rule it matches, so each header is set by one rule only.
+#
+# The page reads the demo API (pay-demo-api.phala.com) and the service's public quote and deposit
+# address views (pay-api-staging.phala.com), and sends the visitor's wallet requests through the
+# wallet's provider (no network access). Its typeface is bundled with its assets.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://pay-demo-api.phala.com https://pay-api-staging.phala.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+
+# The page may change; its assets are named by content hash and never do.
+/
+  Cache-Control: no-cache
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Branch builds' preview versions (wrangler.jsonc) stay out of search results.
+https://:version.:subdomain.workers.dev/*
+  X-Robots-Tag: noindex

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createTestClient, http, publicActions, walletActions, type Address, type Hash, type Hex } from "viem";
 import { sepolia } from "viem/chains";
+import { build, preview, type PreviewServer } from "vite";
 
 const web = resolve(import.meta.dirname, "..");
 const root = resolve(web, "../../..");
@@ -20,17 +21,22 @@ const DETERMINISTIC_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
  * Runs the whole demo locally: Anvil as Sepolia with the test token and the real forwarder
  * factory, deployed as deploy/CONTRACTS.md deploys it (through the deterministic deployment proxy
  * with the committed salt), so it lands at its pinned address; the fake top-up service
- * (e2e/fake_service.py), and the reference product serving the built page at `/`, pinned to
- * the fake service's webhook key. Tests read SITE_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS,
- * TOKEN_ADDRESS, and TREASURY (which the tests control on Anvil, as the merchant's finance team
- * controls its treasury). Service logs go to test-results/services.
+ * (e2e/fake_service.py), the reference product serving the demo's API, pinned to the fake
+ * service's webhook key, and the page, built against that API and served from its own origin (as
+ * Cloudflare serves pay.phala.com), under the CSP of public/_headers with the local origins: the
+ * page calls the API cross-origin, with CORS and the demo account cookie. Tests read SITE_URL,
+ * API_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS, TOKEN_ADDRESS, and TREASURY (which the tests
+ * control on Anvil, as the merchant's finance team controls its treasury). Service logs go to
+ * test-results/services.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const work = mkdtempSync(join(tmpdir(), "demo-e2e-"));
   const logs = join(web, "test-results", "services");
   mkdirSync(logs, { recursive: true });
   const children: ChildProcess[] = [];
+  let site: PreviewServer | undefined;
   const teardown = async () => {
+    await site?.close();
     await Promise.all(children.map(stop));
     rmSync(work, { recursive: true, force: true });
   };
@@ -67,7 +73,12 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       readFileSync(join(root, "deploy/contracts/expected-codehashes.json"), "utf8"),
     ) as { factory_salt: Hex };
 
-    const [anvilPort, servicePort, productPort] = [await freePort(), await freePort(), await freePort()];
+    const [anvilPort, servicePort, productPort, sitePort] = [
+      await freePort(),
+      await freePort(),
+      await freePort(),
+      await freePort(),
+    ];
     children.push(
       spawn(
         process.env["ANVIL"] ?? "anvil",
@@ -119,6 +130,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     writeFileSync(join(work, "product.key"), `ppay_rk_test_${"A".repeat(43)}000000`, { mode: 0o600 });
     const product = `http://127.0.0.1:${productPort}`;
     const service = `http://127.0.0.1:${servicePort}`;
+    const origin = `http://127.0.0.1:${sitePort}`;
     const uv = ["run", "--locked", "--project", join(root, "sdk/python"), "python"];
 
     children.push(
@@ -154,7 +166,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       ledger_path: join(work, "ledger.sqlite3"),
       driver_public_key: rawPublicKey(generateKeyPairSync("ed25519").publicKey.export({ format: "der", type: "spki" })),
       webhook_public_keys: [rawPublicKey(publicKeyOf(webhookSeed))],
-      demo_dir: join(web, "dist"),
+      web_origin: origin,
     };
     writeFileSync(join(work, "product.json"), JSON.stringify(config));
     children.push(
@@ -166,8 +178,31 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await waitFor(() => fetchOk(`${service}/evidences/quote.json`), 600);
     await waitFor(() => fetchOk(`${product}/healthz`), 600);
 
+    // The page as `build:cloudflare` builds it, with the local API's origin instead of staging's.
+    const dist = join(work, "dist");
+    process.env["VITE_DEMO_API_ORIGIN"] = product;
+    await build({ root: web, logLevel: "warn", build: { outDir: dist } });
+    const stagingApi = "https://pay-demo-api.phala.com";
+    const stagingService = "https://pay-api-staging.phala.com";
+    const csp = /^\s+Content-Security-Policy: (.+)$/m.exec(readFileSync(join(web, "public/_headers"), "utf8"))?.[1];
+    if (csp === undefined || !csp.includes(` ${stagingApi} ${stagingService};`)) {
+      throw new Error(`public/_headers has no CSP connecting to ${stagingApi} and ${stagingService}`);
+    }
+    site = await preview({
+      root: web,
+      logLevel: "warn",
+      build: { outDir: dist },
+      preview: {
+        host: "127.0.0.1",
+        port: sitePort,
+        strictPort: true,
+        headers: { "content-security-policy": csp.replace(stagingApi, product).replace(stagingService, service) },
+      },
+    });
+
     Object.assign(process.env, {
-      SITE_URL: `${product}/`,
+      SITE_URL: `${origin}/`,
+      API_URL: product,
       SERVICE_URL: service,
       ANVIL_URL: anvil,
       PAYER_ADDRESS: payer,

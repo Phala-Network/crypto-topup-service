@@ -14,6 +14,11 @@ from topup_sdk import TopupClient
 DRIVER_KEYID = "driver/v1"
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 ACCOUNT_ID = re.compile(r"acct_[0-9a-f]{32}")
+# An origin as browsers serialize it in `Origin`: https with a lowercase host and no path; http
+# only on the loopback host, for local runs.
+WEB_ORIGIN = re.compile(
+    r"(https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?|http://(127\.0\.0\.1|localhost))(:[1-9][0-9]{0,4})?"
+)
 
 
 class MissingProductKeyError(Exception):
@@ -61,13 +66,15 @@ class ProductConfig:
     per_period_cap_minor: int = 500_000
     period_seconds: int = 24 * 60 * 60
     restart_command: list[str] = field(default_factory=list)
-    # The built website, deploy/product/web/dist, served with the demo's API
-    # (reference_product.demo); unset, neither is served.
-    demo_dir: str | None = None
+    # The website's origin (https://pay.phala.com), the only origin the demo's API
+    # (reference_product.demo) allows; unset, the demo's API is not served.
+    web_origin: str | None = None
 
     def __post_init__(self) -> None:
         if not ACCOUNT_ID.fullmatch(self.account):
             raise ValueError("account must be the product's Phala Pay account id, acct_…")
+        if self.web_origin is not None and not WEB_ORIGIN.fullmatch(self.web_origin):
+            raise ValueError("web_origin must be https://HOST[:PORT] in lowercase, with no path")
 
     @classmethod
     def load(cls, path: str | Path) -> ProductConfig:

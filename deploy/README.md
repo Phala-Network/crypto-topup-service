@@ -61,7 +61,7 @@ key, and the database passwords: that is a key migration, not an image bump.
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
-   | `PRODUCT_DOMAIN` | `staging` only: the reference product's [custom domain](#custom-domain), `pay.phala.com` |
+   | `PRODUCT_DOMAIN` | `staging` only: the reference product's [custom domain](#custom-domain), `pay-demo-api.phala.com` (the [website](#website), `pay.phala.com`, is on Cloudflare) |
 
    No variable or secret names a treasury or a transaction-signing key: treasuries are each
    account's own, set through the API, and the service sends no transactions.
@@ -211,8 +211,10 @@ socket (its instance id and the evidence quote), which is why it is pinned by di
 with the compose.
 
 The staging reference product is served the same way: the same pinned dstack-ingress in its
-compose terminates TLS for `$PRODUCT_DOMAIN` and forwards to `product:8089`, so the demo, the
-product's webhook endpoint, and its account API are at `https://$PRODUCT_DOMAIN`.
+compose terminates TLS for `$PRODUCT_DOMAIN` (`pay-demo-api.phala.com`) and forwards to
+`product:8089`, so the demo's API, the product's webhook endpoint, and its account API are at
+`https://$PRODUCT_DOMAIN`. The website, `pay.phala.com`, is not a CVM's: Cloudflare serves it
+([Website](#website)).
 
 **HUMAN-ONLY, owner of the domain's Cloudflare zone**, once per CVM instance. Every Deploy run
 lists the records for its target's domain (`$DOMAIN`: `$TOPUP_DOMAIN` or `$PRODUCT_DOMAIN`), in
@@ -663,7 +665,8 @@ Staging's reference product is a merchant like any other, with its own account, 
 running [product/reference_product](product/reference_product): `serve` mode is the webhook
 receiver that applies every `deposit.*` snapshot by the balance rule (a deposit nets to
 `amount − amount_refunded − amount_reversed` while `credited` or `reversed`; its tests are in
-`product/tests`), an account API, and the public demo, with a SQLite ledger; `deposit` mode, run
+`product/tests`), an account API, and the API of the website's live demo, with a SQLite ledger;
+`deposit` mode, run
 from an operator's machine, plays a customer and signs the product's account API with a separate
 driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
 
@@ -682,13 +685,18 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
 - **Attested settings.** `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`), `PRODUCT_PUBLIC_URL`
   (`https://$PRODUCT_DOMAIN`, its [custom domain](#custom-domain)), `PRODUCT_DOMAIN` and
   `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), `PRODUCT_RPC_URL` (a keyless Sepolia RPC: it is published and the product seals no
-  RPC key), and `PRODUCT_DRIVER_PUBLIC_KEY`.
+  RPC key), and `PRODUCT_DRIVER_PUBLIC_KEY`. The config also fixes `web_origin`,
+  `https://pay.phala.com`, the only origin the demo's API allows.
 
-The product also serves the public **Phala Pay website** ([pay.phala.com](https://pay.phala.com/)):
-one page at exactly `PRODUCT_PUBLIC_URL/`, its hashed assets at `/assets/`, and the demo's JSON
-API at `/api/` ([product/web](product/web), built into the image; served by
-[reference_product/demo.py](product/reference_product/demo.py) from the files present at startup,
-by exact name). The page is a short headline, the live demo, and the key properties. The demo
+The product serves the JSON API of the live demo on the public **Phala Pay website**
+([pay.phala.com](https://pay.phala.com/), [product/web](product/web), served by Cloudflare:
+[Website](#website)) at `PRODUCT_PUBLIC_URL/api/`
+([reference_product/demo.py](product/reference_product/demo.py)); it serves no page. The page
+calls it cross-origin: the API answers CORS preflights and sends
+`Access-Control-Allow-Origin: https://pay.phala.com` with `Access-Control-Allow-Credentials: true`
+and `Vary: Origin` on every `/api/` response, errors included, and nothing of CORS to any other
+origin; `/webhooks`, `/healthz`, and `/accounts` have no CORS. The page is a short headline, the
+live demo, and the key properties. The demo
 sets the product beside its backend (stacked on narrow screens): first, what the customer sees (a cloud console's
 billing page, framed as the merchant's app); then what the merchant's backend sees (the
 payment's live event stream, then tabs for payments, refunds, sweeps, API requests and webhooks,
@@ -704,12 +712,16 @@ address, `mark_paid`, verified at finality; on staging that treasury is the fina
 visitor who pays from their own wallet sees the verification fail (`sender_mismatch`). Sweeps are
 the merchant's: the page shows the unswept balance, the `flush` call and the Safe Transaction
 Builder batch the SDK builds, and the finalized sweeps; the product holds no wallet key. Each
-browser gets a random demo account in an `HttpOnly` cookie; quote creation is rate-limited per
-account (3 a minute, 20 a day) and overall (30 a minute), and the page carries a strict CSP. Test
-PHA is minted by the visitor's own wallet (`mint` is public on the staging token), with Sepolia ETH
-from a public faucet for gas. `cd product/web && pnpm run build && pnpm run e2e` runs the whole
-flow on Anvil, with the real factory at its deterministic address, against a stand-in service
-([product/web/e2e/fake_service.py](product/web/e2e/fake_service.py)).
+browser gets a random demo account in a cookie of the API's origin (`HttpOnly; Secure;
+SameSite=Lax; Path=/`, host-only: the two origins are same-site under `phala.com`, so the page's
+credentialed requests carry it); quote creation is rate-limited per account (3 a minute, 20 a day)
+and overall (30 a minute), POSTs must be JSON, and the page carries a strict CSP. Test PHA is
+minted by the visitor's own wallet (`mint` is public on the staging token), with Sepolia ETH from a
+public faucet for gas. With `sdk/js` built, `cd product/web && pnpm run e2e` runs the whole flow on
+Anvil, with the real factory at its deterministic address, against a stand-in service
+([product/web/e2e/fake_service.py](product/web/e2e/fake_service.py)): it builds the page against
+the local product and serves it from its own origin under the CSP of `public/_headers`, so the
+demo runs cross-origin, with CORS and the cookie, as in production.
 
 Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1–8 (each step
 **HUMAN-ONLY** unless it is a workflow run):
@@ -786,6 +798,33 @@ Each row adds its options to the step-5 driver command: `T` is the Sepolia unsup
 `0x287E3577c66866a3F5Cb7a8Dac6761EB43608392`, `A` an address the staging owner controls, and the refund
 row needs `--timeout 43200`. A mismatch between the expected and the observed outcome exits
 non-zero with the reason.
+
+### Website
+
+`pay.phala.com` is the static build of [product/web](product/web), served by the Cloudflare Worker
+`phala-pay-web` with static assets only (no Worker script) and deployed by **Cloudflare Workers
+Builds**, connected to this repository. Its dashboard settings: root directory
+`deploy/product/web` and build command `npm run build:cloudflare`; the deploy commands are the
+defaults, `npx wrangler deploy` on `main` and `npx wrangler versions upload` on other branches.
+Workers Builds uses the wrangler pinned in [product/web/package.json](product/web/package.json) and
+ignores a `build` section of the Wrangler config.
+
+- **Build.** `build:cloudflare` builds `sdk/js` (the page depends on it through `file:`) and then
+  the page, each from its own lockfile with `npx -y pnpm@12.6.0`, on the Node of
+  `product/web/.node-version` (24, as CI). The page's API origin is fixed at build time:
+  `VITE_DEMO_API_ORIGIN` in `product/web/.env.production`, `https://pay-demo-api.phala.com`.
+- **[wrangler.jsonc](product/web/wrangler.jsonc).** The assets of `./dist`; any path but the page
+  and its assets is a real `404` (`not_found_handling: "none"`); the custom domain `pay.phala.com`
+  as a `custom_domain` route; no `workers.dev` copy of the site (`workers_dev: false`); and preview
+  URLs on (`preview_urls: true`) for the versions branch builds upload.
+- **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers: the
+  page's CSP (`connect-src` names only the demo API and `pay-api-staging.phala.com`, whose public
+  quote and deposit address views the SDK components read), `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `no-cache` for the page, and a year's immutable caching for the
+  content-hashed `/assets/*`.
+- **Pull requests.** Each branch build uploads a preview version with its own `workers.dev` URL,
+  to review the page. Its demo API calls are refused by CORS by design: the API allows only
+  `https://pay.phala.com`.
 
 ## Local verification
 
