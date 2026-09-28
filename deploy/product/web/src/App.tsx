@@ -1,5 +1,17 @@
 import { Checkout, type Appearance } from "@phala/pay/react";
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ChevronRight, CircleAlert, Cloud, Cpu, ShieldCheck, TriangleAlert, Wallet } from "lucide-react";
+import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldLabel, FieldLegend, FieldSet, FieldTitle } from "@/components/ui/field";
+import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   createQuote,
   getAccount,
@@ -11,14 +23,14 @@ import {
   type Timeline,
   type Trust,
 } from "./api.js";
-import { ExplorerLink, describe, usePolling } from "./common.js";
+import { Detail, Details, ExplorerLink, LINK, StatusBadge, describe, usePolling } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
 import { dollars, short, signedDollars, statusLabel, time, tokens } from "./format.js";
 import { Sweeps } from "./Sweeps.js";
 import { errorMessage, mintTestTokens } from "./testTokens.js";
+import { ThemeToggle, useTheme } from "./theme.js";
 import { BehindTheScenes } from "./Timeline.js";
 
-type Theme = "light" | "dark";
 type Method = "quote" | "address";
 
 interface Session {
@@ -32,6 +44,9 @@ const METHODS: { id: Method; label: string }[] = [
   { id: "quote", label: "Exact amount" },
   { id: "address", label: "Deposit address" },
 ];
+
+/** The page's width: wide screens get room for the payment and its timeline side by side. */
+const CONTAINER = "mx-auto w-full max-w-[1760px] px-4 sm:px-6 lg:px-8";
 
 export function App() {
   const [theme, setTheme] = useTheme();
@@ -75,17 +90,20 @@ export function App() {
     refreshAccount();
   };
 
+  // The SDK's components take the page's theme tokens (src/index.css).
   const appearance: Appearance = {
     theme,
     variables: {
-      colorPrimary: "var(--accent)",
-      accessibleColorOnColorPrimary: "var(--accent-contrast)",
-      colorBackground: "var(--surface)",
-      colorText: "var(--text)",
-      colorTextSecondary: "var(--text-muted)",
+      colorPrimary: "var(--primary)",
+      accessibleColorOnColorPrimary: "var(--primary-foreground)",
+      colorBackground: "var(--card)",
+      colorText: "var(--card-foreground)",
+      colorTextSecondary: "var(--muted-foreground)",
       colorBorder: "var(--border)",
-      borderRadius: "10px",
-      fontFamily: "var(--font)",
+      colorDanger: "var(--destructive)",
+      colorSuccess: "var(--success)",
+      borderRadius: "var(--radius)",
+      fontFamily: "inherit",
     },
   };
   const select = (next: Selection) => {
@@ -94,145 +112,120 @@ export function App() {
   };
 
   return (
-    <div className="app">
-      {account?.network.testnet === true && <TestnetBanner account={account} />}
-      <header className="topbar">
-        <div className="brand">
-          <span className="logo" aria-hidden="true" />
-          <span>Cloud Console</span>
-          <span className="crumb">/ Billing</span>
-          <span className="pill">Phala Pay demo</span>
-        </div>
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
-        >
-          {theme === "dark" ? "Light" : "Dark"} theme
-        </button>
-      </header>
-
-      <main className="page">
-        <div className="page-head">
-          <h1>Add credits</h1>
-          <p className="muted">
-            A cloud console's billing page paid with Phala Pay: top up this workspace with{" "}
-            {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}, either for an
-            exact amount at a locked price, or at any time to your own deposit address. The balance
-            moves only when this console's webhook handler receives a verified <code>deposit.*</code>{" "}
-            event, exactly as a real integration applies credits.
-          </p>
-        </div>
-        {accountError !== null && (
-          <p className="alert" role="alert">
-            Could not load the account: {accountError}
-          </p>
-        )}
-
-        <div className="grid">
-          <div className="column">
-            <BalanceCard account={account} />
-            <section className="card" aria-labelledby="pay-title">
-              <h2 id="pay-title">Pay with crypto</h2>
-              <MethodTabs method={method} onChange={setMethod} />
-              <div
-                role="tabpanel"
-                id={`panel-${method}`}
-                aria-labelledby={`tab-${method}`}
-                className="tabpanel"
-              >
-                {method === "quote" ? (
-                  session === null || account === null ? (
-                    <AmountPicker
-                      account={account}
-                      onQuote={(created: CreatedQuote) => {
-                        setSession({
-                          quote: created.quote,
-                          clientSecret: created.client_secret,
-                          expectedAddress: created.expected_address,
-                          orderId: created.order_id,
-                        });
-                        select({ kind: "quote", id: created.quote });
-                      }}
-                    />
-                  ) : (
-                    <div className="checkout">
-                      <p className="small">
-                        Order <code>{session.orderId}</code>, in the quote's <code>metadata</code>. The
-                        checkout shows the quote only if the service's address is the one the product's
-                        SDK recomputed from its pins.
-                      </p>
-                      <Checkout
-                        clientSecret={session.clientSecret}
-                        expectedAddress={session.expectedAddress}
-                        apiBase={account.api_base}
-                        appearance={appearance}
-                        onSuccess={refreshAccount}
-                      />
-                      <button type="button" className="ghost" onClick={() => setSession(null)}>
-                        Start a new top-up
-                      </button>
-                    </div>
-                  )
-                ) : account === null ? (
-                  <p className="muted">Loading…</p>
-                ) : (
-                  <DepositAddressPanel account={account} appearance={appearance} onSelect={select} />
-                )}
-              </div>
-            </section>
+    <TooltipProvider>
+      <div className="min-h-svh bg-muted/40 dark:bg-background">
+        <header className="sticky top-0 z-30 border-b bg-background/90 backdrop-blur">
+          <div className={`${CONTAINER} flex h-14 items-center justify-between gap-4`}>
+            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Cloud className="size-4" aria-hidden="true" />
+              </span>
+              <span className="truncate">Cloud Console</span>
+              <span className="hidden font-normal text-muted-foreground sm:inline">/ Billing</span>
+              <Badge variant="outline" asChild>
+                <a href="../">Phala Pay demo</a>
+              </Badge>
+            </div>
+            <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
-          <BehindTheScenes
-            timeline={timeline !== null && timeline.key === selectedKey ? timeline.view : null}
-            loading={selected?.id ?? null}
-            account={account}
-            onChanged={refreshAll}
-          />
-        </div>
+        </header>
 
-        <Payments account={account} selected={selected} onSelect={select} />
-        {account !== null && <Sweeps account={account} />}
-        <TrustStrip trust={trust} account={account} />
-      </main>
-    </div>
-  );
-}
+        <main className={`${CONTAINER} flex flex-col gap-6 py-6 lg:py-8`}>
+          {account?.network.testnet === true && <TestnetBanner account={account} />}
+          <div className="flex flex-col gap-2">
+            <h1 className="text-2xl font-semibold tracking-tight">Add credits</h1>
+            <p className="max-w-3xl text-sm text-muted-foreground">
+              A cloud console's billing page paid with Phala Pay: top up this workspace with{" "}
+              {account?.token.symbol ?? "PHA"} on {account?.network.name ?? "Sepolia"}, either for an
+              exact amount at a locked price, or at any time to your own deposit address. The balance
+              moves only when this console's webhook handler receives a verified <code>deposit.*</code>{" "}
+              event, exactly as a real integration applies credits.
+            </p>
+          </div>
+          {accountError !== null && (
+            <Alert variant="destructive">
+              <CircleAlert aria-hidden="true" />
+              <AlertDescription>Could not load the account: {accountError}</AlertDescription>
+            </Alert>
+          )}
 
-function MethodTabs({ method, onChange }: { method: Method; onChange: (method: Method) => void }) {
-  const refs = useRef<Record<Method, HTMLButtonElement | null>>({ quote: null, address: null });
-  // Arrow keys move between tabs (WAI-ARIA tabs pattern, automatic activation).
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-      return;
-    }
-    event.preventDefault();
-    const next = method === "quote" ? "address" : "quote";
-    onChange(next);
-    refs.current[next]?.focus();
-  };
-  return (
-    <div className="tabs" role="tablist" aria-label="Payment method">
-      {METHODS.map(({ id, label }) => (
-        <button
-          key={id}
-          ref={(element) => {
-            refs.current[id] = element;
-          }}
-          id={`tab-${id}`}
-          type="button"
-          role="tab"
-          className="tab"
-          aria-selected={method === id}
-          aria-controls={`panel-${id}`}
-          tabIndex={method === id ? 0 : -1}
-          onClick={() => onChange(id)}
-          onKeyDown={onKeyDown}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
+          <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] 2xl:grid-cols-[minmax(0,30rem)_minmax(0,1fr)]">
+            <div className="flex min-w-0 flex-col gap-6">
+              <BalanceCard account={account} />
+              <Card role="region" aria-labelledby="pay-title">
+                <CardHeader>
+                  <CardTitle>
+                    <h2 id="pay-title">Pay with crypto</h2>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <Tabs value={method} onValueChange={(value) => setMethod(value === "address" ? "address" : "quote")}>
+                    <TabsList aria-label="Payment method" className="w-full">
+                      {METHODS.map(({ id, label }) => (
+                        <TabsTrigger key={id} value={id}>
+                          {label}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                    <TabsContent value="quote" className="pt-3">
+                      {session === null || account === null ? (
+                        <AmountPicker
+                          account={account}
+                          onQuote={(created: CreatedQuote) => {
+                            setSession({
+                              quote: created.quote,
+                              clientSecret: created.client_secret,
+                              expectedAddress: created.expected_address,
+                              orderId: created.order_id,
+                            });
+                            select({ kind: "quote", id: created.quote });
+                          }}
+                        />
+                      ) : (
+                        <div className="flex flex-col gap-4">
+                          <p className="text-xs text-muted-foreground">
+                            Order <code>{session.orderId}</code>, in the quote's <code>metadata</code>. The
+                            checkout shows the quote only if the service's address is the one the product's
+                            SDK recomputed from its pins.
+                          </p>
+                          <Checkout
+                            clientSecret={session.clientSecret}
+                            expectedAddress={session.expectedAddress}
+                            apiBase={account.api_base}
+                            appearance={appearance}
+                            onSuccess={refreshAccount}
+                          />
+                          <Button type="button" variant="outline" onClick={() => setSession(null)}>
+                            Start a new top-up
+                          </Button>
+                        </div>
+                      )}
+                    </TabsContent>
+                    <TabsContent value="address" className="pt-3">
+                      {account === null ? (
+                        <p className="text-muted-foreground">Loading…</p>
+                      ) : (
+                        <DepositAddressPanel account={account} appearance={appearance} onSelect={select} />
+                      )}
+                    </TabsContent>
+                  </Tabs>
+                </CardContent>
+              </Card>
+            </div>
+            <BehindTheScenes
+              timeline={timeline !== null && timeline.key === selectedKey ? timeline.view : null}
+              loading={selected?.id ?? null}
+              account={account}
+              onChanged={refreshAll}
+            />
+          </div>
+
+          <Payments account={account} selected={selected} onSelect={select} />
+          {account !== null && <Sweeps account={account} />}
+          <TrustStrip trust={trust} account={account} />
+        </main>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -250,69 +243,90 @@ function TestnetBanner({ account }: { account: Account }) {
     }
   };
   return (
-    <div className="banner" role="note">
-      <strong>Testnet demo.</strong> {account.network.name} and test {account.token.symbol} only; no
-      real money moves. Test {account.token.symbol} is free: mint it from your wallet (gas is{" "}
-      {account.network.name} ETH from a public faucet).{" "}
-      <button type="button" className="link" onClick={() => void mint()} disabled={state.kind === "pending"}>
-        {state.kind === "pending" ? "Confirm in your wallet…" : `Get 1,000 test ${account.token.symbol}`}
-      </button>
-      <span aria-live="polite">
-        {state.kind === "done" && state.text !== undefined && (
-          <>
-            {" "}
-            Minted: <ExplorerLink account={account} kind="tx" value={state.text} />
-          </>
-        )}
-        {state.kind === "failed" && ` ${state.text ?? ""}`}
-      </span>
-    </div>
+    <Alert role="note" className="border-warning/50 bg-warning/10">
+      <TriangleAlert aria-hidden="true" />
+      <AlertTitle>Testnet demo.</AlertTitle>
+      <AlertDescription className="text-foreground/80">
+        <p>
+          {account.network.name} and test {account.token.symbol} only; no real money moves. Test{" "}
+          {account.token.symbol} is free: mint it from your wallet (gas is {account.network.name} ETH from a
+          public faucet).{" "}
+          <Button
+            type="button"
+            variant="link"
+            className="h-auto p-0 text-foreground underline"
+            onClick={() => void mint()}
+            disabled={state.kind === "pending"}
+          >
+            {state.kind === "pending" ? "Confirm in your wallet…" : `Get 1,000 test ${account.token.symbol}`}
+          </Button>
+          <span aria-live="polite">
+            {state.kind === "done" && state.text !== undefined && (
+              <>
+                {" "}
+                Minted: <ExplorerLink account={account} kind="tx" value={state.text} />
+              </>
+            )}
+            {state.kind === "failed" && ` ${state.text ?? ""}`}
+          </span>
+        </p>
+      </AlertDescription>
+    </Alert>
   );
 }
 
 function BalanceCard({ account }: { account: Account | null }) {
   return (
-    <section className="card balance" aria-labelledby="balance-title">
-      <h2 id="balance-title">Account balance</h2>
-      <p className="balance-value" aria-live="polite" data-testid="balance">
-        {account === null ? "—" : dollars(account.balance)}
-      </p>
-      <p className="muted small">
-        Workspace <code>{account?.account_id ?? "…"}</code>, a demo account kept in a cookie in this
-        browser.
-      </p>
-      {account !== null && account.ledger.length > 0 && (
-        <details className="ledger-lines">
-          <summary>How this balance adds up ({account.ledger.length})</summary>
-          <div className="table-scroll">
-          <table className="table compact">
-            <thead>
-              <tr>
-                <th scope="col">When</th>
-                <th scope="col">Deposit</th>
-                <th scope="col">Event</th>
-                <th scope="col">Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {account.ledger.map((line) => (
-                <tr key={`${line.deposit}-${line.reason}-${line.at}`} data-testid="ledger-line">
-                  <td>{time(line.at)}</td>
-                  <td className="mono" title={line.deposit}>
-                    {short(line.deposit)}
-                  </td>
-                  <td>
-                    <code>{line.reason}</code>
-                  </td>
-                  <td className={line.amount < 0 ? "danger" : "success"}>{signedDollars(line.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          </div>
-        </details>
-      )}
-    </section>
+    <Card role="region" aria-labelledby="balance-title">
+      <CardHeader>
+        <CardDescription>
+          <h2 id="balance-title">Account balance</h2>
+        </CardDescription>
+        <div className="text-3xl font-semibold tracking-tight tabular-nums" aria-live="polite" data-testid="balance">
+          {account === null ? <Skeleton className="h-9 w-32" /> : dollars(account.balance)}
+        </div>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <p className="text-xs text-muted-foreground">
+          Workspace <code>{account?.account_id ?? "…"}</code>, a demo account kept in a cookie in this
+          browser.
+        </p>
+        {account !== null && account.ledger.length > 0 && (
+          <details className="group">
+            <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+              How this balance adds up ({account.ledger.length})
+            </summary>
+            <Table className="mt-2 text-xs">
+              <TableHeader>
+                <TableRow>
+                  <TableHead scope="col">When</TableHead>
+                  <TableHead scope="col">Deposit</TableHead>
+                  <TableHead scope="col">Event</TableHead>
+                  <TableHead scope="col">Amount</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {account.ledger.map((line) => (
+                  <TableRow key={`${line.deposit}-${line.reason}-${line.at}`} data-testid="ledger-line">
+                    <TableCell>{time(line.at)}</TableCell>
+                    <TableCell className="font-mono" title={line.deposit}>
+                      {short(line.deposit)}
+                    </TableCell>
+                    <TableCell>
+                      <code>{line.reason}</code>
+                    </TableCell>
+                    <TableCell className={line.amount < 0 ? "text-destructive" : "text-success"}>
+                      {signedDollars(line.amount)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </details>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -321,7 +335,7 @@ function AmountPicker({ account, onQuote }: { account: Account | null; onQuote: 
   const [custom, setCustom] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const customId = useId();
+  const id = useId();
   const min = account?.min_amount ?? 100;
   const max = account?.max_amount ?? 100_000;
 
@@ -345,51 +359,62 @@ function AmountPicker({ account, onQuote }: { account: Account | null; onQuote: 
       },
     );
   };
+  const options = [
+    ...(account?.presets ?? [500, 2000, 5000]).map((cents) => ({ value: String(cents), label: dollars(cents) })),
+    { value: "custom", label: "Custom" },
+  ];
 
   return (
-    <form onSubmit={submit} className="picker">
-      <fieldset>
-        <legend>Amount</legend>
-        <div className="presets">
-          {(account?.presets ?? [500, 2000, 5000]).map((cents) => (
-            <label key={cents} className="preset">
-              <input type="radio" name="amount" checked={preset === cents} onChange={() => setPreset(cents)} />
-              <span>{dollars(cents)}</span>
-            </label>
+    <form onSubmit={submit} className="flex flex-col gap-4">
+      <FieldSet>
+        <FieldLegend variant="label" className="text-muted-foreground">
+          Amount
+        </FieldLegend>
+        <RadioGroup
+          value={String(preset)}
+          onValueChange={(value) => setPreset(value === "custom" ? "custom" : Number(value))}
+          className="grid-cols-2"
+        >
+          {options.map((option) => (
+            <FieldLabel key={option.value} htmlFor={`${id}-${option.value}`}>
+              <Field orientation="horizontal">
+                <RadioGroupItem value={option.value} id={`${id}-${option.value}`} />
+                <FieldTitle>{option.label}</FieldTitle>
+              </Field>
+            </FieldLabel>
           ))}
-          <label className="preset">
-            <input type="radio" name="amount" checked={preset === "custom"} onChange={() => setPreset("custom")} />
-            <span>Custom</span>
-          </label>
-        </div>
-      </fieldset>
+        </RadioGroup>
+      </FieldSet>
       {preset === "custom" && (
-        <div className="field">
-          <label htmlFor={customId}>Custom amount (USD)</label>
-          <div className="money">
-            <span aria-hidden="true">$</span>
-            <input
-              id={customId}
+        <Field>
+          <FieldLabel htmlFor={`${id}-amount`}>Custom amount (USD)</FieldLabel>
+          <InputGroup>
+            <InputGroupAddon>
+              <InputGroupText>$</InputGroupText>
+            </InputGroupAddon>
+            <InputGroupInput
+              id={`${id}-amount`}
               inputMode="decimal"
               placeholder="25.00"
               value={custom}
               onChange={(event) => setCustom(event.target.value)}
             />
-          </div>
-        </div>
+          </InputGroup>
+        </Field>
       )}
-      <button type="submit" className="primary" disabled={pending || account === null}>
+      <Button type="submit" size="lg" className="w-full" disabled={pending || account === null}>
         {pending ? "Creating quote…" : "Pay with crypto"}
-      </button>
-      <p className="muted small">
+      </Button>
+      <p className="text-xs text-muted-foreground">
         A quote locks the price for 15 minutes for an exact amount. Pay from a browser wallet, by QR
         code, or by sending the exact amount manually; another amount, or a late payment, is credited
         at the market rate instead.
       </p>
       {error !== null && (
-        <p className="alert" role="alert">
-          {error}
-        </p>
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden="true" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
     </form>
   );
@@ -406,70 +431,83 @@ function Payments({
 }) {
   const symbol = account?.token.symbol ?? "PHA";
   return (
-    <section className="card" aria-labelledby="history-title">
-      <h2 id="history-title">Payments</h2>
-      {account === null || account.payments.length === 0 ? (
-        <p className="muted">No top-ups yet.</p>
-      ) : (
-        <div className="table-scroll">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Date</th>
-                <th scope="col">Method</th>
-                <th scope="col">{symbol}</th>
-                <th scope="col">Transaction</th>
-                <th scope="col">Status</th>
-                <th scope="col">Credited</th>
-                <th scope="col">Refunded</th>
-                <th scope="col">Nets to</th>
-                <th scope="col">
-                  <span className="visually-hidden">Timeline</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
+    <Card role="region" aria-labelledby="history-title">
+      <CardHeader>
+        <CardTitle>
+          <h2 id="history-title">Payments</h2>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {account === null || account.payments.length === 0 ? (
+          <p className="text-muted-foreground">No top-ups yet.</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead scope="col">Date</TableHead>
+                <TableHead scope="col">Method</TableHead>
+                <TableHead scope="col">{symbol}</TableHead>
+                <TableHead scope="col">Transaction</TableHead>
+                <TableHead scope="col">Status</TableHead>
+                <TableHead scope="col">Credited</TableHead>
+                <TableHead scope="col">Refunded</TableHead>
+                <TableHead scope="col">Nets to</TableHead>
+                <TableHead scope="col">
+                  <span className="sr-only">Timeline</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {account.payments.map((row) => {
                 const selection: Selection = row.id.startsWith("dep_")
                   ? { kind: "deposit", id: row.id }
                   : { kind: "quote", id: row.id };
+                const isSelected = selected?.id === row.id || selected?.id === row.quote;
                 return (
-                  <tr
+                  <TableRow
                     key={row.id}
                     data-testid="payment"
                     data-kind={row.kind}
-                    aria-selected={selected?.id === row.id || selected?.id === row.quote}
+                    data-state={isSelected ? "selected" : undefined}
+                    aria-selected={isSelected}
                   >
-                    <td>{time(row.created)}</td>
-                    <td>{row.kind === "quote" ? "Quote" : "Deposit address"}</td>
-                    <td>{tokens(row.amount_atomic, symbol)}</td>
-                    <td>{row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}</td>
-                    <td>
-                      <span className={`badge ${row.status}`}>{statusLabel(row.status)}</span>
-                      {row.final && <span className="badge"> final</span>}
-                      {row.swept && <span className="badge"> swept</span>}
-                    </td>
-                    <td>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</td>
-                    <td>{row.amount_refunded_atomic === "0" ? "—" : tokens(row.amount_refunded_atomic, symbol)}</td>
-                    <td>{row.net === null ? "—" : dollars(row.net)}</td>
-                    <td>
-                      <button
+                    <TableCell>{time(row.created)}</TableCell>
+                    <TableCell>{row.kind === "quote" ? "Quote" : "Deposit address"}</TableCell>
+                    <TableCell>{tokens(row.amount_atomic, symbol)}</TableCell>
+                    <TableCell>
+                      {row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <StatusBadge status={row.status}>{statusLabel(row.status)}</StatusBadge>
+                        {row.final && <Badge variant="outline">final</Badge>}
+                        {row.swept && <StatusBadge status="swept">swept</StatusBadge>}
+                      </div>
+                    </TableCell>
+                    <TableCell>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</TableCell>
+                    <TableCell>
+                      {row.amount_refunded_atomic === "0" ? "—" : tokens(row.amount_refunded_atomic, symbol)}
+                    </TableCell>
+                    <TableCell>{row.net === null ? "—" : dollars(row.net)}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
                         type="button"
-                        className="link"
+                        variant="link"
+                        className="h-auto p-0"
                         onClick={() => onSelect(selection)}
                         aria-label={`Timeline of ${row.id}`}
                       >
                         Timeline
-                      </button>
-                    </td>
-                  </tr>
+                      </Button>
+                    </TableCell>
+                  </TableRow>
                 );
               })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -477,86 +515,75 @@ function TrustStrip({ trust, account }: { trust: Trust | null; account: Account 
   const attestation = trust?.attestation;
   const evidence = trust?.tls_evidence;
   return (
-    <section className="trust" aria-labelledby="trust-title">
-      <h2 id="trust-title">Why you can trust Phala Pay</h2>
-      <div className="trust-grid">
-        <div>
-          <h3>Attestation</h3>
+    <Card role="region" aria-labelledby="trust-title">
+      <CardHeader>
+        <CardTitle>
+          <h2 id="trust-title">Why you can trust Phala Pay</h2>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-6 text-xs md:grid-cols-3">
+        <div className="flex flex-col gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <ShieldCheck className="size-4 text-muted-foreground" aria-hidden="true" />
+            Attestation
+          </h3>
           {attestation === undefined ? (
-            <p className="muted small">Loading…</p>
+            <p className="text-muted-foreground">Loading…</p>
           ) : attestation.binding_verified ? (
-            <p className="small">
-              <span className="success">Verified</span> for a fresh nonce: the TDX quote's report
-              data binds this account's webhook key{" "}
+            <p>
+              <span className="font-medium text-success">Verified</span> for a fresh nonce: the TDX quote's
+              report data binds this account's webhook key{" "}
               <code title={attestation.webhook_public_key}>{short(attestation.webhook_public_key ?? "")}</code> that
               signs every webhook ({attestation.quote_bytes ?? 0}-byte quote).
             </p>
           ) : (
-            <p className="small danger">The attestation did not bind its keys.</p>
+            <p className="text-destructive">The attestation did not bind its keys.</p>
           )}
         </div>
-        <div>
-          <h3>Application</h3>
+        <div className="flex flex-col gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <Cpu className="size-4 text-muted-foreground" aria-hidden="true" />
+            Application
+          </h3>
           {evidence == null ? (
-            <p className="muted small">TLS evidence unavailable.</p>
+            <p className="text-muted-foreground">TLS evidence unavailable.</p>
           ) : (
-            <dl className="details">
-              <div>
-                <dt>App id</dt>
-                <dd className="mono">{evidence.app_id}</dd>
-              </div>
+            <Details>
+              <Detail label="App id" className="font-mono">
+                {evidence.app_id}
+              </Detail>
               {evidence.compose_hash !== undefined && (
-                <div>
-                  <dt>Compose hash</dt>
-                  <dd className="mono" title={evidence.compose_hash}>
-                    {short(evidence.compose_hash)}
-                  </dd>
-                </div>
+                <Detail label="Compose hash" className="font-mono" title={evidence.compose_hash}>
+                  {short(evidence.compose_hash)}
+                </Detail>
               )}
-            </dl>
+            </Details>
           )}
-          <p className="muted small">From the TLS certificate evidence quote (at issuance).</p>
+          <p className="text-muted-foreground">From the TLS certificate evidence quote (at issuance).</p>
         </div>
-        <div>
-          <h3>Non-custodial</h3>
-          <p className="small">
+        <div className="flex flex-col gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <Wallet className="size-4 text-muted-foreground" aria-hidden="true" />
+            Non-custodial
+          </h3>
+          <p>
             Every address pays only the merchant's treasury, fixed in the address. Phala Pay holds no
             funds and sends no transactions: the merchant sweeps and refunds itself.
           </p>
-          <p className="small">
-            <a href={trust?.verify_docs} target="_blank" rel="noreferrer">
+          <p>
+            <a className={LINK} href={trust?.verify_docs} target="_blank" rel="noreferrer">
               Attestation guide
             </a>{" "}
             ·{" "}
-            <a href={trust?.dstack_verifier} target="_blank" rel="noreferrer">
+            <a className={LINK} href={trust?.dstack_verifier} target="_blank" rel="noreferrer">
               dstack verifier
             </a>
           </p>
-          <p className="muted small">
+          <p className="text-muted-foreground">
             Network: {account?.network.name ?? "Sepolia"} {account?.network.testnet === false ? "" : "testnet"}
           </p>
         </div>
-      </div>
-    </section>
+      </CardContent>
+    </Card>
   );
-}
-
-function useTheme(): [Theme, (theme: Theme) => void] {
-  const [theme, setTheme] = useState<Theme>(() => {
-    const stored = localStorage.getItem("demo-theme");
-    if (stored === "light" || stored === "dark") {
-      return stored;
-    }
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  });
-  useEffect(() => {
-    document.documentElement.dataset["theme"] = theme;
-  }, [theme]);
-  return [
-    theme,
-    (next) => {
-      localStorage.setItem("demo-theme", next);
-      setTheme(next);
-    },
-  ];
 }

@@ -3,7 +3,8 @@ import reactHooks from "eslint-plugin-react-hooks";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", "test-results", "playwright-report"] },
+  // src/components/ui is shadcn/ui's generated code, kept as its CLI writes it (still type-checked).
+  { ignores: ["dist", "node_modules", "test-results", "playwright-report", "src/components/ui"] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   reactHooks.configs.flat.recommended,

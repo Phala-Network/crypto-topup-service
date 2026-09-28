@@ -263,10 +263,10 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 
   // The developer view shows the requests, never the API key or a client secret.
   await scenes.getByText(/^Developer view/).click();
-  const dev = scenes.locator("details.dev");
+  const dev = scenes.locator("details").filter({ hasText: /^Developer view/ });
   await expect(dev).toContainText("GET /v1/deposits");
   await expect(dev).toContainText("GET /v1/refunds");
-  await dev.locator("details.exchange").first().click();
+  await dev.locator("details").first().click();
   await expect(dev).toContainText("Bearer ppay_rk_test_…");
   await expect(dev).not.toContainText("AAAAAAAA");
 
