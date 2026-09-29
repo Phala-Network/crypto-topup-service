@@ -89,7 +89,7 @@ function SweepSection({ group }: { group: SweepGroup }) {
           ) : (
             <div className="flex flex-col gap-3">
               <Disclosure summary={`The flush the SDK built (${group.flush.length} call${group.flush.length === 1 ? "" : "s"})`}>
-                <pre className="max-h-60 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
+                <pre className="max-h-60 overflow-auto rounded-lg bg-card p-3 dark:bg-muted font-mono text-xs leading-relaxed">
                   {JSON.stringify(group.flush, null, 2)}
                 </pre>
               </Disclosure>
