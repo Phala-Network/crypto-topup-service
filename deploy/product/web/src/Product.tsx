@@ -1,7 +1,7 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
-import { Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
+import { Check, CircleAlert, Cloud, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -113,11 +113,23 @@ export function Product({
           {(network?.testnet ?? true) && <TestnetBadge network={network?.name ?? "a"} />}
         </div>
         <div className="flex flex-col gap-6 p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex flex-col gap-1">
-              <h2 id="product-title" className="sr-only">
-                Acme Cloud · Billing
+          <div className="flex flex-col gap-5">
+            {/* The app's own header: its name and page, and the signed-in workspace. */}
+            <div className="flex items-center justify-between gap-4">
+              <h2 id="product-title" className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                <span
+                  className="flex size-5 shrink-0 items-center justify-center rounded-md bg-foreground text-background"
+                  aria-hidden="true"
+                >
+                  <Cloud className="size-3" />
+                </span>
+                <span className="truncate">
+                  Acme Cloud<span className="font-normal text-muted-foreground"> · Billing</span>
+                </span>
               </h2>
+              <Workspace account={account} />
+            </div>
+            <div className="flex flex-col gap-1">
               <h3 id="balance-title" className="text-sm text-muted-foreground">
                 Account balance
               </h3>
@@ -130,7 +142,6 @@ export function Product({
                 {account === null ? <Skeleton className="h-9 w-32" /> : dollars(account.balance)}
               </div>
             </div>
-            <Workspace account={account} />
           </div>
           {accountError !== null && (
             <Alert variant="destructive">
@@ -656,7 +667,7 @@ function TestTokens({ network, className }: { network: Network; className?: stri
     <div
       role="note"
       aria-label="Test tokens"
-      className={cn("rounded-xl border bg-muted/30 text-sm", className)}
+      className={cn("rounded-xl border border-dashed text-sm", className)}
     >
       <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
         <span className="font-medium">Need test tokens?</span>

@@ -1,5 +1,5 @@
 import { Cpu, ReceiptText, ShieldCheck, Terminal, Wallet } from "lucide-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,7 +30,9 @@ import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
 // Every table of the panel: one cell padding, so their columns share a left edge.
 const TABLE = "text-xs [&_td]:px-3 [&_th]:h-9 [&_th]:px-3 [&_th]:text-muted-foreground";
 // The shown payment's row: highlighted, with an indicator on its left edge.
-const SELECTED_ROW = "data-[state=selected]:bg-muted data-[state=selected]:shadow-[inset_2px_0_0_var(--primary)]";
+// On the light console's tinted surface, the page's card; on the dark one, muted.
+const SELECTED_ROW =
+  "data-[state=selected]:bg-card dark:data-[state=selected]:bg-muted data-[state=selected]:shadow-[inset_2px_0_0_var(--primary)]";
 // A payment's row where the console is narrow (below @md): two lines, the payment and its credit,
 // then its status and its action; its cells placed in that grid.
 const STACKED_ROW =
@@ -70,7 +72,7 @@ export function Backend({
       <AreaLabel step={2} title="Your backend's view" text="What your server receives" />
       <aside
         aria-label="Your backend"
-        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-muted/70 lg:min-h-0 lg:flex-1 dark:bg-background"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-foreground/4 lg:min-h-0 lg:flex-1 dark:bg-background"
       >
         {/* A terminal's title bar, as tall as the product's browser bar: dark in either theme (the
             dark theme's tokens, in the light theme too). */}
@@ -104,9 +106,9 @@ export function Backend({
             <TabsList
               variant="line"
               aria-label="Backend"
-              // Where the tabs overflow a narrow console, their right edge fades, so the cut-off
-              // tab reads as more to scroll to.
-              className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-5 py-0 @max-md/console:pr-8 @max-md/console:mask-r-from-[calc(100%-2rem)] sm:gap-5"
+              // Where the tabs overflow a narrow console, the next one peeks in, faded but still
+              // legible at the row's right edge, so the row reads as scrollable.
+              className="h-11! w-full justify-start gap-2.5 overflow-x-auto rounded-none border-b px-3 py-0 @max-md/console:mask-r-from-[calc(100%-2rem)] @max-md/console:mask-r-to-[calc(100%+1rem)] @md/console:gap-5 @md/console:px-5"
             >
               <Tab value="credits" count={account?.payments.length}>
                 Credits
@@ -180,7 +182,7 @@ function Tab({ value, count, children }: { value: string; count?: number | undef
     <TabsTrigger value={value} className="h-full flex-none px-0 text-sm after:bottom-[-1px]!">
       {children}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-muted px-1.5 font-mono text-xs text-muted-foreground tabular-nums">
+        <span className="rounded-full bg-card px-1.5 font-mono text-xs text-muted-foreground tabular-nums dark:bg-muted">
           {count}
         </span>
       )}
@@ -468,7 +470,7 @@ function AddressView({
           );
         })}
         <Detail label="Metadata" className="font-mono">
-          {JSON.stringify(view.metadata)}
+          <MetadataJson metadata={view.metadata} />
         </Detail>
       </Details>
       {view.payments.length === 0 ? (
@@ -513,6 +515,30 @@ function AddressView({
         </ul>
       )}
     </Subsection>
+  );
+}
+
+/**
+ * Metadata as JSON, wrapping only between its tokens: after a key's colon and after a comma; a long
+ * value breaks anywhere, and nothing else does.
+ */
+function MetadataJson({ metadata }: { metadata: Record<string, string> }) {
+  return (
+    <span className="wrap-normal">
+      {"{"}
+      {Object.entries(metadata).map(([key, value], index) => (
+        <Fragment key={key}>
+          {index > 0 && (
+            <>
+              ,<wbr />
+            </>
+          )}
+          {JSON.stringify(key)}:<wbr />
+          <span className="wrap-anywhere">{JSON.stringify(value)}</span>
+        </Fragment>
+      ))}
+      {"}"}
+    </span>
   );
 }
 

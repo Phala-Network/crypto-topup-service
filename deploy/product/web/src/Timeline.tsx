@@ -203,7 +203,7 @@ function StreamStep({
         <CollapsibleTrigger
           className={cn(
             STEP_GRID,
-            "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+            "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-card dark:hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
           )}
         >
           {/* A step yet to happen leaves its time blank. */}
@@ -397,7 +397,7 @@ export function Requests({ exchanges, title, id }: { exchanges: ApiExchange[]; t
           {exchanges.map((exchange, index) => (
             <li key={`${exchange.method}-${exchange.url}-${index}`}>
               <details className="group/exchange">
-                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-mono outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-mono outline-none hover:bg-card dark:hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
                   <ChevronRight
                     className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/exchange:rotate-90 motion-reduce:transition-none"
                     aria-hidden="true"
@@ -408,7 +408,7 @@ export function Requests({ exchanges, title, id }: { exchanges: ApiExchange[]; t
                   </code>
                   <span className={exchange.status < 400 ? "text-success" : "text-destructive"}>{exchange.status}</span>
                 </summary>
-                <pre className="max-h-80 overflow-auto border-t bg-muted p-3 font-mono text-xs leading-relaxed">
+                <pre className="max-h-80 overflow-auto border-t bg-card p-3 dark:bg-muted font-mono text-xs leading-relaxed">
                   {JSON.stringify({ request: exchange.request, response: exchange.response }, null, 2)}
                 </pre>
               </details>
