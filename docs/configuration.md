@@ -1,9 +1,13 @@
 # Service configuration
 
 This page is the reference for the `topup` binary: its commands, the flags of `topup run`, and the
-environment it reads. In a deployment the attested compose sets all of these
-([deploy/README.md, "Attested settings"](../deploy/README.md#attested-settings)), so an operator
-changes them through the fork and a Deploy `upgrade`, not by hand. Route files are described in
+environment it reads. In a deployment the attested compose sets all of them
+([deploy/README.md, "Attested settings"](../deploy/README.md#attested-settings)) except the
+two secrets `topup` reads, `SENTRY_DSN` and each `TOPUP_RPC_<ID>_KEY`, which the owner seals into
+the CVM's encrypted environment
+([deploy/README.md, "Sealing the secrets"](../deploy/README.md#sealing-the-secrets)). An operator
+changes a setting through the fork and a Deploy `upgrade`, and a secret by sealing it again. Route
+files are described in
 [architecture §14](architecture.md#14-configuration-and-deployment).
 
 ## Commands
@@ -78,13 +82,13 @@ trusts `Host` or `X-Forwarded-*` headers.
 | `MIGRATE_DATABASE_URL` | `migrate`, `restore-check` | The database owner (above). |
 | `TOPUP_PUBLIC_ORIGIN` | `run` | The public origin (above). Required. |
 | `TOPUP_ADMIN_KID`, `TOPUP_ADMIN_PUBLIC_KEY` | `run` | The key id and base64 ed25519 public key of the operator's admin key. Required. |
-| `TOPUP_RPC_<ID>_URL`, `TOPUP_RPC_<ID>_KEY` | `run`, `reconcile`, `restore-check` | Each RPC provider's URL, and the key that fills its `{key}` placeholder (at least 8 characters of `A-Z a-z 0-9 - . _ ~`). A key without a placeholder, or a placeholder without a key, is refused. |
+| `TOPUP_RPC_<ID>_URL`, `TOPUP_RPC_<ID>_KEY` | `run`, `reconcile`, `restore-check` | Each RPC provider's URL (attested), and the key (sealed) that fills its `{key}` placeholder (at least 8 characters of `A-Z a-z 0-9 - . _ ~`). A key without a placeholder, or a placeholder without a key, is refused. |
 | `TOPUP_WEBHOOK_PROXY` | `run` | The egress proxy of webhook deliveries, such as `http://smokescreen:4750`. Required unless `TOPUP_PUBLIC_ORIGIN` is `http` (local stacks) ([webhook egress](../deploy/README.md#webhook-egress)). |
 | `TOPUP_SERVICE_ENABLED` | `run`, `heartbeat` | `on` (default), `read-only` (the restore-check variant: `run` serves reads only, and Sentry reports as `<environment>-restore`), or `off`. `heartbeat` runs only while `on`. |
 | `TOPUP_RESTORE_FROM_BACKUP` | `restore-check` | `on` (default) or `off`; `off` makes `restore-check` do nothing. |
 | `TOPUP_RESTORE_REPORT_FILE` | `restore-check` | Where to write the restore report, if set. |
 | `TOPUP_BACKUP_TIMESTAMP_FILE` | `run` | The WAL-G success marker the `topup-backup` Crons monitor reads; defaults to `/run/topup-observability/last-backup-unix-seconds`. |
-| `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `TOPUP_IMAGE` | every command | Sentry reporting, off while `SENTRY_DSN` is unset or empty; the release is the `TOPUP_IMAGE` digest ([deploy/README.md, "Sentry"](../deploy/README.md#sentry)). |
+| `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `TOPUP_IMAGE` | every command | Sentry reporting, off while `SENTRY_DSN` (sealed) is unset or empty; the release is the `TOPUP_IMAGE` digest ([deploy/README.md, "Sentry"](../deploy/README.md#sentry)). |
 
 The service also needs the dstack guest API socket (`/var/run/dstack.sock`) for its keys and
 attestation; local stacks use the dstack simulator.

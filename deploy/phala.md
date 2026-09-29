@@ -53,16 +53,13 @@ Staging's providers, in the `staging` Environment's `TOPUP_RPC_<ID>_URL` variabl
 | Base Sepolia | A | Tenderly (`https://base-sepolia.gateway.tenderly.co`) |
 | Base Sepolia | B | PublicNode (`https://base-sepolia-rpc.publicnode.com`) |
 
-Checked on 2026-09-29, only Tenderly among keyless public endpoints (and Grove/Pocket on Sepolia)
-serves slot A's `eth_getLogs` over 2 000 blocks without a contract address. The others checked
-refuse it:
+Checked on 2026-09-29, Tenderly is the only keyless public endpoint that serves slot A's
+`eth_getLogs` over 2 000 blocks without a contract address on both chains (Grove/Pocket serves it
+on Sepolia but was not chosen, and returned regressing `finalized` heads on Base Sepolia), while
+`sepolia.base.org` caps the range at 1 000 blocks, PublicNode requires an address, thirdweb caps
+the response size, and Nodies and 1RPC cap the range at 50 blocks.
 
-- `sepolia.base.org` caps the range at 1 000 blocks;
-- PublicNode requires an address;
-- thirdweb caps the response size;
-- Nodies and 1RPC cap the range at 50 blocks.
-
-Mainnet needs keyed, paid providers from two different companies.
+Mainnet needs paid providers from two different companies.
 
 ## Staging reset (HUMAN-ONLY)
 

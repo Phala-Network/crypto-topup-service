@@ -346,7 +346,7 @@ it moved its forwarder's balance to your treasury (§1.7). Nothing is reported a
 the route's confirmation (two blocks on Ethereum)
 ([architecture §7](architecture.md#7-states-and-pump)).
 Phala's staging deposit driver asserts these outcomes on Sepolia
-([deploy/README.md](../deploy/phala.md#abnormal-paths)); the sandbox scenarios assert them
+([deploy/phala.md, "Abnormal paths"](../deploy/phala.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
 | Payment | Outcome visible to you |

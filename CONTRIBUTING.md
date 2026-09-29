@@ -63,23 +63,31 @@ and login role, so any host and port will do:
 
 ```sh
 docker run -d --name phala-pay-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18.6-trixie
+export SQLX_OFFLINE=true   # compile against the committed .sqlx metadata, as CI does
 export MIGRATE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 export DATABASE_URL=postgres://topup_ci:topup_ci@localhost:5432/postgres
 cargo test --workspace --locked --all-features
 ```
 
+Keep `SQLX_OFFLINE=true` set: with `DATABASE_URL` set and no offline flag, sqlx checks every query
+against that database at compile time, and the build fails before the `topup_ci` role exists.
+
 With `CI=true`, as in GitHub Actions, a missing database or `anvil` fails the tests instead of
 skipping them.
 
 SQL queries are checked at compile time against the committed [.sqlx](.sqlx) metadata
-(`SQLX_OFFLINE=true`). After changing a query, migrate a database and regenerate the metadata with
-[sqlx-cli](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli) 0.9.0, as CI's check does
-without `--check`:
+(`SQLX_OFFLINE=true`). To change a query, regenerate the metadata with
+[sqlx-cli](https://github.com/launchbadge/sqlx/tree/main/sqlx-cli) 0.9.0 against a migrated
+database, as CI's check does without `--check`. `topup migrate` needs a `topup` that compiles, so
+migrate the database before you edit the queries, while the committed metadata still matches them,
+with `SQLX_OFFLINE=true` still exported:
 
 ```sh
 cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres --locked
+# With any new migration added, but before editing a query (the committed metadata still matches):
 cargo run --locked -p topup -- migrate
 psql "$MIGRATE_DATABASE_URL" -c "CREATE ROLE topup_ci LOGIN PASSWORD 'topup_ci' IN ROLE topup_app"
+# Edit the queries, then:
 SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets --all-features
 ```
 
@@ -174,9 +182,11 @@ exception at the crate root so production code remains covered:
 
 ### Dependencies
 
-The `topup-core` dependency policy test reads `cargo metadata` and rejects runtime dependencies in
-`core`. Future pure dependencies must be reviewed and the policy test narrowed to an explicit I/O
-denylist before they are added; `tokio` and I/O frameworks never belong in `core`.
+The `topup-core` dependency policy test
+([crates/core/tests/dependency_policy.rs](crates/core/tests/dependency_policy.rs)) reads
+`cargo metadata` and allows only an explicit list of reviewed, pure, I/O-free runtime dependencies.
+A new runtime dependency of `core` is reviewed as pure and I/O-free, then added to that list in the
+same pull request; `tokio` and I/O frameworks never belong in `core`.
 
 Route YAML is parsed at the `topup` I/O boundary with exactly pinned `serde-saphyr`, selected for
 its maintained, panic-resistant, unsafe-free implementation. The archived `serde_yaml`, deprecated
