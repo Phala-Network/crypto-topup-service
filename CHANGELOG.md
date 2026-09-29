@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- markdownlint-disable-file MD024 -->
+
 Integrator-visible changes to the HTTP API and webhook payloads. Additive fields are not breaking;
 webhook receivers must ignore unknown fields. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the SDKs keep their own changelogs in
@@ -37,7 +39,7 @@ webhook receivers must ignore unknown fields. The format follows
   (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update
   the forwarder you pin; accounts, keys, treasuries, endpoints, and webhook keys are created anew.
 - Staging adds a second test-mode route, `phala-cloud-sepolia-usdc-usd`: Circle's testnet USDC on
-  Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; https://faucet.circle.com),
+  Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; <https://faucet.circle.com>),
   valued at one dollar (pricing mode `stablecoin`) with no quote spread, so a $10 quote asks 10 USDC.
   `GET /v1/config` lists it beside PHA, and a deposit address takes both tokens.
 - Staging adds Base Sepolia (84532), with the same two test-mode routes:

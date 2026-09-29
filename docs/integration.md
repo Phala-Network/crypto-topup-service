@@ -33,23 +33,23 @@ Phala Pay has two SDKs, both in this repository:
 Samples below use them; every step is plain HTTP and ed25519, so any backend language can do the
 same.
 
+**Contents:** [Quickstart](#quickstart) · [1. Quotes](#1-quotes) (and deposit addresses,
+treasuries, sweeps) · [2. Webhooks and fulfillment](#2-webhooks-and-fulfillment) ·
+[3. Refunds](#3-refunds) · [4. Testing and go-live](#4-testing-and-go-live) ·
+[5. Reference](#5-reference)
+
 ## Quickstart
 
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install.** This API's SDKs are not released yet: `@phala/pay` 0.1.2 on npm predates it (its next
-release follows `sdk/js/CHANGELOG.md`, Unreleased), and `phala-pay` installs from this repository
-until its first PyPI release ([plan](plan.md)):
+**Install.** `@phala/pay` from npm and `phala-pay` from PyPI, 0.2.0 or later (the multi-tenant
+API):
 
 ```sh
 npm install @phala/pay viem
-uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
+uv add phala-pay   # or: pip install phala-pay
 ```
-
-Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to uv, for
-example) and fail to find the package; install it with `uv` or `pip` directly, and switch to
-`phala-pay` from PyPI once it is released.
 
 **Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
 account and sends your contact its first secret key,
@@ -1062,7 +1062,7 @@ set your own on each chain first (§1.6).
 For example, Phala's own instance, which serves only Phala Cloud's account: production
 `https://pay-api.phala.com` (live: Ethereum Mainnet; test: Sepolia; not deployed yet) and staging
 `https://pay-api-staging.phala.com` (test: Sepolia and Base Sepolia; internal pre-production,
-reset for the multi-tenant schema, [deploy/README.md](../deploy/README.md#staging-reset-human-only)).
+[deploy/README.md, "Phala's instance"](../deploy/README.md#phalas-instance)).
 
 ### 4.2 Testing your receiver
 

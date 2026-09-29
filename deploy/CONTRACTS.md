@@ -2,11 +2,10 @@
 
 The factory is permissionless and deterministic, so every Phala Pay instance on a chain uses the
 same one: an operator reuses it wherever it is deployed and runs this runbook only on a chain where
-it is missing ([self-hosting guide](../docs/self-hosting.md#3-routes-and-contracts)). This runbook
-implements work package A2. No signing key is stored in CI: every funding or
-broadcast command below is **HUMAN-ONLY**, run by a deployer with their own key, and the
-Verify contracts workflow re-checks the deployment daily. Mainnet is never deployed from
-automation.
+it is missing ([self-hosting guide](../docs/self-hosting.md#3-routes-and-contracts)). No signing
+key is stored in CI: every funding or broadcast command below is **HUMAN-ONLY**, run by a deployer
+with their own key, and the Verify contracts workflow re-checks the deployment daily. Mainnet is
+never deployed from automation.
 
 The Arachnid deterministic deployment proxy is fixed at
 `0x4e59b44847b379578588920cA78FbF26c0B4956C`. Its calldata is the plain 32-byte salt followed by

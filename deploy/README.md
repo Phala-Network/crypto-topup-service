@@ -1,4 +1,4 @@
-# dstack deployment
+# Deployment reference
 
 How an operator deploys and runs its own Phala Pay instance. Phala Pay is self-hosted: each
 operator deploys from its own fork, to its own Phala Cloud workspace, on its own domain; the
@@ -19,7 +19,7 @@ a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md)
 | Staging reference-product CVM (Phala's demo; optional) | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
 | Object storage (S3-compatible; Phala's instance: Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | The operator's Sentry project (optional; Phala's: `phala-network/crypto-topup-service`) | errors, alerts, Crons and Uptime monitors | the service itself |
-| EVM chains of the routes (the committed routes: Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
+| EVM chains of the routes (the committed routes: Sepolia and Base Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
 | GitHub Actions | [Release images](../.github/workflows/release-images.yml), [Deploy](../.github/workflows/deploy.yml), [Verify contracts](../.github/workflows/verify-contracts.yml) (daily, read-only), [Restore drill](../.github/workflows/restore-drill.yml) (weekly, local stack) | — |
 
 Production CVMs have no SSH, no logs, and no database access. Everything an operator sees comes
@@ -460,7 +460,7 @@ at `TOPUP_PUBLIC_ORIGIN` with a valid certificate, its [certificate
 evidence](#custom-domain), and that PostgreSQL and topup's port 8080 are unreachable. The admin
 API verifies every signed `@target-uri` against `TOPUP_PUBLIC_ORIGIN`, so a correctly signed
 admin request answered `401` usually means the URL differs from it. **Egress** (HUMAN-ONLY, cloud network
-authority; dstack has no hostname allow-list): restrict outbound traffic to the two RPC hosts,
+authority; dstack has no hostname allow-list): restrict outbound traffic to the RPC providers' hosts,
 the price sources, the object storage host, the Sentry ingest host, DNS, the Phala/dstack
 platform endpoints, and public addresses on ports 443 and 80 for webhooks (merchants register
 their own endpoints, so their hosts cannot be listed; [webhook egress](#webhook-egress) filters
@@ -513,8 +513,9 @@ implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` at the same addresse
 names only the factory; `topup run` refuses to start unless the chain holds exactly that build's
 code there, so the factory is deployed on a chain before any compose with a route on it.
 
-An operator reuses the factory wherever it is deployed (it is on Sepolia; `verify-deployment.sh`
-below checks a chain read-only) and deploys it only on a chain where it is missing.
+An operator reuses the factory wherever it is deployed (it is on Sepolia and Base Sepolia;
+`verify-deployment.sh` below checks a chain read-only) and deploys it only on a chain where it is
+missing.
 **HUMAN-ONLY, deployer with a funded throwaway EOA**, once per chain ([CONTRACTS.md](CONTRACTS.md)
 has the checks each script makes; `$SEPOLIA_RPC_A` and `$SEPOLIA_RPC_B` are two providers):
 
@@ -725,14 +726,16 @@ never a reset.
 
 ### Staging reset (HUMAN-ONLY)
 
-The multi-tenant schema (design §14) replaced the migration history and migrates no data
-(`crates/topup/migrations/README.md`), and staging's route now uses the new factory, so the staging
-service is replaced, not upgraded: a new CVM on an empty backup prefix, with every account created
-again. Nothing on staging is live, so no funds or merchants are affected. Every step below is
-HUMAN-ONLY except the workflow runs, which the staging owner dispatches; agents and CI run none of
-them. In order:
+Phala's staging was reset this way for the multi-tenant launch, and the procedure is kept for a
+future reset (pull request #208 pinned the reference product's new account). The multi-tenant
+schema (design §14) replaced the migration history and migrates no data
+(`crates/topup/migrations/README.md`), and staging's route now uses the new factory, so the
+staging service is replaced, not upgraded: a new CVM on an empty backup prefix, with every account
+created again. Nothing on staging is live, so no funds or merchants are affected. Every step below
+is HUMAN-ONLY except the workflow runs, which the staging owner dispatches; agents and CI run none
+of them. In order:
 
-1. **Merge and build.** This change is on `main`; run Release images and note its run id.
+1. **Build.** Run Release images on `main` and note its run id.
 2. **Factory on Sepolia: done.** The factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its
    implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified
    ([Contracts](#contracts)); confirm Verify contracts is green.

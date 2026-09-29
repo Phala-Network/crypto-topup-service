@@ -4,7 +4,7 @@ Phala Pay is open-source, self-hosted software. An operator runs its own instanc
 dstack confidential VM (CVM) on Phala Cloud, for its own merchants, each an account (`acct_…`)
 that the operator creates. Phala runs an instance only for Phala Cloud and offers no hosted
 service to third parties; its staging instance and the demo at [pay.phala.com](https://pay.phala.com/)
-are Phala's own, on Sepolia. Nothing in an instance depends on Phala's: you build your own
+are Phala's own, on Sepolia and Base Sepolia. Nothing in an instance depends on Phala's: you build your own
 images from your fork, deploy to your own Phala Cloud workspace, serve your own domain, and hold
 your own admin key. The only shared piece is the forwarder factory, a permissionless contract at
 one address on every chain.
@@ -145,8 +145,9 @@ files are committed and attested: a new route is a pull request to your fork and
   (`NETWORK` from `networks.json`, the URLs with their keys).
   Only where it is missing, deploy it (**HUMAN-ONLY**, a funded throwaway EOA) as in
   [deploy/CONTRACTS.md](../deploy/CONTRACTS.md); if anyone deployed it first, the broadcast sends
-  nothing. It is deployed on Sepolia; Phala deploys it on mainnet after the contracts' independent
-  security review ([plan](plan.md)), which an operator going live before then should weigh.
+  nothing. It is deployed on Sepolia and Base Sepolia; Phala deploys it on mainnet after the
+  contracts' independent security review ([plan](plan.md)), which an operator going live before
+  then should weigh.
 
 ## 4. Release and provision
 

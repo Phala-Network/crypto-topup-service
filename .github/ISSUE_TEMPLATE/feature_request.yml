@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a new capability or a change to existing behavior.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Behavior is specified in [docs/architecture.md](https://github.com/Phala-Network/phala-pay/blob/main/docs/architecture.md).
+        Some things are out of scope by design: custody, withdrawals, trading, fiat, fees, and a
+        merchant dashboard (architecture §1 and §18).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Service (topup)
+        - Contracts
+        - "@phala/pay (JavaScript SDK)"
+        - "phala-pay (Python SDK)"
+        - Deployment, backups, or runbooks
+        - Documentation
+        - Website or demo
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do, and why it is hard or impossible today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The behavior you want. Name the established practice it follows, if any (for example, a Stripe API convention).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

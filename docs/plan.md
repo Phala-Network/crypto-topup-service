@@ -1,13 +1,13 @@
 # Plan to production
 
-What remains before Phala's instance of Phala Pay takes live payments for Phala Cloud's account on
-Ethereum Mainnet, and who owns each item. Phala Pay is open-source, self-hosted software: Phala's
-instance serves only Phala Cloud, Phala offers no hosted service, and other operators run their own
-([self-hosting](self-hosting.md)). The decisions are the [design](design/multi-tenant.md) (§16 is
-its PR plan); the specification is [architecture.md](architecture.md); merchants read
-[integration.md](integration.md); operators read [self-hosting.md](self-hosting.md),
-[deploy/README.md](../deploy/README.md), and the [runbooks](../deploy/runbooks/README.md).
-Completed work is in git history and the changelogs.
+This page tracks Phala's own instance, not the software: what remains before it takes live
+payments for Phala Cloud's account on Ethereum Mainnet, and who owns each item. Phala Pay is
+open-source, self-hosted software: Phala's instance serves only Phala Cloud, Phala offers no hosted
+service, and other operators run their own ([self-hosting](self-hosting.md)). The decisions are
+the [design](design/multi-tenant.md) (§16 is its PR plan); the specification is
+[architecture.md](architecture.md); merchants read [integration.md](integration.md); operators
+read [self-hosting.md](self-hosting.md), [deploy/README.md](../deploy/README.md), and the
+[runbooks](../deploy/runbooks/README.md). Completed work is in git history and the changelogs.
 
 ## Where things stand
 
@@ -30,15 +30,18 @@ Completed work is in git history and the changelogs.
   the demo (#206).
 - **Contracts**: the permissionless factory is deterministic: `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain
-  ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Deployed and verified on Sepolia; not yet on
-  mainnet. The staging finance Safe has its `CompatibilityFallbackHandler` set and passes
+  ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Deployed and verified on Sepolia and Base
+  Sepolia; not yet on mainnet. The staging finance Safe has its `CompatibilityFallbackHandler` set and passes
   `verify-safe.sh`.
-- **Staging** (`https://pay-api-staging.phala.com`, Sepolia) ran the single-tenant service; it
-  cannot run the multi-tenant schema until it is reset (below). The paths verified there on
-  2026-09-27 (exact payment, underpayment, late payment, unsupported token, refunds, the demo
-  checkout) are pre-reset history and are verified again after the reset.
-- **SDKs**: `@phala/pay` 0.1.2 on npm (provenance, trusted publisher) predates the multi-tenant
-  API; `phala-pay` installs from GitHub. Both have unreleased breaking changes (their changelogs).
+- **Staging** (`https://pay-api-staging.phala.com`) was reset for the multi-tenant schema
+  ([deploy/README.md, "Staging reset"](../deploy/README.md#staging-reset-human-only); the
+  reference product's account, #208). It serves four test-mode routes, test PHA and Circle's
+  testnet USDC on Sepolia and Base Sepolia (#222, #225), and runs the reference product behind
+  the demo on [pay.phala.com](https://pay.phala.com/). The paths verified there on 2026-09-27
+  (exact payment, underpayment, late payment, unsupported token, refunds, the demo checkout)
+  predate the reset.
+- **SDKs**: `@phala/pay` 0.2.0 on npm and `phala-pay` 0.2.0 on PyPI (#226), both for the
+  multi-tenant API, published with trusted publishing.
 
 ## Remaining work
 
@@ -48,11 +51,14 @@ Completed work is in git history and the changelogs.
       ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Owner: deployer.
 - [x] Set the staging finance Safe's fallback handler to the `CompatibilityFallbackHandler`
       (Sepolia transaction `0xc63baf59…0812`). Owner: Safe owners.
-- [ ] Reset staging ([deploy/README.md](../deploy/README.md), "Staging reset"), deploy the PR 11
-      image, re-create the staging accounts, and run the staging paths again. Owner: staging owner.
-- [ ] Base Sepolia (84532) beside Sepolia on staging, as configuration: the factory there, its
-      route, and two RPC providers of its own ([deploy/README.md, "RPC
-      providers"](../deploy/README.md#rpc-providers)). Owner: staging owner.
+- [x] Reset staging ([deploy/README.md, "Staging reset"](../deploy/README.md#staging-reset-human-only))
+      and re-create the staging accounts (#208). Owner: staging owner.
+- [ ] Run the staging paths again on the multi-tenant service
+      ([deploy/README.md, "Abnormal paths"](../deploy/README.md#abnormal-paths)). Owner: staging
+      owner.
+- [x] Base Sepolia (84532) beside Sepolia on staging, as configuration: the factory there, its
+      routes, and two RPC providers of its own ([deploy/README.md, "Staging
+      routes"](../deploy/README.md#staging-routes); #223, #225). Owner: staging owner.
 
 ### Phala Cloud
 
@@ -97,9 +103,8 @@ Completed work is in git history and the changelogs.
 
 ### Releases
 
-- [ ] `phala-pay` on PyPI: add the pending trusted publisher (environment `pypi`), then release
-      it (CONTRIBUTING.md, "Releasing an SDK").
-- [ ] `@phala/pay` with the multi-tenant API on npm.
+- [x] `phala-pay` on PyPI with trusted publishing (environment `pypi`): 0.2.0 (#226).
+- [x] `@phala/pay` with the multi-tenant API on npm: 0.2.0 (#226).
 
 ### Optional
 

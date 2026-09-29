@@ -1,36 +1,79 @@
 # Phala Pay
 
-Open-source, self-hosted software for an API-only, multi-tenant crypto payments service in
-Stripe's shape. Each operator runs its own instance in its own dstack confidential VM, for its own
-merchants: [self-hosting](docs/self-hosting.md) is the path from a fork to a credited deposit.
-Phala runs an instance only for Phala Cloud and offers no hosted service to others.
+Self-hosted, non-custodial crypto payments API for merchants: quotes, deposit addresses, signed
+webhooks, and refunds, running in an attested confidential VM.
 
-The operator onboards each merchant as an account (`acct_…`) through the admin API; the merchant
-does everything else with its API keys and the SDKs (there is no dashboard). Phala Cloud is an
-ordinary account of Phala's instance. The service
-turns deposits of configured ERC-20 tokens into USD-valued credits and tells the merchant what to
-credit with signed `deposit.credited` webhooks, which it fulfills once per deposit. It is
-software, not custody: deposit addresses are CREATE2 forwarder contracts that can only pay the
-merchant's own treasury, the service holds no funds and sends no transactions, and the merchant
-sweeps and refunds from its own wallet or Safe. The service runs inside a dstack confidential VM,
-and each account pins its own webhook signing key from attestation.
+[![CI](https://github.com/Phala-Network/phala-pay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Phala-Network/phala-pay/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/Phala-Network/phala-pay)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@phala/pay?label=%40phala%2Fpay)](https://www.npmjs.com/package/@phala/pay)
+[![PyPI](https://img.shields.io/pypi/v/phala-pay?label=phala-pay)](https://pypi.org/project/phala-pay/)
 
-A **quote** locks a price: the customer receives an exact amount and a single-use address and pays
-within the window. Each customer can also have one persistent, rotatable **deposit address** for
-every supported token on every chain (the same address wherever the treasury is the same),
-credited at spot for any amount, like the stable bank-transfer details of Stripe's customer
-balance.
+## What it is
 
-Routes (a chain and a token each) are route files each operator commits to its fork; further
-merchants are accounts, not configuration. Phala's first route is Ethereum Mainnet PHA, for Phala
-Cloud's account.
+- **An API-only payments service in Stripe's shape.** Merchants create quotes and deposit
+  addresses with API keys, and credit their customers from signed `deposit.credited` webhooks.
+- **Self-hosted.** Each operator runs its own instance in a [dstack](https://github.com/Dstack-TEE/dstack)
+  confidential VM on Phala Cloud, for the merchant accounts it onboards.
+- **Non-custodial.** Payments land in CREATE2 forwarder contracts that can only pay the
+  merchant's own treasury. The service holds no funds and sends no transactions.
 
-**Website and live demo:** [pay.phala.com](https://pay.phala.com/), Phala's page with a working
-demo, a cloud console's billing page on Sepolia with test PHA; the page is served by Cloudflare and
-its demo is run by Phala's staging reference product
-([deploy/README.md](deploy/README.md#staging-reference-product)).
+## What it isn't
 
-## Flow
+- **Not a hosted service.** Phala runs an instance only for Phala Cloud; everyone else runs
+  their own ([self-hosting](docs/self-hosting.md)).
+- **Not a wallet, exchange, or dashboard.** There is no custody, trading, fiat conversion,
+  signup, or merchant UI; merchants use the API and the SDKs.
+- **Not production-ready yet.** The software is pre-1.0 and has not had its independent security
+  review ([status](#status)).
+
+## Quickstart
+
+Pick the path that matches your role:
+
+- **Merchants** integrating with an operator's instance: the
+  [integration quickstart](docs/integration.md#quickstart).
+- **Operators** running their own instance: the [self-hosting guide](docs/self-hosting.md).
+- **Evaluators and contributors**: run the whole stack locally. The sandbox builds the images,
+  starts PostgreSQL, the dstack simulator, and an Anvil chain, and pays and credits a quote end to
+  end through the reference merchant backend.
+
+  ```sh
+  git clone --recurse-submodules https://github.com/Phala-Network/phala-pay.git
+  cd phala-pay
+  deploy/sandbox/run-local.sh happy_path
+  ```
+
+  It needs Docker Compose, [Foundry](https://getfoundry.sh/) v1.8.3, `jq`, [uv](https://docs.astral.sh/uv/),
+  Python 3, `curl`, and OpenSSL 3, and internet access for live prices. It removes everything it
+  starts on exit. See [deploy/sandbox/README.md](deploy/sandbox/README.md) for every scenario.
+
+To see it running, [pay.phala.com](https://pay.phala.com/) has a live demo: a cloud console's
+billing page that takes test PHA and test USDC on Sepolia and Base Sepolia. The site is static, on
+Cloudflare Workers; its demo calls an API-only reference merchant backend at
+`pay-demo-api.phala.com`, an ordinary merchant account of Phala's staging instance
+([staging reference product](deploy/README.md#staging-reference-product)).
+
+## Features
+
+- **Quotes**: a locked price, an exact token amount, and a single-use address to pay within a
+  window. Late, partial, or extra payments are still credited, at spot.
+- **Deposit addresses**: one persistent, rotatable address per customer for every supported token
+  on every chain, credited at spot for any amount.
+- **Fast credit, watched to finality**: a deposit is credited at the route's confirmation (about
+  30 seconds after paying on Ethereum), confirmed by a second RPC provider, and reversed with
+  `deposit.reversed` if its transaction leaves the chain before finality.
+- **Signed webhooks**: Standard Webhooks with ed25519 keys per account and mode, derived in the
+  CVM and pinned by merchants from TDX attestation.
+- **Merchant sweeps and refunds**: merchants sweep forwarders and pay refunds from their own
+  wallet or Safe; the service verifies refunds at finality.
+- **Stripe-style API**: test and live modes, secret and restricted keys, idempotency keys, events,
+  cursor pagination, and Stripe's error object.
+- **Screening and pricing**: direct sanctions screening with the Chainalysis oracle, and Coin
+  Metrics reference-rate prices with a deviation check.
+- **Operable in a CVM**: reproducible images, an attested compose, encrypted WAL-G backups,
+  restore mode, Sentry alerts linked to [runbooks](deploy/runbooks/README.md).
+
+## Architecture at a glance
 
 ```mermaid
 flowchart LR
@@ -44,7 +87,7 @@ flowchart LR
         api["HTTP API<br/>/v1/quotes, deposit_addresses, deposits, refunds"]
         worker["Scanner, pump, finality watch,<br/>outbox, reconciler"]
     end
-    subgraph chain["Ethereum"]
+    subgraph chain["EVM chain"]
         fwd["CREATE2 forwarders<br/>(clone arg: treasury)"]
         treasury[("Merchant treasury")]
     end
@@ -58,91 +101,47 @@ flowchart LR
     fwd -->|"can only pay"| treasury
 ```
 
-```text
-merchant backend creates a quote (or the customer's deposit address) with its API key
-  → service locks the price and computes a CREATE2 forwarder address over the merchant's treasury
-  → the merchant recomputes the address from its own pins before showing it
-  → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
-  → recorded once its block reaches the confirmation (2 on Ethereum, or the account's stricter policy)
-  → a second RPC provider confirms block hash and log; the quote is taken at that instant
-  → sanctions screening and per-deposit bounds
-  → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
-  → watched to finality; a dropped transaction becomes deposit.reversed
-  → the merchant (or anyone) flushes forwarders to its treasury; the service marks deposits swept
-    from the finalized Flushed events
-  → reconciliation of chain and service ledger per forwarder
-```
+[How Phala Pay works](docs/overview.md) walks through the payment lifecycle and who owns what.
 
-There is no operator step in a payment and no failure state: anything that cannot complete
-retries with backoff and raises an alert on age. Deterministic denials are recorded with evidence
-and never credited.
+## Documentation
 
-## Ownership
+| I want to… | Read |
+|---|---|
+| Understand the model | [How Phala Pay works](docs/overview.md) |
+| Integrate as a merchant | [Integration guide](docs/integration.md), [API reference](https://phala-network.github.io/phala-pay/) |
+| Run my own instance | [Self-hosting guide](docs/self-hosting.md), [deployment reference](deploy/README.md), [runbooks](deploy/runbooks/README.md) |
+| Configure the service | [Service configuration](docs/configuration.md) |
+| Read the specification | [Architecture](docs/architecture.md), [design record](docs/design/multi-tenant.md) |
 
-The service owns addresses, chain evidence, finality, screening, pricing, deposit state, credits
-and their webhooks, the swept status it reads from the chain, and reconciliation. The operator
-creates accounts, decides live access, issues first and recovery keys, and handles incidents. The
-merchant owns its keys, treasuries, webhook endpoints, sweeps, and refunds, pays that gas, and owns
-its customers' identity, balances, entitlements, and billing policy.
+The [documentation index](docs/README.md) lists every document.
 
-## Documents
+## SDKs
 
-- [Design](docs/design/multi-tenant.md) — the multi-tenant, API-only design and its decisions
-- [Architecture](docs/architecture.md) — the specification: trust model, schema, state machine, contracts, API, deployment, policies
-- [Integration guide](docs/integration.md) — for merchants: quickstart, quotes, deposit addresses, treasuries, sweeps, webhooks, refunds, keys, reference
-- [API reference](https://phala-network.github.io/phala-pay/) — built from [crates/topup/openapi.json](crates/topup/openapi.json)
-- [First route profile](examples/phala-cloud-pha.yaml)
-- [Self-hosting](docs/self-hosting.md) — for the operator: running your own instance, in order
-- [Deployment](deploy/README.md) and [runbooks](deploy/runbooks/README.md) — for the operator: the reference
-- [Plan to production](docs/plan.md) — Phala's instance: what is done, what remains, and who owns it
+| Package | Install | For |
+|---|---|---|
+| [`@phala/pay`](sdk/js) | `npm install @phala/pay viem` | The browser checkout (`<Checkout>`, `<DepositAddress>`) and server helpers for Node |
+| [`phala-pay`](sdk/python) | `pip install phala-pay` | The Python backend client, webhook verification, and address pinning |
 
-## Database roles
-
-Runtime commands use `DATABASE_URL`, whose login role must be a member of the migration-created
-`topup_app` NOLOGIN role. The application role has operational CRUD privileges but no `TRUNCATE`,
-and append-only tables (among them `transitions`, `audit`, `events`, and the finalized chain facts
-`flushed` and `flush_failures`) permit only `SELECT` and `INSERT`.
-
-`topup migrate` uses only `MIGRATE_DATABASE_URL`. It must identify the trusted database owner with
-permission to create roles and schema objects; the command never falls back to the application URL.
-
-## Scanner configuration
-
-`topup run` reads `DATABASE_URL` and accepts each enabled route version through a repeated
-`--route FILE` option. Provider ids in each route file resolve to `TOPUP_RPC_<ID>_URL` after
-uppercasing and replacing non-alphanumeric characters with underscores; a URL with the placeholder
-`{key}` takes the API key in `TOPUP_RPC_<ID>_KEY` there, so the URL can be attested while the key
-stays sealed (deploy/README.md, "Sealing the secrets"); the first provider is
-provider A for scanning. For each chain and asset the scanner uses the highest supplied route
-version. A head loop on provider A polls `eth_blockNumber` once per block time
-(`--head-poll-interval-s`, 12 seconds by default) and reads each new block's transfers to every
-issued address in one request; `finalized` is read at most every `--finalized-poll-interval-s`
-(60 seconds), and its advances drive the finalized backstop, the finality watch, and reconciliation
-(`--reconcile-interval-s`, at most every 600 seconds). docs/architecture.md §8 has the cadences,
-and deploy/README.md ("Measuring RPC usage") the call counters and a cost formula.
-
-The same command serves the HTTP API on `0.0.0.0:8080` by default; `--bind` overrides the socket
-address. `TOPUP_PUBLIC_ORIGIN` is required: the public scheme and authority clients call, such as
-`https://topup.example` (no path). The admin API's RFC 9421 signatures are verified against this
-origin plus the request path and query, and treasury challenges (EIP-4361) name it, so behind an
-ingress it must be the public URL (in a CVM, the custom domain of `deploy/README.md`), not the
-internal address; `Host` and `X-Forwarded-*` headers are never trusted.
-
-## Restore
-
-A database restored from backup starts in **restore mode** (docs/architecture.md §14): reads work,
-every merchant write answers `503 service_restoring`, and nothing is credited or delivered until
-the operator has reconciled the restore with each merchant's records through
-`/v1/admin/restore/…` and unfrozen it. `topup restore-check` validates the restored database
-read-only and records the restore; the [restore guide](deploy/RESTORE.md) and the
-[reconciliation runbook](deploy/runbooks/restore.md) have the steps.
+The Python SDK's low-level client is generated from [crates/topup/openapi.json](crates/topup/openapi.json),
+the API's OpenAPI document.
 
 ## Status
 
-The software is pre-1.0 and has not had its independent security review. Phala's instance is not
-on mainnet yet, and its staging deployment (Sepolia, `https://pay-api-staging.phala.com`) is reset
-for the multi-tenant schema: [the plan to production](docs/plan.md) lists what remains.
+Phala Pay is pre-1.0 and has not had its independent security review. Phala's production instance
+is not deployed yet; its staging instance (`https://pay-api-staging.phala.com`) serves test routes
+on Sepolia and Base Sepolia. [The plan to production](docs/plan.md) lists what remains.
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the development setup,
+tests, and pull request conventions, and everyone taking part follows the
+[code of conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md). Do not open public
+issues for them.
 
 ## License
 
-[Apache-2.0](LICENSE). Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+[Apache-2.0](LICENSE)

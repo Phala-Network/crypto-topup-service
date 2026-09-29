@@ -1,8 +1,22 @@
-# Phala Pay — Design
+# Architecture
 
 Status: v8 (multi-tenant, API-only; [design](design/multi-tenant.md)). Single specification and
 implementation design. Numbers marked *(policy)* are set by the operator's finance and risk owners;
-this document fixes what they mean.
+this document fixes what they mean. Code comments and other documents cite its sections as
+"architecture §N". For an introduction, read [How Phala Pay works](overview.md) first.
+
+**Contents:** [0. Standards used](#0-standards-used) · [1. Goal](#1-goal) ·
+[2. Design rules](#2-design-rules) · [3. Trust model](#3-trust-model) ·
+[4. Contracts](#4-contracts) · [5. Stack](#5-stack) · [6. Schema](#6-schema) ·
+[7. States and pump](#7-states-and-pump) ·
+[8. Chain, valuation, screening](#8-chain-valuation-screening) · [9. Quotes](#9-quotes) ·
+[10. Signing and sweeping](#10-signing-and-sweeping) ·
+[11. Fulfillment webhook](#11-fulfillment-webhook) · [12. API and events](#12-api-and-events) ·
+[13. Reconciliation](#13-reconciliation) ·
+[14. Configuration and deployment](#14-configuration-and-deployment) ·
+[15. Operating policies](#15-operating-policies) ·
+[16. Observability and tests](#16-observability-and-tests) · [17. Delivery](#17-delivery) ·
+[18. Feature map](#18-feature-map)
 
 ## 0. Standards used
 
@@ -237,7 +251,8 @@ crates/core       pure, no I/O: money, route schema, CREATE2 math, state machine
 crates/adapters   chain::evm, signer::dstack, pricing::{coinmetrics,binance,kraken}, risk::oracle
 crates/topup      binary: db, pump, scanner, finality, outbox, reconciler, api, cli
 contracts/        Forwarder.sol, ForwarderFactory.sol, deploy scripts, Foundry tests
-config/routes     route files (attested)   deploy/  compose + Dockerfile   tests/  integration + contract
+deploy/           compose, deployment scripts, runbooks; deploy/config/routes: route files (attested)
+crates/topup/tests  integration tests on PostgreSQL and Anvil
 ```
 
 ## 6. Schema
@@ -1462,8 +1477,9 @@ The plan and its status are [docs/plan.md](plan.md); the design's PR plan is
    concurrency yield one ledger mutation; every forwarder's balance matches its deposits minus its
    finalized `Flushed` events; one merchant sweep and one refund end to end; restore drill passed.
 4. **Third-party merchants** go live only after Phala's legal review (design §17).
-5. **Later**: Base PHA and USDC routes through route files, the same addresses wherever the
-   treasury is the same; account closure (design PR 13).
+5. **Later**: Base mainnet PHA and USDC routes through route files, the same addresses wherever
+   the treasury is the same (staging already serves test routes on Base Sepolia); account closure
+   (design PR 13).
 
 ## 18. Feature map
 
@@ -1487,5 +1503,5 @@ Ownership: **S** service, **M** merchant (its UI, billing, and support), **O** o
 | Sanctions screening of payers, refund destinations, and treasuries | S | ✓ | |
 | SDKs with webhook verification, address pinning, idempotent client, examples; versioning policy; local sandbox | S | ✓ | |
 | Account closure (design PR 13) | S+O | | ✓ |
-| Base PHA and USDC routes | S | | ✓ |
+| Base mainnet PHA and USDC routes (test routes on Base Sepolia run on staging) | S | | ✓ |
 | Merchant dashboard, users, logins, self-serve onboarding, fees, custody | — | | never (design, owner ruling of 2026-09-28) |
