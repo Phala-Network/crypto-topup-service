@@ -1,5 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <!-- Phala's "P" mark, from web3icons' pha.svg (MIT; src/icons/README.md), on rounded corners. -->
-  <rect width="24" height="24" rx="5" fill="#000"/>
-  <path fill="#D1FF52" fill-rule="evenodd" d="M4 4h12.571v3.429H20V12h-3.429V7.429H7.43V12H4zm3.429 11.429h9.142V12H7.43zm0 0V20H4v-4.571z" clip-rule="evenodd"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- The mark (brand/mark-light.svg), with brand/mark-dark.svg's edge in a dark browser theme. -->
+  <style>#edge { display: none } @media (prefers-color-scheme: dark) { #edge { display: inline } }</style>
+  <clipPath id="tile"><rect width="32" height="32" rx="8"/></clipPath>
+  <rect width="32" height="32" rx="8" fill="#0a0a0a"/>
+  <rect id="edge" width="32" height="32" rx="8" fill="none" stroke="#fff" stroke-opacity=".15" stroke-width="2" vector-effect="non-scaling-stroke" clip-path="url(#tile)"/>
+  <rect x="10" y="10" width="12" height="12" rx="3" fill="#cefc5d"/>
 </svg>

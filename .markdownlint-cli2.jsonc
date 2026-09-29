@@ -8,8 +8,9 @@
     "MD060": false,
     // Changelogs repeat `Added`, `Changed`, ... under each release.
     "MD024": { "siblings_only": true },
-    // Explicit anchors that keep existing links working.
-    "MD033": { "allowed_elements": ["a"] }
+    // Explicit anchors that keep existing links working, and the README's logo, which follows
+    // GitHub's light or dark theme.
+    "MD033": { "allowed_elements": ["a", "h1", "picture", "source", "img"] }
   },
   "gitignore": true,
   "globs": ["**/*.md"],

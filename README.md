@@ -1,4 +1,9 @@
-# Phala Pay
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="deploy/product/web/brand/lockup-dark.svg">
+    <img alt="Phala Pay" src="deploy/product/web/brand/lockup-light.svg" height="40">
+  </picture>
+</h1>
 
 Self-hosted, non-custodial crypto payments API for merchants: quotes, deposit addresses, signed
 webhooks, and refunds, running in an attested confidential VM.
