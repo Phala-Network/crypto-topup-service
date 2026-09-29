@@ -78,8 +78,8 @@ def sync_detailed(
     client: AuthenticatedClient,
 ) -> Response[ApiKeyObject | ErrorResponse]:
     """Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be
-    revoked, so the account always keeps a working key; to replace a leaked last key, roll it with
-    `expires_in: 0`.
+    revoked, so the account always keeps a working key; to replace a leaked last key, roll it and
+    revoke it with the new key.
 
     Args:
         id (str):
@@ -109,8 +109,8 @@ def sync(
     client: AuthenticatedClient,
 ) -> ApiKeyObject | ErrorResponse | None:
     """Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be
-    revoked, so the account always keeps a working key; to replace a leaked last key, roll it with
-    `expires_in: 0`.
+    revoked, so the account always keeps a working key; to replace a leaked last key, roll it and
+    revoke it with the new key.
 
     Args:
         id (str):
@@ -135,8 +135,8 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
 ) -> Response[ApiKeyObject | ErrorResponse]:
     """Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be
-    revoked, so the account always keeps a working key; to replace a leaked last key, roll it with
-    `expires_in: 0`.
+    revoked, so the account always keeps a working key; to replace a leaked last key, roll it and
+    revoke it with the new key.
 
     Args:
         id (str):
@@ -164,8 +164,8 @@ async def asyncio(
     client: AuthenticatedClient,
 ) -> ApiKeyObject | ErrorResponse | None:
     """Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be
-    revoked, so the account always keeps a working key; to replace a leaked last key, roll it with
-    `expires_in: 0`.
+    revoked, so the account always keeps a working key; to replace a leaked last key, roll it and
+    revoke it with the new key.
 
     Args:
         id (str):

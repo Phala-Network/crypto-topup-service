@@ -53,7 +53,8 @@ uv add phala-pay   # or: pip install phala-pay
 
 **Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
 account and sends your contact its first secret key,
-`ppay_sk_test_…` (§5.1); roll it at once and keep the new key offline, for administration.
+`ppay_sk_test_…` (§5.1); roll it at once (`{"expires_in": 3600}`, then revoke it with the new
+key) and keep the new key offline, for administration.
 Create a restricted key for your servers (§5.4). Pin your account's webhook key for the mode from
 its attestation (§5.3). Set your treasury on each chain you accept (§1.6): payments go only there,
 and quotes answer `400 treasury_not_set` until it is.
@@ -1244,7 +1245,7 @@ With a secret key you manage the keys of its account and mode (design D7), as St
 |---|---|
 | `GET /v1/api_keys`, `GET /v1/api_keys/{id}` | The mode's keys (`key_…`), with `type` (`secret` or `restricted`), `permissions` (a restricted key's), `redacted` (prefix and last four), `status` (`active`, `expiring`, `expired`, `revoked`), `expires_at`, and `last_used` (to the minute); never the secret. |
 | `POST /v1/api_keys` `{name?, type?, permissions?}` | A new secret key, or with `"type": "restricted"` a restricted key holding `permissions`; its `secret` is in this response only. |
-| `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name, type, and permissions; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once. |
+| `POST /v1/api_keys/{id}/roll` `{expires_in?}` | A new key with the same name, type, and permissions; the old one keeps working for `expires_in` seconds (at most 604800, 7 days), then answers `401 api_key_expired`. `0`, the default, revokes it at once; a key rolling itself needs at least `3600` (`400 parameter_invalid`), so a lost response can be recovered with it. |
 | `DELETE /v1/api_keys/{id}` | Revoke at once. The mode's last key that is neither revoked nor expiring cannot be revoked (`400 last_api_key`), so you always keep one. |
 
 **Restricted keys.** Run production with a restricted key, Stripe's
@@ -1270,7 +1271,11 @@ The grantable permissions are `account.read`, `api_keys.read`, `quotes.read|writ
 `refunds.write` only to the internal admin that requests refunds.
 
 A planned rotation: roll with an overlap (`{"expires_in": 86400}`), deploy the new key, and let
-the old one expire. A leak: roll with `{"expires_in": 0}` at once. If you lost every key of a
+the old one expire. A leak: roll the leaked key at once, then revoke it with the new key
+(`DELETE /v1/api_keys/{id}`); a key rolling itself keeps working for at least an hour
+(`{"expires_in": 3600}`), so if the roll's response is lost, a retry with the same
+`Idempotency-Key` returns the new key's id without its secret, and rolling that new key with the
+old one issues a key you hold. If you lost every key of a
 mode, or cannot win against an attacker who rolls too, ask the operator from your recorded
 contact: they verify the request, may revoke the mode's keys, and issue a recovery key
 ([runbook](../deploy/runbooks/api-key-compromise.md)). Every key change is an `api_key.created`,
@@ -1332,16 +1337,20 @@ the request starts executing, whatever it is: a repeat of the same request (meth
 returns the first response again with `Idempotent-Replayed: true`, a `400` or a `500` included, so
 a retry after a failure whose effects you cannot see never runs the request twice. A request that
 did not execute is not saved, and a retry with its key runs it: one refused by authentication or
-by the key's permissions (`401`, `403`), one that failed validation (`parameter_*`), was rate
-limited (`429`), or met `503 unavailable`; a key never replays a response to a request it may not
-make. The same key with another
+by the key's permissions (`401`, `403`, `testmode_charges_only` included), one that failed
+validation (`parameter_*`), was rate limited (`429`), or met `503 unavailable`; a key never replays
+a response to a request it may not make. The same key with another
 request is `400 idempotency_key_reused` (`type: idempotency_error`); a repeat while the first
 request still runs is `409 idempotency_key_in_use`, retry with the same key. Without a key every
 `POST` runs. The response is saved in the same transaction as the request's changes, so a retry
 after a lost response or a crash replays it and never creates a second quote, refund, key, or
-endpoint; a request still running after a minute loses its key to a repeat of it, which runs it,
-and then answers `409 idempotency_key_in_use` without changing anything. A replayed key creation or roll returns the key without
-its `secret`, which is never stored: roll again if the first response was lost. Canceling a
+endpoint. A request that has not reached its changes a minute later (for example, still waiting
+for a price) loses its key to a repeat of it, which runs it, and then answers
+`409 idempotency_key_in_use` without changing anything; one already making its changes commits,
+and the repeat waits for it and replays its response. A replayed key creation or roll returns the
+key without its `secret`, which is never stored: if a roll's response was lost, roll the new key
+(its id is in the replay) with the old one, which a key rolling itself keeps for at least an hour
+(§5.4). Canceling a
 canceled quote and revoking a revoked key return it unchanged. Updating metadata is
 idempotent by its merge: sending the same `metadata` again leaves the object unchanged.
 

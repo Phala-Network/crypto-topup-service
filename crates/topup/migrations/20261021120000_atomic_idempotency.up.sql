@@ -4,9 +4,8 @@
 -- A request claims its idempotency key under a fresh owner. Its changes and its saved response
 -- commit in one transaction, which locks the key's row and checks the request still owns it, so a
 -- repeat that takes over a key whose request never saved a response fences that request out.
--- Rows claimed before this migration get an owner no request holds.
+-- A row without an owner gets one no request holds, as do the rows claimed before this migration.
 ALTER TABLE idempotency_keys ADD COLUMN owner uuid NOT NULL DEFAULT gen_random_uuid();
-ALTER TABLE idempotency_keys ALTER COLUMN owner DROP DEFAULT;
 
 COMMENT ON COLUMN idempotency_keys.owner IS
     'The request that holds the key, a fresh id per claim; a takeover replaces it, and only the owner saves a response.';

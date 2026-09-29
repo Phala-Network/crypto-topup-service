@@ -875,22 +875,29 @@ a missing one.
 Every `POST` is idempotent by `Idempotency-Key` (above), and its result commits with its changes
 (Brandur Leach, [Implementing Stripe-like Idempotency Keys in
 Postgres](https://brandur.org/idempotency-keys)). Authentication and authorization run first, so a
-key never replays a response to a request it may not make, and their refusals are not saved. The
+key never replays a response to a request it may not make, and their refusals are not saved (nor
+is a handler's `401` or `403`, such as `testmode_charges_only`). The
 request then claims its key under a fresh `owner`. Its handler makes its external calls (the price
 fetch, sanctions screening, EIP-1271 checks) before any transaction, then makes its changes,
 rechecking in the transaction what those calls relied on, renders its response, and saves the
 response to the key's row in the same transaction, which first locks the row and checks the request
 still owns it. A saved response therefore exists exactly when the request's changes committed,
 whether or not the client received it: a repeat replays it and never runs the request twice. A key
-without a saved response, whose request stopped, lost its client, or is still slow, is taken over
-by a repeat of the same request after a minute under a new owner, and the repeat runs the request:
-nothing of the first one committed, and the first one can no longer commit. A failure that rolled
+without a saved response, whose request stopped, lost its client, or has not reached its
+transaction, is taken over by a repeat of the same request after a minute under a new owner, and
+the repeat runs the request: nothing of the first one committed, and the first one can no longer
+commit. A request already in its transaction holds the row lock, so the repeat waits for it (at
+most five seconds, `lock_timeout`, then `409 idempotency_key_in_use`), and replays its response
+once it commits. This relies on READ COMMITTED, PostgreSQL's default, under which the waiting
+takeover re-checks the committed row. A database that cannot begin the transaction, or a deadlock
+or serialization failure, answers an unsaved `503` to retry. A failure that rolled
 back is saved afterwards as the request's result while the request still owns the key, as Stripe
 saves a `500`.
 
 A secret key manages its mode's keys (`/v1/api_keys`): create (a secret key, or a restricted key
 with a subset of the grantable permissions), list, roll (the old key works for up to 7 days, or is
-revoked at once), and revoke, except the mode's last secret key that is neither revoked nor
+revoked at once; a key rolling itself keeps working for at least an hour, so the response of a
+roll it lost can be recovered with it), and revoke, except the mode's last secret key that is neither revoked nor
 expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
 admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live

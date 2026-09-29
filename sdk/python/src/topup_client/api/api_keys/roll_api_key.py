@@ -99,7 +99,10 @@ def sync_detailed(
 ) -> Response[ApiKeyObject | ErrorResponse]:
     """Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
     working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
-    at once. A secret key may roll itself.
+    at once. A secret key may roll itself, keeping itself working for at least an hour
+    (`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits
+    it, so if the response is lost, roll the new key (its id is in the replay) with the old key
+    while it still works. To stop the old key sooner, revoke it with the new key.
 
     Args:
         id (str):
@@ -137,7 +140,10 @@ def sync(
 ) -> ApiKeyObject | ErrorResponse | None:
     """Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
     working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
-    at once. A secret key may roll itself.
+    at once. A secret key may roll itself, keeping itself working for at least an hour
+    (`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits
+    it, so if the response is lost, roll the new key (its id is in the replay) with the old key
+    while it still works. To stop the old key sooner, revoke it with the new key.
 
     Args:
         id (str):
@@ -170,7 +176,10 @@ async def asyncio_detailed(
 ) -> Response[ApiKeyObject | ErrorResponse]:
     """Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
     working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
-    at once. A secret key may roll itself.
+    at once. A secret key may roll itself, keeping itself working for at least an hour
+    (`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits
+    it, so if the response is lost, roll the new key (its id is in the replay) with the old key
+    while it still works. To stop the old key sooner, revoke it with the new key.
 
     Args:
         id (str):
@@ -206,7 +215,10 @@ async def asyncio(
 ) -> ApiKeyObject | ErrorResponse | None:
     """Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
     working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
-    at once. A secret key may roll itself.
+    at once. A secret key may roll itself, keeping itself working for at least an hour
+    (`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits
+    it, so if the response is lost, roll the new key (its id is in the replay) with the old key
+    while it still works. To stop the old key sooner, revoke it with the new key.
 
     Args:
         id (str):

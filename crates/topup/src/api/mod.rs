@@ -363,13 +363,17 @@ const ROUTE_PERMISSIONS: &[(&str, &str, Permission)] = &[
     ("POST", "/v1/events/{id}/resend", Permission::EndpointsWrite),
 ];
 
-/// The permission the merchant route `method` `path` requires; `path` is the route's template.
+/// The permission the merchant route `method` `path` requires; `path` is the route's template. A
+/// `HEAD` requires what its `GET` does, which serves it.
 fn required_permission(method: &Method, path: &str) -> Option<Permission> {
+    let method = if method == Method::HEAD {
+        Method::GET.as_str()
+    } else {
+        method.as_str()
+    };
     ROUTE_PERMISSIONS
         .iter()
-        .find(|(route_method, route_path, _)| {
-            *route_method == method.as_str() && *route_path == path
-        })
+        .find(|(route_method, route_path, _)| *route_method == method && *route_path == path)
         .map(|(_, _, permission)| *permission)
 }
 

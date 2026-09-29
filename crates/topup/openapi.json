@@ -3056,7 +3056,7 @@
         },
         "properties": {
           "expires_in": {
-            "description": "Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at\nonce.",
+            "description": "Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at\nonce. A key rolling itself needs at least 3600.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -4750,7 +4750,7 @@
             "api_key": []
           }
         ],
-        "summary": "Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be\nrevoked, so the account always keeps a working key; to replace a leaked last key, roll it with\n`expires_in: 0`.",
+        "summary": "Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be\nrevoked, so the account always keeps a working key; to replace a leaked last key, roll it and\nrevoke it with the new key.",
         "tags": [
           "api_keys"
         ]
@@ -4908,7 +4908,7 @@
                 }
               }
             },
-            "description": "Bad Request, or `api_key_inactive`: revoked or already rolled",
+            "description": "Bad Request, `parameter_invalid` for a key rolling itself with `expires_in` under 3600, or `api_key_inactive`: revoked or already rolled",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -4988,7 +4988,7 @@
             "api_key": []
           }
         ],
-        "summary": "Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps\nworking for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it\nat once. A secret key may roll itself.",
+        "summary": "Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps\nworking for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it\nat once. A secret key may roll itself, keeping itself working for at least an hour\n(`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits\nit, so if the response is lost, roll the new key (its id is in the replay) with the old key\nwhile it still works. To stop the old key sooner, revoke it with the new key.",
         "tags": [
           "api_keys"
         ]

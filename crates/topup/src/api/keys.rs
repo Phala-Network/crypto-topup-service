@@ -22,6 +22,10 @@ use super::pagination::Page;
 
 type ApiResult<T> = Result<T, ApiError>;
 
+/// The shortest `expires_in` of a key rolling itself: the old key must outlive a lost response,
+/// whose new secret a replay never returns, so the merchant can recover by rolling the new key.
+const MIN_SELF_ROLL_EXPIRES_IN: u32 = 3_600;
+
 #[utoipa::path(
     get,
     path = "/v1/api_keys",
@@ -182,7 +186,7 @@ pub(crate) async fn create_api_key(
     request_body = RollApiKeyRequest,
     responses(
         (status = 200, description = "OK: the new key with its `secret`, shown once", body = ApiKeyObject),
-        (status = 400, description = "Bad Request, or `api_key_inactive`: revoked or already rolled", body = ErrorResponse),
+        (status = 400, description = "Bad Request, `parameter_invalid` for a key rolling itself with `expires_in` under 3600, or `api_key_inactive`: revoked or already rolled", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -191,7 +195,10 @@ pub(crate) async fn create_api_key(
 )]
 /// Rolls a key: returns a new key of the same type, name, and permissions, and the old key keeps
 /// working for `expires_in` seconds (at most 7 days), Stripe's roll; `0`, the default, revokes it
-/// at once. A secret key may roll itself.
+/// at once. A secret key may roll itself, keeping itself working for at least an hour
+/// (`expires_in` ≥ 3600): the new key's secret is shown only in this response, and a replay omits
+/// it, so if the response is lost, roll the new key (its id is in the replay) with the old key
+/// while it still works. To stop the old key sooner, revoke it with the new key.
 pub(crate) async fn roll_api_key(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -200,6 +207,14 @@ pub(crate) async fn roll_api_key(
     ApiJson(request): ApiJson<RollApiKeyRequest>,
 ) -> ApiResult<Response> {
     let id = ids::parse(ids::API_KEY, &id).ok_or_else(ApiError::not_found)?;
+    if id == merchant.key.id && request.expires_in < MIN_SELF_ROLL_EXPIRES_IN {
+        return Err(ApiError::invalid_param(
+            "expires_in",
+            "a key rolling itself keeps working for at least 3600 seconds, so a lost response can \
+             be recovered with it: roll the new key with this one; revoke this key with the new \
+             one to stop it sooner",
+        ));
+    }
     let mut transaction = idempotent.begin(&state.pool).await?;
     let issued = api_keys::roll(
         &mut *transaction,
@@ -234,8 +249,8 @@ pub(crate) async fn roll_api_key(
     tag = "api_keys"
 )]
 /// Revokes a key at once. The mode's last key that is neither revoked nor expiring cannot be
-/// revoked, so the account always keeps a working key; to replace a leaked last key, roll it with
-/// `expires_in: 0`.
+/// revoked, so the account always keeps a working key; to replace a leaked last key, roll it and
+/// revoke it with the new key.
 pub(crate) async fn revoke_api_key(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,

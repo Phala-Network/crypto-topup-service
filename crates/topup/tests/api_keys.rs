@@ -553,23 +553,68 @@ async fn keys_authenticate_by_bearer_and_expire_or_revoke() -> Result<()> {
         ensure!(expired.status == StatusCode::UNAUTHORIZED);
         ensure!(expired.body["error"]["code"] == "api_key_expired");
 
-        // Rolling with no overlap revokes the old key at once.
+        // A key rolling itself keeps working for at least an hour, so a roll whose response is
+        // lost can be recovered with it: the replay names the new key, without its secret, and
+        // the old key rolls that new key with no overlap, revoking it at once.
         let new_id = rolled.body["id"].as_str().context("id")?.to_owned();
-        let rolled_again = harness
+        let self_roll = format!("/v1/api_keys/{new_id}/roll");
+        for body in [json!({}), json!({"expires_in": 3599})] {
+            let refused = harness
+                .merchant(
+                    Method::POST,
+                    &self_roll,
+                    Some(&body),
+                    &new_key,
+                    Some("self"),
+                )
+                .await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{}",
+                refused.body
+            );
+            ensure!(refused.body["error"]["code"] == "parameter_invalid");
+            ensure!(refused.body["error"]["param"] == "expires_in");
+        }
+        let hour = json!({"expires_in": 3600});
+        let lost = harness
             .merchant(
                 Method::POST,
-                &format!("/v1/api_keys/{new_id}/roll"),
+                &self_roll,
+                Some(&hour),
+                &new_key,
+                Some("self"),
+            )
+            .await?;
+        ensure!(lost.status == StatusCode::OK, "{}", lost.body);
+        let replayed = harness
+            .merchant(
+                Method::POST,
+                &self_roll,
+                Some(&hour),
+                &new_key,
+                Some("self"),
+            )
+            .await?;
+        ensure!(replayed.headers["idempotent-replayed"] == "true");
+        ensure!(replayed.body.get("secret").is_none());
+        let lost_id = replayed.body["id"].as_str().context("id")?.to_owned();
+        ensure!(lost_id == lost.body["id"]);
+        let recovered = harness
+            .merchant(
+                Method::POST,
+                &format!("/v1/api_keys/{lost_id}/roll"),
                 Some(&json!({})),
                 &new_key,
                 None,
             )
             .await?;
-        ensure!(rolled_again.status == StatusCode::OK);
-        let revoked = harness.get("/v1/account", &new_key).await?;
+        ensure!(recovered.status == StatusCode::OK, "{}", recovered.body);
+        let revoked = harness.get("/v1/account", &secret(&lost.body)?).await?;
         ensure!(revoked.body["error"]["code"] == "api_key_invalid");
         ensure!(
             harness
-                .get("/v1/account", &secret(&rolled_again.body)?)
+                .get("/v1/account", &secret(&recovered.body)?)
                 .await?
                 .status
                 == StatusCode::OK
@@ -852,8 +897,8 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
         // minute; after 24 hours a key may be used for anything.
         let before = count().await?;
         sqlx::query(
-            "INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint, owner) \
-             VALUES ($1, false, 'running', $2, gen_random_uuid())",
+            "INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint) \
+             VALUES ($1, false, 'running', $2)",
         )
         .bind(account)
         .bind(vec![0_u8; 32])
@@ -1035,6 +1080,16 @@ async fn authorization_runs_before_an_idempotent_replay() -> Result<()> {
                     .await
             }
         };
+
+        // A `HEAD` needs what its `GET` needs.
+        let head = harness
+            .merchant(Method::HEAD, "/v1/account", None, &key, None)
+            .await?;
+        ensure!(head.status == StatusCode::OK, "{}", head.body);
+        let head = harness
+            .merchant(Method::HEAD, "/v1/api_keys", None, &restricted, None)
+            .await?;
+        ensure!(head.status == StatusCode::FORBIDDEN);
 
         let created = create("ci", key.clone(), "shared").await?;
         ensure!(created.status == StatusCode::OK, "{}", created.body);

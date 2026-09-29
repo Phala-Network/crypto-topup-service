@@ -7,7 +7,8 @@
 //! As Stripe's, the result is saved once the handler starts executing, whatever it is, including
 //! a `500` (<https://docs.stripe.com/api/idempotent_requests>). A request that did not execute is
 //! not saved, so a retry with the same key runs it: one refused by authentication or
-//! authorization (both run before this layer), one that failed validation (`parameter_*`), was
+//! authorization (both run before this layer; a handler's `401` or `403`, such as
+//! `testmode_charges_only`, is released too), one that failed validation (`parameter_*`), was
 //! rate limited (`429`), or met a temporary unavailability (`503`), marked [`NotExecuted`].
 //!
 //! The result commits with the request's changes, in one PostgreSQL transaction (Brandur Leach,
@@ -21,8 +22,16 @@
 //! saved a response (the process stopped, the client disconnected, or the request is still slow)
 //! is taken over by a repeat of the same request after a minute under a new owner, which runs the
 //! request again: nothing committed, and the former owner can no longer commit (it is fenced by
-//! the row lock and the owner check). A response the handler returns without committing it, a
-//! failure whose transaction rolled back, is saved afterwards if the request still owns the key.
+//! the row lock and the owner check). A request already inside its transaction when a repeat
+//! arrives holds the row lock: the repeat waits for it (at most five seconds, then `409`),
+//! and finds its saved response. A response the handler returns without committing it, a failure
+//! whose transaction rolled back, is saved afterwards if the request still owns the key.
+//!
+//! This relies on PostgreSQL's READ COMMITTED isolation, the default: a takeover's
+//! `INSERT … ON CONFLICT DO UPDATE … WHERE` that waited for the row lock re-evaluates its `WHERE`
+//! against the row as the committing transaction left it, so it never takes over a key whose
+//! response was just saved. Under REPEATABLE READ or SERIALIZABLE the takeover would fail with a
+//! serialization error instead.
 //!
 //! An API key's `secret` is never stored: a replayed key creation or roll returns the key without
 //! it. A quote's `client_secret` is stored with its response; it reads only the quote's public
@@ -83,12 +92,17 @@ impl<S: Send + Sync> FromRequestParts<S> for Idempotent {
 impl Idempotent {
     /// Begins the transaction of the request's changes. With a key it locks the key's row until
     /// the transaction ends, and fails with `409 idempotency_key_in_use` once a repeat has taken
-    /// the key over.
+    /// the key over, or with an unsaved `503` when the database cannot begin it.
     pub(crate) async fn begin(
         &self,
         pool: &PgPool,
     ) -> Result<Transaction<'static, Postgres>, ApiError> {
-        let mut transaction = pool.begin().await?;
+        // Nothing ran yet, so a failure here is an unsaved `503` the client retries.
+        let unavailable = |error: sqlx::Error| {
+            tracing::warn!(%error, "the request's transaction did not begin");
+            ApiError::database_busy()
+        };
+        let mut transaction = pool.begin().await.map_err(unavailable)?;
         if let Some(claim) = &self.0 {
             let held = sqlx::query(
                 "SELECT 1 FROM idempotency_keys \
@@ -101,7 +115,8 @@ impl Idempotent {
             .bind(&claim.key)
             .bind(claim.owner)
             .fetch_optional(&mut *transaction)
-            .await?
+            .await
+            .map_err(unavailable)?
             .is_some();
             if !held {
                 return Err(ApiError::idempotency_key_in_use());
@@ -188,6 +203,9 @@ pub(crate) async fn idempotent_post(
         Ok(Acquired::Replay(stored)) => return replay(&stored),
         Ok(Acquired::InUse) => return ApiError::idempotency_key_in_use().into_response(),
         Ok(Acquired::OtherRequest) => return ApiError::idempotency_key_reused().into_response(),
+        Err(error) if lock_not_available(&error) => {
+            return ApiError::idempotency_key_in_use().into_response();
+        }
         Err(error) => return ApiError::from(error).into_response(),
     }
     parts.extensions.insert(claim.clone());
@@ -195,6 +213,12 @@ pub(crate) async fn idempotent_post(
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
     if response.extensions().get::<Saved>().is_some() {
         return response;
+    }
+    if response.status().is_success() {
+        // Every merchant `POST` commits its success through `Idempotent::commit`; one that does
+        // not is no longer atomic with its saved response.
+        tracing::error!("a keyed POST succeeded without saving its response with its changes");
+        debug_assert!(false, "a keyed POST succeeded without Idempotent::commit");
     }
     if response.extensions().get::<NotExecuted>().is_some() {
         release(&state.pool, &claim).await;
@@ -253,7 +277,12 @@ async fn acquire(
     // A key whose request never saved a response is taken over by the same request after a
     // minute, under the new owner; an expired row not yet pruned by a concurrent request is
     // replaced. A takeover waits for the row lock of a transaction still committing, and then
-    // finds its saved response.
+    // finds its saved response; `lock_timeout` bounds the wait, so a long transaction cannot pin
+    // the repeats' connections.
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *transaction)
+        .await?;
     let claimed = sqlx::query(
         r#"
         INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint, owner)
@@ -272,11 +301,12 @@ async fn acquire(
     .bind(&claim.key)
     .bind(fingerprint.as_slice())
     .bind(claim.owner)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?
     .rows_affected()
         == 1;
     if claimed {
+        transaction.commit().await?;
         return Ok(Acquired::Claimed);
     }
     let stored = sqlx::query_as::<_, (Vec<u8>, Option<Value>)>(
@@ -286,8 +316,9 @@ async fn acquire(
     .bind(claim.scope.account_id())
     .bind(claim.scope.livemode())
     .bind(&claim.key)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(match stored {
         // Released between the two statements: the client retries.
         None => Acquired::InUse,
@@ -295,6 +326,14 @@ async fn acquire(
         Some((_, None)) => Acquired::InUse,
         Some((_, Some(response))) => Acquired::Replay(response),
     })
+}
+
+/// Whether `error` is PostgreSQL's `lock_not_available` (`55P03`), a `lock_timeout`.
+fn lock_not_available(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| code == "55P03")
 }
 
 /// The stored form of a response, `{"status", "body"}`, without a `secret` when it contains one;

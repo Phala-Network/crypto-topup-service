@@ -77,8 +77,9 @@ mode; only the key selects the mode (design §9). Account creation is a human st
 2. **HUMAN-ONLY, operator:** creates your account (`acct_…`) with `POST /v1/admin/accounts` and
    `charges_enabled: false`, as [Account credentials](../README.md#account-credentials) describes,
    and sends your contact, through an encrypted channel, the account id and its first test secret
-   key (`ppay_sk_test_…`). Roll the key at once (`POST /v1/api_keys/{id}/roll`), keep the new one in
-   a mode-0600 file, and use it only for test mode; run production with a restricted key
+   key (`ppay_sk_test_…`). Roll the key at once (`POST /v1/api_keys/{id}/roll {"expires_in": 3600}`,
+   then revoke it with the new one), keep the new one in a mode-0600 file, and use it only for
+   test mode; run production with a restricted key
    (`ppay_rk_test_…`) holding only the permissions it needs.
 3. With the key, and no further help from the operator: pin your account's test-mode webhook keys
    from the attestation (docs/integration.md §5.3) and the forwarder factory and implementation

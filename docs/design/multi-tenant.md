@@ -555,7 +555,9 @@ is the merchant's own record, so no `cus_` object is added.
   [Cloudflare](https://developers.cloudflare.com/fundamentals/api/how-to/create-via-api/)).
 - Roll: `POST /v1/api_keys/{id}/roll {expires_in}` returns a new key; the old one works until
   the chosen expiry of at most 7 days, Stripe's grace period ([keys](https://docs.stripe.com/keys));
-  `expires_in: 0` revokes at once. Expired → `401 api_key_expired` (Stripe's code).
+  `expires_in: 0` revokes at once. Expired → `401 api_key_expired` (Stripe's code). A key rolling
+  itself keeps working for at least an hour: a replay never returns the new secret, so a lost
+  response is recovered by rolling the new key with the old one (2026-09-29).
 - **First key and recovery.** The operator's account creation returns the first key of each
   enabled mode (D8). A merchant that loses every key, or suspects a leak it cannot win by rolling,
   asks the operator, who verifies the request with the contact recorded at onboarding, revokes the
