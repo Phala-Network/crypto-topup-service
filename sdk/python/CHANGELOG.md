@@ -6,6 +6,10 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
+The first release on PyPI.
+
 ### Added
 
 - `list_forwarders` / `pay.forwarders.list` take the API's `quote` and `deposit_address` filters.
@@ -292,6 +296,8 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [0.1.0] - 2026-09-22
 
+Not published.
+
 Generated from OpenAPI `info.version` 0.1.0.
 
 ### Added
@@ -304,3 +310,6 @@ Generated from OpenAPI `info.version` 0.1.0.
 - `TopupClient` with idempotent, retrying helpers for accounts, deposit addresses, rotation,
   rate locks, deposits, limits, refunds, and attestation.
 - `topup-sdk keygen` and `topup-sdk public-key` for credential issuance.
+
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.2.0...HEAD
+[0.2.0]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-py-v0.2.0
