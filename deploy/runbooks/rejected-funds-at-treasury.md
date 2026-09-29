@@ -34,9 +34,8 @@ refundable customer case, or a custody mismatch.
   flush failed (`FlushFailed`); the merchant sweeps ([deploy/README.md, "Sweeping"](../README.md#sweeping)).
 - Treasury inflow differs from the `Flushed` events: critical reconciliation incident; see
   [chain frozen](chain-frozen.md) for `custody_balance`.
-- Sanctioned funds: the merchant's compliance matter (design §17, item 2); the operator's
-  compliance records its review, and the merchant refunds nothing until its own disposition is
-  recorded.
+- Sanctioned funds: the merchant's compliance matter (design §17, item 2); Phala's Compliance
+  records its review, and the merchant refunds nothing until its own disposition is recorded.
 
 ## Fix
 

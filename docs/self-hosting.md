@@ -52,12 +52,10 @@ the merchant's steps with the account's keys, never with the admin key.
 1. **Fork** the repository and enable Actions on the fork (GitHub disables workflows on a new
    fork). Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER` names a
    runner label.
-2. **Point Release images at your registry.** The workflow pushes with the repository's
-   `GITHUB_TOKEN`, which can write only to packages of the fork's owner. In
-   [release-images.yml](../.github/workflows/release-images.yml) set `TOPUP_REPOSITORY`,
-   `POSTGRES_WALG_REPOSITORY`, and `REFERENCE_PRODUCT_REPOSITORY` to `ghcr.io/<your owner>/…`
-   (lowercase) and commit it to your `main`. Deploy accepts only the images of a Release images
-   run of the same repository.
+2. **Your registry needs no setting.** [Release images](../.github/workflows/release-images.yml)
+   publishes to the repository owner's GHCR namespace, `ghcr.io/<owner, lowercased>/…`, with the
+   repository's `GITHUB_TOKEN`, and Deploy accepts only the images of a Release images run of the
+   same repository. The packages must then be made public (section 4).
 3. **Create the admin key** on the machine that will keep it, one per Environment. The seed
    never leaves that machine; the printed `public_key` is the Environment variable
    `TOPUP_ADMIN_PUBLIC_KEY`, and `admin/<Environment>-v1` is the key id Deploy derives:
@@ -203,8 +201,7 @@ and each upgrade changes the compose hash.
 ## 6. Onboard your first account
 
 Accounts are created only by the operator, through the admin API; there is no signup. Due
-diligence is yours to define: the service records only its reference, date, and reviewer, and the
-legal and compliance obligations of running an instance for others are the operator's.
+diligence is done offline; the service records only its reference, date, and reviewer.
 
 1. **Admin helper.** Convert the seed to the PEM the signer uses, once, and load the
    [runbooks' `admin` helper](../deploy/runbooks/README.md#environment) with
@@ -273,7 +270,7 @@ directory's scenarios play late, partial, rejected, and refunded payments.
 2. Your own sign-off of the limits: route bounds, each account's caps, and
    `max_unfinalized_credit` ([architecture §17](architecture.md#17-delivery) lists Phala's), and a
    passed restore drill (section 10).
-3. `charges_enabled: true` for each account your review allows; the merchant then proves a live
+3. `charges_enabled: true` for each account you enable; the merchant then proves a live
    treasury and follows the [go-live checklist](integration.md#44-go-live-checklist).
 
 ## 10. Backups and restore

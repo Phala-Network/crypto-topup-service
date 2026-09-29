@@ -47,11 +47,11 @@ key, and the database passwords: that is a key migration, not an image bump.
 
 ## One-time setup (HUMAN-ONLY, repository owner)
 
-0. **Fork.** Fork the repository, enable Actions on the fork, and set `TOPUP_REPOSITORY`,
-   `POSTGRES_WALG_REPOSITORY`, and `REFERENCE_PRODUCT_REPOSITORY` in
-   [release-images.yml](../.github/workflows/release-images.yml) to the fork owner's `ghcr.io`
-   namespace, the only one its `GITHUB_TOKEN` can push to. Workflows run on `ubuntu-latest` unless
-   the repository variable `CI_RUNNER` names another runner.
+0. **Fork.** Fork the repository and enable Actions on the fork. Release images publishes to the
+   repository owner's namespace, `ghcr.io/<owner, lowercased>/` (Phala's: `ghcr.io/phala-network/`),
+   the only one its `GITHUB_TOKEN` can push to, so a fork changes nothing; its packages are made
+   public in step 6. Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER`
+   names another runner.
 1. **Environments.** Repository Settings > Environments: `production` and, for a pre-production
    instance with test routes only, `staging` (the names Deploy offers), deployment branches `main`
    only. Required reviewers are optional (Phala's repository has none: its plan does not offer
@@ -147,9 +147,8 @@ chain, and any live route in `staging`. After the first deploy, in order: seal t
 the attestation](#attestation-ingress-and-egress); have the operator's Finance, Risk, and Operations
 approve the pilot limits (route bounds, each account's caps (`limits`: open quotes and their credit
 per account and per customer) and `max_unfinalized_credit`; architecture §17) and a passed restore
-drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) the accounts and enable
-`charges_enabled` as the operator's own review allows (Phala's instance: Phala Cloud's account
-only).
+drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) Phala's own accounts with
+`charges_enabled` (third-party merchants only after the legal review, design §17).
 
 ### Sealing the secrets
 
@@ -505,8 +504,8 @@ helper](runbooks/README.md#environment), in order:
 
 1. **Due diligence, offline** (HUMAN-ONLY, operator): the business, its owners, sanctions screening
    of the entity, owners, and intended treasuries, jurisdiction, and the signed merchant agreement,
-   under the operator's own policy and legal review (design §17 lists what Phala's covers). The
-   product stores only a reference, the date, and the reviewer.
+   under Phala's policy (design §17). Until the legal review signs off, live mode is for Phala's own
+   accounts only. The product stores only a reference, the date, and the reviewer.
 2. **Create** (HUMAN-ONLY, admin key holder, after [attestation](#attestation-ingress-and-egress)).
    The answer holds the account id `acct_…` and, in `api_keys`, its first secret test key
    (`ppay_sk_test_…`) and, with `charges_enabled`, live key; each `secret` is shown only here:

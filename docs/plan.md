@@ -85,12 +85,11 @@ Completed work is in git history and the changelogs.
       on Phala Cloud's account.
 - [ ] Restore drill against production backups, including the freeze and reconciliation.
 
-### Third-party merchants
+### Before third-party merchants go live
 
-Phala's instance onboards no third-party merchants (design, amendment of 2026-09-29): others run
-their own instance, under their own legal and compliance review. The legal review of design §17
-was the gate for such merchants on Phala's instance, so it no longer gates anything there.
-
+- [ ] Phala's legal review (design §17): money transmission and crypto-asset licensing, sanctions
+      obligations, the due-diligence policy, merchant agreement, privacy and retention. Until it
+      signs off, the operator enables live mode only for Phala's own accounts. Owner: Legal.
 - [ ] Design PR 13, account closure.
 
 ### Releases
