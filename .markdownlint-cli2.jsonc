@@ -10,7 +10,9 @@
     "MD024": { "siblings_only": true },
     // Explicit anchors that keep existing links working, and the README's logo, which follows
     // GitHub's light or dark theme.
-    "MD033": { "allowed_elements": ["a", "h1", "picture", "source", "img"] }
+    "MD033": { "allowed_elements": ["a", "p", "picture", "source", "img"] },
+    // The README's logo comes before its heading.
+    "MD041": { "allow_preamble": true }
   },
   "gitignore": true,
   "globs": ["**/*.md"],

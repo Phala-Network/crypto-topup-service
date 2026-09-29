@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-  <!-- The mark (brand/mark-light.svg), with brand/mark-dark.svg's edge in a dark browser theme. -->
+  <!-- The mark (brand/mark-light.svg), with an edge in a dark browser theme: a 2-unit ring,
+       1 px in a 16 px tab (brand/README.md). -->
   <style>#edge { display: none } @media (prefers-color-scheme: dark) { #edge { display: inline } }</style>
-  <clipPath id="tile"><rect width="32" height="32" rx="8"/></clipPath>
   <rect width="32" height="32" rx="8" fill="#0a0a0a"/>
-  <rect id="edge" width="32" height="32" rx="8" fill="none" stroke="#fff" stroke-opacity=".15" stroke-width="2" vector-effect="non-scaling-stroke" clip-path="url(#tile)"/>
+  <path id="edge" fill="#fff" fill-opacity=".15" fill-rule="evenodd" d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 2A6 6 0 0 0 2 8V24A6 6 0 0 0 8 30H24A6 6 0 0 0 30 24V8A6 6 0 0 0 24 2Z"/>
   <rect x="10" y="10" width="12" height="12" rx="3" fill="#cefc5d"/>
 </svg>

@@ -1,6 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-  <clipPath id="tile"><rect width="32" height="32" rx="8"/></clipPath>
   <rect width="32" height="32" rx="8" fill="#0a0a0a"/>
-  <rect width="32" height="32" rx="8" fill="none" stroke="#fff" stroke-opacity=".15" stroke-width="2" vector-effect="non-scaling-stroke" clip-path="url(#tile)"/>
+  <path fill="#fff" fill-opacity=".15" fill-rule="evenodd" d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 1A7 7 0 0 0 1 8V24A7 7 0 0 0 8 31H24A7 7 0 0 0 31 24V8A7 7 0 0 0 24 1Z"/>
   <rect x="10" y="10" width="12" height="12" rx="3" fill="#cefc5d"/>
 </svg>

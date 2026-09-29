@@ -99,27 +99,24 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
 
 /**
  * The logo: the mark and the name in Geist SemiBold, as brand/lockup-light.svg and, with the mark's
- * edge on the dark theme, brand/lockup-dark.svg: a 1 px hairline inside the tile (the SVG's overflow
- * clips its outer half). At a 24 px mark the name is 16 px, 7.5 px away: the gap is 6 px plus the
- * P's side bearing. Geist centres its line box on the cap height.
+ * edge on the dark theme, brand/lockup-dark.svg. The edge is a 4/3-unit ring, 1 px at this 24 px
+ * mark. The name is 16 px, 7.5 px away: the gap is 6 px plus the P's side bearing. Its box is
+ * trimmed to the caps, which centres them on the mark; its line box, with Geist's ascent and
+ * descent rounded to whole pixels, put them 0.6 px high.
  */
 function Lockup() {
   return (
     <span className="flex items-center gap-1.5 text-base font-semibold tracking-tight">
       <svg viewBox="0 0 32 32" aria-hidden="true" className="size-6 shrink-0">
         <rect width="32" height="32" rx="8" className="fill-neutral-950" />
-        <rect
-          width="32"
-          height="32"
-          rx="8"
-          fill="none"
-          strokeWidth="2"
-          vectorEffect="non-scaling-stroke"
-          className="hidden stroke-white/15 dark:block"
+        <path
+          fillRule="evenodd"
+          d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 1.333A6.667 6.667 0 0 0 1.333 8V24A6.667 6.667 0 0 0 8 30.667H24A6.667 6.667 0 0 0 30.667 24V8A6.667 6.667 0 0 0 24 1.333Z"
+          className="hidden fill-white/15 dark:block"
         />
         <rect x="10" y="10" width="12" height="12" rx="3" className="fill-brand" />
       </svg>
-      Phala Pay
+      <span className="[text-box:trim-both_cap_alphabetic]">Phala Pay</span>
     </span>
   );
 }
