@@ -25,6 +25,10 @@ When the lag is material, pause issuance (existing addresses stay valid and watc
   load-balanced gateway answering from a node that has not caught up; repeat the first command a
   few times), is retried, not trusted: the monitor reports errors until it catches up. If it
   keeps lagging, replace it.
+- An address backfill longer than the provider allows at once (`finalized chain scan failed
+  transiently` repeating while the provider answers): each pass keeps the backfill windows it
+  committed and the next resumes after them, so the cursor moves on once it completes; nothing to
+  do unless the errors are not provider refusals or timeouts.
 - A chain scanner that stops on a failure it cannot retry stops the whole service (Sentry:
   `chain scanner task stopped; stopping every chain scanner`), which the container restart policy
   restarts; the scanner resumes from its committed cursor, and a transfer it had not recorded is

@@ -519,7 +519,17 @@ deposits unswept. Every other factory event is ignored: anyone can call the fact
 advances after both are committed, so everything at or below it is indexed at finality. New
 addresses backfill from creation (the chain's committed cursor when the address is issued), all
 pending ones together in the same windows; quote, retired, and superseded addresses stay in the
-filter. A `finalized` answer below one provider A gave before, or below the committed cursor, is a
+filter. The cursor waits for the backfill, so each backfill window is recorded against its
+addresses (`addresses.backfilled_through`) once committed, and a failed pass or a restart
+resumes after it instead of reading the range again, so a backfill that outlasts a provider's
+budget still completes instead of holding the chain's deposits back for good. A chain's cursor starts at provider A's
+`finalized` head when `topup run` first starts with the chain, before the API can issue an
+address on it, never at genesis: a first pass that walked the chain's history issued addresses
+at a cursor deep in it and gave them a backfill of the whole history (Base Sepolia on staging,
+2026-09-29). After a restore, a chain without a restored cursor is rescanned from genesis
+instead, so addresses re-issued on it find the payments made since the restore point. A read
+the provider refuses for now (HTTP 429, JSON-RPC `-32005`) is retried within the pass, as in the
+reconciler (§13). A `finalized` answer below one provider A gave before, or below the committed cursor, is a
 node behind the others (a load-balanced gateway can answer from both for minutes): the reader
 refuses it and the pass is retried, with the scanner's monitor unhealthy until the provider
 catches up. A chain's loops that stop on a failure they cannot retry stop the service, which the

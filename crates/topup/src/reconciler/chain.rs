@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::time::Duration;
 
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{Address, B256, U256};
@@ -7,14 +6,9 @@ use async_trait::async_trait;
 use tokio::time::timeout;
 use topup_adapters::chain::evm::{ChainError, ChainReader, FinalizedReader, TransferLog};
 
-use crate::jitter::{JitterSource as _, OsJitter};
+use crate::chain_retry::backing_off;
 
 use super::ReconciliationError;
-
-/// Retries of one read that the provider refused for now.
-const RATE_LIMIT_RETRIES: u32 = 6;
-/// Ceiling of the first retry delay; it doubles per retry, so all retries wait at most 32 s.
-const RATE_LIMIT_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Bounded chain reads needed by reconciliation.
 #[async_trait]
@@ -51,7 +45,9 @@ pub trait ReconciliationChain: Send + Sync {
 /// balances and derived addresses through the shared client.
 ///
 /// Every read backs off and retries while the provider refuses it for now (see
-/// [`backing_off`]); each attempt keeps the client's request timeout.
+/// [`backing_off`]); each attempt keeps the client's request timeout. A round's reads are
+/// sequential, but every task of the service starts at once and shares provider A, so the first
+/// round after a restart meets that startup burst.
 #[async_trait]
 impl ReconciliationChain for FinalizedReader {
     async fn finalized_head(&self) -> Result<u64, ReconciliationError> {
@@ -115,45 +111,6 @@ async fn bounded<T>(
     timeout(reader.client().request_timeout(), read)
         .await
         .map_err(|_| ChainError::Transport(reader.client().endpoint().timeout_error(operation)))?
-}
-
-/// Runs one provider read, retrying it while the provider refuses it for now.
-///
-/// A round's reads are sequential, but every task of the service starts at once and shares
-/// provider A, so the first round after a restart meets that startup burst, and a public gateway
-/// answers the excess with HTTP 429 or JSON-RPC `-32005`. Backing off within the round
-/// (exponential, equal jitter) turns such a refusal into a short delay instead of a failed check.
-/// Every other failure, and a refusal that outlasts the retries, fails the read.
-async fn backing_off<T, Read, Attempt>(mut read: Read) -> Result<T, ChainError>
-where
-    Read: FnMut() -> Attempt,
-    Attempt: Future<Output = Result<T, ChainError>>,
-{
-    let mut retry = 0;
-    loop {
-        match read().await {
-            Err(error) if error.is_rate_limited() && retry < RATE_LIMIT_RETRIES => {
-                let delay = retry_delay(retry, OsJitter.next_u64());
-                tracing::warn!(
-                    %error,
-                    retry,
-                    delay_ms = delay.as_millis(),
-                    "provider refused a reconciliation read for now; retrying"
-                );
-                tokio::time::sleep(delay).await;
-                retry += 1;
-            }
-            result => return result,
-        }
-    }
-}
-
-/// Returns a delay between half and all of the retry's ceiling, `RATE_LIMIT_BACKOFF * 2^retry`.
-fn retry_delay(retry: u32, jitter: u64) -> Duration {
-    let ceiling = RATE_LIMIT_BACKOFF.saturating_mul(2_u32.saturating_pow(retry));
-    let half = ceiling / 2;
-    let spread = u64::try_from(half.as_millis()).unwrap_or(u64::MAX);
-    half.saturating_add(Duration::from_millis(jitter % spread.saturating_add(1)))
 }
 
 #[cfg(test)]

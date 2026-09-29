@@ -28,7 +28,9 @@ use sqlx::PgPool;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{ChainReader, FinalizedHead, FinalizedReader, TransferLog};
+use topup_adapters::chain::evm::{
+    ChainError, ChainReader, FinalizedHead, FinalizedReader, TransferLog,
+};
 use topup_core::route::{ChainHeads, Confirmations};
 
 use super::{
@@ -224,7 +226,7 @@ pub(super) async fn issued_transfers<R: ChainReader>(
     addresses: &[ScanAddress],
     from_block: u64,
     to_block: u64,
-) -> Result<Vec<TransferLog>, ScannerError> {
+) -> Result<Vec<TransferLog>, ChainError> {
     if addresses.is_empty() {
         return Ok(Vec::new());
     }
@@ -234,9 +236,9 @@ pub(super) async fn issued_transfers<R: ChainReader>(
             .iter()
             .map(|address| address.address)
             .collect::<BTreeSet<_>>();
-        return Ok(reader
+        return reader
             .token_transfers(&tokens, &recipients, from_block, to_block)
-            .await?);
+            .await;
     }
     let physical = addresses
         .iter()

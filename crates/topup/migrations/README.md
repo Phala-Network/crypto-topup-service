@@ -213,3 +213,10 @@ instead of the route file: `max_open_quotes`, `max_open_minor_account`, and
 `max_active_deposit_addresses` already did, and `quotes_open_exposure_idx` indexes the open
 reserved quotes per account and mode for the exposure check. Its down migration writes the
 defaults into null caps before restoring `NOT NULL`.
+
+`20261020000000_resumable_backfill` adds `addresses.backfilled_through`, the last block through
+which the scanner committed an address's one-time backfill (architecture §8): a failed pass, a
+restart, or a provider refusal resumes the backfill after it instead of reading the address's whole
+range again, so a backfill longer than one provider budget still completes and the chain's
+finalized cursor moves on. Its down migration drops the column; an unfinished backfill then restarts
+from the address's creation block.
