@@ -2,7 +2,6 @@ import { BookOpen, Braces, Cpu, Menu, Rocket, Server, Wallet, type LucideIcon } 
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { GitHubIcon } from "./common.js";
-import phaMark from "./icons/pha.svg";
 import { ICON_BUTTON, ThemeToggle, type Theme } from "./theme.js";
 
 const REPO = "https://github.com/Phala-Network/phala-pay";
@@ -58,9 +57,8 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
   return (
     <header className="sticky top-0 z-50 border-b bg-background">
       <div className={`${CONTAINER} flex h-14 items-center justify-between gap-4`}>
-        <a href="#top" className="flex items-center gap-2 rounded-md text-[0.9375rem] font-semibold tracking-tight">
-          <Logo />
-          Phala Pay
+        <a href="#top" className="flex rounded-md">
+          <Lockup />
         </a>
         <nav aria-label="Site" className="-mr-3 flex items-center gap-1 text-muted-foreground">
           {NAV.map(({ href, label }) => (
@@ -99,9 +97,28 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
   );
 }
 
-/** Phala's "P" mark (./icons/pha.svg), the Phala Pay logo, as in the favicon and link preview. */
-function Logo() {
-  return <img src={phaMark} alt="" className="size-6 rounded-md ring-1 ring-foreground/10" />;
+/**
+ * The logo: the mark and the name in Geist SemiBold, as brand/lockup-light.svg and, with the mark's
+ * edge on the dark theme, brand/lockup-dark.svg. The edge is a 4/3-unit ring, 1 px at this 24 px
+ * mark. The name is 16 px, 7.5 px away: the gap is 6 px plus the P's side bearing. Its box is
+ * trimmed to the caps, which centres them on the mark; its line box, with Geist's ascent and
+ * descent rounded to whole pixels, put them 0.6 px high.
+ */
+function Lockup() {
+  return (
+    <span className="flex items-center gap-1.5 text-base font-semibold tracking-tight">
+      <svg viewBox="0 0 32 32" aria-hidden="true" className="size-6 shrink-0">
+        <rect width="32" height="32" rx="8" className="fill-neutral-950" />
+        <path
+          fillRule="evenodd"
+          d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 1.333A6.667 6.667 0 0 0 1.333 8V24A6.667 6.667 0 0 0 8 30.667H24A6.667 6.667 0 0 0 30.667 24V8A6.667 6.667 0 0 0 24 1.333Z"
+          className="hidden fill-white/15 dark:block"
+        />
+        <rect x="10" y="10" width="12" height="12" rx="3" className="fill-brand" />
+      </svg>
+      <span className="[text-box:trim-both_cap_alphabetic]">Phala Pay</span>
+    </span>
+  );
 }
 
 // The hero's two calls to action: one height, whatever their variant.
@@ -196,10 +213,7 @@ export function SiteFooter() {
     <footer className="border-t">
       <div className={`${CONTAINER} grid gap-10 py-16 text-sm sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]`}>
         <div>
-          <span className="flex items-center gap-2 font-semibold tracking-tight">
-            <Logo />
-            Phala Pay
-          </span>
+          <Lockup />
           <p className="mt-3 max-w-xs leading-6 text-muted-foreground">{TAGLINE}</p>
         </div>
         {FOOTER.map((column) => (

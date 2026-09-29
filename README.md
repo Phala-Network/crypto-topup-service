@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="deploy/product/web/brand/lockup-dark.svg">
+    <img alt="Phala Pay" src="deploy/product/web/brand/lockup-light.svg" height="48">
+  </picture>
+</p>
+
 # Phala Pay
 
 Self-hosted, non-custodial crypto payments API for merchants: quotes, deposit addresses, signed

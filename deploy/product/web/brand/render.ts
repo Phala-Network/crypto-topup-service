@@ -14,9 +14,11 @@ const font = readFileSync(
 const IMAGES: { source: string; output: string; size: [number, number] }[] = [
   { source: "brand/og-image.svg", output: "public/og-image.png", size: [1200, 630] },
   { source: "public/favicon.svg", output: "public/favicon-32.png", size: [32, 32] },
+  // The manifest's icons: the mark as it is, and full-bleed for Android's maskable icons.
+  { source: "brand/mark-light.svg", output: "public/icon-192.png", size: [192, 192] },
+  { source: "brand/mark-light.svg", output: "public/icon-512.png", size: [512, 512] },
+  { source: "brand/app-icon.svg", output: "public/icon-maskable-512.png", size: [512, 512] },
   { source: "brand/app-icon.svg", output: "public/apple-touch-icon.png", size: [180, 180] },
-  { source: "brand/app-icon.svg", output: "public/icon-192.png", size: [192, 192] },
-  { source: "brand/app-icon.svg", output: "public/icon-512.png", size: [512, 512] },
 ];
 
 const browser = await chromium.launch();

@@ -1,8 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-  <!-- Phala's "P" mark (public/favicon.svg), full-bleed: platforms round or mask app icons
-       themselves. The mark is scaled to 70% so it stays inside a maskable icon's safe zone. -->
-  <rect width="24" height="24" fill="#000"/>
-  <g transform="translate(3.6 3.6) scale(0.7)">
-    <path fill="#D1FF52" fill-rule="evenodd" d="M4 4h12.571v3.429H20V12h-3.429V7.429H7.43V12H4zm3.429 11.429h9.142V12H7.43zm0 0V20H4v-4.571z" clip-rule="evenodd"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- The mark full-bleed, for platforms that round or mask icons themselves (iOS; Android's
+       maskable icons). The dot keeps its 3/8 and sits well inside the maskable safe zone, the
+       centred circle of 80% diameter. -->
+  <rect width="32" height="32" fill="#0a0a0a"/>
+  <rect x="10" y="10" width="12" height="12" rx="3" fill="#cefc5d"/>
 </svg>
