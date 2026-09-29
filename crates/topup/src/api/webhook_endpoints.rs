@@ -7,15 +7,17 @@
 
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
+use axum::response::Response;
+use sqlx::PgConnection;
 
 use crate::ids;
-use crate::tenancy::Permission;
 use crate::webhook_endpoints::{self, Changes, EndpointError, NewEndpoint, Page};
 
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
+use super::idempotency::Idempotent;
 use super::metadata::{self, MetadataUpdate};
 use super::models::{
     CreateWebhookEndpointRequest, DeletedWebhookEndpoint, EventObjectResponse,
@@ -56,18 +58,17 @@ const MAX_DESCRIPTION_CHARS: usize = 5000;
 pub(crate) async fn create_webhook_endpoint(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<CreateWebhookEndpointRequest>,
-) -> ApiResult<Json<WebhookEndpointObject>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let livemode = merchant.scope.livemode();
     validate_url(&request.url, livemode, local_stack(&state))?;
     let enabled_events = validate_enabled_events(&request.enabled_events)?;
     let description = description(request.description.as_deref())?;
     let metadata = metadata::on_create(request.metadata.as_ref())?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let endpoint = webhook_endpoints::create(
-        &state.pool,
+        &mut *transaction,
         merchant.scope,
         &NewEndpoint {
             url: &request.url,
@@ -79,7 +80,8 @@ pub(crate) async fn create_webhook_endpoint(
     )
     .await
     .map_err(map_error)?;
-    rendered(&state, &endpoint).await
+    let rendered = rendered(&mut transaction, &endpoint).await?;
+    idempotent.commit(transaction, rendered).await
 }
 
 #[utoipa::path(
@@ -104,9 +106,6 @@ pub(crate) async fn list_webhook_endpoints(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<WebhookEndpointList>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsRead)
-        .await?;
     let page = parse_page(&query_pairs(query.as_deref()))?;
     let (endpoints, has_more) = webhook_endpoints::list(&state.pool, merchant.scope, page)
         .await
@@ -152,25 +151,19 @@ pub(crate) async fn get_webhook_endpoint(
     Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<WebhookEndpointObject>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsRead)
-        .await?;
     let id = ids::parse(ids::WEBHOOK_ENDPOINT, &id).ok_or_else(ApiError::not_found)?;
     let endpoint = webhook_endpoints::get(&state.pool, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    rendered(&state, &endpoint).await
+    rendered(&mut *state.pool.acquire().await?, &endpoint).await
 }
 
 /// The endpoint's API representation with its delivery health.
 async fn rendered(
-    state: &AppState,
+    connection: &mut PgConnection,
     endpoint: &webhook_endpoints::WebhookEndpoint,
 ) -> ApiResult<Json<WebhookEndpointObject>> {
-    let mut connection = state.pool.acquire().await?;
-    Ok(Json(
-        webhook_endpoints::render(&mut connection, endpoint).await?,
-    ))
+    Ok(Json(webhook_endpoints::render(connection, endpoint).await?))
 }
 
 #[utoipa::path(
@@ -203,12 +196,10 @@ async fn rendered(
 pub(crate) async fn update_webhook_endpoint(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateWebhookEndpointRequest>,
-) -> ApiResult<Json<WebhookEndpointObject>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::WEBHOOK_ENDPOINT, &id).ok_or_else(ApiError::not_found)?;
     if let Some(url) = &request.url {
         validate_url(url, merchant.scope.livemode(), local_stack(&state))?;
@@ -228,8 +219,9 @@ pub(crate) async fn update_webhook_endpoint(
         .as_ref()
         .map(MetadataUpdate::parse)
         .transpose()?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let endpoint = webhook_endpoints::update(
-        &state.pool,
+        &mut *transaction,
         merchant.scope,
         id,
         &Changes {
@@ -243,7 +235,8 @@ pub(crate) async fn update_webhook_endpoint(
     )
     .await
     .map_err(map_error)?;
-    rendered(&state, &endpoint).await
+    let rendered = rendered(&mut transaction, &endpoint).await?;
+    idempotent.commit(transaction, rendered).await
 }
 
 #[utoipa::path(
@@ -265,9 +258,6 @@ pub(crate) async fn delete_webhook_endpoint(
     Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<DeletedWebhookEndpoint>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsWrite)
-        .await?;
     let id = ids::parse(ids::WEBHOOK_ENDPOINT, &id).ok_or_else(ApiError::not_found)?;
     let endpoint = webhook_endpoints::delete(&state.pool, merchant.scope, id, &merchant.actor())
         .await
@@ -305,19 +295,19 @@ pub(crate) async fn delete_webhook_endpoint(
 pub(crate) async fn test_webhook_endpoint(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<EventObjectResponse>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::WEBHOOK_ENDPOINT, &id).ok_or_else(ApiError::not_found)?;
-    let event_id = webhook_endpoints::send_test(&state.pool, merchant.scope, id, &merchant.actor())
-        .await
-        .map_err(map_error)?;
-    super::events::find_event(&state, merchant.scope, event_id)
+    let mut transaction = idempotent.begin(&state.pool).await?;
+    let event_id =
+        webhook_endpoints::send_test(&mut *transaction, merchant.scope, id, &merchant.actor())
+            .await
+            .map_err(map_error)?;
+    let event = super::events::find_event(&mut *transaction, merchant.scope, event_id)
         .await?
-        .map(Json)
-        .ok_or_else(ApiError::internal)
+        .ok_or_else(ApiError::internal)?;
+    idempotent.commit(transaction, Json(event)).await
 }
 
 /// Whether the service's own public origin is `http`, which only local stacks use: there any

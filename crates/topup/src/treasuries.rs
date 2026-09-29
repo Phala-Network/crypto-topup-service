@@ -46,7 +46,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rand::TryRng as _;
 use rand::rngs::SysRng;
-use sqlx::{FromRow, PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{Acquire, FromRow, PgConnection, PgExecutor, PgPool, Postgres, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::EvmClient;
@@ -365,8 +365,8 @@ fn render_message(
 
 /// Issues a challenge to prove `address` as the scope's treasury on `chain_id`, valid for `ttl`:
 /// [`CHALLENGE_TTL`] for an EOA, [`CONTRACT_CHALLENGE_TTL`] for an address that holds code.
-pub async fn create_challenge(
-    pool: &PgPool,
+pub async fn create_challenge<'e>(
+    executor: impl PgExecutor<'e>,
     scope: Scope,
     account_public_id: &str,
     origin: &MessageOrigin,
@@ -409,7 +409,7 @@ pub async fn create_challenge(
     .bind(&message)
     .bind(expires_at)
     .bind(now)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(Challenge {
         nonce,
@@ -659,8 +659,8 @@ pub struct Proof {
 /// Records `proof` as the scope's treasury of its chain, using its challenge. The first treasury
 /// of a chain and any test-mode change apply at once; a later live change waits [`TIME_LOCK`].
 /// `routes` supply the chain's forwarder contracts for the deposit address networks.
-pub async fn submit(
-    pool: &PgPool,
+pub async fn submit<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     actor: &Actor,
@@ -670,7 +670,7 @@ pub async fn submit(
     let challenge = &proof.challenge;
     let chain_id =
         i64::try_from(challenge.chain_id).map_err(|_| TreasuryError::DatabaseInvariant)?;
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     lock(&mut transaction, scope, true).await?;
     let used = sqlx::query(
         "UPDATE treasury_challenges SET used_at = $2 \
@@ -753,13 +753,13 @@ pub async fn submit(
 }
 
 /// Cancels the scope's pending treasury `id`.
-pub async fn cancel(
-    pool: &PgPool,
+pub async fn cancel<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     actor: &Actor,
     id: Uuid,
 ) -> Result<Treasury, TreasuryError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     lock(&mut transaction, scope, true).await?;
     let treasury = get_in(&mut transaction, scope, id)
         .await?
@@ -787,8 +787,8 @@ pub async fn cancel(
 /// address of the scope's treasury `id`: every treasury of the scope and chain with that address
 /// changes, each audited with `reason` and announced as `treasury.updated`. A deposit held by the
 /// pause stays `pending` and is credited once no pause remains. Returns treasury `id`.
-pub(crate) async fn set_crediting_paused(
-    pool: &PgPool,
+pub(crate) async fn set_crediting_paused<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     id: Uuid,
     owner: crate::pause::PauseOwner,
@@ -796,7 +796,7 @@ pub(crate) async fn set_crediting_paused(
     actor: &Actor,
     reason: &str,
 ) -> Result<Treasury, TreasuryError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     lock(&mut transaction, scope, true).await?;
     let treasury = get_in(&mut transaction, scope, id)
         .await?

@@ -5,7 +5,7 @@ use super::AppState;
 use super::error::ApiError;
 use super::repository;
 use axum::body::{Body, to_bytes};
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -13,14 +13,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
-use sqlx::PgPool;
 use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
 use zeroize::Zeroizing;
 
-use crate::api_keys::{self, ApiKey, KeyKind, Rejection};
+use crate::api_keys::{self, ApiKey, Rejection};
 use crate::audit::{Actor, RequestRef};
 use crate::db::Account;
-use crate::tenancy::{self, Permission, Principal, Scope};
+use crate::tenancy::Scope;
 
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -67,24 +66,6 @@ impl Merchant {
     pub(crate) fn actor(&self) -> Actor {
         self.key.actor().with_request(self.request.clone())
     }
-
-    /// Fails with `403 permission_denied` unless the authorization table grants `permission` to
-    /// the key's kind and, for a restricted key, the key was granted it.
-    pub(crate) async fn require(
-        &self,
-        pool: &PgPool,
-        permission: Permission,
-    ) -> Result<(), ApiError> {
-        let principal = match self.key.kind {
-            KeyKind::Secret => Principal::SecretKey,
-            KeyKind::Restricted => Principal::RestrictedKey,
-        };
-        if self.key.granted(permission) && tenancy::holds(pool, principal, permission).await? {
-            Ok(())
-        } else {
-            Err(ApiError::permission_denied())
-        }
-    }
 }
 
 /// Authenticates a merchant request by its `Authorization: Bearer ppay_sk_…` or `ppay_rk_…` key
@@ -126,6 +107,28 @@ pub async fn authenticate_merchant(
         request: request_ref,
     });
     next.run(request).await
+}
+
+/// Refuses a merchant request whose key does not hold the permission its route requires
+/// (`ROUTE_PERMISSIONS`) with `403 permission_denied`. It runs after authentication and before
+/// the idempotency layer, so a refused request neither replays nor saves a result. A request by
+/// `client_secret`, without a merchant, passes to the public view its route serves.
+pub async fn authorize(request: Request, next: Next) -> Response {
+    let Some(merchant) = request.extensions().get::<Merchant>() else {
+        return next.run(request).await;
+    };
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    match path.and_then(|path| super::required_permission(request.method(), path)) {
+        Some(permission) if merchant.key.holds(permission) => next.run(request).await,
+        Some(_) => ApiError::permission_denied().into_response(),
+        None => {
+            tracing::error!(?path, method = %request.method(), "route declares no permission");
+            ApiError::permission_denied().into_response()
+        }
+    }
 }
 
 /// Passes a request without `Authorization` that carries a `client_secret` query parameter to

@@ -1331,12 +1331,16 @@ up to 255 characters, kept per account and mode for 24 hours. As Stripe's, the r
 the request starts executing, whatever it is: a repeat of the same request (method, path, and body)
 returns the first response again with `Idempotent-Replayed: true`, a `400` or a `500` included, so
 a retry after a failure whose effects you cannot see never runs the request twice. A request that
-did not execute is not saved, and a retry with its key runs it: one that failed validation
-(`parameter_*`), was rate limited (`429`), or met `503 unavailable`. The same key with another
+did not execute is not saved, and a retry with its key runs it: one refused by authentication or
+by the key's permissions (`401`, `403`), one that failed validation (`parameter_*`), was rate
+limited (`429`), or met `503 unavailable`; a key never replays a response to a request it may not
+make. The same key with another
 request is `400 idempotency_key_reused` (`type: idempotency_error`); a repeat while the first
 request still runs is `409 idempotency_key_in_use`, retry with the same key. Without a key every
-`POST` runs. A quote is created with its `client_secret` in one transaction: a failure after it
-was created is saved and replayed, never a second quote. A replayed key creation or roll returns the key without
+`POST` runs. The response is saved in the same transaction as the request's changes, so a retry
+after a lost response or a crash replays it and never creates a second quote, refund, key, or
+endpoint; a request still running after a minute loses its key to a repeat of it, which runs it,
+and then answers `409 idempotency_key_in_use` without changing anything. A replayed key creation or roll returns the key without
 its `secret`, which is never stored: roll again if the first response was lost. Canceling a
 canceled quote and revoking a revoked key return it unchanged. Updating metadata is
 idempotent by its merge: sending the same `metadata` again leaves the object unchanged.

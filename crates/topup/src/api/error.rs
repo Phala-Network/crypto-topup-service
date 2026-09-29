@@ -265,8 +265,8 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
 ];
 
 /// Marks an error response to a request no handler executed, which an `Idempotency-Key` does not
-/// save: a request that failed validation (`parameter_*`), was rate limited, or met a temporary
-/// unavailability, so a retry with the same key runs it (Stripe: "Results are only saved if an
+/// save: a request that failed authentication, authorization, or validation (`parameter_*`), was
+/// rate limited, or met a temporary unavailability, so a retry with the same key runs it (Stripe: "Results are only saved if an
 /// API endpoint started executing", <https://docs.stripe.com/api/idempotent_requests>).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NotExecuted;
@@ -871,6 +871,8 @@ impl ApiError {
     /// not save ([`NotExecuted`]).
     fn not_executed(&self) -> bool {
         self.detail.code.starts_with("parameter_")
+            || self.status == StatusCode::UNAUTHORIZED
+            || self.status == StatusCode::FORBIDDEN
             || self.status == StatusCode::TOO_MANY_REQUESTS
             || self.status == StatusCode::SERVICE_UNAVAILABLE
     }

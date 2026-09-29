@@ -199,7 +199,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D10 | Treasury | Set through the API with an EIP-4361 proof (EOA) or EIP-1271 (deployed Safe); live changes time-locked 48 h, cancellable, announced as events | EIP-4361, EIP-1271; timelock; Stripe `account.external_account.updated` |
 | D11 | Webhooks | Standard Webhooks `v1a` with one key **per account and mode**; endpoints per account; retries until delivered, never auto-disabled (owner decision, 2026-09-28); only `410 Gone` or the merchant stops an endpoint | Standard Webhooks; Stripe endpoints |
 | D12 | Go-live | The operator sets `charges_enabled` when creating the account (or later, same endpoint); third parties only after legal sign-off | Stripe `charges_enabled` |
-| D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; one authorization table; per-account limits | Stripe rate limits; OWASP authorization |
+| D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; each route's required permission declared with the routes; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 | D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
 | D16 | Deposit addresses | One persistent, rotatable address per customer for every supported token on every chain (owner's decision, 2026-09-28), the same address wherever the treasury is the same; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
@@ -565,8 +565,8 @@ is the merchant's own record, so no `cus_` object is added.
   [GitHub](https://docs.github.com/en/authentication/securing-your-account-with-two-factor-authentication-2fa/recovering-your-account-if-you-lose-your-2fa-credentials)).
   The merchant rolls every operator-issued key on receipt, so no one at Phala holds a working key.
 - Restricted keys `ppay_rk_…` (PR 12, pulled into the launch set by the launch hardening
-  amendment) hold the permissions they are created with, a `write` including its `read`, sharing
-  the authorization table below; they never hold `api_keys.write`, `treasury.write`,
+  amendment) hold the permissions they are created with, a `write` including its `read`, within
+  what their kind holds (D13); they never hold `api_keys.write`, `treasury.write`,
   `endpoints.write`, or `account.write`.
 
 RFC 9421 request signing is removed for merchants: every SDK and language needed signing,
@@ -598,10 +598,15 @@ a Stripe-hosted Dashboard" (`controller.stripe_dashboard.type = none`,
 
 ### D13: authorization and scoping
 
-- **One authorization table** maps each permission (`quotes.write`, `refunds.write`,
-  `treasury.write`, `api_keys.write`, `endpoints.write`, `account.write`, reads) to the key kinds
-  that hold it: secret keys hold every permission; restricted keys (PR 12) hold a granted subset.
-  There are no roles.
+- **Permissions per route.** Each merchant route declares the permission it requires
+  (`quotes.write`, `refunds.write`, `treasury.write`, `api_keys.write`, `endpoints.write`,
+  `account.write`, reads) where the routes are declared, and the request is authorized after
+  authentication and before the idempotency layer (§13), as Stripe checks a key's permissions
+  before an idempotent replay. Secret keys hold every permission; restricted keys (PR 12) hold a
+  granted subset, never `api_keys.write`, `treasury.write`, `endpoints.write`, or
+  `account.write`. There are no roles. The two key kinds' permissions are fixed, so they are code
+  (`crate::tenancy::Principal`), not a table only migrations could change; the `permissions` table
+  was dropped (2026-09-29).
 - **Scope.** Every merchant query takes `Scope { account_id, livemode }`, built by the server
   from the key and checked on every request. A client-supplied account id is never trusted (OWASP
   [IDOR](https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html)).
@@ -771,7 +776,11 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
 
 - **Idempotency.** Every `POST` accepts `Idempotency-Key`, kept per `(account, livemode, key)`
   with a fingerprint and the response for 24 hours; a different request with the same key is
-  `400 idempotency_error` ([Stripe](https://docs.stripe.com/api/idempotent_requests)).
+  `400 idempotency_error` ([Stripe](https://docs.stripe.com/api/idempotent_requests)). The
+  response is saved in the transaction of the request's changes, and a key whose request never
+  saved one is taken over under a new owner that fences the first request out (Brandur Leach,
+  [Stripe-like idempotency keys in Postgres](https://brandur.org/idempotency-keys);
+  architecture §12).
 - **Audit log via the API.** The merchant's audit log is `GET /v1/events` (filterable by `type`):
   every key, endpoint, treasury, policy, pause, and operator action on the account is an event
   (§11) carrying its `actor` (an API key id, `admin`, or `system`). One mechanism serves both
@@ -849,7 +858,6 @@ confirmation_policies account_id, chain_id, required (depth | safe | finalized)
 account_limits  account_id, livemode, max_open_quotes, max_open_minor_account,
                 max_open_minor_customer, max_active_deposit_addresses
                                                                   PRIMARY KEY (account_id, livemode)
-permissions     permission, principal (key:secret | key:restricted)   -- the one table (§7)
 api_keys        id, account_id, livemode, kind, name, permissions jsonb, prefix, last4,
                 key_hash UNIQUE, created_by (api key id | admin), created_at, expires_at,
                 last_used_at, revoked_at
@@ -877,7 +885,7 @@ webhook_endpoints id (we_…), account_id, livemode, url, enabled_events text[],
 events          id (evt_…), account_id, livemode, type, object_type, object_id, actor, data jsonb, created
 webhook_deliveries event_id, endpoint_id, next_attempt_at, attempts, delivered_at, response jsonb
                 PRIMARY KEY (event_id, endpoint_id)
-idempotency_keys account_id, livemode, key, fingerprint, response jsonb, created_at
+idempotency_keys account_id, livemode, key, fingerprint, owner, response jsonb, created_at
                 PRIMARY KEY (account_id, livemode, key)      -- pruned after 24 h
 audit           id, account_id, actor_type (api_key|admin|system), actor_id, action, subject,
                 reason, created_at

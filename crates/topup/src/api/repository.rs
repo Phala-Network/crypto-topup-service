@@ -11,7 +11,7 @@ use alloy_primitives::{Address as EvmAddress, B256, U256};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgPool, Postgres, Row};
+use sqlx::{Acquire, FromRow, PgPool, Postgres, Row};
 use topup_core::money::AtomicAmount;
 use topup_core::refund::{RefundDeposit, refund_eligibility};
 use topup_core::route::RouteFile;
@@ -414,12 +414,12 @@ pub struct NewRefund<'a> {
 /// and refundable, nothing pauses refunds, and the amount fits the deposit's remainder after its
 /// pending and succeeded refunds, which it then reserves. Audited, and announced as
 /// `refund.created`.
-pub async fn request_refund(
-    pool: &PgPool,
+pub async fn request_refund<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     refund: &NewRefund<'_>,
 ) -> Result<Uuid, ApiError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
@@ -538,8 +538,8 @@ fn refund_subject(refund_id: Uuid) -> String {
 /// it at finality. Repeating the same transaction is a no-op; another one is
 /// `refund_unexpected_state`, since only the verification outcome ends a refund with a
 /// transaction attached. Audited, and announced as `refund.updated`.
-pub async fn mark_refund_paid(
-    pool: &PgPool,
+pub async fn mark_refund_paid<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     refund_id: Uuid,
@@ -547,7 +547,7 @@ pub async fn mark_refund_paid(
     receipt_log_index: Option<u64>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let (status, current_hash, current_log) = locked_refund(&mut transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -617,14 +617,14 @@ pub async fn mark_refund_paid(
 /// canceled refund is a no-op. Once `mark_paid` attached a transaction, the refund stays reserved
 /// until verification ends it, so that the merchant cannot pay the deposit back twice. Audited,
 /// and announced as `refund.updated`.
-pub async fn cancel_refund(
-    pool: &PgPool,
+pub async fn cancel_refund<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     refund_id: Uuid,
     actor: &Actor,
 ) -> Result<(), ApiError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let (status, tx_hash, _) = locked_refund(&mut transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;

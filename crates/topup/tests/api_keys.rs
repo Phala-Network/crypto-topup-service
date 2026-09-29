@@ -852,8 +852,8 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
         // minute; after 24 hours a key may be used for anything.
         let before = count().await?;
         sqlx::query(
-            "INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint) \
-             VALUES ($1, false, 'running', $2)",
+            "INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint, owner) \
+             VALUES ($1, false, 'running', $2, gen_random_uuid())",
         )
         .bind(account)
         .bind(vec![0_u8; 32])
@@ -901,6 +901,154 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
         .fetch_one(pool)
         .await?;
         ensure!(pruned == 0);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// A request's changes and its saved response commit in one transaction (Brandur Leach,
+/// "Implementing Stripe-like Idempotency Keys in Postgres"): when the response cannot be saved,
+/// nothing is created, and a repeat after the takeover interval runs the request once. A
+/// response the client never received is replayed, never run again.
+#[tokio::test]
+async fn a_saved_result_commits_with_the_changes_it_reports() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits::default())?;
+        let (account, key) = seed_test_account(pool, "atomic").await?;
+        let body = json!({"name": "atomic"});
+        let create = || {
+            harness.merchant(
+                Method::POST,
+                "/v1/api_keys",
+                Some(&body),
+                &key,
+                Some("atomic"),
+            )
+        };
+        let count = || async {
+            anyhow::Ok(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_keys WHERE account_id = $1")
+                    .bind(account)
+                    .fetch_one(pool)
+                    .await?,
+            )
+        };
+        let age_key = || async {
+            sqlx::query(
+                "UPDATE idempotency_keys SET created_at = now() - interval '2 minutes' \
+                 WHERE account_id = $1 AND key = 'atomic'",
+            )
+            .bind(account)
+            .execute(pool)
+            .await
+        };
+        let before = count().await?;
+
+        // Saving the response fails, as when the process stops before it: the key the request
+        // created is rolled back with it, and the request keeps holding its idempotency key.
+        for statement in [
+            "CREATE FUNCTION fail_save() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'response not saved'; END $$",
+            "CREATE TRIGGER fail_save BEFORE UPDATE ON idempotency_keys FOR EACH ROW \
+             WHEN (NEW.response IS NOT NULL) EXECUTE FUNCTION fail_save()",
+        ] {
+            sqlx::query(statement).execute(&database.owner_pool).await?;
+        }
+        let failed = create().await?;
+        ensure!(
+            failed.status == StatusCode::INTERNAL_SERVER_ERROR,
+            "{}",
+            failed.body
+        );
+        ensure!(
+            count().await? == before,
+            "nothing commits without its saved response"
+        );
+        sqlx::query("DROP FUNCTION fail_save() CASCADE")
+            .execute(&database.owner_pool)
+            .await?;
+        let in_use = create().await?;
+        ensure!(in_use.status == StatusCode::CONFLICT, "{}", in_use.body);
+        ensure!(count().await? == before);
+
+        // After the takeover interval the repeat runs the request, once.
+        age_key().await?;
+        let ran = create().await?;
+        ensure!(ran.status == StatusCode::OK, "{}", ran.body);
+        ensure!(!ran.headers.contains_key("idempotent-replayed"));
+        ensure!(count().await? == before + 1);
+
+        // Its response is lost on the way back: a repeat, however late, replays it.
+        age_key().await?;
+        let replayed = create().await?;
+        ensure!(replayed.status == StatusCode::OK, "{}", replayed.body);
+        ensure!(replayed.headers["idempotent-replayed"] == "true");
+        ensure!(replayed.body["id"] == ran.body["id"]);
+        ensure!(count().await? == before + 1, "the request ran once");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Authorization runs before the idempotency layer, as Stripe's: a restricted key cannot replay
+/// the response to a request it may not make, and its `403` does not take the key, so the same
+/// request by a secret key then runs.
+#[tokio::test]
+async fn authorization_runs_before_an_idempotent_replay() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits::default())?;
+        let (_, key) = seed_test_account(pool, "authorized").await?;
+        let restricted = harness
+            .merchant(
+                Method::POST,
+                "/v1/api_keys",
+                Some(&json!({"type": "restricted", "permissions": ["quotes.read"]})),
+                &key,
+                None,
+            )
+            .await?;
+        ensure!(restricted.status == StatusCode::OK, "{}", restricted.body);
+        let restricted = secret(&restricted.body)?;
+        let create = |name: &'static str, key: String, idempotency_key: &'static str| {
+            let harness = &harness;
+            async move {
+                harness
+                    .merchant(
+                        Method::POST,
+                        "/v1/api_keys",
+                        Some(&json!({"name": name})),
+                        &key,
+                        Some(idempotency_key),
+                    )
+                    .await
+            }
+        };
+
+        let created = create("ci", key.clone(), "shared").await?;
+        ensure!(created.status == StatusCode::OK, "{}", created.body);
+        let refused = create("ci", restricted.clone(), "shared").await?;
+        ensure!(refused.status == StatusCode::FORBIDDEN, "{}", refused.body);
+        ensure!(refused.body["error"]["code"] == "permission_denied");
+        ensure!(!refused.headers.contains_key("idempotent-replayed"));
+
+        let denied = create("later", restricted, "fresh").await?;
+        ensure!(denied.status == StatusCode::FORBIDDEN, "{}", denied.body);
+        let ran = create("later", key.clone(), "fresh").await?;
+        ensure!(ran.status == StatusCode::OK, "{}", ran.body);
+        ensure!(!ran.headers.contains_key("idempotent-replayed"));
+        ensure!(ran.body["name"] == "later" && ran.body.get("secret").is_some());
         Ok(())
     }
     .await;
@@ -985,21 +1133,6 @@ async fn restricted_keys_hold_only_their_grants() -> Result<()> {
         };
         let harness = Harness::new(pool, limits)?;
         let (account, key) = seed_test_account(pool, "restricted").await?;
-
-        // The authorization table never grants the management writes to restricted keys.
-        let held: Vec<String> = sqlx::query_scalar(
-            "SELECT permission FROM permissions WHERE principal = 'key:restricted' ORDER BY 1",
-        )
-        .fetch_all(pool)
-        .await?;
-        for management in [
-            "account.write",
-            "api_keys.write",
-            "endpoints.write",
-            "treasury.write",
-        ] {
-            ensure!(!held.iter().any(|code| code == management), "{held:?}");
-        }
 
         let create = |body: Value| {
             let harness = &harness;

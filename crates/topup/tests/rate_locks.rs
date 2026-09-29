@@ -14,6 +14,7 @@ use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row as _;
+use tokio::sync::Notify;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::audit::Actor;
 use topup::db::{Account, Customer};
@@ -58,11 +59,12 @@ impl QuoteProvider for FixedQuote {
     }
 }
 
-/// A quote is created with its `client_secret` in one transaction, and a request that failed
-/// after creating it is replayed as it failed: a retry with the same `Idempotency-Key` never
-/// creates a second quote (Stripe saves the result of every executed request, including a `500`).
+/// A quote is created with its `client_secret` and its saved response in one transaction, so a
+/// request that failed while rendering its response created nothing, and is replayed as it
+/// failed: a retry with the same `Idempotency-Key` never creates a quote (Stripe saves the result
+/// of every executed request, including a `500`).
 #[tokio::test]
-async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote() -> Result<()> {
+async fn a_failure_before_the_response_is_saved_creates_no_quote_and_is_replayed() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -99,7 +101,7 @@ async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote()
                 "create-once",
             ))
         };
-        // Rendering the response fails after the quote is committed.
+        // Rendering the response fails after the quote is inserted.
         sqlx::query("REVOKE SELECT ON pending_transfers FROM topup_app")
             .execute(&database.owner_pool)
             .await?;
@@ -120,9 +122,106 @@ async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote()
         .fetch_one(&database.app_pool)
         .await?;
         ensure!(
-            count == 1 && with_secret == 1,
+            count == 0 && with_secret == 0,
             "{count} quotes, {with_secret} with a secret"
         );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Prices at [`FixedQuote`], the first call only once released.
+struct FirstQuoteWaits {
+    calls: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl QuoteProvider for FirstQuoteWaits {
+    async fn quote(&self, route: &RouteFile) -> Result<ValidatedQuote, Value> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        FixedQuote.quote(route).await
+    }
+}
+
+/// A request slower than the takeover interval is fenced once a repeat takes its key over: the
+/// repeat creates the quote, and the slow request, resuming after its price fetch, can no longer
+/// commit, so one quote exists and every later repeat replays it.
+#[tokio::test]
+async fn a_takeover_fences_the_slow_request_it_replaced() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let admin_key = SigningKey::from_bytes(&[45; 32]);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        seed_account(&database.app_pool, product.id, "slow").await?;
+        let quotes = Arc::new(FirstQuoteWaits {
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let app = topup::api::router(AppState {
+            pool: database.app_pool.clone(),
+            routes: Arc::new(test_routes()),
+            admin_key: VerificationKey::from_base64(
+                ADMIN_KID.to_owned(),
+                &public_key_base64(&admin_key),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: quotes.clone(),
+            client_reads: Arc::default(),
+            rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        })
+        .0;
+        let create = || -> Result<_> {
+            Ok(merchant_request_with_key(
+                Method::POST,
+                "/v1/quotes",
+                serde_json::to_vec(&json!({
+                    "client_reference_id": "slow", "amount": 100, "currency": "usd",
+                    "chain_id": 1, "asset": "pha"
+                }))?,
+                &product_key,
+                "slow",
+            ))
+        };
+
+        let slow = tokio::spawn(app.clone().oneshot(create()?));
+        quotes.entered.notified().await;
+        sqlx::query(
+            "UPDATE idempotency_keys SET created_at = now() - interval '2 minutes' \
+             WHERE key = 'slow'",
+        )
+        .execute(&database.app_pool)
+        .await?;
+        let repeat = app.clone().oneshot(create()?).await?;
+        ensure!(repeat.status() == StatusCode::OK);
+        ensure!(repeat.headers().get("idempotent-replayed").is_none());
+        let created = response_json(repeat).await?;
+
+        quotes.release.notify_one();
+        let fenced = slow.await??;
+        ensure!(fenced.status() == StatusCode::CONFLICT);
+        ensure!(response_json(fenced).await?["error"]["code"] == "idempotency_key_in_use");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM quotes WHERE account_id = $1")
+            .bind(product.id)
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(count == 1, "{count} quotes");
+        let replayed = app.clone().oneshot(create()?).await?;
+        ensure!(replayed.headers()["idempotent-replayed"] == "true");
+        ensure!(response_json(replayed).await?["id"] == created["id"]);
         Ok(())
     }
     .await;

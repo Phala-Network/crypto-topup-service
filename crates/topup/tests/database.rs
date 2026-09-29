@@ -179,112 +179,6 @@ async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> 
     .await
 }
 
-/// The one authorization table (design D13): key kinds only. Secret keys hold every permission;
-/// restricted keys may be granted all but `api_keys.write` and `treasury.write`.
-#[tokio::test]
-async fn the_authorization_table_grants_key_kinds_as_designed() -> Result<()> {
-    with_database(|context| {
-        Box::pin(async move {
-            let rows: Vec<(String, String)> =
-                sqlx::query_as("SELECT principal, permission FROM permissions")
-                    .fetch_all(&context.app_pool)
-                    .await?;
-            let held = |principal: &str| -> std::collections::BTreeSet<&str> {
-                rows.iter()
-                    .filter(|(holder, _)| holder == principal)
-                    .map(|(_, permission)| permission.as_str())
-                    .collect()
-            };
-            let all: std::collections::BTreeSet<&str> = rows
-                .iter()
-                .map(|(_, permission)| permission.as_str())
-                .collect();
-            ensure!(
-                rows.iter().all(
-                    |(principal, _)| principal == "key:secret" || principal == "key:restricted"
-                ),
-                "no roles remain"
-            );
-            let (secret, restricted) = (held("key:secret"), held("key:restricted"));
-            ensure!(secret == all);
-            let expected: std::collections::BTreeSet<&str> = all
-                .iter()
-                .copied()
-                .filter(|permission| {
-                    ![
-                        "api_keys.write",
-                        "treasury.write",
-                        "endpoints.write",
-                        "account.write",
-                    ]
-                    .contains(permission)
-                })
-                .collect();
-            ensure!(restricted == expected, "{restricted:?}");
-            // Every code in the table is a permission the service knows.
-            ensure!(
-                all.iter()
-                    .all(|code| topup::tenancy::Permission::parse(code).is_some()),
-                "{all:?}"
-            );
-            for permission in [
-                "quotes.write",
-                "refunds.write",
-                "deposits.read",
-                "deposit_addresses.read",
-                "deposit_addresses.write",
-                "endpoints.write",
-                "api_keys.read",
-                "api_keys.write",
-                "treasury.write",
-                "account.write",
-            ] {
-                ensure!(secret.contains(permission), "{permission}");
-            }
-            for removed in [
-                "keys.write",
-                "members.write",
-                "audit.read",
-                "ownership.write",
-            ] {
-                ensure!(!all.contains(removed), "{removed}");
-            }
-
-            // The service reads the table and checks it through `tenancy::holds`.
-            use topup::tenancy::{Permission, Principal, holds};
-            ensure!(
-                holds(
-                    &context.app_pool,
-                    Principal::SecretKey,
-                    Permission::ApiKeysWrite
-                )
-                .await?
-            );
-            ensure!(
-                !holds(
-                    &context.app_pool,
-                    Principal::RestrictedKey,
-                    Permission::ApiKeysWrite
-                )
-                .await?
-            );
-            // The migrations own it: the service cannot grant itself a permission.
-            assert_sqlstate(
-                sqlx::query(
-                    "INSERT INTO permissions (permission, principal) \
-                     VALUES ('members.write', 'key:secret')",
-                )
-                .execute(&context.app_pool)
-                .await
-                .err(),
-                "42501",
-            )?;
-            Ok(())
-        })
-    })
-    .await
-}
-
 #[tokio::test]
 async fn restore_check_accepts_a_current_schema_and_fresh_heartbeat() -> Result<()> {
     with_database(|context| {
@@ -623,7 +517,6 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("restores", &["SELECT", "INSERT", "UPDATE"]),
     ("restore_delivered_events", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),
-    ("permissions", &["SELECT"]),
     ("accounts", OPERATIONAL),
     ("confirmation_policies", OPERATIONAL),
     ("account_limits", OPERATIONAL),

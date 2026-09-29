@@ -610,6 +610,19 @@ happens only from two-provider finalized data.
 
 ### Fixed
 
+- Idempotent requests are atomic (architecture §12; Brandur Leach's
+  [Stripe-like idempotency keys in Postgres](https://brandur.org/idempotency-keys)): every
+  merchant `POST` saves its response in the transaction of its changes, so a retry after a crash,
+  a dropped connection, or a request slower than a minute replays the result and never runs the
+  request twice (a quote, a partial refund, an API key, a webhook endpoint, or a webhook key roll
+  was created twice before). A key whose request never saved a response is still taken over by the
+  same request after a minute, and the request it replaced can no longer commit: it answers
+  `409 idempotency_key_in_use`. A failure while rendering a response now creates nothing and is
+  replayed as it failed (a quote was created before).
+- Authorization runs before the idempotency lookup, as Stripe's: a restricted key no longer
+  replays a response to a request its permissions refuse, and a `401` or `403` is no longer saved,
+  so the same request by a key that holds the permission then runs.
+
 - A token without a route sent to an issued address is again recorded as
   `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block
   scanning change, routes in token mode (the default) never saw such transfers: the missing-deposit

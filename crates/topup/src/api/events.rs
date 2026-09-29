@@ -4,20 +4,22 @@
 
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
+use axum::response::Response;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgExecutor, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::ids;
 use crate::outbox::webhook_id;
-use crate::tenancy::{Permission, Scope};
+use crate::tenancy::Scope;
 use crate::webhook_endpoints;
 
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
+use super::idempotency::Idempotent;
 use super::models::{EventData, EventList, EventObjectResponse, EventRequest, ResendEventRequest};
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -69,9 +71,6 @@ pub(crate) async fn list_events(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<EventList>> {
-    merchant
-        .require(&state.pool, Permission::EventsRead)
-        .await?;
     let filter = parse_filter(&query_pairs(query.as_deref()))?;
     let mut builder = select(merchant.scope);
     if !filter.types.is_empty() {
@@ -182,11 +181,8 @@ pub(crate) async fn get_event(
     Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<EventObjectResponse>> {
-    merchant
-        .require(&state.pool, Permission::EventsRead)
-        .await?;
     let id = ids::parse(ids::EVENT, &id).ok_or_else(ApiError::not_found)?;
-    find_event(&state, merchant.scope, id)
+    find_event(&state.pool, merchant.scope, id)
         .await?
         .map(Json)
         .ok_or_else(ApiError::not_found)
@@ -224,17 +220,16 @@ pub(crate) async fn get_event(
 pub(crate) async fn resend_event(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<ResendEventRequest>,
-) -> ApiResult<Json<EventObjectResponse>> {
-    merchant
-        .require(&state.pool, Permission::EndpointsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let event_id = ids::parse(ids::EVENT, &id).ok_or_else(ApiError::not_found)?;
     let endpoint_id = ids::parse(ids::WEBHOOK_ENDPOINT, &request.webhook_endpoint)
         .ok_or_else(|| ApiError::not_found().with_param("webhook_endpoint"))?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     webhook_endpoints::resend(
-        &state.pool,
+        &mut *transaction,
         merchant.scope,
         event_id,
         endpoint_id,
@@ -247,15 +242,15 @@ pub(crate) async fn resend_event(
         }
         error => super::webhook_endpoints::map_error(error),
     })?;
-    find_event(&state, merchant.scope, event_id)
+    let event = find_event(&mut *transaction, merchant.scope, event_id)
         .await?
-        .map(Json)
-        .ok_or_else(ApiError::not_found)
+        .ok_or_else(ApiError::not_found)?;
+    idempotent.commit(transaction, Json(event)).await
 }
 
 /// The scope's event `id` as the API shows it.
-pub(crate) async fn find_event(
-    state: &AppState,
+pub(crate) async fn find_event<'e>(
+    executor: impl PgExecutor<'e>,
     scope: Scope,
     id: Uuid,
 ) -> ApiResult<Option<EventObjectResponse>> {
@@ -263,7 +258,7 @@ pub(crate) async fn find_event(
     builder.push(" AND event.id = ").push_bind(id);
     let row = builder
         .build_query_as::<EventRow>()
-        .fetch_optional(&state.pool)
+        .fetch_optional(executor)
         .await?;
     row.map(event_object).transpose()
 }

@@ -23,14 +23,14 @@ use chrono::{DateTime, Duration, Utc};
 use rand::TryRng as _;
 use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::audit::{self, Actor, ActorType};
 use crate::db::Account;
 use crate::ids;
-use crate::tenancy::{self, Permission, Principal, Scope};
+use crate::tenancy::{Permission, Principal, Scope};
 
 /// Base62 characters of the random part.
 const RANDOM_CHARS: usize = 43;
@@ -213,13 +213,19 @@ impl ApiKey {
         Scope::new(self.account_id, self.livemode)
     }
 
-    /// Whether the key's own grants include `permission`: always for a secret key. The
-    /// authorization table must grant it to the key's kind as well.
+    /// Whether the key holds `permission`: its kind holds it and, for a restricted key, its own
+    /// grants include it.
     #[must_use]
-    pub fn granted(&self, permission: Permission) -> bool {
-        self.permissions
-            .as_ref()
-            .is_none_or(|granted| granted.contains(&permission))
+    pub fn holds(&self, permission: Permission) -> bool {
+        let principal = match self.kind {
+            KeyKind::Secret => Principal::SecretKey,
+            KeyKind::Restricted => Principal::RestrictedKey,
+        };
+        principal.holds(permission)
+            && self
+                .permissions
+                .as_ref()
+                .is_none_or(|granted| granted.contains(&permission))
     }
 }
 
@@ -478,14 +484,14 @@ pub async fn get<'e>(
 
 /// Issues a secret key in `scope` named `name`, with its audit row and `api_key.created` event,
 /// in one transaction. A live key needs an account enabled for live mode.
-pub async fn create(
-    pool: &PgPool,
+pub async fn create<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     name: &str,
     actor: &Actor,
     reason: &str,
 ) -> Result<IssuedKey, ApiKeyError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let issued = create_in(&mut transaction, scope, name, actor, reason).await?;
     transaction.commit().await?;
     Ok(issued)
@@ -561,20 +567,19 @@ pub(crate) async fn create_in(
     Ok(issued)
 }
 
-/// Issues a restricted key in `scope` named `name` holding `permissions`, each a permission the
-/// authorization table grants to restricted keys; a `write` grant includes its resource's `read`.
+/// Issues a restricted key in `scope` named `name` holding `permissions`, each a permission a
+/// restricted key may hold; a `write` grant includes its resource's `read`.
 /// Audited and announced as `api_key.created`.
-pub async fn create_restricted(
-    pool: &PgPool,
+pub async fn create_restricted<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     name: &str,
     permissions: &[Permission],
     actor: &Actor,
 ) -> Result<IssuedKey, ApiKeyError> {
-    let grantable = tenancy::grants(pool, Principal::RestrictedKey).await?;
     let mut granted = Vec::with_capacity(permissions.len().saturating_mul(2));
     for permission in permissions {
-        if !grantable.contains(permission) {
+        if !Principal::RestrictedKey.holds(*permission) {
             return Err(ApiKeyError::PermissionNotGrantable(
                 permission.code().to_owned(),
             ));
@@ -587,7 +592,7 @@ pub async fn create_restricted(
     }
     granted.sort_by_key(|permission| permission.code());
     granted.dedup();
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let charges_enabled: bool =
         sqlx::query_scalar("SELECT charges_enabled FROM accounts WHERE id = $1 FOR SHARE")
             .bind(scope.account_id())
@@ -621,8 +626,8 @@ pub async fn create_restricted(
 
 /// Rolls the scope's key `id`: a new key of the same kind, name, and permissions, and the old key
 /// expiring after `expires_in` (at most 7 days), or revoked at once for zero.
-pub async fn roll(
-    pool: &PgPool,
+pub async fn roll<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     id: Uuid,
     expires_in: Duration,
@@ -631,7 +636,7 @@ pub async fn roll(
     if expires_in < Duration::zero() || expires_in > MAX_ROLL_EXPIRY {
         return Err(ApiKeyError::InvalidExpiry);
     }
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let old = locked_key(&mut transaction, scope, id).await?;
     if old.revoked_at.is_some() || old.expires_at.is_some() {
         return Err(ApiKeyError::Inactive);

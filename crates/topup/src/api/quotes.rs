@@ -13,7 +13,7 @@ use crate::db::{Account, Customer};
 use crate::ids;
 use crate::locks::{self, RateLock, RateLockError, RateLockStatus};
 use crate::routes::RouteSet;
-use crate::tenancy::{Permission, Scope};
+use crate::tenancy::Scope;
 
 use super::AppState;
 use super::auth::Merchant;
@@ -21,6 +21,7 @@ use super::client_limit;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::ensure_customer;
+use super::idempotency::Idempotent;
 use super::metadata::{self, Object};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteList,
@@ -48,9 +49,6 @@ pub(crate) async fn get_config(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
 ) -> ApiResult<Json<Config>> {
-    merchant
-        .require(&state.pool, Permission::AccountRead)
-        .await?;
     let routes = state
         .routes
         .current_in(merchant.scope.livemode())
@@ -142,11 +140,9 @@ pub(crate) async fn get_config(
 pub(crate) async fn create_quote(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<CreateQuoteRequest>,
-) -> ApiResult<Json<Quote>> {
-    merchant
-        .require(&state.pool, Permission::QuotesWrite)
-        .await?;
+) -> ApiResult<Response> {
     if request.currency != "usd" {
         return Err(ApiError::invalid_param("currency", "currency must be usd"));
     }
@@ -178,21 +174,31 @@ pub(crate) async fn create_quote(
     if has_quotes_pause(&merchant.account, &customer, &route_scopes) {
         return Err(ApiError::paused("quotes are paused"));
     }
-    let (lock, client_secret) = locks::create(
+    let priced = locks::price(
         &state.pool,
         &state.rate_lock_quotes,
-        state.client_reads.key(),
         &merchant.account,
         &customer,
         route,
         credit,
+    )
+    .await
+    .map_err(map_error)?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
+    let (lock, client_secret) = locks::create_in(
+        &mut transaction,
+        state.client_reads.key(),
+        &merchant.account,
+        &customer,
+        route,
+        &priced,
         &metadata,
     )
     .await
     .map_err(map_error)?;
-    let mut quote = quote_object(&mut *state.pool.acquire().await?, &state.routes, lock).await?;
+    let mut quote = quote_object(&mut transaction, &state.routes, lock).await?;
     quote.client_secret = Some(client_secret);
-    Ok(Json(quote))
+    idempotent.commit(transaction, Json(quote)).await
 }
 
 #[utoipa::path(
@@ -219,9 +225,6 @@ pub(crate) async fn list_quotes(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<QuoteList>> {
-    merchant
-        .require(&state.pool, Permission::QuotesRead)
-        .await?;
     let mut client_reference_id = None;
     let mut status_filter = None;
     let mut limit = 10;
@@ -331,16 +334,15 @@ pub(crate) async fn list_quotes(
 pub(crate) async fn update_quote(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateMetadataRequest>,
-) -> ApiResult<Json<Quote>> {
-    merchant
-        .require(&state.pool, Permission::QuotesWrite)
-        .await?;
+) -> ApiResult<Response> {
     let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
     let scope = merchant.scope;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     if !metadata::update(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         Object::Quote,
         scope,
@@ -352,15 +354,10 @@ pub(crate) async fn update_quote(
     {
         return Err(ApiError::not_found());
     }
-    find_quote(
-        &mut *state.pool.acquire().await?,
-        &state.routes,
-        scope,
-        quote,
-    )
-    .await?
-    .ok_or_else(ApiError::not_found)
-    .map(Json)
+    let quote = find_quote(&mut transaction, &state.routes, scope, quote)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    idempotent.commit(transaction, Json(quote)).await
 }
 
 #[utoipa::path(
@@ -416,9 +413,6 @@ pub(crate) async fn get_quote(
         return response;
     };
     let quote = async {
-        merchant
-            .require(&state.pool, Permission::QuotesRead)
-            .await?;
         let expand = expansions(&pairs, &["deposit"])?;
         let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
         let lock = locks::get(&state.pool, merchant.scope, quote)
@@ -566,14 +560,13 @@ async fn address_has_reversed_deposit(pool: &PgPool, address_id: Uuid) -> ApiRes
 pub(crate) async fn cancel_quote(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Quote>> {
-    merchant
-        .require(&state.pool, Permission::QuotesWrite)
-        .await?;
+) -> ApiResult<Response> {
     let quote = ids::parse(ids::QUOTE, &id).ok_or_else(ApiError::not_found)?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let lock = locks::cancel(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         merchant.scope,
         &merchant.actor(),
@@ -581,13 +574,8 @@ pub(crate) async fn cancel_quote(
     )
     .await
     .map_err(map_error)?;
-    respond(&state, lock).await
-}
-
-async fn respond(state: &AppState, lock: RateLock) -> ApiResult<Json<Quote>> {
-    quote_object(&mut *state.pool.acquire().await?, &state.routes, lock)
-        .await
-        .map(Json)
+    let quote = quote_object(&mut transaction, &state.routes, lock).await?;
+    idempotent.commit(transaction, Json(quote)).await
 }
 
 fn payment_uri(route: &RouteFile, lock: &RateLock) -> String {
