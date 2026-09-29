@@ -17,6 +17,7 @@ use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
+use sqlx::Connection as _;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
@@ -251,6 +252,93 @@ async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Resul
     .await;
     let cleanup = database.cleanup().await;
     result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_refused_or_repeated_refund_call_holds_no_lock_once_it_answers() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[49; 32]);
+        let app = test_router(pool, &admin_key);
+        let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+        let deposit = seed_rejected_deposit(pool, merchant.account.id, "locks", 150).await?;
+        // Connected, and each probe prepared, up front: a probe right after a response is then a
+        // single round trip, which reaches the server before a dropped transaction's queued
+        // rollback would.
+        let mut probe = sqlx::PgConnection::connect(&database.app_url).await?;
+        ensure!(unlocked(&mut probe, DEPOSIT_ROW, deposit).await?);
+
+        let (status, error) = merchant
+            .post(
+                "/v1/refunds",
+                refund_body(deposit, REFUND_DESTINATION, "151")?,
+            )
+            .await?;
+        ensure!(status == StatusCode::BAD_REQUEST, "{error}");
+        ensure!(
+            unlocked(&mut probe, DEPOSIT_ROW, deposit).await?,
+            "a refused refund request left its deposit locked"
+        );
+
+        let id = merchant.refund(deposit, "100").await?;
+        let refund_id = topup::ids::parse(topup::ids::REFUND, &id).context("re_ id")?;
+        merchant.mark_paid(&id, REFUND_TX).await?;
+        ensure!(unlocked(&mut probe, REFUND_ROW, refund_id).await?);
+        for (name, path, body, expected) in [
+            (
+                "a repeated mark_paid",
+                format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(REFUND_TX)?,
+                StatusCode::OK,
+            ),
+            (
+                "a mark_paid with another transaction",
+                format!("/v1/refunds/{id}/mark_paid"),
+                mark_paid_body(OTHER_TX)?,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "a cancel of a paid refund",
+                format!("/v1/refunds/{id}/cancel"),
+                Vec::new(),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, response) = merchant.post(&path, body).await?;
+            ensure!(status == expected, "{name}: {response}");
+            ensure!(
+                unlocked(&mut probe, REFUND_ROW, refund_id).await?,
+                "{name} left the refund locked"
+            );
+        }
+        // So the verification worker, which skips locked refunds, claims it straight away.
+        let worker = test_worker(
+            pool,
+            vec![RefundReceipt::Pending],
+            vec![RefundReceipt::Pending],
+        );
+        ensure!(worker.check_once().await? == Verification::Waiting);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+const DEPOSIT_ROW: &str = "SELECT id FROM deposits WHERE id = $1 FOR UPDATE SKIP LOCKED";
+const REFUND_ROW: &str = "SELECT id FROM refunds WHERE id = $1 FOR UPDATE SKIP LOCKED";
+
+/// Whether no other transaction holds row `id`, taken as the workers take rows: `FOR UPDATE SKIP
+/// LOCKED`, which returns nothing for a locked row.
+async fn unlocked(probe: &mut sqlx::PgConnection, query: &'static str, id: Uuid) -> Result<bool> {
+    let row: Option<Uuid> = sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_optional(&mut *probe)
+        .await?;
+    Ok(row == Some(id))
 }
 
 #[tokio::test]

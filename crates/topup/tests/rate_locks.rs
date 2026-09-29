@@ -15,6 +15,7 @@ use axum::response::Response;
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
+use sqlx::Connection as _;
 use sqlx::Row as _;
 use tokio::sync::Notify;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
@@ -1281,10 +1282,20 @@ async fn unpaid_lock_expires_only_once_the_finalized_chain_passes_its_window() -
         set_finalized_time(&database.app_pool, expires_at).await?;
         ensure!(locks::expire_once(&database.app_pool, &test_routes()).await? == 0);
         ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
+        // Connected, and the probe prepared, up front: the probe right after the refusal is then
+        // a single round trip, which reaches the server before a dropped transaction's queued
+        // rollback would.
+        let mut probe = sqlx::PgConnection::connect(&database.app_url).await?;
+        ensure!(quote_unlocked(&mut probe, lock.id).await?);
         ensure!(matches!(
             cancel_lock(&database.app_pool, &product, lock.id).await,
             Err(RateLockError::WindowClosed)
         ));
+        // The refusal left the quote unlocked for the expiry below, which skips locked quotes.
+        ensure!(
+            quote_unlocked(&mut probe, lock.id).await?,
+            "a refused cancel left the quote locked"
+        );
         ensure!(exposure(&database.app_pool, &account_key).await? == 100);
         let events: i64 =
             sqlx::query_scalar("SELECT count(*) FROM events WHERE type = 'quote.expired'")
@@ -1944,6 +1955,17 @@ async fn create_lock(
 }
 
 /// Cancels the account's quote `quote_id` as its API key does.
+/// Whether no other transaction holds quote `id`, taken as the expiry takes quotes: `FOR UPDATE
+/// SKIP LOCKED`, which returns nothing for a locked row.
+async fn quote_unlocked(probe: &mut sqlx::PgConnection, id: Uuid) -> Result<bool> {
+    let row: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM quotes WHERE id = $1 FOR UPDATE SKIP LOCKED")
+            .bind(id)
+            .fetch_optional(&mut *probe)
+            .await?;
+    Ok(row == Some(id))
+}
+
 async fn cancel_lock(
     pool: &sqlx::PgPool,
     product: &Account,
