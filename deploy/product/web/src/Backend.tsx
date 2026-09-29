@@ -1,5 +1,5 @@
 import { Cpu, ReceiptText, ShieldCheck, Terminal, Wallet } from "lucide-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,13 +24,25 @@ import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
 
 /**
  * What the merchant's backend sees while its customer pays: the payment's live steps, then its
- * payments, refunds, sweeps, API requests, and the service's attestation. A console in either
- * theme, apart from the product's own surface.
+ * payments, refunds, sweeps, API requests, and the service's attestation. A developer console in
+ * either theme: flat and set into the page, where the product is a raised app window.
  */
 // Every table of the panel: one cell padding, so their columns share a left edge.
 const TABLE = "text-xs [&_td]:px-3 [&_th]:h-9 [&_th]:px-3 [&_th]:text-muted-foreground";
 // The shown payment's row: highlighted, with an indicator on its left edge.
-const SELECTED_ROW = "data-[state=selected]:bg-muted data-[state=selected]:shadow-[inset_2px_0_0_var(--primary)]";
+// On the light console's tinted surface, the page's card; on the dark one, muted.
+const SELECTED_ROW =
+  "data-[state=selected]:bg-card dark:data-[state=selected]:bg-muted data-[state=selected]:shadow-[inset_2px_0_0_var(--primary)]";
+// A payment's row where the console is narrow (below @md): two lines, the payment and its credit,
+// then its status and its action; its cells placed in that grid.
+const STACKED_ROW =
+  "@max-md/console:grid @max-md/console:grid-cols-[minmax(0,1fr)_auto] @max-md/console:py-2 @max-md/console:[&>td]:py-0.5";
+const STACKED = {
+  payment: "@max-md/console:col-start-1 @max-md/console:row-start-1",
+  credited: "@max-md/console:col-start-2 @max-md/console:row-start-1",
+  status: "@max-md/console:col-start-1 @max-md/console:row-start-2",
+  action: "@max-md/console:col-start-2 @max-md/console:row-start-2 @max-md/console:self-end",
+};
 
 export function Backend({
   account,
@@ -57,13 +69,18 @@ export function Backend({
     // height, its header fixed and the stream with its tabs scrolling inside. Below lg, its natural
     // height in the page's flow.
     <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24 lg:h-[calc(100svh-7rem)] lg:self-start">
-      <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
+      <AreaLabel step={2} title="Your backend's view" text="What your server receives" />
       <aside
-        aria-label="Behind the scenes"
-        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm lg:min-h-0 lg:flex-1"
+        aria-label="Your backend"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-foreground/4 lg:min-h-0 lg:flex-1 dark:bg-background"
       >
-        <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
-          <h2 className="text-sm font-medium">Event stream</h2>
+        {/* A terminal's title bar, as tall as the product's browser bar: dark in either theme (the
+            dark theme's tokens, in the light theme too). */}
+        <header className="dark flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-background px-4 py-2 text-foreground dark:bg-muted/30">
+          <h2 className="flex items-center gap-2 font-mono text-xs">
+            <Terminal className="size-3.5 text-muted-foreground" aria-hidden="true" />
+            Event stream
+          </h2>
           <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground" data-testid="stream-status">
             <span className="relative flex size-2" aria-hidden="true">
               {live && <span className="absolute inset-0 rounded-full bg-success/60 motion-safe:animate-ping" />}
@@ -72,7 +89,7 @@ export function Backend({
             {selected === null ? "Idle" : live ? "Live" : "Done"}
           </Badge>
           {selected !== null && (
-            <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs @2xl/console:ml-auto">
+            <dl className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
               {order !== undefined && <MetaItem label="Order" value={order} testId="meta-order" />}
               <MetaItem label={selected.kind === "quote" ? "Quote" : "Deposit"} value={selected.id} testId="meta-selected" />
             </dl>
@@ -89,7 +106,9 @@ export function Backend({
             <TabsList
               variant="line"
               aria-label="Backend"
-              className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-5 py-0 sm:gap-5"
+              // Where the tabs overflow a narrow console, the next one peeks in, faded but still
+              // legible at the row's right edge, so the row reads as scrollable.
+              className="h-11! w-full justify-start gap-2.5 overflow-x-auto rounded-none border-b px-3 py-0 @max-md/console:mask-r-from-[calc(100%-2rem)] @max-md/console:mask-r-to-[calc(100%+1rem)] @md/console:gap-5 @md/console:px-5"
             >
               <Tab value="credits" count={account?.payments.length}>
                 Credits
@@ -163,7 +182,7 @@ function Tab({ value, count, children }: { value: string; count?: number | undef
     <TabsTrigger value={value} className="h-full flex-none px-0 text-sm after:bottom-[-1px]!">
       {children}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-muted px-1.5 font-mono text-xs text-muted-foreground tabular-nums">
+        <span className="rounded-full bg-card px-1.5 font-mono text-xs text-muted-foreground tabular-nums dark:bg-muted">
           {count}
         </span>
       )}
@@ -171,14 +190,17 @@ function Tab({ value, count, children }: { value: string; count?: number | undef
   );
 }
 
-/** Shows a payment in the event stream above; the shown one's row is highlighted. */
+/**
+ * Shows a payment in the event stream above: one style whether or not it is the shown one, which
+ * its row's highlight marks.
+ */
 function ViewButton({ selected, id, onClick }: { selected: boolean; id: string; onClick: () => void }) {
   return (
     <Button
       type="button"
       variant="link"
       size="xs"
-      className="h-auto px-0 text-xs aria-pressed:text-muted-foreground aria-pressed:no-underline"
+      className="h-auto px-0 text-xs"
       onClick={onClick}
       aria-label={`View ${id}`}
       aria-pressed={selected}
@@ -219,20 +241,25 @@ function CreditsTab({
     <div className="flex flex-col gap-8">
       {account.payments.length > 0 && (
         <section aria-label="Credits" className="flex min-w-0 flex-col text-xs">
+          {/* Every column where the console has room; below @2xl without the token amount (the credit
+              says its value) and the net (the Refunds tab has it), and below @md each row stacked,
+              its headings kept for screen readers. */}
           <Table className={cn(TABLE, "[&_td]:align-top [&_td]:leading-5")}>
-            <TableHeader>
+            <TableHeader className="@max-md/console:sr-only">
               <TableRow className="hover:bg-transparent">
                 <TableHead scope="col">Payment</TableHead>
-                <TableHead scope="col">Amount</TableHead>
+                <TableHead scope="col" className="hidden @2xl/console:table-cell">
+                  Amount
+                </TableHead>
                 <TableHead scope="col">Status</TableHead>
                 <TableHead scope="col" className="text-right">
                   Credited
                 </TableHead>
-                <TableHead scope="col" className="text-right">
+                <TableHead scope="col" className="hidden text-right @2xl/console:table-cell">
                   Nets to
                 </TableHead>
                 <TableHead scope="col" className="text-right">
-                  Timeline
+                  <span className="sr-only">Timeline</span>
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -252,21 +279,21 @@ function CreditsTab({
                     data-kind={row.kind}
                     data-state={isSelected ? "selected" : undefined}
                     aria-selected={isSelected}
-                    className={SELECTED_ROW}
+                    className={cn(SELECTED_ROW, STACKED_ROW)}
                   >
-                    <TableCell>
+                    <TableCell className={STACKED.payment}>
                       <div className="font-medium">{row.kind === "quote" ? "Quote" : "Deposit address"}</div>
                       <div className="text-muted-foreground" title={time(row.created)}>
                         {day(row.created)}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden @2xl/console:table-cell">
                       <div>{tokens(row.amount_atomic, symbol, decimals)}</div>
                       <div className="text-muted-foreground">
                         {row.exchange_rate === null ? "—" : `at ${price(row.exchange_rate)} / ${symbol}`}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className={STACKED.status}>
                       <div className="flex max-w-40 flex-wrap gap-1">
                         <StatusBadge status={row.status}>{statusLabel(row.status)}</StatusBadge>
                         {row.final && <Badge variant="outline">final</Badge>}
@@ -278,13 +305,13 @@ function CreditsTab({
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className={cn("text-right", STACKED.credited)}>
                       <div>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</div>
                       {row.bonus !== null && row.bonus !== 0 && (
                         <div className="text-muted-foreground">{signedDollars(row.bonus)} bonus</div>
                       )}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="hidden text-right @2xl/console:table-cell">
                       <div className="font-medium">{row.net === null ? "—" : dollars(row.net)}</div>
                       {row.amount_refunded_atomic !== "0" && (
                         <div className="text-muted-foreground">
@@ -292,7 +319,7 @@ function CreditsTab({
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className={cn("text-right", STACKED.action)}>
                       <ViewButton selected={isSelected} id={row.id} onClick={() => onSelect(selection)} />
                     </TableCell>
                   </TableRow>
@@ -317,10 +344,16 @@ function CreditsTab({
             <Table className={TABLE}>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead scope="col">When</TableHead>
-                  <TableHead scope="col">Deposit</TableHead>
+                  {/* When, where the console has room: the payments above carry their dates; below @md
+                      the deposit's id too, so the amount stays in view. */}
+                  <TableHead scope="col" className="hidden w-32 @2xl/console:table-cell">
+                    When
+                  </TableHead>
+                  <TableHead scope="col" className="hidden w-40 @md/console:table-cell">
+                    Deposit
+                  </TableHead>
                   <TableHead scope="col">Event</TableHead>
-                  <TableHead scope="col" className="text-right">
+                  <TableHead scope="col" className="w-24 text-right">
                     Amount
                   </TableHead>
                 </TableRow>
@@ -332,10 +365,10 @@ function CreditsTab({
                     data-testid="ledger-line"
                     data-kind={line.kind}
                   >
-                    <TableCell className="text-muted-foreground" title={time(line.at)}>
+                    <TableCell className="hidden text-muted-foreground @2xl/console:table-cell" title={time(line.at)}>
                       {day(line.at)}
                     </TableCell>
-                    <TableCell className="font-mono" title={line.deposit}>
+                    <TableCell className="hidden font-mono @md/console:table-cell" title={line.deposit}>
                       {short(line.deposit)}
                     </TableCell>
                     <TableCell>
@@ -437,7 +470,7 @@ function AddressView({
           );
         })}
         <Detail label="Metadata" className="font-mono">
-          {JSON.stringify(view.metadata)}
+          <MetadataJson metadata={view.metadata} />
         </Detail>
       </Details>
       {view.payments.length === 0 ? (
@@ -482,6 +515,30 @@ function AddressView({
         </ul>
       )}
     </Subsection>
+  );
+}
+
+/**
+ * Metadata as JSON, wrapping only between its tokens: after a key's colon and after a comma; a long
+ * value breaks anywhere, and nothing else does.
+ */
+function MetadataJson({ metadata }: { metadata: Record<string, string> }) {
+  return (
+    <span className="wrap-normal">
+      {"{"}
+      {Object.entries(metadata).map(([key, value], index) => (
+        <Fragment key={key}>
+          {index > 0 && (
+            <>
+              ,<wbr />
+            </>
+          )}
+          {JSON.stringify(key)}:<wbr />
+          <span className="wrap-anywhere">{JSON.stringify(value)}</span>
+        </Fragment>
+      ))}
+      {"}"}
+    </span>
   );
 }
 

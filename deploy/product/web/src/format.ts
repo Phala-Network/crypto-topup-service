@@ -57,16 +57,16 @@ export function clock(seconds: number): string {
   });
 }
 
-/** `12s`, `3m 5s`, or `1h 2m`. */
+/** `12 s`, `3 min 5 s`, or `1 h 2 min`, as the page's copy writes times. */
 export function duration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
   if (s < 60) {
-    return `${s}s`;
+    return `${s}\u00a0s`;
   }
   if (s < 3600) {
-    return `${Math.floor(s / 60)}m ${s % 60}s`;
+    return `${Math.floor(s / 60)}\u00a0min ${s % 60}\u00a0s`;
   }
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 3600)}\u00a0h ${Math.floor((s % 3600) / 60)}\u00a0min`;
 }
 
 export function statusLabel(status: string): string {

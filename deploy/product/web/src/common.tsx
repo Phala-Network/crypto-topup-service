@@ -135,7 +135,8 @@ export function InfoTip({ label, children, className }: { label: string; childre
 
 /** A list of labelled values, such as a timeline step's details. */
 export function Details({ className, ...props }: ComponentProps<"dl">) {
-  return <dl className={cn("grid gap-1.5 rounded-lg bg-muted p-3 text-xs", className)} {...props} />;
+  // The card on the light console's tinted surface; muted on the dark one.
+  return <dl className={cn("grid gap-1.5 rounded-lg bg-card p-3 text-xs dark:bg-muted", className)} {...props} />;
 }
 
 export function Detail({ label, className, ...props }: ComponentProps<"dd"> & { label: ReactNode }) {
