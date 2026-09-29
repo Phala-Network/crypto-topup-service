@@ -129,19 +129,22 @@ const HERO_BUTTON = "h-10 px-4";
 export function Hero() {
   return (
     <section aria-labelledby="hero-title">
-      <div className={`${CONTAINER} flex flex-col items-start gap-3 pt-8 pb-7 lg:pt-10 lg:pb-8`}>
-        <h1 id="hero-title" className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl">
+      {/* From lg, the CTAs sit right of the subline, level with its last line, under the headline. */}
+      <div className={`${CONTAINER} grid justify-items-start gap-3 pt-8 pb-7 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end lg:gap-x-8`}>
+        <h1 id="hero-title" className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl lg:col-span-2">
           {TAGLINE}
         </h1>
         <p className="max-w-2xl text-base text-pretty text-muted-foreground sm:text-lg">
-          {/* Each sentence a line where the paragraph is wide; on a phone, its clauses kept whole so
-              it wraps only between them (checked at 360 and 390 px). */}
+          {/* Each sentence starts a line, and is one where the paragraph is wide; its clauses kept
+              whole so it wraps only between them (checked at 1024 px, beside the CTAs, and at 360
+              and 390 px). */}
           Credited at two confirmations, <span className="whitespace-nowrap">about 15&nbsp;s on Ethereum</span>,{" "}
-          <span className="whitespace-nowrap">in a TEE you can verify</span>.{" "}
+          <span className="whitespace-nowrap">in a TEE you can verify</span>.
+          <br />
           <span className="whitespace-nowrap">Addresses can only pay your treasury</span>,{" "}
           <span className="whitespace-nowrap">and the API follows Stripe's</span>.
         </p>
-        <div className="flex flex-wrap items-center gap-3 pt-2">
+        <div className="flex flex-wrap items-center gap-3 pt-2 lg:pt-0">
           <Button asChild size="lg" className={HERO_BUTTON}>
             <a href={LINKS.deploy}>
               <Rocket aria-hidden="true" />
