@@ -29,7 +29,7 @@ pub use pending::{
 };
 pub use scanner::{
     ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,
-    list_scan_addresses,
+    initialize_cursor, list_scan_addresses, record_backfill_progress,
 };
 pub(crate) use sweeps::mark_swept;
 pub use sweeps::{FactoryCommit, commit_factory_logs};

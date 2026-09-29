@@ -16,7 +16,7 @@ use sqlx::{PgPool, Row};
 use topup::db;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, Step, StepResult, StepSet};
 use topup::routes::RouteSet;
-use topup::scanner::{ChainRoutes, chain_routes, scan_once};
+use topup::scanner::{ChainRoutes, chain_routes, initialize_cursor, scan_new_blocks, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, ReceiptLookup, TransferLog,
@@ -164,6 +164,10 @@ impl BackfillReader {
     fn request_count(&self) -> usize {
         self.requests.lock().expect("request lock").len()
     }
+
+    fn requests(&self) -> Vec<RecordedRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
 }
 
 impl ChainReader for BackfillReader {
@@ -256,6 +260,187 @@ impl ChainReader for BackfillReader {
     }
 }
 
+const BASE_SEPOLIA: u64 = 84_532;
+/// Test PHA on Base Sepolia (deploy/config/routes/phala-cloud-base-sepolia-pha.yaml).
+const BASE_SEPOLIA_PHA: Address =
+    alloy_primitives::address!("1a6F260377e42ead1418C7C1afDFD5DE371A9284");
+
+#[derive(Clone, Debug)]
+struct StagingRequest {
+    from_block: u64,
+    to_block: u64,
+    ok: bool,
+}
+
+/// Provider A of the staging incident: one payment to the quote address, and every
+/// `refuse_every`-th transfer request refused, as a public gateway refuses a burst.
+struct StagingReader {
+    token: Address,
+    quote: Address,
+    payment_block: u64,
+    finalized: Mutex<u64>,
+    refuse_every: usize,
+    requests: Mutex<Vec<StagingRequest>>,
+}
+
+impl StagingReader {
+    fn new(
+        token: Address,
+        quote: Address,
+        payment_block: u64,
+        finalized: u64,
+        refuse_every: usize,
+    ) -> Self {
+        Self {
+            token,
+            quote,
+            payment_block,
+            finalized: Mutex::new(finalized),
+            refuse_every,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn set_finalized(&self, block: u64) {
+        *self.finalized.lock().expect("finalized lock") = block;
+    }
+
+    fn requests(&self) -> Vec<StagingRequest> {
+        self.requests.lock().expect("request lock").clone()
+    }
+}
+
+impl ChainReader for StagingReader {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
+        Ok(Vec::new())
+    }
+
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
+        Ok(FinalizedHead {
+            number: *self
+                .finalized
+                .lock()
+                .map_err(|_| ChainError::HealthStateUnavailable)?,
+            time: DateTime::UNIX_EPOCH,
+        })
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        let refused = {
+            let mut requests = self
+                .requests
+                .lock()
+                .map_err(|_| ChainError::HealthStateUnavailable)?;
+            let refused =
+                self.refuse_every > 0 && requests.len().saturating_add(1) % self.refuse_every == 0;
+            requests.push(StagingRequest {
+                from_block,
+                to_block,
+                ok: !refused,
+            });
+            refused
+        };
+        if refused {
+            return Err(ChainError::Rpc("scripted provider refusal"));
+        }
+        let mut logs = Vec::new();
+        if addresses.contains(&self.quote) && (from_block..=to_block).contains(&self.payment_block)
+        {
+            logs.push(mock_transfer_log(
+                self.token,
+                self.quote,
+                self.payment_block,
+                0x4b,
+            ));
+        }
+        Ok(logs)
+    }
+
+    async fn confirmation_heads(
+        &self,
+        _confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        let finalized = self.finalized_head().await?.number;
+        Ok(ChainHeads {
+            latest: Some(finalized),
+            safe: Some(finalized),
+            finalized,
+        })
+    }
+
+    async fn receipt_transfer(
+        &self,
+        _tx_hash: B256,
+        _receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        Ok(ReceiptLookup::Missing)
+    }
+
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+        Ok(0)
+    }
+}
+
+/// The committed Base Sepolia routes: an OP-stack chain credited at `safe`, in address mode.
+fn base_sepolia_routes() -> Result<ChainRoutes> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/config/routes");
+    let routes = [
+        "phala-cloud-base-sepolia-pha.yaml",
+        "phala-cloud-base-sepolia-usdc.yaml",
+    ]
+    .into_iter()
+    .map(|file| -> Result<RouteFile> {
+        Ok(serde_saphyr::from_str(&std::fs::read_to_string(
+            directory.join(file),
+        )?)?)
+    })
+    .collect::<Result<Vec<_>>>()?;
+    chain_routes(&RouteSet::new(routes).map_err(anyhow::Error::msg)?)
+        .into_iter()
+        .next()
+        .context("the Base Sepolia chain")
+}
+
+/// Issues a quote address on Base Sepolia at the chain's committed cursor, as quote creation does.
+async fn issue_base_sepolia_address(
+    pool: &PgPool,
+    customer_id: Uuid,
+    address: Address,
+) -> Result<Uuid> {
+    let id = Uuid::new_v4();
+    seed::insert_address(
+        pool,
+        &NewAddress {
+            id,
+            customer_id,
+            chain_id: BASE_SEPOLIA,
+            route: "phala-cloud-base-sepolia-pha-usd".to_owned(),
+            salt: B256::repeat_byte(0x5a),
+            address,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE addresses SET created_block = (SELECT scanned_block FROM cursors \
+         WHERE cursors.chain_id = addresses.chain_id) WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
 struct RouteFixture {
     path: PathBuf,
 }
@@ -316,6 +501,28 @@ async fn backfill_failure_keeps_marker_unset_then_retries_without_duplicates() -
     };
 
     let result = run_backfill_retry_scenario(&database).await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_payment_seen_before_the_chain_stopped_is_recorded_after_a_restart() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+
+    let result = run_stop_restart_scenario(&database).await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn a_new_chain_starts_its_cursor_at_the_finalized_head() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+
+    let result = run_new_chain_scenario(&database).await;
     let cleanup = database.cleanup().await;
     result.and(cleanup)
 }
@@ -524,10 +731,18 @@ async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
     ensure!(!address_backfilled(&database.app_pool, address_id).await?);
     ensure!(deposit_count(&database.app_pool).await? == 1);
 
+    let failed_request_count = reader.request_count();
     let recovered = scan_once(&database.app_pool, &reader, &routes).await?;
     ensure!(
         recovered.inserted == 1,
         "only the missing window should insert"
+    );
+    let resumed = reader.requests();
+    ensure!(
+        resumed
+            .get(failed_request_count..)
+            .is_some_and(|requests| requests.iter().all(|request| request.from_block == 2_001)),
+        "the retry resumes after the committed window instead of reading it again: {resumed:?}"
     );
     ensure!(address_backfilled(&database.app_pool, address_id).await?);
     ensure!(deposit_count(&database.app_pool).await? == 2);
@@ -538,6 +753,135 @@ async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
     ensure!(
         reader.request_count() == completed_request_count,
         "a completed address was backfilled again"
+    );
+    Ok(())
+}
+
+/// The Base Sepolia staging incident of 2026-09-29, on its block numbers. The chain's first pass
+/// walked its history from genesis, so the quote address, issued at the cursor the walk had
+/// committed, was created 20 windows below the `finalized` head the pass then committed without
+/// it. The head loop saw the payment, the chain stopped before `safe` reached it, and after the
+/// restart the head loop's window no longer covers it: only the finalized backstop can record it,
+/// once the address's backfill completes, on a provider that refuses one request in five.
+async fn run_stop_restart_scenario(database: &TestDatabase) -> Result<()> {
+    const ISSUED_AT: u64 = 47_404_000;
+    const STOPPED_AT: u64 = 47_444_900;
+    const PAYMENT: u64 = 47_445_875;
+    const RESTARTED_AT: u64 = 47_450_000;
+    let pool = &database.app_pool;
+    let routes = base_sepolia_routes()?;
+    let token = BASE_SEPOLIA_PHA;
+    let quote = Address::from([0xfa_u8; 20]);
+    let reader = StagingReader::new(token, quote, PAYMENT, STOPPED_AT, 5);
+
+    // 1. The chain starts scanning; 2. the quote address is issued at the committed cursor, and
+    // the pass then commits through `finalized` without it.
+    db::commit_scan(pool, BASE_SEPOLIA, &[], &[], Some(ISSUED_AT), None).await?;
+    let customer_id = seed_account(pool).await?;
+    let address_id = issue_base_sepolia_address(pool, customer_id, quote).await?;
+    db::commit_scan(pool, BASE_SEPOLIA, &[], &[], Some(STOPPED_AT), None).await?;
+
+    // 3. The head loop sees the payment, 100 blocks deep, before `safe` reaches it.
+    let seen = scan_new_blocks(
+        pool,
+        &reader,
+        &routes,
+        ChainHeads {
+            latest: Some(PAYMENT + 100),
+            safe: Some(PAYMENT - 50),
+            finalized: STOPPED_AT,
+        },
+    )
+    .await?
+    .context("the head loop scans the new blocks")?;
+    ensure!(seen.inserted == 0 && seen.commit.seen == 1, "{seen:?}");
+    ensure!(db::list_address_pending(pool, address_id).await?.len() == 1);
+
+    // 4. The chain stops. 5. After the restart, the head loop reads only the last window.
+    reader.set_finalized(RESTARTED_AT);
+    let resumed = scan_new_blocks(
+        pool,
+        &reader,
+        &routes,
+        ChainHeads {
+            latest: Some(RESTARTED_AT + 1_000),
+            safe: Some(RESTARTED_AT + 900),
+            finalized: RESTARTED_AT,
+        },
+    )
+    .await?
+    .context("the head loop scans after the restart")?;
+    ensure!(resumed.from_block > PAYMENT && resumed.inserted == 0);
+
+    // Each failed backstop pass keeps the windows it committed, so the retries complete.
+    let mut passes = 0;
+    while deposit_count(pool).await? == 0 {
+        passes += 1;
+        ensure!(
+            passes <= 20,
+            "the payment was never recorded: {:?}",
+            reader.requests()
+        );
+        let _ = scan_once(pool, &reader, &routes).await;
+    }
+    ensure!(address_backfilled(pool, address_id).await?);
+    ensure!(db::list_address_pending(pool, address_id).await?.is_empty());
+    let recorded = db::get_deposit(
+        pool,
+        topup_core::identity::deposit_id(BASE_SEPOLIA, B256::from([0x4b_u8; 32]), 0),
+    )
+    .await?
+    .context("the seen payment is the recorded deposit")?;
+    ensure!(recorded.block_number == PAYMENT && recorded.address_id == address_id);
+    // No backfill window the backstop committed is read again.
+    let mut backfilled = reader
+        .requests()
+        .into_iter()
+        .filter(|request| request.ok && request.to_block <= STOPPED_AT)
+        .map(|request| request.from_block)
+        .collect::<Vec<_>>();
+    let reads = backfilled.len();
+    backfilled.sort_unstable();
+    backfilled.dedup();
+    ensure!(
+        backfilled.len() == reads,
+        "a committed backfill window was read again: {:?}",
+        reader.requests()
+    );
+    Ok(())
+}
+
+/// A chain added to a running service starts at its `finalized` head, so an address issued on it
+/// is backfilled from there, not from genesis.
+async fn run_new_chain_scenario(database: &TestDatabase) -> Result<()> {
+    const ADDED_AT: u64 = 47_444_900;
+    let pool = &database.app_pool;
+    let routes = base_sepolia_routes()?;
+    let quote = Address::from([0xfa_u8; 20]);
+    let reader = StagingReader::new(BASE_SEPOLIA_PHA, quote, ADDED_AT + 975, ADDED_AT, 0);
+
+    let started = initialize_cursor(pool, &reader, BASE_SEPOLIA).await?;
+    ensure!(started == Some(ADDED_AT), "{started:?}");
+    ensure!(db::get_cursor(pool, BASE_SEPOLIA).await? == Some(ADDED_AT));
+    let customer_id = seed_account(pool).await?;
+    let address_id = issue_base_sepolia_address(pool, customer_id, quote).await?;
+
+    reader.set_finalized(ADDED_AT + 3_000);
+    ensure!(
+        initialize_cursor(pool, &reader, BASE_SEPOLIA)
+            .await?
+            .is_none()
+    );
+    ensure!(db::get_cursor(pool, BASE_SEPOLIA).await? == Some(ADDED_AT));
+    let stats = scan_once(pool, &reader, &routes).await?;
+    ensure!(stats.inserted == 1 && stats.backfilled_addresses == 1);
+    ensure!(address_backfilled(pool, address_id).await?);
+    let requests = reader.requests();
+    ensure!(
+        requests
+            .iter()
+            .all(|request| request.from_block >= ADDED_AT),
+        "nothing below the chain's start is read: {requests:?}"
     );
     Ok(())
 }

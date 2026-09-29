@@ -593,10 +593,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .context("failed to connect to database")?;
     // A restore from backup freezes the service until the operator reconciles it; one that booted
     // straight into this compose is found by its new PostgreSQL timeline.
-    if let Some(restore) = topup::restore_mode::detect(&pool)
+    let restore = topup::restore_mode::detect(&pool)
         .await
-        .context("failed to check for a restore from backup")?
-    {
+        .context("failed to check for a restore from backup")?;
+    if let Some(restore) = &restore {
         tracing::error!(
             restore_id = %restore.id,
             "frozen after a restore from backup: merchant writes answer 503 service_restoring, \
@@ -607,6 +607,15 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
+    // A chain added since the last start gets its cursor at its `finalized` head before the API
+    // issues an address on it (architecture §8). After a restore, a chain without a restored
+    // cursor is rescanned from genesis instead, so addresses re-issued on it find the payments
+    // made since the restore point.
+    if restore.is_none() {
+        topup::scanner::initialize_cursors(&pool, &routes)
+            .await
+            .context("failed to start the cursor of a new chain")?;
+    }
     let signer = Arc::new(spawn_signer().context("failed to start signer actor")?);
     let delivery_config = topup::outbox::DeliveryConfig {
         proxy: webhook_proxy(&public_origin)?,

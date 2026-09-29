@@ -19,6 +19,20 @@ pub struct ScanAddress {
     pub created_block: u64,
     /// Whether the one-time pre-cursor range has been scanned.
     pub backfilled: bool,
+    /// Last block through which that range has been committed while it is not complete.
+    pub backfilled_through: Option<u64>,
+}
+
+impl ScanAddress {
+    /// First block the address's one-time backfill still has to read: its creation block, or the
+    /// block after the backfill's committed progress.
+    #[must_use]
+    pub fn backfill_start(&self) -> u64 {
+        self.backfilled_through
+            .map_or(self.created_block, |through| {
+                self.created_block.max(through.saturating_add(1))
+            })
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -27,6 +41,7 @@ struct ScanAddressRecord {
     address: String,
     created_block: i64,
     backfilled: bool,
+    backfilled_through: Option<i64>,
 }
 
 impl TryFrom<ScanAddressRecord> for ScanAddress {
@@ -38,6 +53,10 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
             address: parse_address(&record.address)?,
             created_block: to_u64(record.created_block, "addresses.created_block")?,
             backfilled: record.backfilled,
+            backfilled_through: record
+                .backfilled_through
+                .map(|block| to_u64(block, "addresses.backfilled_through"))
+                .transpose()?,
         })
     }
 }
@@ -85,6 +104,57 @@ pub async fn get_cursor(pool: &PgPool, chain_id: u64) -> Result<Option<u64>, sql
     scanned_block
         .map(|value| to_u64(value, "cursors.scanned_block"))
         .transpose()
+}
+
+/// Starts a chain's finalized cursor at `scanned_block`, the provider's `finalized` head read when
+/// the chain is first configured, unless the chain has a cursor; returns whether it started one.
+///
+/// Addresses are issued at the committed cursor (§8), so a chain must have one before its first
+/// address: without it an address would be created at block 0 and backfilled from genesis.
+pub async fn initialize_cursor(
+    pool: &PgPool,
+    chain_id: u64,
+    scanned_block: u64,
+    scanned_block_time: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let started = sqlx::query(
+        r#"
+        INSERT INTO cursors (chain_id, scanned_block, scanned_block_time)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id) DO NOTHING
+        "#,
+    )
+    .bind(to_i64(chain_id, "cursors.chain_id")?)
+    .bind(to_i64(scanned_block, "cursors.scanned_block")?)
+    .bind(scanned_block_time)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(started == 1)
+}
+
+/// Records that the backfill of `address_ids` is committed through `through`, after the window's
+/// deposits and factory events, so a retry resumes after it. Progress never moves backwards.
+pub async fn record_backfill_progress(
+    pool: &PgPool,
+    address_ids: &[Uuid],
+    through: u64,
+) -> Result<(), sqlx::Error> {
+    if address_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        UPDATE addresses
+        SET backfilled_through = GREATEST(COALESCE(backfilled_through, 0), $2)
+        WHERE id = ANY($1) AND NOT backfilled
+        "#,
+    )
+    .bind(address_ids)
+    .bind(to_i64(through, "addresses.backfilled_through")?)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Returns the last block the fast scanner committed at the route confirmation, if any.
@@ -167,7 +237,7 @@ pub async fn list_scan_addresses(
     let chain_id = to_i64(chain_id, "addresses.chain_id")?;
     let records = sqlx::query_as::<_, ScanAddressRecord>(
         r#"
-        SELECT id, address, created_block, backfilled
+        SELECT id, address, created_block, backfilled, backfilled_through
         FROM addresses
         WHERE chain_id = $1
         ORDER BY created_block, id

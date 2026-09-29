@@ -29,6 +29,7 @@ use topup_core::retry::backoff;
 use topup_core::route::{Backstop, ChainConfig};
 use tracing::Instrument as _;
 
+use crate::chain_retry::backing_off;
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
 use crate::jitter::{JitterSource as _, OsJitter};
 use crate::routes::RouteSet;
@@ -230,6 +231,47 @@ pub fn chain_routes(routes: &RouteSet) -> Vec<ChainRoutes> {
         .collect()
 }
 
+/// Starts the finalized cursor of every configured chain that has none at provider A's current
+/// `finalized` head; `topup run` calls it before the API can issue an address on the chain.
+///
+/// Addresses are issued at their chain's committed cursor and backfilled from it (§8). Without a
+/// cursor they would be issued at block 0, and the chain's first pass would walk its whole history
+/// from genesis, so an address issued meanwhile would be created deep in that history and
+/// backfilled from there before the cursor could move (Base Sepolia on staging, 2026-09-29). A
+/// quote's address is derived when it is issued, and a deposit address's network on a chain is
+/// covered from the chain's cursor when it is issued, so no deposit precedes the chain's cursor.
+pub async fn initialize_cursors(pool: &PgPool, route_set: &RouteSet) -> Result<(), ScannerError> {
+    for chain_id in route_set.chain_ids() {
+        let client = route_set
+            .provider(chain_id, 0)
+            .map_err(|error| ScannerError::Configuration(error.to_string()))?;
+        initialize_cursor(pool, &FinalizedReader::new(Arc::clone(client)), chain_id).await?;
+    }
+    Ok(())
+}
+
+/// Starts `chain_id`'s finalized cursor at `reader`'s `finalized` head unless it has one; returns
+/// the cursor it started.
+pub async fn initialize_cursor<R: ChainReader>(
+    pool: &PgPool,
+    reader: &R,
+    chain_id: u64,
+) -> Result<Option<u64>, ScannerError> {
+    if db::get_cursor(pool, chain_id).await?.is_some() {
+        return Ok(None);
+    }
+    let head = reader.finalized_head().await?;
+    if !db::initialize_cursor(pool, chain_id, head.number, head.time).await? {
+        return Ok(None);
+    }
+    tracing::info!(
+        chain_id,
+        cursor = head.number,
+        "finalized cursor started at the provider's finalized head"
+    );
+    Ok(Some(head.number))
+}
+
 /// Scans one chain through its current finalized head and commits durable progress.
 ///
 /// Each window records the transfers to every address and the factory's events about them before
@@ -266,7 +308,9 @@ pub async fn scan_once<R: ChainReader>(
     };
 
     // Addresses issued at or below the cursor are read once from their creation block to the
-    // cursor, together.
+    // cursor, together. Each committed window is kept, so a failed pass or a restart resumes the
+    // backfill where it stopped: the cursor waits for it, and one that restarted from its creation
+    // block after every failure would never complete once it outlasts a provider's budget.
     let pending_backfills = addresses
         .iter()
         .filter(|address| !address.backfilled && address.created_block <= cursor)
@@ -274,21 +318,27 @@ pub async fn scan_once<R: ChainReader>(
         .collect::<Vec<_>>();
     if let Some(from) = pending_backfills
         .iter()
-        .map(|address| address.created_block)
+        .map(ScanAddress::backfill_start)
         .min()
     {
-        for (from_block, to_block) in scan_windows(from, cursor.min(finalized))? {
-            let committed = scan_window(
-                pool,
-                reader,
-                routes,
-                &pending_backfills,
-                from_block,
-                to_block,
-            )
-            .await?;
+        let through = cursor.min(finalized);
+        let windows = if from <= through {
+            scan_windows(from, through)?
+        } else {
+            Vec::new()
+        };
+        for (from_block, to_block) in windows {
+            let window = pending_backfills
+                .iter()
+                .filter(|address| address.backfill_start() <= to_block)
+                .cloned()
+                .collect::<Vec<_>>();
+            let committed =
+                scan_window(pool, reader, routes, &window, from_block, to_block).await?;
             record_committed(chain_id, &mut stats, committed.0)?;
             stats.record_factory(committed.1);
+            let ids = window.iter().map(|address| address.id).collect::<Vec<_>>();
+            db::record_backfill_progress(pool, &ids, to_block).await?;
         }
         let ids = pending_backfills
             .iter()
@@ -358,29 +408,29 @@ async fn scan_window<R: ChainReader>(
     async {
         let index = address_index(addresses);
         let created = |address: Address| index.get(&address).map(|known| known.created_block);
-        let logs = head::issued_transfers(reader, routes, addresses, from_block, to_block)
-            .await?
-            .into_iter()
-            .filter(|log| created(log.to).is_some_and(|block| log.block_number >= block))
-            .collect();
+        let logs =
+            backing_off(|| head::issued_transfers(reader, routes, addresses, from_block, to_block))
+                .await?
+                .into_iter()
+                .filter(|log| created(log.to).is_some_and(|block| log.block_number >= block))
+                .collect();
         let deposits = resolve_logs(logs, &index, routes)?;
         let physical = addresses
             .iter()
             .map(|address| address.address)
             .collect::<Vec<_>>();
-        let factory_logs = reader
-            .factory_logs(
+        let factory_logs = backing_off(|| {
+            reader.factory_logs(
                 routes.chain.contracts.forwarder_factory,
                 &physical,
                 from_block,
                 to_block,
             )
-            .await?
-            .into_iter()
-            .filter(|log| {
-                created(log.event.forwarder()).is_some_and(|block| log.block_number >= block)
-            })
-            .collect::<Vec<_>>();
+        })
+        .await?
+        .into_iter()
+        .filter(|log| created(log.event.forwarder()).is_some_and(|block| log.block_number >= block))
+        .collect::<Vec<_>>();
         let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
         let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
         Ok((committed, indexed))
@@ -902,6 +952,7 @@ mod tests {
             address: recipient,
             created_block: 0,
             backfilled: false,
+            backfilled_through: None,
         };
         let routes = test_routes(Address::from([2_u8; 20]));
         let log = TransferLog {
@@ -936,6 +987,7 @@ mod tests {
             address: recipient,
             created_block: 0,
             backfilled: false,
+            backfilled_through: None,
         };
         let pha = Address::from([2_u8; 20]);
         let usdc = Address::from([3_u8; 20]);
