@@ -47,6 +47,13 @@ wait_for() {
     done
 }
 
+# Whether contract $1 has code at Anvil's finalized block.
+# shellcheck disable=SC2329  # invoked through wait_for
+deployed_at_finalized() {
+    local code
+    code=$(cast code "$1" --block finalized --rpc-url "$rpc_url") && [[ -n "$code" && "$code" != 0x ]]
+}
+
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 TOPUP_LOCAL_PORT=$(free_port)
 SANDBOX_ANVIL_PORT=$(free_port)
@@ -112,7 +119,11 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
 account=$(jq -er .id "$tmp/account.json")
 (umask 077 && jq -jer '.api_keys[0].secret' "$tmp/account.json" >"$tmp/product.key")
 echo "created $account"
-# The owner key is the account's test-mode treasury on the chain; quotes need one.
+# The owner key is the account's test-mode treasury on the chain; quotes need one. The service
+# screens an EOA treasury against the sanctions oracle at the finalized block, which Anvil keeps
+# eight blocks behind the head, so wait until the oracle deployed above is there.
+wait_for "the sanctions oracle at the finalized block" \
+    deployed_at_finalized "$(jq -er .sanctions_oracle "$tmp/contracts.json")"
 "$root/deploy/sandbox/set-treasury.sh" --api "$service_url" --key-file "$tmp/product.key" \
     --chain-id 11155111 --private-key "$ANVIL_PRIVATE_KEY" >"$tmp/treasury.json"
 echo "treasury $(jq -er .address "$tmp/treasury.json") is $(jq -er .status "$tmp/treasury.json")"

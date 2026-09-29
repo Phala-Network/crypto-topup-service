@@ -218,3 +218,10 @@ restart, or a provider refusal resumes the backfill after it instead of reading 
 range again, so a backfill longer than one provider budget still completes and the chain's
 finalized cursor moves on. Its down migration drops the column; an unfinished backfill then restarts
 from the address's creation block.
+
+`20261021030000_claimable_deposits` narrows `deposits_claimable_idx` to `detected` and
+`confirmed` deposits, the only ones the pump claims: a credited deposit waits for a finalized
+`Flushed` event, which the scanner and the finality watch apply, so credited deposits that are
+never swept no longer sit at the head of every claim's scan. Transitions the pump wrote for
+credited deposits before (`flush_not_confirmed` waits) are kept: `transitions` is append-only.
+Its down migration restores the index over every non-terminal state.

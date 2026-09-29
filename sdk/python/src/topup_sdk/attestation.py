@@ -7,12 +7,14 @@ evidence whose report data binds a fresh nonce, the account, the mode, and every
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from collections.abc import Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from topup_client.models import AttestationResponse
+from topup_client.types import Unset
 
 from .errors import AttestationError
 
@@ -34,6 +36,11 @@ def attestation_report_data(
     return hashlib.sha256(content).digest()
 
 
+def standard_webhooks_public_key(public_key: bytes) -> str:
+    """Returns a raw ed25519 public key in Standard Webhooks' form, `whpk_` and base64."""
+    return "whpk_" + base64.b64encode(public_key).decode("ascii")
+
+
 def verify_attestation_binding(
     response: AttestationResponse,
     nonce: bytes,
@@ -43,7 +50,8 @@ def verify_attestation_binding(
 ) -> list[Ed25519PublicKey]:
     """Checks that `report_data` binds `nonce`, the response's account and mode, and every listed
     webhook key, and that the account and mode are the expected ones when given; returns the
-    public keys, current first.
+    public keys, current first. `report_data` binds each key's raw `public_key` only, so a key's
+    `standard_webhooks_public_key`, when present, must be that same key as `whpk_` and base64.
 
     This does not verify the quote itself: run the dstack verifier (`deploy/dstack-verifier.sh`)
     and confirm that the verified report data is `response.report_data` zero-padded to 64 bytes
@@ -64,6 +72,10 @@ def verify_attestation_binding(
         raise AttestationError("attestation fields are not hexadecimal") from error
     if any(len(public_key) != 32 or not 1 <= version < 2**32 for version, public_key in keys):
         raise AttestationError("attestation lists a malformed webhook key")
+    for key, (_, public_key) in zip(response.webhook_keys, keys, strict=True):
+        standard = key.standard_webhooks_public_key
+        if not isinstance(standard, Unset) and standard != standard_webhooks_public_key(public_key):
+            raise AttestationError("a webhook key's standard_webhooks_public_key is another key")
     try:
         expected = attestation_report_data(nonce, response.account, response.livemode, keys)
     except ValueError as error:

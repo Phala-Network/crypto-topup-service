@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
@@ -56,6 +57,13 @@ def test_binding_returns_the_keys_current_first() -> None:
     )
     raw = [key.public_bytes(Encoding.Raw, PublicFormat.Raw) for key in keys]
     assert raw == [CURRENT, PREVIOUS]
+    # With the Standard Webhooks form of each key, the binding holds as well.
+    webhook_keys = [
+        {**key, "standard_webhooks_public_key": "whpk_" + base64.b64encode(bytes_).decode()}
+        for key, bytes_ in zip(_response()["webhook_keys"], (CURRENT, PREVIOUS), strict=True)
+    ]
+    response = AttestationResponse.from_dict(_response(webhook_keys=webhook_keys))
+    assert len(verify_attestation_binding(response, NONCE)) == 2
 
 
 @pytest.mark.parametrize(
@@ -68,6 +76,17 @@ def test_binding_returns_the_keys_current_first() -> None:
         {"webhook_keys": [{"version": 2, "public_key": "42" * 31}]},
         {"webhook_keys": []},
         {"report_data": "00" * 32},
+        # The unbound Standard Webhooks form names another key than the bound one.
+        {
+            "webhook_keys": [
+                {
+                    "version": 2,
+                    "public_key": CURRENT.hex(),
+                    "standard_webhooks_public_key": "whpk_" + base64.b64encode(PREVIOUS).decode(),
+                },
+                {"version": 1, "public_key": PREVIOUS.hex()},
+            ]
+        },
         {"report_data": "not hex"},
     ],
 )

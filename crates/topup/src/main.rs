@@ -33,7 +33,7 @@ use topup_adapters::signer::actor::SignerHandle;
 use topup_adapters::signer::dstack::DstackSigner;
 #[cfg(feature = "dev-signer")]
 use topup_core::SecretKey32;
-use topup_core::{DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN};
+use topup_core::{CLIENT_SECRET_KEY_DOMAIN, DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN};
 #[cfg(feature = "dev-signer")]
 use topup_core::{Signer as _, WebhookKeyId};
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -556,8 +556,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .and_then(|value| Ok(topup::api::PublicOrigin::parse(&value)?))
         .context("invalid TOPUP_PUBLIC_ORIGIN")?;
     if mode == ServiceMode::ReadOnly {
+        const READ_ONLY_CONNECTIONS: u32 = 4;
         let state = topup::api::AppState {
-            pool: connect("DATABASE_URL", "run", 4)
+            pool: connect("DATABASE_URL", "run", READ_ONLY_CONNECTIONS)
                 .await
                 .context("failed to connect to database")?,
             routes: Arc::new(routes),
@@ -565,7 +566,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             public_origin,
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes,
-            client_reads: Arc::default(),
+            client_reads: Arc::new(topup::api::ClientReadLimiter::new(
+                client_secret_key().await?,
+                READ_ONLY_CONNECTIONS,
+            )),
             rate_limits: Arc::default(),
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
@@ -654,11 +658,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .context("invalid confirm-step configuration")?;
     let screen_step = ScreenStep::from_routes(pool.clone(), &routes)
         .context("failed to configure screening step")?;
-    let steps = Arc::new(StepSet::new(
-        Box::new(confirm_step),
-        Box::new(screen_step),
-        Box::new(topup::steps::sweep::SweepStep),
-    ));
+    let steps = Arc::new(StepSet::new(Box::new(confirm_step), Box::new(screen_step)));
     let pump = Pump::new(
         pool.clone(),
         Arc::clone(&routes),
@@ -689,7 +689,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         public_origin,
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes,
-        client_reads: Arc::default(),
+        client_reads: Arc::new(topup::api::ClientReadLimiter::new(
+            client_secret_key().await?,
+            connection_count,
+        )),
         rate_limits: Arc::default(),
         screening: Arc::new(topup::refunds::OracleDestinationScreener::new(Arc::clone(
             &routes,
@@ -1151,6 +1154,16 @@ const SIGNER_QUEUE: NonZeroUsize =
 const SIGNER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Starts the dstack webhook signer actor.
+/// The key of quotes' and deposit addresses' client secrets, derived from dstack like the
+/// service's other keys, so every release and CVM of the application checks the same secrets.
+async fn client_secret_key() -> anyhow::Result<topup::client_secret::ClientSecretKey> {
+    DstackSigner::new()
+        .derive_secret(CLIENT_SECRET_KEY_DOMAIN)
+        .await
+        .map(topup::client_secret::ClientSecretKey::new)
+        .map_err(|_| anyhow::anyhow!("failed to derive the client-secret key"))
+}
+
 fn spawn_signer() -> std::io::Result<SignerHandle> {
     SignerHandle::spawn(DstackSigner::new(), SIGNER_QUEUE, SIGNER_TIMEOUT)
 }

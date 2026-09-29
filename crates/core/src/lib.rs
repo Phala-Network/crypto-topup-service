@@ -25,6 +25,6 @@ mod signer;
 pub mod valuation;
 
 pub use signer::{
-    BACKUP_KEY_DOMAIN, DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN, Ed25519PublicKey, Ed25519Signature,
-    SecretKey32, Signer, SignerError, WebhookKeyId,
+    BACKUP_KEY_DOMAIN, CLIENT_SECRET_KEY_DOMAIN, DB_APP_KEY_DOMAIN, DB_OWNER_KEY_DOMAIN,
+    Ed25519PublicKey, Ed25519Signature, SecretKey32, Signer, SignerError, WebhookKeyId,
 };

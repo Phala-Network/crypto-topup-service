@@ -9,6 +9,7 @@ use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, StatusCode};
+use base64::Engine as _;
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
@@ -1084,14 +1085,27 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
             let listed: Vec<Value> = keys
                 .iter()
                 .map(|key| {
-                    json!({"version": key.version, "public_key": hex::encode(key.public_key.0)})
+                    json!({
+                        "version": key.version,
+                        "public_key": hex::encode(key.public_key.0),
+                        "standard_webhooks_public_key": format!(
+                            "whpk_{}",
+                            base64::engine::general_purpose::STANDARD.encode(key.public_key.0)
+                        ),
+                    })
                 })
                 .collect();
             let returned: Vec<Value> = response["webhook_keys"]
                 .as_array()
                 .context("webhook keys")?
                 .iter()
-                .map(|key| json!({"version": key["version"], "public_key": key["public_key"]}))
+                .map(|key| {
+                    json!({
+                        "version": key["version"],
+                        "public_key": key["public_key"],
+                        "standard_webhooks_public_key": key["standard_webhooks_public_key"],
+                    })
+                })
                 .collect();
             let expected = report_data(&[0, 1, 2, 3], &account.public_id, livemode, &keys)
                 .context("report data")?;

@@ -21,7 +21,7 @@ use topup_adapters::pricing::PriceSource;
 use topup_core::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::event_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::{ChainHeads, Confirmations, RouteFile};
+use topup_core::route::{ChainHeads, Confirmations, RouteFile, UNIT_DECIMALS};
 use topup_core::valuation::{
     LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
 };
@@ -300,7 +300,7 @@ impl ConfirmStep {
                     canonical.amount,
                     quote.price,
                     runtime.route.asset.decimals,
-                    runtime.route.destination.unit_decimals,
+                    UNIT_DECIMALS,
                 );
                 let Ok(credit_minor) = computed else {
                     return reject_out_of_range(deposit, effects, &quote);
@@ -1148,7 +1148,7 @@ mod tests {
         canonical_route.route = "canonical-token-route".to_owned();
         canonical_route.version = 7;
         canonical_route.asset.contract = Address::repeat_byte(9);
-        canonical_route.asset.decimals = 1;
+        canonical_route.asset.decimals = 3;
         canonical_route.screening.min_credit_minor = 5;
         let mut canonical = transfer(&deposit);
         canonical.token = canonical_route.asset.contract;
@@ -1478,8 +1478,7 @@ mod tests {
             serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
                 .expect("route fixture");
         route.pricing.mode = mode;
-        route.asset.decimals = 0;
-        route.destination.unit_decimals = 0;
+        route.asset.decimals = 2;
         route.screening.min_credit_minor = 1;
         if mode == PricingMode::Stablecoin {
             route.pricing.check = None;

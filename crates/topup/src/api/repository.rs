@@ -749,13 +749,23 @@ pub async fn admin_deposit(
     Ok(Some((Scope::new(row.account_id, row.livemode), admin)))
 }
 
-/// Makes a deposit immediately claimable without changing its state.
+/// Makes a deposit the pump processes (`detected` or `confirmed`) immediately claimable without
+/// changing its state; any other state is `400 deposit_unexpected_state`, since the pump never
+/// claims it.
 pub async fn nudge_deposit(
     pool: &PgPool,
     deposit_id: Uuid,
     actor: &Actor,
 ) -> Result<NudgeResponse, ApiError> {
     let mut transaction = pool.begin().await?;
+    let state: String = sqlx::query_scalar("SELECT state FROM deposits WHERE id = $1 FOR UPDATE")
+        .bind(deposit_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !matches!(state.as_str(), "detected" | "confirmed") {
+        return Err(ApiError::deposit_unexpected_state(&state));
+    }
     let (next_attempt_at, account_id) = sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
         r#"
         UPDATE deposits SET next_attempt_at = now() WHERE id = $1
@@ -763,9 +773,8 @@ pub async fn nudge_deposit(
         "#,
     )
     .bind(deposit_id)
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or_else(ApiError::not_found)?;
+    .fetch_one(&mut *transaction)
+    .await?;
     insert_audit_tx(
         &mut transaction,
         Some(account_id),

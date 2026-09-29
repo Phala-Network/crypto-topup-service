@@ -357,7 +357,8 @@ and never rewrites them.
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
 `(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`.
 
-Credit: `exp = asset_decimals + price_scale − unit_decimals`,
+Credit: `exp = asset_decimals + price_scale − unit_decimals`, where `unit_decimals` is 2 on every
+route (credit is USD cents, the API's `amount`; a route file cannot set it),
 `credit_minor = floor(amount_atomic × price_scaled / 10^exp)` (multiply when `exp < 0`),
 512-bit intermediate, checked into `u64` or `rejected(out_of_range)`. Property tests:
 monotone; splitting into `n` parts loses at most `n − 1` minor units.
@@ -617,8 +618,8 @@ Invoice model, with this service's exception profile:
   shows the quote `open` past `expires_at`, and cancellation is refused once the window has
   closed (`400 quote_window_closed`). A quote whose address has received any payment, even a
   rejected one, can no longer be cancelled (`400 quote_payment_received`).
-- Exposure counters sum `credit_minor` across routes, so every route must use the same
-  `unit_decimals`; the service refuses to load routes that differ.
+- Exposure counters sum `credit_minor` across routes, which every route counts in USD cents
+  (§6).
 - A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
   quote by amount alone is ambiguous, and the single-use address is the processor-standard
   answer. A deposit address (below) carries no price.
@@ -760,7 +761,9 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 - Delivery is the outbox (§12): at least once, in no order, to every enabled endpoint of the
   account and mode that subscribes to the event (`enabled_events`, or `*`). `2xx` acknowledges;
   a redirect (never followed), anything else, or no answer within 20 s is retried with
-  full-jitter backoff (ceiling 30 s doubling to 1 h) until delivered, forever: a failing
+  full-jitter backoff (ceiling 30 s doubling to 1 h) until delivered, forever, and a `429` or
+  `503` with `Retry-After` (delay-seconds or an HTTP date) is retried no sooner than it asks, at
+  most 1 h later; the endpoint's cooldown (below) waits as long. A failing
   endpoint is never disabled automatically, since without an email channel a disabled endpoint
   would leave a paid deposit uncredited silently (owner decision, design §11). Only `410 Gone`
   disables an endpoint (`disabled_reason: gone`), as Standard Webhooks asks, announced to the
@@ -927,7 +930,7 @@ GET    /v1/admin/deposits/{id}            the Deposit with `admin`: state, route
 POST   /v1/admin/accounts/{acct}/customers/{client_reference_id}/pause | resume {scopes, livemode}
 POST   /v1/admin/accounts/{acct}/treasuries/{trs}/pause | resume {reason}   the operator's crediting pause
 POST   /v1/admin/routes/{r}/pause | resume {scopes}
-POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited
+POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state change; audited; detected or confirmed only (else 400 deposit_unexpected_state)
 POST   /v1/admin/reconciliation_blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 GET    /v1/admin/reports/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
@@ -997,9 +1000,10 @@ price); and `deposit`, the `dep_` id it has or will have. On a canceled quote no
 A seen transfer can disappear in a reorg; only deposits and `deposit.credited` reflect credit. The view ignores pause
 scopes, and while a chain is frozen (§13) it stops updating.
 
-**Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{48 random hex
-digits}`, for the payer's checkout page. Only its SHA-256 is stored with the quote, so no read
-returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
+**Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{nonce}{tag}`,
+for the payer's checkout page: `nonce` is 16 random bytes and `tag` the first 16 bytes of
+HMAC-SHA256 of everything before it, both as lowercase hex, under `get_key("client-secret/v1")`,
+derived like the service's other keys (§14), so every release and CVM checks the same secrets. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
 secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, livemode, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
 payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
@@ -1007,9 +1011,14 @@ route's confirmation, being valued and screened), `credited`, `rejected` (the re
 exposed), or `reversed`. No account,
 price, deposit id, or transaction hash. Every such response, errors included, allows any
 origin (`Access-Control-Allow-Origin: *`) and exposes `Request-Id` and `Retry-After`; the secret
-is the bearer. A secret that is not the quote's is `404`. These reads are limited in the process
-to 120 per quote and 6 000 in total per minute (`429 rate_limit`, `Retry-After` the rest of the
-minute).
+is the bearer. A secret that is not the quote's is `404`. These reads, and a deposit address's,
+are checked in memory first: a secret whose tag does not verify, forged or malformed, is `404`
+(in constant time) with no database work and no budget spent, so forgeries cannot throttle real
+checkouts. A genuine secret is then charged, still before the database, to its object's budget of
+120 reads per minute (`429 rate_limit`, `Retry-After` the rest of the minute), and waits at most
+250 ms for one of the in-process slots of anonymous reads, half the database pool (`429
+rate_limit`, `Retry-After: 1`). Its database work, the lookup of the secret's SHA-256, which a
+retired or replaced secret fails with `404`, and the view, is bounded to 2 s (`503`).
 
 **Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
 status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
@@ -1277,7 +1286,8 @@ key's mode, paying its own treasury of the chain (§9).
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints
 the resolved route, every value explicit (JSON, itself a valid route file); preflight reads the
-defaulted addresses from it. The defaults and why:
+defaulted addresses from it. A resolved route saved before `unit_decimals` was removed still
+carries `"unit_decimals": 2` and is now refused: delete that key. The defaults and why:
 
 | Value | Default |
 |---|---|
@@ -1292,7 +1302,6 @@ defaulted addresses from it. The defaults and why:
 | `quote.window_s`, `spread_bps`, `tolerance_bps`, `max_creations_per_minute` | 900, 50, 100, 10 |
 | `quote.amount_decimals` | 4, or `asset.decimals` if fewer: a quote asks for, say, `273.9185` PHA rather than 18 decimals; at most `asset.decimals` |
 | `alerts.stuck_after_s` | detected 1 800, confirmed 1 800 (a credited deposit waits for its merchant's sweep and has no threshold) |
-| `unit_decimals` | 2 (USD cents) |
 
 The defaults are the launch numbers *(policy)*: finance confirms each, including the zero token
 floors, before production, and a route overrides any it does not accept.
@@ -1308,7 +1317,8 @@ placeholder. The only dstack encrypted environment variables are the object-stor
 the Sentry DSN, and the RPC providers' API keys that fill those placeholders. The in-CVM database's passwords
 are the hex of `get_key("db/owner/v1")` and `get_key("db/app/v1")`, handed to PostgreSQL and its
 clients as tmpfs files (`POSTGRES_PASSWORD_FILE`, `PGPASSFILE`), identical on every CVM of the app
-id. Startup refuses to run without the dstack
+id; the service derives `get_key("client-secret/v1")` itself, the key of client secrets (§12).
+Startup refuses to run without the dstack
 socket, two RPC providers, or the on-chain contract checks of §4.
 
 All enabled versions are loaded at startup. The highest enabled version of a route is current for

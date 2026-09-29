@@ -115,6 +115,54 @@ async fn a_third_partys_flush_marks_deposits_swept_only_after_finality() -> Resu
 }
 
 #[tokio::test]
+async fn the_pump_leaves_a_credited_deposit_to_its_finalized_sweep() -> Result<()> {
+    run(|chain| {
+        Box::pin(async move {
+            let paid = chain.seed_address(1).await?;
+            chain.pay(paid.forwarder)?;
+            chain.finalize()?;
+            chain.scan().await?;
+            let deposit = chain.deposit_of(&paid).await?;
+            chain.credit(deposit, true).await?;
+            let transitions = "SELECT count(*) FROM transitions";
+            let before = chain.count(transitions).await?;
+
+            // A due credited deposit is not claimed, so waiting for its sweep writes nothing.
+            let calls = Arc::new(AtomicUsize::new(0));
+            let step = || Box::new(CountingStep(Arc::clone(&calls))) as Box<dyn Step>;
+            let pump = Pump::new(
+                chain.pool().clone(),
+                Arc::default(),
+                Arc::new(StepSet::new(step(), step())),
+                PumpConfig::default(),
+            )?;
+            ensure!(pump.run_once().await? == RunOnceResult::Idle);
+            ensure!(calls.load(Ordering::SeqCst) == 0);
+            ensure!(chain.count(transitions).await? == before);
+
+            // The finalized `Flushed` event alone sweeps it, with one transition.
+            chain.flush(&[paid.salt])?;
+            chain.finalize()?;
+            chain.scan().await?;
+            ensure!(chain.state(deposit).await? == "swept");
+            let written: Vec<(String, String)> = sqlx::query_as(
+                "SELECT from_state, to_state FROM transitions WHERE deposit_id = $1",
+            )
+            .bind(deposit)
+            .fetch_all(chain.pool())
+            .await?;
+            ensure!(
+                written == [("credited".to_owned(), "swept".to_owned())],
+                "{written:?}"
+            );
+            ensure!(chain.count(transitions).await? == before + 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn a_failing_target_is_reported_and_leaves_its_deposits_unswept() -> Result<()> {
     run(|chain| {
         Box::pin(async move {
@@ -299,7 +347,7 @@ async fn a_forwarder_mismatch_freezes_crediting_on_the_chain() -> Result<()> {
             let pump = Pump::new(
                 chain.pool().clone(),
                 Arc::default(),
-                Arc::new(StepSet::new(step(), step(), step())),
+                Arc::new(StepSet::new(step(), step())),
                 PumpConfig::default(),
             )?;
             let RunOnceResult::Applied { deposit_id } = pump.run_once().await? else {

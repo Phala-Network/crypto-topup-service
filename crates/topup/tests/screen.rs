@@ -590,7 +590,7 @@ impl Step for WaitStep {
 }
 
 fn wait_steps() -> StepSet {
-    StepSet::new(Box::new(WaitStep), Box::new(WaitStep), Box::new(WaitStep))
+    StepSet::new(Box::new(WaitStep), Box::new(WaitStep))
 }
 
 fn client(rpc_url: &str, timeout: StdDuration) -> Result<Arc<EvmClient>> {

@@ -118,6 +118,11 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
         "The quote is `complete` or `expired`; only an `open` quote can be canceled.",
     ),
     (
+        "deposit_unexpected_state",
+        400,
+        "Admin: only a deposit the pump processes, `detected` or `confirmed`, can be nudged; a credited deposit waits for its sweep, which only a finalized `Flushed` event records.",
+    ),
+    (
         "deposit_not_refundable",
         400,
         "The deposit cannot be refunded: it is not credited or rejected, or it was reversed.",
@@ -463,6 +468,16 @@ impl ApiError {
         )
     }
 
+    /// Returns a nudge of a deposit in `state`, which the pump never claims.
+    #[must_use]
+    pub fn deposit_unexpected_state(state: &str) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "deposit_unexpected_state",
+            format!("the deposit is {state}; only a detected or confirmed deposit can be nudged"),
+        )
+    }
+
     /// Returns a refund refused because the deposit is not refundable (architecture §15).
     #[must_use]
     pub fn deposit_not_refundable() -> Self {
@@ -583,14 +598,14 @@ impl ApiError {
         )
     }
 
-    /// Returns a read of a quote's or deposit address's public view over its limit, retryable
-    /// after `retry_after` seconds.
+    /// Returns a read of a quote's or deposit address's public view by `client_secret` over a
+    /// limit, retryable after `retry_after` seconds.
     #[must_use]
     pub fn client_reads_limited(retry_after: u64) -> Self {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit",
-            "too many reads of this object; retry after Retry-After seconds",
+            "too many reads by client_secret; retry after Retry-After seconds",
         )
         .with_retry_after(retry_after)
     }
@@ -963,6 +978,7 @@ mod tests {
             ApiError::treasury_change_pending(),
             ApiError::treasury_unchanged(),
             ApiError::treasury_unexpected_state("current"),
+            ApiError::deposit_unexpected_state("credited"),
             ApiError::paused(""),
             ApiError::chain_frozen(),
             ApiError::service_unavailable(""),

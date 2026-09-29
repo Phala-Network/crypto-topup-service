@@ -16,6 +16,7 @@ pub mod api;
 pub mod api_keys;
 pub mod audit;
 mod chain_retry;
+pub mod client_secret;
 pub mod contracts;
 pub mod db;
 pub mod deposit_addresses;

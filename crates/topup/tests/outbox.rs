@@ -11,7 +11,7 @@ use anyhow::{Context, Result, ensure};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::LOCATION, header::RETRY_AFTER};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use base64::Engine;
@@ -108,6 +108,7 @@ struct ResponsePlan {
     status: StatusCode,
     delay: StdDuration,
     location: Option<String>,
+    retry_after: Option<&'static str>,
 }
 
 impl ResponsePlan {
@@ -116,6 +117,14 @@ impl ResponsePlan {
             status,
             delay,
             location: None,
+            retry_after: None,
+        }
+    }
+
+    fn retry_after(status: StatusCode, seconds: &'static str) -> Self {
+        Self {
+            retry_after: Some(seconds),
+            ..Self::new(status, StdDuration::ZERO)
         }
     }
 
@@ -124,6 +133,7 @@ impl ResponsePlan {
             status: StatusCode::FOUND,
             delay: StdDuration::ZERO,
             location: Some(location.to_owned()),
+            retry_after: None,
         }
     }
 }
@@ -304,6 +314,11 @@ async fn reference_webhook(
                 .into_response();
         };
         response.headers_mut().insert(LOCATION, location);
+    }
+    if let Some(seconds) = plan.retry_after {
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static(seconds));
     }
     response
 }
@@ -734,6 +749,61 @@ async fn server_error_increments_attempts_and_schedules_backoff() -> Result<()> 
     let response: Value = row.try_get("response")?;
     ensure!(response["status"] == 500);
     ensure!(response["error"] == "non_2xx_status");
+
+    receiver.stop().await;
+    context.cleanup().await
+}
+
+#[tokio::test]
+async fn a_throttling_receivers_retry_after_defers_the_retry_up_to_an_hour() -> Result<()> {
+    let Some(context) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let signer = Arc::new(TestSigner::fixed());
+    let account = Uuid::new_v4();
+    let receiver = ReferenceReceiver::start_with_plans(
+        signer.verifying_key(account),
+        vec![
+            ResponsePlan::retry_after(StatusCode::TOO_MANY_REQUESTS, "600"),
+            ResponsePlan::retry_after(StatusCode::SERVICE_UNAVAILABLE, "86400"),
+        ],
+    )
+    .await?;
+    let event_id = Uuid::nil();
+    seed_event(&context.app_pool, account, &receiver.url, event_id).await?;
+    let next_attempt_at = || async {
+        let at: chrono::DateTime<Utc> = sqlx::query_scalar(
+            "SELECT next_attempt_at FROM webhook_deliveries WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(&context.app_pool)
+        .await?;
+        Ok::<_, anyhow::Error>(at)
+    };
+
+    // The first retry's backoff is at most 30 seconds; the receiver asks for ten minutes.
+    let before = Utc::now();
+    ensure!(
+        worker(&context.app_pool, signer.clone())?
+            .run_once()
+            .await?
+            == 1
+    );
+    let at = next_attempt_at().await?;
+    ensure!(at >= before + Duration::seconds(600) && at <= Utc::now() + Duration::seconds(600));
+
+    // A day is bounded to the backoff's ceiling of an hour.
+    sqlx::query(
+        "UPDATE webhook_deliveries SET next_attempt_at = now() - interval '1 second' \
+         WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .execute(&context.app_pool)
+    .await?;
+    let before = Utc::now();
+    ensure!(worker(&context.app_pool, signer)?.run_once().await? == 1);
+    let at = next_attempt_at().await?;
+    ensure!(at >= before + Duration::hours(1) && at <= Utc::now() + Duration::hours(1));
 
     receiver.stop().await;
     context.cleanup().await

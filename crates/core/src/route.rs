@@ -27,8 +27,6 @@ pub struct RouteFile {
     pub livemode: bool,
     /// Asset settings.
     pub asset: AssetConfig,
-    /// Credit unit settings.
-    pub destination: DestinationConfig,
     /// Price-source and freshness settings.
     pub pricing: PricingConfig,
     /// Deposit screening settings.
@@ -70,7 +68,6 @@ impl RouteFile {
         validate_livemode(self.livemode, self.chain.chain_id)?;
         validate_slug("asset.symbol", &self.asset.symbol)?;
         validate_decimals("asset.decimals", self.asset.decimals)?;
-        validate_decimals("unit_decimals", self.destination.unit_decimals)?;
         validate_bps("pricing.max_deviation_bps", self.pricing.max_deviation_bps)?;
         if self.pricing.mode == PricingMode::Spot {
             if self.pricing.check.is_none() {
@@ -391,13 +388,6 @@ pub enum Backstop {
     Addresses,
 }
 
-/// The unit credits are counted in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DestinationConfig {
-    /// Number of USD minor-unit decimal places.
-    pub unit_decimals: u8,
-}
-
 /// Price validation configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PricingConfig {
@@ -511,9 +501,6 @@ pub struct RouteSpec {
     pub version: u64,
     /// Whether the route is live (a mainnet) or test (a testnet); checked against the chain.
     pub livemode: bool,
-    /// USD minor-unit decimals; default [`DEFAULT_UNIT_DECIMALS`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit_decimals: Option<u8>,
     /// Chain settings.
     pub chain: ChainSpec,
     /// Deposited asset.
@@ -680,8 +667,8 @@ impl StuckAfterSpec {
     }
 }
 
-/// USD cents.
-pub const DEFAULT_UNIT_DECIMALS: u8 = 2;
+/// Decimals of the unit credit is counted in: USD cents, the API's `amount`, on every route.
+pub const UNIT_DECIMALS: u8 = 2;
 /// Two blocks on Ethereum L1: depth-1 reorgs are routine, deeper ones were not observed (design
 /// D1), and a reversal is recoverable.
 pub const DEFAULT_ETHEREUM_CONFIRMATION_DEPTH: u64 = 2;
@@ -823,9 +810,6 @@ impl TryFrom<RouteSpec> for RouteFile {
                 backstop: spec.asset.backstop.unwrap_or_default(),
             },
             livemode: spec.livemode,
-            destination: DestinationConfig {
-                unit_decimals: spec.unit_decimals.unwrap_or(DEFAULT_UNIT_DECIMALS),
-            },
             pricing: PricingConfig {
                 mode,
                 primary: spec.pricing.primary,
@@ -879,7 +863,6 @@ impl From<RouteFile> for RouteSpec {
             route: route.route,
             version: route.version,
             livemode: route.livemode,
-            unit_decimals: Some(route.destination.unit_decimals),
             chain: ChainSpec {
                 chain_id: route.chain.chain_id,
                 forwarder_factory: route.chain.contracts.forwarder_factory,

@@ -15,6 +15,10 @@ pub const BACKUP_KEY_DOMAIN: &str = "backup/v1";
 pub const DB_OWNER_KEY_DOMAIN: &str = "db/owner/v1";
 /// Domain used to derive the application login (`topup_service`) password.
 pub const DB_APP_KEY_DOMAIN: &str = "db/app/v1";
+/// Domain used to derive the key that tags quotes' and deposit addresses' `client_secret`s.
+///
+/// Changing the version invalidates every issued secret.
+pub const CLIENT_SECRET_KEY_DOMAIN: &str = "client-secret/v1";
 
 /// A 32-byte secret which is zeroized when dropped.
 pub struct SecretKey32(SecretBox<[u8; 32]>);

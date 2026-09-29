@@ -1265,7 +1265,97 @@ async fn worker_shutdown_cancels_a_hung_read() -> Result<()> {
 }
 
 #[tokio::test]
-async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
+async fn admin_nudge_reschedules_only_a_deposit_the_pump_claims() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let admin_key = SigningKey::from_bytes(&[53; 32]);
+        let (product, _) = seed_product(&database.app_pool, "phala-cloud").await?;
+        let pool = &database.app_pool;
+        let seed = |customer: &'static str, state| {
+            seed_deposit(pool, product.id, customer, 100, state, None)
+        };
+        let detected = seed("nudge-detected", DepositState::Detected).await?;
+        let credited = seed("nudge-credited", DepositState::Credited).await?;
+        let rejected = seed_rejected_deposit(pool, product.id, "nudge-rejected", 100).await?;
+        sqlx::query("UPDATE deposits SET next_attempt_at = now() + interval '1 day'")
+            .execute(pool)
+            .await?;
+        let app = test_router(pool, &admin_key);
+        let now = Utc::now().timestamp();
+        let nudge = |path: String, created: i64| {
+            app.clone().oneshot(signed_request(
+                Method::POST,
+                &path,
+                Vec::new(),
+                ADMIN_KID,
+                &admin_key,
+                created,
+            ))
+        };
+
+        // The `dep_` id and the bare UUID of older logs both name the deposit.
+        for (path, created) in [
+            (
+                format!("/v1/admin/deposits/dep_{}/nudge", detected.simple()),
+                now - 1,
+            ),
+            (format!("/v1/admin/deposits/{detected}/nudge"), now),
+        ] {
+            let response = nudge(path, created).await?;
+            ensure!(response.status() == StatusCode::OK);
+            let nudged = response_json(response).await?;
+            ensure!(
+                nudged["deposit_id"] == format!("dep_{}", detected.simple()),
+                "{nudged}"
+            );
+        }
+        let (state, due): (String, bool) =
+            sqlx::query_as("SELECT state, next_attempt_at <= now() FROM deposits WHERE id = $1")
+                .bind(detected)
+                .fetch_one(pool)
+                .await?;
+        ensure!(state == "detected" && due);
+
+        // A credited deposit waits for its sweep and a rejected one is final: the pump claims
+        // neither, so a nudge is refused rather than silently doing nothing.
+        for (deposit, state, created) in [
+            (credited, "credited", now + 1),
+            (rejected, "rejected", now + 2),
+        ] {
+            let response = nudge(format!("/v1/admin/deposits/{deposit}/nudge"), created).await?;
+            ensure!(response.status() == StatusCode::BAD_REQUEST);
+            let error = response_json(response).await?;
+            ensure!(
+                error["error"]["code"] == "deposit_unexpected_state",
+                "{error}"
+            );
+            ensure!(
+                error["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(state)),
+                "{error}"
+            );
+        }
+        let audits: Vec<String> = sqlx::query_scalar(
+            "SELECT subject FROM audit WHERE action = 'deposit_nudged' ORDER BY subject",
+        )
+        .fetch_all(pool)
+        .await?;
+        ensure!(
+            audits == vec![format!("deposit:{detected}"); 2],
+            "{audits:?}"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
+async fn admin_daily_report_uses_seeded_integer_facts() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -1349,39 +1439,6 @@ async fn admin_nudge_and_daily_report_use_seeded_integer_facts() -> Result<()> {
 
         let app = test_router(&database.app_pool, &admin_key);
         let now = Utc::now().timestamp();
-        // The `dep_` id and the bare UUID of older logs both name the deposit.
-        for (nudge_path, created) in [
-            (format!("/v1/admin/deposits/dep_{}/nudge", rejected.simple()), now - 1),
-            (format!("/v1/admin/deposits/{rejected}/nudge"), now),
-        ] {
-            let response = app
-                .clone()
-                .oneshot(signed_request(
-                    Method::POST,
-                    &nudge_path,
-                    Vec::new(),
-                    ADMIN_KID,
-                    &admin_key,
-                    created,
-                ))
-                .await?;
-            ensure!(response.status() == StatusCode::OK);
-            let nudged = response_json(response).await?;
-            ensure!(nudged["deposit_id"] == format!("dep_{}", rejected.simple()), "{nudged}");
-        }
-        let state: String = sqlx::query_scalar("SELECT state FROM deposits WHERE id = $1")
-            .bind(rejected)
-            .fetch_one(&database.app_pool)
-            .await?;
-        ensure!(state == "rejected");
-        let audit_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit WHERE action = 'deposit_nudged' AND subject = $1",
-        )
-        .bind(format!("deposit:{rejected}"))
-        .fetch_one(&database.app_pool)
-        .await?;
-        ensure!(audit_count == 2);
-
         let response = app
             .oneshot(signed_request(
                 Method::GET,

@@ -218,6 +218,31 @@ describe("constructEvent", () => {
     expect(verified.data.object["object"]).toBe("deposit");
   });
 
+  it("accepts a Standard Webhooks whpk_ key and returns the causing request", async () => {
+    const request = { id: `req_${"3c".repeat(12)}`, idempotency_key: "order-17" };
+    const body = event({ request });
+    const { publicKey, headers } = await signed(body, EVENT_ID);
+    const verified = await constructEvent(body, headers, `whpk_${publicKey}`, {
+      expectedAccount: ACCOUNT,
+      expectedLivemode: false,
+    });
+    expect(verified.request).toEqual(request);
+    const malformed = event({ request: { id: 7 } });
+    const other = await signed(malformed, EVENT_ID);
+    await expect(
+      constructEvent(malformed, other.headers, `whpk_${other.publicKey}`, {
+        expectedAccount: ACCOUNT,
+        expectedLivemode: false,
+      }),
+    ).rejects.toThrow("not an event");
+    await expect(
+      constructEvent(body, headers, `whpk_${PUBLIC_KEY}`, {
+        expectedAccount: ACCOUNT,
+        expectedLivemode: false,
+      }),
+    ).rejects.toThrow("32 bytes");
+  });
+
   it.each([
     ["another account", event({ account: `acct_${"b2".repeat(16)}` }), EVENT_ID, "another account"],
     ["the other mode", event({ livemode: true }), EVENT_ID, "other mode"],

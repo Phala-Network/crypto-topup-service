@@ -24,7 +24,7 @@ use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
-use topup_core::route::RouteFile;
+use topup_core::route::{RouteFile, UNIT_DECIMALS};
 use uuid::Uuid;
 
 use crate::db::{self, ApplyTransitionError, ScanAddress};
@@ -602,7 +602,7 @@ impl Reconciler {
                 deposit.amount_atomic,
                 price,
                 route.asset.decimals,
-                route.destination.unit_decimals,
+                UNIT_DECIMALS,
             )
             .map_err(|_| ReconciliationError::Invariant("stored credit cannot be recomputed"))?
             .value()

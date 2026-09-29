@@ -32,6 +32,7 @@ from web3.middleware import SignAndSendRawMiddlewareBuilder
 from topup_client.models import Deposit, Quote
 from topup_sdk import RequestSigner, SigningAuth
 from topup_sdk.addresses import same_address
+from topup_sdk.signing import sf_string
 
 from .config import ChainConfig, ProductConfig
 from .server import quote_address
@@ -138,7 +139,9 @@ class ProductApi:
         )
 
     def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = self._http.request(method, self._base + path, json=body)
+        # The product requires a signed Idempotency-Key on every POST, so a replay creates nothing.
+        headers = {"Idempotency-Key": sf_string(str(uuid.uuid4()))} if method == "POST" else {}
+        response = self._http.request(method, self._base + path, json=body, headers=headers)
         if response.status_code != HTTPStatus.OK:
             raise ProductApiError(response.status_code, response.text)
         value = response.json()

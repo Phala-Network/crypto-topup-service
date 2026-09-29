@@ -3,6 +3,7 @@
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
 use axum::response::{IntoResponse as _, Response};
+use sha2::{Digest as _, Sha256};
 use sqlx::{PgConnection, PgPool};
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
@@ -16,6 +17,7 @@ use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
 use super::auth::Merchant;
+use super::client_limit;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::ensure_customer;
@@ -179,6 +181,7 @@ pub(crate) async fn create_quote(
     let (lock, client_secret) = locks::create(
         &state.pool,
         &state.rate_lock_quotes,
+        state.client_reads.key(),
         &merchant.account,
         &customer,
         route,
@@ -449,18 +452,23 @@ async fn client_quote(
     client_secret: Option<&str>,
 ) -> ApiResult<ClientQuote> {
     let quote = ids::parse(ids::QUOTE, id).ok_or_else(ApiError::not_found)?;
-    let client_secret = client_secret
-        .filter(|secret| {
-            secret
-                .strip_prefix(id)
-                .is_some_and(|rest| rest.starts_with("_secret_"))
-        })
+    let client_secret = client_secret.ok_or_else(ApiError::not_found)?;
+    let _slot = state.client_reads.admit(id, quote, client_secret).await?;
+    let secret = Sha256::digest(client_secret.as_bytes());
+    client_limit::bounded(client_quote_view(state, quote, &secret)).await
+}
+
+/// The public view of `quote` if `secret_hash` is the SHA-256 of one of its valid client secrets.
+async fn client_quote_view(
+    state: &AppState,
+    quote: Uuid,
+    secret_hash: &[u8],
+) -> ApiResult<ClientQuote> {
+    let scope = locks::client_secret_scope(&state.pool, quote, secret_hash)
+        .await
+        .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    state
-        .client_reads
-        .allow(quote)
-        .map_err(ApiError::client_reads_limited)?;
-    let lock = locks::get_by_client_secret(&state.pool, client_secret)
+    let lock = locks::get(&state.pool, scope, quote)
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;

@@ -214,9 +214,14 @@ class VerifiedRequest:
 
 
 def load_public_key(encoded: str) -> Ed25519PublicKey:
-    """Parses a raw ed25519 public key given as 64 hexadecimal characters or standard base64."""
-    value = encoded.strip().removeprefix("0x")
-    raw = bytes.fromhex(value) if len(value) == 64 else base64.b64decode(value, validate=True)
+    """Parses a raw ed25519 public key given as 64 hexadecimal characters, standard base64, or
+    Standard Webhooks' `whpk_` and standard base64."""
+    value = encoded.strip()
+    if value.startswith("whpk_"):
+        raw = base64.b64decode(value.removeprefix("whpk_"), validate=True)
+    else:
+        value = value.removeprefix("0x")
+        raw = bytes.fromhex(value) if len(value) == 64 else base64.b64decode(value, validate=True)
     if len(raw) != 32:
         raise ValueError("ed25519 public key must contain exactly 32 bytes")
     return Ed25519PublicKey.from_public_bytes(raw)

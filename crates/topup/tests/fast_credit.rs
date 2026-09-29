@@ -26,7 +26,6 @@ use topup::scanner::{
 };
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::{ScreenRoute, ScreenStep};
-use topup::steps::sweep::SweepStep;
 use topup::tenancy::Scope;
 use topup_adapters::chain::evm::metrics::provider_call_counts;
 use topup_adapters::chain::evm::{
@@ -682,9 +681,8 @@ impl FastChain {
                 ),
         )?;
         route.chain.confirmations = Confirmations::Depth(2);
-        route.asset.decimals = 0;
-        route.rate_lock.amount_decimals = 0;
-        route.destination.unit_decimals = 0;
+        route.asset.decimals = 2;
+        route.rate_lock.amount_decimals = 2;
         route.screening.min_credit_minor = 1;
         route.screening.min_deposit_atomic = AtomicAmount::new(U256::ZERO);
         route.validate()?;
@@ -724,11 +722,7 @@ impl FastChain {
         let pump = Pump::new(
             pool.clone(),
             Arc::clone(&route_set),
-            Arc::new(StepSet::new(
-                Box::new(confirm),
-                Box::new(screen),
-                Box::new(SweepStep),
-            )),
+            Arc::new(StepSet::new(Box::new(confirm), Box::new(screen))),
             PumpConfig::default(),
         )?;
         let watch = FinalityWatch::single(

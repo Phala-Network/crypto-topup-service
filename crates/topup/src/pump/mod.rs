@@ -76,21 +76,22 @@ impl StepResult {
     }
 }
 
-/// Registry containing exactly one step for every non-terminal deposit state.
+/// Registry containing exactly one step for every state the pump claims.
+///
+/// A credited deposit has no step: the finalized scanner and the finality watch mark it `swept`
+/// ([`crate::db::commit_factory_logs`]), so the pump never claims it.
 pub struct StepSet {
     detected: Box<dyn Step>,
     confirmed: Box<dyn Step>,
-    credited: Box<dyn Step>,
 }
 
 impl StepSet {
     /// Creates a complete state-to-step registry.
     #[must_use]
-    pub fn new(detected: Box<dyn Step>, confirmed: Box<dyn Step>, credited: Box<dyn Step>) -> Self {
+    pub fn new(detected: Box<dyn Step>, confirmed: Box<dyn Step>) -> Self {
         Self {
             detected,
             confirmed,
-            credited,
         }
     }
 
@@ -112,8 +113,10 @@ impl StepSet {
         match state {
             DepositState::Detected => Some(self.detected.as_ref()),
             DepositState::Confirmed => Some(self.confirmed.as_ref()),
-            DepositState::Credited => Some(self.credited.as_ref()),
-            DepositState::Swept | DepositState::Rejected | DepositState::Reversed => None,
+            DepositState::Credited
+            | DepositState::Swept
+            | DepositState::Rejected
+            | DepositState::Reversed => None,
         }
     }
 }

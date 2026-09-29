@@ -164,8 +164,10 @@ class AccountApi:
     The product calls the service with its own key on the user's behalf, as Phala Cloud's
     backend does. Requests must carry an RFC 9421 signature by the pinned driver key
     (`driver_public_key`, key id `driver/v1`), which stands in for user sessions and cannot sign
-    service requests. Replays are bounded only by the five-minute freshness window; every
-    operation is idempotent.
+    service requests. A signature is fresh for five minutes, so a captured request can be replayed
+    within them: every `POST` must carry an `Idempotency-Key` the signature covers, and quote and
+    refund creation pass it to the service, whose replay of the first response makes a replayed
+    request create nothing new. Registration and reads are idempotent in themselves.
     """
 
     def __init__(self, config: ProductConfig, ledger: ProductLedger, driver_key: Ed25519PublicKey):
@@ -183,14 +185,14 @@ class AccountApi:
     def handle(self, method: str, target: str, headers: Mapping[str, str], body: bytes) -> Answer:
         public = urlsplit(self.config.public_url)
         try:
-            verify_request(
+            verified = verify_request(
                 method=method,
                 target_uri=f"{public.scheme}://{public.netloc}{target}",
                 headers=headers,
                 body=body,
                 public_key=self.driver_key,
                 keyid=DRIVER_KEYID,
-                require_idempotency_key=False,
+                require_idempotency_key=method == "POST",
             )
         except SignatureError:
             return Answer(HTTPStatus.UNAUTHORIZED)
@@ -222,6 +224,7 @@ class AccountApi:
                     amount_minor=amount_minor,
                     chain_id=chain.chain_id,
                     asset=asset or chain.test_token.symbol.lower(),
+                    idempotency_key=verified.idempotency_key,
                 )
                 return Answer(HTTPStatus.OK, quote.to_dict())
             if (
@@ -244,7 +247,9 @@ class AccountApi:
                     for item in self._service().list_deposits(client_reference_id=team)
                 ):
                     return Answer(HTTPStatus.NOT_FOUND)
-                refund = self._service().create_refund(deposit, destination, amount)
+                refund = self._service().create_refund(
+                    deposit, destination, amount, idempotency_key=verified.idempotency_key
+                )
                 return Answer(HTTPStatus.OK, refund.to_dict())
             if len(parts) == 1 and method == "GET":
                 team = _account_ref(parts[0])
@@ -395,9 +400,11 @@ def create_quote(
     amount_minor: int,
     chain_id: int | None = None,
     asset: str | None = None,
+    idempotency_key: str | None = None,
 ) -> Quote:
     """Creates a quote for the workspace on a configured chain (the first by default), in `asset`
-    (the chain's first test token by default), and records its address.
+    (the chain's first test token by default), and records its address; a repeat with the same
+    `idempotency_key` returns the first quote.
 
     The client recomputes the address from the pinned forwarder, the chain's treasury, and the
     quote id, and raises before returning an address the product did not derive.
@@ -408,6 +415,7 @@ def create_quote(
         amount_minor,
         chain_id=chain.chain_id,
         asset=asset or chain.test_token.symbol.lower(),
+        idempotency_key=idempotency_key,
     )
     ledger.record_quote_address(quote.address, team, quote.id)
     return quote
