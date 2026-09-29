@@ -264,8 +264,8 @@ the sender's nonce consumed at `finalized`: Etherscan's "Dropped & Replaced",
 `TRANSACTION_REPLACED`, [ethers](https://docs.ethers.org/v6/api/utils/errors/)) → **`reversed`**
 (terminal); another transfer at the position at finality (a contract-mediated transfer
 re-executed against other state) → the deposit **`reversed`** and that transfer, if it pays an
-issued address, a **new deposit** credited through the normal path, as indexers re-index the
-canonical log after a reorg; no receipt and the nonce not consumed → wait, alert after one hour.
+issued address, a **new deposit** (`replaces` the old one) credited through the normal path, as
+indexers re-index the canonical log after a reorg; no receipt and the nonce not consumed → wait, alert after one hour.
 
 - `deposit.reversed` is sent for a reversed deposit that was reported as credited or rejected; a
   quote it consumed re-opens if its window is still open; its pending refunds without a

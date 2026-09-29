@@ -10,6 +10,8 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ### Added
 
+- `Deposit.replaces` and `replaced_by` (`topup_client`): the deposit a reorganization's new
+  transfer at the same receipt position replaced, and the reverse link.
 - `Webhook.construct_event` and `load_public_key` accept a public key in Standard Webhooks' `whpk_`
   form (`whpk_` and base64), beside hex and base64.
 - `WebhookKeyObject.standard_webhooks_public_key`, the attested key in that form;

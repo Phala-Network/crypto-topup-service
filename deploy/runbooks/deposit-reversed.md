@@ -46,7 +46,8 @@ rare one means the chain, or a provider, is misbehaving.
   transfer is missing from its final receipt): a real reorg or a replaced transaction. Confirm the
   merchant received `deposit.reversed` (the view's `events` shows `delivered_at`); if the payer
   still wants to top up, they pay a new quote. With `transfer_changed_at_finality` and a
-  `successor_deposit_id`, the payer's payment is the successor instead: confirm it is credited
+  `successor_deposit_id`, the payer's payment is the successor instead (the reversed deposit's
+  `replaced_by` names it within the same account and mode): confirm it is credited
   (`admin GET "/v1/admin/deposits/$SUCCESSOR_DEPOSIT_ID"`, the evidence's id), and nothing more is
   needed.
 - Several reversals on one chain in a short time: treat as a chain or provider incident. Pause

@@ -5,7 +5,7 @@ use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::event_id;
 use uuid::Uuid;
 
-use super::deposits::{NewDeposit, insert_deposit_in};
+use super::deposits::{Evidence, NewDeposit, insert_deposit_in};
 use super::types::{parse_address, to_i64, to_u64};
 
 /// Address metadata required by the finalized-log scanner.
@@ -176,7 +176,8 @@ pub async fn get_confirmed_cursor(
 }
 
 /// Commits deposits the fast scanner found at the route confirmation and advances its cursor
-/// to `confirmed_block`, atomically. The cursor never moves backwards, and it needs a finalized
+/// to `confirmed_block`, atomically. A receipt position whose deposits were all reversed is final,
+/// so a transfer read there before finality is stale, and it is left to finalized evidence. The cursor never moves backwards, and it needs a finalized
 /// cursor row: the fast scan starts above the finalized scanner's range.
 pub async fn commit_confirmed_scan(
     pool: &PgPool,
@@ -185,7 +186,7 @@ pub async fn commit_confirmed_scan(
     confirmed_block: u64,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits).await?;
+    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Confirmed).await?;
     sqlx::query(
         r#"
         UPDATE cursors
@@ -202,12 +203,14 @@ pub async fn commit_confirmed_scan(
 }
 
 /// Inserts a transfer read from the chain as a deposit, with its `deposit.rejected` event if it
-/// is born rejected, and returns its id; `None` when its receipt position is already held.
+/// is born rejected, and returns its id; `None` when its receipt position is held, or when only
+/// finalized `evidence` may take it (`Evidence`).
 pub(crate) async fn insert_scanned_deposit_in(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deposit: &NewDeposit,
+    evidence: Evidence,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    let id = insert_deposit_in(transaction, deposit).await?;
+    let id = insert_deposit_in(transaction, deposit, evidence).await?;
     if let Some(id) = id
         && deposit.state == DepositState::Rejected
     {
@@ -219,11 +222,12 @@ pub(crate) async fn insert_scanned_deposit_in(
 async fn insert_deposits_in(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     deposits: &[NewDeposit],
+    evidence: Evidence,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut inserted = 0_u64;
     let mut unsupported_inserted = 0_u64;
     for deposit in deposits {
-        if insert_scanned_deposit_in(transaction, deposit)
+        if insert_scanned_deposit_in(transaction, deposit, evidence)
             .await?
             .is_some()
         {
@@ -306,7 +310,7 @@ pub async fn commit_scan(
     scanned_block_time: Option<DateTime<Utc>>,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits).await?;
+    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Finalized).await?;
 
     if !backfilled_address_ids.is_empty() {
         sqlx::query("UPDATE addresses SET backfilled = true WHERE id = ANY($1)")

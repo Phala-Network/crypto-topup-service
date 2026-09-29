@@ -48,7 +48,7 @@ use topup_core::identity::{event_id, reversed_event_id};
 use topup_core::money::AtomicAmount;
 use uuid::Uuid;
 
-use crate::db::{self, EventObject, NewOutboxEvent};
+use crate::db::{self, EventObject, Evidence, NewOutboxEvent};
 use crate::routes::RouteSet;
 use crate::scanner::{FinalizedHeads, chain_routes, resolve_log};
 use crate::tenancy::Scope;
@@ -773,6 +773,7 @@ async fn reverse_deposit(
     let Ok(transition) = reverse(deposit.state) else {
         return Ok(None);
     };
+    let successor_to = successor.map(|transfer| transfer.to);
     let from = db::state_code(transition.from);
     let to = db::state_code(transition.to);
     let mut transaction = pool.begin().await?;
@@ -794,9 +795,16 @@ async fn reverse_deposit(
         return Ok(None);
     };
     let successor = match successor {
-        Some(transfer) => record_successor(&mut transaction, routes, chain_id, transfer).await?,
+        Some(transfer) => {
+            record_successor(&mut transaction, routes, chain_id, deposit.id, transfer).await?
+        }
         None => None,
     };
+    // A successor paid to the same address takes the quote over: it stays open for the
+    // successor's confirm step, which consumes it if the successor pays it; otherwise it expires
+    // as any quote does once no payment to its address is left unconfirmed (§9). So the quote
+    // does not expire on the way, and the merchant sees no `quote.expired` before the credit.
+    let successor_keeps_quote = successor.is_some() && successor_to == Some(deposit.address);
     if let (Some(id), Some(evidence)) = (successor, evidence.as_object_mut()) {
         evidence.insert("successor_deposit_id".to_owned(), json!(id));
     }
@@ -831,14 +839,15 @@ async fn reverse_deposit(
         r#"
         UPDATE quotes
         SET consumed_by = NULL,
-            status = CASE WHEN expires_at > now() THEN 'open' ELSE 'expired' END,
-            exposure_reserved = expires_at > now(),
-            closed_at = CASE WHEN expires_at > now() THEN NULL ELSE now() END
+            status = CASE WHEN $2 OR expires_at > now() THEN 'open' ELSE 'expired' END,
+            exposure_reserved = $2 OR expires_at > now(),
+            closed_at = CASE WHEN $2 OR expires_at > now() THEN NULL ELSE now() END
         WHERE consumed_by = $1
         RETURNING id, status
         "#,
     )
     .bind(deposit.id)
+    .bind(successor_keeps_quote)
     .fetch_optional(&mut *transaction)
     .await?;
     if let Some(row) = reopened
@@ -871,7 +880,7 @@ async fn reverse_deposit(
     Ok(Some(Reversed { successor }))
 }
 
-/// Records `transfer`, final on both providers at a reversed deposit's receipt position, as a new
+/// Records `transfer`, final on both providers at the receipt position of `replaces`, as a new
 /// deposit exactly as the scanner would, when it pays an issued address at or after the address's
 /// creation block; returns its id. The old deposit, reversed earlier in `transaction`, no longer
 /// holds the position, so the new one takes the next revision (`identity::deposit_revision_id`)
@@ -881,6 +890,7 @@ async fn record_successor(
     transaction: &mut Transaction<'_, Postgres>,
     routes: &RouteSet,
     chain_id: u64,
+    replaces: Uuid,
     transfer: &TransferLog,
 ) -> Result<Option<Uuid>, FinalityError> {
     let Some(address) = db::find_scan_address(&mut **transaction, chain_id, transfer.to).await?
@@ -895,7 +905,10 @@ async fn record_successor(
         .find(|chain| chain.chain.chain_id == chain_id)
         .ok_or(FinalityError::UnknownChain(chain_id))?;
     let deposit = resolve_log(transfer.clone(), &address, &chain, Utc::now());
-    Ok(db::insert_scanned_deposit_in(transaction, &deposit).await?)
+    Ok(
+        db::insert_scanned_deposit_in(transaction, &deposit, Evidence::Successor { replaces })
+            .await?,
+    )
 }
 
 async fn insert_transition(
@@ -1098,6 +1111,48 @@ mod tests {
                 &deposit,
                 observed(100, &with),
                 observed(100, &missing),
+                None
+            ),
+            Verdict::Wait
+        );
+    }
+
+    #[test]
+    fn providers_disagreeing_on_the_transfer_at_finality_wait() {
+        let deposit = deposit(DepositState::Credited);
+        let mut ninety = transfer(&deposit, 100, 2);
+        ninety.amount = AtomicAmount::new(U256::from(90));
+        let mut eighty = ninety.clone();
+        eighty.amount = AtomicAmount::new(U256::from(80));
+        let primary = included(Some(ninety.clone()), 100, 2);
+        let secondary = included(Some(eighty), 100, 2);
+        assert_eq!(
+            decide(
+                &deposit,
+                observed(100, &primary),
+                observed(100, &secondary),
+                None
+            ),
+            Verdict::Wait
+        );
+        // One provider still shows the recorded transfer.
+        let recorded = included(Some(transfer(&deposit, 100, 2)), 100, 2);
+        assert_eq!(
+            decide(
+                &deposit,
+                observed(100, &primary),
+                observed(100, &recorded),
+                None
+            ),
+            Verdict::Wait
+        );
+        // Same content in blocks the providers disagree on.
+        let elsewhere = included(Some(ninety), 100, 9);
+        assert_eq!(
+            decide(
+                &deposit,
+                observed(100, &primary),
+                observed(100, &elsewhere),
                 None
             ),
             Verdict::Wait

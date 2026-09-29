@@ -14,6 +14,7 @@ use sqlx::migrate::Migrator;
 
 pub use accounts::{Account, Customer, get_account, get_customer};
 pub use addresses::{Address, get_address, list_chain_addresses};
+pub(crate) use deposits::Evidence;
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,

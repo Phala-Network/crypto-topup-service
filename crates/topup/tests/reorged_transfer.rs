@@ -3,7 +3,7 @@
 //! re-executed against other state pays another amount, or another issued address, from the same
 //! transaction and receipt position. The old deposit is reversed at finality, and the transfer now
 //! at the position is a new deposit, credited once, whichever of the scanners and the finality
-//! watch reads it first.
+//! watch reads it first, and each deposit names the other (`replaces`, `replaced_by`).
 
 mod support;
 
@@ -21,14 +21,15 @@ use topup::routes::RouteSet;
 use topup::scanner::{ChainRoutes, chain_routes, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::{ScreenRoute, ScreenStep};
-use topup::steps::sweep::SweepStep;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, FactoryLog, FinalizedHead, ReceiptLookup, TransferLog,
 };
 use topup_adapters::pricing::{Observation, PriceError, PriceSource};
 use topup_adapters::risk::oracle::SanctionsSource;
-use topup_core::deposit::DepositState;
-use topup_core::identity::{credited_event_id, deposit_id, deposit_revision_id, reversed_event_id};
+use topup_core::deposit::{DepositState, RejectReason};
+use topup_core::identity::{
+    credited_event_id, deposit_id, deposit_revision_id, event_id, reversed_event_id,
+};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::{ChainHeads, Confirmations, RouteFile};
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
@@ -40,6 +41,7 @@ use support::seed::{self, NewAccount, NewAddress};
 
 const CHAIN_ID: u64 = 31_337;
 const TOKEN: Address = Address::repeat_byte(0x55);
+const OTHER_TOKEN: Address = Address::repeat_byte(0x56);
 const ROUTER: Address = Address::repeat_byte(0x66);
 const PAYER: Address = Address::repeat_byte(0x77);
 const TX: B256 = B256::repeat_byte(0x0a);
@@ -125,6 +127,104 @@ async fn an_unchanged_re_inclusion_keeps_its_deposit() -> Result<()> {
             ensure!(chain.count("SELECT count(*) FROM deposits").await? == 1);
             ensure!(chain.events("deposit.credited").await? == vec![credited_event_id(old)]);
             ensure!(chain.events("deposit.reversed").await?.is_empty());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_successor_of_an_unsupported_token_is_rejected_once() -> Result<()> {
+    run(|chain| {
+        Box::pin(async move {
+            let old = chain.credit_first(chain.recipient).await?;
+            // The swap now pays out another token, which has no route.
+            let new = chain.reorg(TransferLog {
+                token: OTHER_TOKEN,
+                ..transfer(chain.recipient, 11, 0xbb, 100)
+            });
+
+            ensure!(chain.watch().await?.reversed == 1);
+            let successor = deposit_revision_id(CHAIN_ID, TX, 0, 1);
+            let rejected = chain.deposit(successor).await?;
+            ensure!(rejected.state == DepositState::Rejected);
+            ensure!(rejected.reason == Some(RejectReason::UnsupportedAsset));
+            ensure!(rejected.asset_contract == OTHER_TOKEN && rejected.route.is_none());
+
+            // Read again by the scanners, the transfer is a duplicate.
+            ensure!(chain.finalized_scan().await? == 0);
+            ensure!(chain.reconciler_scan(&new).await? == 0);
+            chain.settle().await?;
+            ensure!(chain.count("SELECT count(*) FROM deposits").await? == 2);
+            ensure!(
+                chain.events("deposit.rejected").await?
+                    == vec![event_id("deposit.rejected", successor)]
+            );
+            ensure!(chain.events("deposit.reversed").await? == vec![reversed_event_id(old)]);
+            ensure!(chain.events("deposit.credited").await? == vec![credited_event_id(old)]);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_transfer_moved_to_an_address_not_issued_leaves_no_successor() -> Result<()> {
+    run(|chain| {
+        Box::pin(async move {
+            let old = chain.credit_first(chain.recipient).await?;
+            let stale = transfer(chain.recipient, 10, 0xaa, 100);
+            chain.reorg(transfer(Address::repeat_byte(0x99), 11, 0xbb, 100));
+
+            ensure!(chain.watch().await?.reversed == 1);
+            let evidence = chain.reversal_evidence(old).await?;
+            ensure!(
+                evidence["result"] == "transfer_changed_at_finality",
+                "{evidence}"
+            );
+            ensure!(evidence.get("successor_deposit_id").is_none(), "{evidence}");
+
+            // A provider still serving the orphaned block gives the per-block scan the old
+            // transfer: the position is final, so the read is stale and records nothing.
+            ensure!(chain.fast_scan(&stale).await? == 0);
+            ensure!(chain.finalized_scan().await? == 0);
+            ensure!(chain.watch().await?.reversed == 0);
+            chain.settle().await?;
+            ensure!(chain.count("SELECT count(*) FROM deposits").await? == 1);
+            ensure!(chain.deposit(old).await?.state == DepositState::Reversed);
+            ensure!(chain.snapshot("deposit.reversed", old).await?["replaced_by"].is_null());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_successor_that_still_pays_the_quote_takes_it_over() -> Result<()> {
+    run(|chain| {
+        Box::pin(async move {
+            chain.open_quote(100).await?;
+            let old = chain.credit_first(chain.recipient).await?;
+            ensure!(chain.quote_consumed_by().await? == ("consumed".to_owned(), Some(old)));
+            // The quote's window closes before the deposit is final.
+            chain.close_quote_window().await?;
+
+            // The router pays the same amount to the same address, from another pool.
+            chain.reorg(TransferLog {
+                from: Address::repeat_byte(0x67),
+                ..transfer(chain.recipient, 11, 0xbb, 100)
+            });
+            ensure!(chain.watch().await?.reversed == 1);
+            let successor = chain.successor(chain.recipient_id, 100).await?;
+            ensure!(chain.quote_consumed_by().await? == ("open".to_owned(), None));
+            chain.settle().await?;
+
+            chain
+                .assert_replaced(old, successor, chain.recipient_id, 100)
+                .await?;
+            ensure!(chain.deposit(successor).await?.price_source.as_deref() == Some("lock"));
+            ensure!(chain.quote_consumed_by().await? == ("consumed".to_owned(), Some(successor)));
+            ensure!(chain.events("quote.expired").await?.is_empty());
             Ok(())
         })
     })
@@ -298,7 +398,6 @@ impl Scenario {
         route.chain.confirmations = Confirmations::Depth(2);
         route.asset.decimals = 0;
         route.rate_lock.amount_decimals = 0;
-        route.destination.unit_decimals = 0;
         route.screening.min_credit_minor = 1;
         route.screening.min_deposit_atomic = AtomicAmount::new(U256::ZERO);
         route.validate()?;
@@ -357,11 +456,7 @@ impl Scenario {
         let pump = Pump::new(
             pool.clone(),
             Arc::clone(&route_set),
-            Arc::new(StepSet::new(
-                Box::new(confirm),
-                Box::new(screen),
-                Box::new(SweepStep),
-            )),
+            Arc::new(StepSet::new(Box::new(confirm), Box::new(screen))),
             PumpConfig::default(),
         )?;
         let watch = FinalityWatch::single(
@@ -417,6 +512,17 @@ impl Scenario {
     }
 
     /// The reconciler's missing-deposit repair of `transfer`; returns the deposits it recorded.
+    /// The per-block scan's commit of `transfer`, read at the route's confirmation; returns the
+    /// deposits it recorded.
+    async fn fast_scan(&self, transfer: &TransferLog) -> Result<u64> {
+        let deposit = self.deposit_of(transfer)?;
+        Ok(
+            db::commit_confirmed_scan(&self.pool, CHAIN_ID, &[deposit], transfer.block_number)
+                .await?
+                .inserted,
+        )
+    }
+
     async fn reconciler_scan(&self, transfer: &TransferLog) -> Result<u64> {
         let deposit = self.deposit_of(transfer)?;
         Ok(
@@ -434,6 +540,7 @@ impl Scenario {
         } else {
             bail!("the transfer pays no issued address")
         };
+        let routed = transfer.token == TOKEN;
         Ok(NewDeposit {
             chain_id: CHAIN_ID,
             tx_hash: transfer.tx_hash,
@@ -443,13 +550,17 @@ impl Scenario {
             block_hash: transfer.block_hash,
             block_time: transfer.block_time,
             address_id,
-            route: Some(self.route.route.clone()),
-            route_version: Some(self.route.version),
+            route: routed.then(|| self.route.route.clone()),
+            route_version: routed.then_some(self.route.version),
             asset_contract: transfer.token,
             from_address: transfer.from,
             amount_atomic: transfer.amount,
-            state: DepositState::Detected,
-            reason: None,
+            state: if routed {
+                DepositState::Detected
+            } else {
+                DepositState::Rejected
+            },
+            reason: (!routed).then_some(RejectReason::UnsupportedAsset),
             next_attempt_at: Utc::now(),
             tx_from: transfer.tx_from,
             tx_nonce: transfer.tx_nonce,
@@ -495,12 +606,7 @@ impl Scenario {
     ) -> Result<()> {
         let reversed = self.deposit(old).await?;
         ensure!(reversed.state == DepositState::Reversed);
-        let evidence: serde_json::Value = sqlx::query_scalar(
-            "SELECT evidence FROM transitions WHERE deposit_id = $1 AND to_state = 'reversed'",
-        )
-        .bind(old)
-        .fetch_one(&self.pool)
-        .await?;
+        let evidence = self.reversal_evidence(old).await?;
         ensure!(
             evidence["result"] == "transfer_changed_at_finality",
             "{evidence}"
@@ -526,7 +632,77 @@ impl Scenario {
         credits.sort();
         ensure!(self.events("deposit.credited").await? == credits);
         ensure!(self.events("deposit.reversed").await? == vec![reversed_event_id(old)]);
+
+        // The webhook snapshots link the two deposits.
+        let (old_id, new_id) = (public_id(old), public_id(new));
+        let reversal = self.snapshot("deposit.reversed", old).await?;
+        ensure!(reversal["replaced_by"] == new_id.as_str(), "{reversal}");
+        ensure!(reversal["replaces"].is_null(), "{reversal}");
+        let credit = self.snapshot("deposit.credited", new).await?;
+        ensure!(credit["replaces"] == old_id.as_str(), "{credit}");
+        ensure!(credit["replaced_by"].is_null(), "{credit}");
         Ok(())
+    }
+
+    async fn reversal_evidence(&self, id: Uuid) -> Result<serde_json::Value> {
+        Ok(sqlx::query_scalar(
+            "SELECT evidence FROM transitions WHERE deposit_id = $1 AND to_state = 'reversed'",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// The deposit object of deposit `id`'s `event_type` event.
+    async fn snapshot(&self, event_type: &str, id: Uuid) -> Result<serde_json::Value> {
+        Ok(sqlx::query_scalar(
+            "SELECT data->'object' FROM events WHERE type = $1 AND data->'object'->>'id' = $2",
+        )
+        .bind(event_type)
+        .bind(public_id(id))
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Opens the recipient's quote for `amount`, its window an hour long.
+    async fn open_quote(&self, amount: u64) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE quotes
+            SET route = $2, amount_atomic = $3::text::numeric, price_scaled = 9000000,
+                expires_at = now() + interval '1 hour', credit_minor = 900, status = 'open',
+                exposure_reserved = true, closed_at = NULL
+            WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
+            "#,
+        )
+        .bind(self.recipient_id)
+        .bind(&self.route.route)
+        .bind(amount.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Moves the recipient's quote window into the past; the transfers stay inside it.
+    async fn close_quote_window(&self) -> Result<()> {
+        sqlx::query(
+            "UPDATE quotes SET expires_at = now() - interval '1 minute' \
+             WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
+        )
+        .bind(self.recipient_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn quote_consumed_by(&self) -> Result<(String, Option<Uuid>)> {
+        Ok(sqlx::query_as(
+            "SELECT quote.status, quote.consumed_by FROM quotes AS quote \
+             JOIN addresses AS address ON address.quote_id = quote.id WHERE address.id = $1",
+        )
+        .bind(self.recipient_id)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     async fn deposit(&self, id: Uuid) -> Result<db::Deposit> {
@@ -547,6 +723,10 @@ impl Scenario {
                 .await?,
         )
     }
+}
+
+fn public_id(id: Uuid) -> String {
+    topup::ids::format(topup::ids::DEPOSIT, id)
 }
 
 struct FixedPrice(Observation);

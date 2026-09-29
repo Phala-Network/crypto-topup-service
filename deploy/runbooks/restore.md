@@ -179,7 +179,11 @@ Each finding is an imported event whose deposit the ledger does not hold as deli
 credit differs from what the merchant received (a spot deposit re-valued). The merchant keeps its
 delivered credit and is never sent another; record each mismatch, both amounts, and the deposit in
 the incident and settle it with the merchant. A `pending` finding that stays after the rescan is a
-deposit the chain does not show: escalate.
+deposit the chain does not show: escalate. One exception: a deposit the finality watch reversed
+because another transfer took its receipt position, and its successor (the successor's
+`replaces` names it), when the backup predates both. The rescan records the final transfer under
+the reversed deposit's id, so that deposit's events may show as `mismatch` and the successor's stay
+`pending`: record the two as one incident and settle what the merchant applied with it.
 
 ## Done when
 

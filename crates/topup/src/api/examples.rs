@@ -544,6 +544,8 @@ fn deposit() -> Value {
         "refunded": false,
         "amount_refunded": 0,
         "amount_reversed": 0,
+        "replaces": null,
+        "replaced_by": null,
         "created": CREATED + 24,
         "metadata": {"order_id": "ord_1001"},
     })

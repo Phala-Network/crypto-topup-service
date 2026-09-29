@@ -382,11 +382,28 @@ impl TryFrom<DepositRecord> for Deposit {
     }
 }
 
-/// Inserts a deposit and returns `false` when a deposit that is not reversed already holds its
-/// receipt position.
+/// What a transfer was read from, which decides whether it may take a receipt position whose
+/// deposits were all reversed (architecture §7).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Evidence {
+    /// Read at the route's confirmation, before finality (the per-block scan): only a position
+    /// that never had a deposit. Such a read may be of a log a reorganization has since removed.
+    Confirmed,
+    /// Read at or below `finalized` (the finalized backstop, the reconciler, restore rescans).
+    Finalized,
+    /// The transfer the finality watch found final at the position of `replaces`, which it
+    /// reversed in the same transaction.
+    Successor {
+        /// The reversed deposit.
+        replaces: Uuid,
+    },
+}
+
+/// Inserts a deposit read at or below `finalized` and returns `false` when a deposit that is not
+/// reversed already holds its receipt position.
 pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let inserted = insert_deposit_in(&mut transaction, deposit).await?;
+    let inserted = insert_deposit_in(&mut transaction, deposit, Evidence::Finalized).await?;
     transaction.commit().await?;
     Ok(inserted.is_some())
 }
@@ -394,11 +411,14 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
 /// Inserts a deposit and returns its id, or `None` when a deposit that is not reversed already
 /// holds its receipt position: the same transfer seen again, or another one at that position,
 /// which the finality watch settles when the position is final. A position whose deposits were
-/// all reversed takes a new deposit with the next revision (`identity::deposit_revision_id`), so
-/// an existing deposit keeps its id and a concurrent insert of the same revision does nothing.
+/// all reversed takes a new deposit with the next revision (`identity::deposit_revision_id`) from
+/// finalized `evidence` only, so an existing deposit keeps its id and a concurrent insert of the
+/// same revision does nothing. A successor names the deposit it replaces when both are in the same
+/// account and mode.
 pub(crate) async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
+    evidence: Evidence,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let chain_id = to_i64(deposit.chain_id, "deposits.chain_id")?;
     let tx_hash = b256_hex(deposit.tx_hash);
@@ -432,25 +452,33 @@ pub(crate) async fn insert_deposit_in(
     let reason = deposit.reason.map(RejectReason::code);
     let tx_from = address_hex(deposit.tx_from);
     let tx_nonce = deposit.tx_nonce.to_string();
+    let (takes_revision, replaces) = match evidence {
+        Evidence::Confirmed => (false, None),
+        Evidence::Finalized => (true, None),
+        Evidence::Successor { replaces } => (true, Some(replaces)),
+    };
     let result = sqlx::query!(
         r#"
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, route, route_version, asset_contract,
             from_address, amount_atomic, state, reason, next_attempt_at, receipt_log_index,
-            tx_from, tx_nonce, final_at, metadata, revision
+            tx_from, tx_nonce, final_at, metadata, revision, replaces
         )
         SELECT
             $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
             COALESCE(quote.customer_id, deposit_address.customer_id), $9, $10, $11, $12,
             $13::text::numeric, $14, $15, $16, $17, $18, $19::text::numeric,
             CASE WHEN $20 THEN now() END,
-            COALESCE(quote.metadata, deposit_address.metadata), $21
+            COALESCE(quote.metadata, deposit_address.metadata), $21, replaced.id
         FROM addresses AS address
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id
-        WHERE address.id = $8
+        LEFT JOIN deposits AS replaced
+            ON replaced.id = $23 AND replaced.account_id = address.account_id
+               AND replaced.livemode = address.livemode
+        WHERE address.id = $8 AND ($21 = 0::bigint OR $22)
         ON CONFLICT DO NOTHING
         "#,
         id,
@@ -473,7 +501,9 @@ pub(crate) async fn insert_deposit_in(
         tx_from,
         tx_nonce,
         deposit.is_final,
-        revision
+        revision,
+        takes_revision,
+        replaces
     )
     .execute(&mut **transaction)
     .await?;

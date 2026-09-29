@@ -365,7 +365,7 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
 | Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): its `amount_reversed` takes the whole credit back (§2.3). A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
-| A payment made through a contract (a router, a swap output) whose transaction is re-included before finality against other state, so that it pays you another amount, or another of your addresses | The first deposit is `reversed` as above, and the transfer now in the final chain is a **new deposit with a new id**: `deposit.credited` (or `deposit.rejected`) for it follows, already final. Apply both through the balance rule (§2.3); the customer ends up credited for what the final chain paid. A plain token transfer cannot change this way. |
+| A payment made through a contract (a router, a swap output) whose transaction is re-included before finality against other state, so that it pays you another amount, or another of your addresses | The first deposit is `reversed` as above, and the transfer now in the final chain is a **new deposit with a new id**, credited (or rejected) through the usual events, already final. The new deposit's `replaces` names the reversed one, and the reversed one's `replaced_by` names it (both `null` when the other deposit is in another account or mode). If it pays the same quote, it completes that quote in the first deposit's place, with no `quote.expired` in between. The events of the two deposits can arrive in any order (a new deposit's `deposit.rejected` can even come before the old one's `deposit.reversed`): apply each through the balance rule (§2.3), which nets the customer to what the final chain paid whatever the order. A plain transfer of a routed token cannot change this way: routes never take fee-on-transfer or rebasing tokens. |
 | You refuse the credit (for example a closed customer) | Deposit `credited`; you hold it and refund it (§2.4). |
 
 User-facing copy per state and reason, including what never to show, is in
@@ -799,9 +799,8 @@ Optional hardening, your choice: fetch `GET /v1/deposits/{id}` in `fulfill` and 
 `status: "credited"` with the same amount; recompute the deposit id, `dep_` and the hex of
 `uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}")` (`topup_sdk.deposit_id`), where
 `receipt_log_index` is the transfer's position among its transaction's receipt logs (0 for a plain
-token transfer), or of `uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}:{revision}")`
-(`deposit_id(…, revision=)`) for a deposit recorded after `revision` earlier deposits at that
-position were reversed (§1.3), and verify the cited log on your own node at finality; per-deposit and per-period caps as review holds. None is needed for
+token transfer), and verify the cited log on your own node at finality (a deposit with `replaces`
+set has another id: verify its log alone, §1.3); per-deposit and per-period caps as review holds. None is needed for
 correctness: as with a card processor, the credit is authorized by the service's signature.
 Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
 events, and the event follows the `credited` commit within a second.

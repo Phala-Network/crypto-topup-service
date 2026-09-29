@@ -12,4 +12,8 @@ DROP INDEX deposits_chain_event_live_unique;
 ALTER TABLE deposits DROP CONSTRAINT deposits_chain_event_unique;
 ALTER TABLE deposits
     ADD CONSTRAINT deposits_chain_event_unique UNIQUE (chain_id, tx_hash, receipt_log_index);
-ALTER TABLE deposits DROP COLUMN revision;
+ALTER TABLE deposits
+    DROP CONSTRAINT deposits_replaces_fkey,
+    DROP CONSTRAINT deposits_replaces_unique,
+    DROP COLUMN replaces,
+    DROP COLUMN revision;
