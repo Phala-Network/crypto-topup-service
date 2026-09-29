@@ -23,14 +23,22 @@ export interface Account {
   payments: PaymentRow[];
 }
 
-/** A token the customer can pay with: the service's `GET /v1/config` `assets` on the product's chain. */
+/**
+ * A network the customer can pay on, with its tokens: the service's `GET /v1/config` `assets` on
+ * the chains the product has pins for.
+ */
+export interface Network {
+  chain_id: number;
+  /** For display, for example `Sepolia testnet`. */
+  name: string;
+  testnet: boolean;
+  assets: Asset[];
+}
+
 export interface Asset {
   /** The service's asset code, for example `pha`. */
   asset: string;
   symbol: string;
-  chain_id: number;
-  network: string;
-  testnet: boolean;
   contract: string;
   decimals: number;
   pricing: string;
@@ -199,6 +207,7 @@ export interface CreatedQuote {
   /** The quote's address as the product's SDK recomputed it from the pins. */
   expected_address: string;
   order_id: string;
+  chain_id: number;
   asset: string;
   amount_atomic: string;
   /** The price the quote locks until `expires_at`, in USD per token. */
@@ -293,13 +302,21 @@ export async function getAccount(): Promise<Account> {
   return expect<Account>(body, ["account_id", "balance", "ledger", "payments", "network", "token"]);
 }
 
-export async function getAssets(): Promise<Asset[]> {
+export async function getNetworks(): Promise<Network[]> {
   const body = await request("assets");
-  return expect<{ assets: Asset[] }>(body, ["assets"]).assets;
+  return expect<{ networks: Network[] }>(body, ["networks"]).networks;
 }
 
-export async function createQuote({ amount, asset }: { amount: number; asset: string }): Promise<CreatedQuote> {
-  const body = await post("quotes", { amount, asset });
+export async function createQuote({
+  amount,
+  chainId,
+  asset,
+}: {
+  amount: number;
+  chainId: number;
+  asset: string;
+}): Promise<CreatedQuote> {
+  const body = await post("quotes", { amount, chain_id: chainId, asset });
   return expect<CreatedQuote>(body, ["quote", "client_secret", "expected_address", "exchange_rate", "expires_at"]);
 }
 

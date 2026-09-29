@@ -129,6 +129,16 @@ async function installWallet(page: Page) {
   );
 }
 
+/** The network, then the token, chosen: one network, Sepolia, with one token, test PHA. */
+async function expectPaymentOptions(product: Locator) {
+  const network = product.getByRole("radiogroup", { name: "Network" });
+  await expect(network.getByRole("radio")).toHaveCount(1);
+  await expect(network.getByRole("radio", { name: "Sepolia testnet", exact: true })).toBeChecked();
+  const token = product.getByRole("radiogroup", { name: "Token" });
+  await expect(token.getByRole("radio")).toHaveCount(1);
+  await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
+}
+
 /** Collects the page's console errors and CSP violations; the flows expect none. */
 async function watchConsole(page: Page): Promise<string[]> {
   const problems: string[] = [];
@@ -224,22 +234,22 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(testTokens).toContainText("Minted:");
   expect(await tokenBalance(env("PAYER_ADDRESS"))).toBe(parseEther("1000"));
 
-  // The customer picks the amount and the token: the service's one asset, test PHA on Sepolia,
-  // shown and chosen.
-  const token = product.getByRole("radiogroup", { name: "Token" });
-  await expect(token.getByTestId("token-option")).toHaveCount(1);
-  await expect(token.getByTestId("token-option")).toContainText("Test PHA");
-  await expect(token.getByTestId("token-option")).toContainText("Sepolia testnet");
-  await expect(token.getByRole("radio")).toBeChecked();
+  // The customer picks the amount, the network, then the token: the product's one network,
+  // Sepolia, and its one token, test PHA, shown and chosen.
+  await expectPaymentOptions(product);
 
   // $20 at the fake service's 0.25 USD per PHA: exactly 80 PHA, with an order id in its metadata.
+  // The quote is for the chosen network and token.
   await product.getByText("$20.00", { exact: true }).click();
+  const quoteRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
-  // The quote's locked rate, counting down from its 15 minutes.
+  expect((await quoteRequest).postDataJSON()).toEqual({ amount: 2000, chain_id: sepolia.id, asset: "pha" });
+  // The quote's locked rate; the SDK's status line holds the one countdown.
   const rate = product.getByTestId("locked-rate");
+  await expect(rate).toContainText("Locked rate · Test PHA");
   await expect(rate).toContainText("1 PHA = $0.25");
-  await expect(rate).toContainText("Test PHA");
-  await expect(rate).toContainText(/Locked for\s*1[45]:\d\d/);
+  await expect(product.getByLabel("Time left to pay")).toHaveText(/^1[45]:\d\d$/);
+  await expect(product.getByText(/\d+:\d\d$/)).toHaveCount(1);
   const timeline = scenes.getByRole("list", { name: "Payment timeline" });
   await expect(step(timeline, "quote_created")).toHaveAttribute("data-state", "complete");
   await expect(step(timeline, "sent")).toHaveAttribute("data-state", "current");
@@ -256,6 +266,8 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(product.getByText(/^Transaction sent:/)).toBeVisible();
   await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
   await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00");
+  // Nothing pending once credited: the locked rate is gone with the countdown.
+  await expect(rate).toHaveCount(0);
   await expect(product.getByTestId("balance")).toHaveText("$20.00", { timeout: 10_000 });
   // Real times: the block's, then each step's, with the elapsed time since sending.
   const credited = await openStep(timeline, "credited");
@@ -344,6 +356,26 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await page.screenshot({ path: testInfo.outputPath("refunds-dark.png"), fullPage: true });
   await page.setViewportSize({ width: 420, height: 900 });
   await page.screenshot({ path: testInfo.outputPath("mobile-dark.png"), fullPage: true });
+
+  // A quote that ends unpaid, expired or canceled, drops its locked rate too.
+  await page.setViewportSize({ width: 1360, height: 1000 });
+  const followed = scenes.locator('[title^="qt_"]');
+  for (const [end, message] of [
+    ["expire", "This quote has expired"],
+    ["cancel", "This quote was canceled"],
+  ] as const) {
+    const before = await followed.getAttribute("title");
+    await product.getByRole("button", { name: "Start a new top-up" }).click();
+    await product.getByText("$5.00", { exact: true }).click();
+    await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+    await expect(rate).toContainText("1 PHA = $0.25");
+    await expect(followed).not.toHaveAttribute("title", before ?? "");
+    const quote = (await followed.getAttribute("title")) ?? "";
+    const ended = await fetch(`${env("SERVICE_URL")}/_test/quotes/${quote}/${end}`, { method: "POST" });
+    expect(ended.status).toBe(200);
+    await expect(product.getByRole("status").first()).toContainText(message, { timeout: 10_000 });
+    await expect(rate).toHaveCount(0);
+  }
   expect(problems).toEqual([]);
 });
 
@@ -364,10 +396,14 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(page.getByRole("tab", { name: "Deposit address" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: "Deposit address" })).toBeFocused();
 
-  await expect(product.getByRole("radiogroup", { name: "Token" }).getByRole("radio")).toBeChecked();
+  await expectPaymentOptions(product);
   await product.getByRole("button", { name: "Show my deposit address" }).click();
   // The backend sees the address checked against the product's pins.
   await expect(scenes.getByTestId("deposit-address-verified")).toContainText("Verified");
+  // Its networks and tokens, named as the product's selectors name them.
+  const tokensOnNetwork = scenes.getByTestId("deposit-address-network");
+  await expect(tokensOnNetwork).toHaveText("Test PHA");
+  await expect(tokensOnNetwork.locator("xpath=..")).toContainText("Sepolia testnet");
   const address = (await scenes.getByTestId("deposit-address").textContent()) ?? "";
   expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
   // The SDK's <DepositAddress> shows the customer the same address to copy.
@@ -438,7 +474,7 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amount: 500 }),
+        body: JSON.stringify({ amount: 500, chain_id: 11155111, asset: "pha" }),
       });
       statuses.push(response.status);
       const body = (await response.json()) as { quote?: string };

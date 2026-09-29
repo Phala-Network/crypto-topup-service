@@ -1,8 +1,8 @@
-import { formatCountdown } from "@phala/pay";
+import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
 import { AppWindow, ArrowRight, CircleAlert, FlaskConical, Lock } from "lucide-react";
-import { Suspense, lazy, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldContent, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
@@ -12,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { Account, Asset, CreatedQuote, DepositAddressResponse } from "./api.js";
+import type { Account, Asset, CreatedQuote, DepositAddressResponse, Network } from "./api.js";
 import { BRAND_BUTTON, ExplorerLink, InfoTip, LINK, describe, errorMessage, loadSdk, wallet } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
 import { dollars, price, tokenName } from "./format.js";
@@ -37,7 +37,7 @@ const METHODS: { id: Method; label: string }[] = [
 export function Product({
   account,
   accountError,
-  assets,
+  networks,
   method,
   onMethodChange,
   session,
@@ -50,7 +50,7 @@ export function Product({
 }: {
   account: Account | null;
   accountError: string | null;
-  assets: Asset[] | undefined;
+  networks: Network[] | undefined;
   method: Method;
   onMethodChange: (method: Method) => void;
   session: CreatedQuote | null;
@@ -61,10 +61,24 @@ export function Product({
   onAddress: (created: DepositAddressResponse) => void;
   appearance: Appearance;
 }) {
-  // The token the customer pays with, for either method; the first offered until they choose.
-  const [choice, setChoice] = useState<string | null>(null);
-  const asset = assets?.find((each) => each.asset === choice) ?? assets?.[0];
+  // The network, then the token, the customer pays with, for either method: the first offered
+  // until they choose; a network's first token when they change the network.
+  const [choice, setChoice] = useState<{ chainId: number | null; asset: string | null }>({
+    chainId: null,
+    asset: null,
+  });
+  const network = networks?.find((each) => each.chain_id === choice.chainId) ?? networks?.[0];
+  const asset = network?.assets.find((each) => each.asset === choice.asset) ?? network?.assets[0];
   const testnet = account?.network.testnet ?? true;
+  const picker = (
+    <PaymentOptions
+      networks={networks}
+      network={network}
+      asset={asset}
+      onNetworkChange={(chainId) => setChoice({ chainId, asset: null })}
+      onAssetChange={(value) => setChoice({ chainId: network?.chain_id ?? null, asset: value })}
+    />
+  );
   return (
     <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
       <AreaLabel icon={<AppWindow />} title="Your product" text="What your customer sees" />
@@ -127,23 +141,17 @@ export function Product({
               </TabsList>
               <TabsContent value="quote" className="pt-5">
                 {session === null || account === null ? (
-                  <AmountPicker account={account} assets={assets} asset={asset} onAssetChange={setChoice} onQuote={onQuote} />
+                  <AmountPicker account={account} network={network} asset={asset} picker={picker} onQuote={onQuote} />
                 ) : (
-                  <div className="flex flex-col gap-5">
-                    <LockedRate session={session} testnet={testnet} />
-                    <Suspense fallback={<CheckoutSkeleton />}>
-                      <Checkout
-                        clientSecret={session.client_secret}
-                        expectedAddress={session.expected_address}
-                        apiBase={account.api_base}
-                        appearance={appearance}
-                        onSuccess={onCredited}
-                      />
-                    </Suspense>
-                    <Button type="button" variant="ghost" className="self-center text-muted-foreground" onClick={onNewTopUp}>
-                      Start a new top-up
-                    </Button>
-                  </div>
+                  <QuoteCheckout
+                    key={session.quote}
+                    session={session}
+                    account={account}
+                    testnet={networks?.find((each) => each.chain_id === session.chain_id)?.testnet ?? testnet}
+                    appearance={appearance}
+                    onCredited={onCredited}
+                    onNewTopUp={onNewTopUp}
+                  />
                 )}
               </TabsContent>
               <TabsContent value="address" className="pt-5">
@@ -152,7 +160,8 @@ export function Product({
                 ) : (
                   <DepositAddressPanel
                     account={account}
-                    picker={<TokenPicker assets={assets} asset={asset} onChange={setChoice} hint="Market rate" />}
+                    picker={picker}
+                    network={network}
                     asset={asset}
                     appearance={appearance}
                     created={address}
@@ -237,56 +246,110 @@ function CheckoutSkeleton() {
 }
 
 /**
- * The tokens the service accepts on the product's chain, as radio cards: shown even with one, so
- * the customer sees what they pay with (a test token, on a testnet) before paying.
+ * The network, then the token, the customer pays with, as radio cards: the networks the product
+ * offers, and the chosen network's tokens. Shown even with one option each, so the customer sees
+ * what they pay with (a test token, on a testnet) before paying.
  */
-function TokenPicker({
-  assets,
+function PaymentOptions({
+  networks,
+  network,
   asset,
-  onChange,
-  hint,
+  onNetworkChange,
+  onAssetChange,
 }: {
-  assets: Asset[] | undefined;
+  networks: Network[] | undefined;
+  network: Network | undefined;
   asset: Asset | undefined;
-  onChange: (asset: string) => void;
-  hint: string;
+  onNetworkChange: (chainId: number) => void;
+  onAssetChange: (asset: string) => void;
 }) {
   const id = useId();
+  if (networks === undefined) {
+    return <Skeleton className="h-[4.75rem] w-full rounded-lg" />;
+  }
+  if (network === undefined || asset === undefined) {
+    return <p className="text-sm text-muted-foreground">No network accepts payments right now.</p>;
+  }
   return (
-    <FieldSet className="gap-2!">
-      <FieldLegend variant="label" className="mb-0 text-[0.8125rem] text-muted-foreground">
-        Pay with
-      </FieldLegend>
-      {assets === undefined ? (
-        <Skeleton className="h-[3.625rem] w-full rounded-lg" />
-      ) : assets.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No token is accepted right now.</p>
-      ) : (
-        <RadioGroup value={asset?.asset ?? ""} onValueChange={onChange} aria-label="Token" className="gap-2">
-          {assets.map((each) => (
-            <FieldLabel
-              key={`${each.chain_id}:${each.asset}`}
-              htmlFor={`${id}-${each.asset}`}
-              data-testid="token-option"
-              className={CHOICE}
-            >
-              <Field orientation="horizontal" className="items-center! gap-3 px-3.5! py-2.5!">
-                <RadioGroupItem value={each.asset} id={`${id}-${each.asset}`} />
-                <TokenMark symbol={each.symbol} />
-                <FieldContent className="min-w-0 gap-0">
-                  <span className="text-sm font-medium">{tokenName(each.symbol, each.testnet)}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {each.network}
-                    {each.testnet && " testnet"}
-                  </span>
-                </FieldContent>
-                <span className="shrink-0 text-xs text-muted-foreground">{hint}</span>
-              </Field>
-            </FieldLabel>
+    <div className="grid gap-4 sm:grid-cols-2 sm:gap-2">
+      <Options legend="Network">
+        <RadioGroup
+          value={String(network.chain_id)}
+          onValueChange={(value) => onNetworkChange(Number(value))}
+          aria-label="Network"
+          className="gap-2"
+        >
+          {networks.map((each) => (
+            <Option
+              key={each.chain_id}
+              id={`${id}-network-${each.chain_id}`}
+              value={String(each.chain_id)}
+              testId="network-option"
+              mark={<NetworkMark name={each.name} />}
+              label={each.name}
+            />
           ))}
         </RadioGroup>
-      )}
+      </Options>
+      <Options legend="Token">
+        {/* Keyed by network: each network lists its own tokens. */}
+        <RadioGroup
+          key={network.chain_id}
+          value={asset.asset}
+          onValueChange={onAssetChange}
+          aria-label="Token"
+          className="gap-2"
+        >
+          {network.assets.map((each) => (
+            <Option
+              key={each.asset}
+              id={`${id}-token-${network.chain_id}-${each.asset}`}
+              value={each.asset}
+              testId="token-option"
+              mark={<TokenMark symbol={each.symbol} />}
+              label={tokenName(each.symbol, network.testnet)}
+            />
+          ))}
+        </RadioGroup>
+      </Options>
+    </div>
+  );
+}
+
+function Options({ legend, children }: { legend: string; children: ReactNode }) {
+  return (
+    <FieldSet className="min-w-0 gap-2!">
+      <FieldLegend variant="label" className="mb-0 text-[0.8125rem] text-muted-foreground">
+        {legend}
+      </FieldLegend>
+      {children}
     </FieldSet>
+  );
+}
+
+function Option({
+  id,
+  value,
+  testId,
+  mark,
+  label,
+}: {
+  id: string;
+  value: string;
+  testId: string;
+  mark: ReactNode;
+  label: string;
+}) {
+  return (
+    <FieldLabel htmlFor={id} data-testid={testId} className={CHOICE}>
+      <Field orientation="horizontal" className="items-center! gap-2.5 px-3! py-2.5!">
+        <RadioGroupItem value={value} id={id} />
+        {mark}
+        <FieldContent className="min-w-0">
+          <span className="truncate text-sm font-medium">{label}</span>
+        </FieldContent>
+      </Field>
+    </FieldLabel>
   );
 }
 
@@ -297,7 +360,7 @@ const CHOICE =
 function TokenMark({ symbol }: { symbol: string }) {
   return (
     <span
-      className="flex size-7 shrink-0 items-center justify-center rounded-full bg-foreground text-[0.5625rem] font-bold tracking-tight text-background"
+      className="flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-[0.5rem] font-bold tracking-tight text-background"
       aria-hidden="true"
     >
       {symbol.slice(0, 3)}
@@ -305,17 +368,29 @@ function TokenMark({ symbol }: { symbol: string }) {
   );
 }
 
+function NetworkMark({ name }: { name: string }) {
+  return (
+    <span
+      className="flex size-6 shrink-0 items-center justify-center rounded-md border text-[0.6875rem] font-semibold text-muted-foreground"
+      aria-hidden="true"
+    >
+      {name.slice(0, 1)}
+    </span>
+  );
+}
+
 function AmountPicker({
   account,
-  assets,
+  network,
   asset,
-  onAssetChange,
+  picker,
   onQuote,
 }: {
   account: Account | null;
-  assets: Asset[] | undefined;
+  network: Network | undefined;
   asset: Asset | undefined;
-  onAssetChange: (asset: string) => void;
+  /** The network and token choice. */
+  picker: ReactNode;
   onQuote: (created: CreatedQuote) => void;
 }) {
   const [preset, setPreset] = useState<number | "custom">(2000);
@@ -333,13 +408,13 @@ function AmountPicker({
       setInvalid(`Enter an amount between ${dollars(min)} and ${dollars(max)}.`);
       return;
     }
-    if (asset === undefined) {
+    if (network === undefined || asset === undefined) {
       return;
     }
     setInvalid(null);
     // The checkout's code loads while the quote is created.
     loadSdk().catch(() => undefined);
-    quote.mutate({ amount: cents, asset: asset.asset }, { onSuccess: onQuote });
+    quote.mutate({ amount: cents, chainId: network.chain_id, asset: asset.asset }, { onSuccess: onQuote });
   };
   const options = [
     ...(account?.presets ?? [500, 2000, 5000]).map((cents) => ({ value: String(cents), label: dollars(cents) })),
@@ -392,7 +467,7 @@ function AmountPicker({
           </InputGroup>
         </Field>
       )}
-      <TokenPicker assets={assets} asset={asset} onChange={onAssetChange} hint="Rate locked at checkout" />
+      {picker}
       <div className="flex flex-col gap-3">
         <Button
           type="submit"
@@ -421,40 +496,61 @@ function AmountPicker({
   );
 }
 
-/** The quote's locked price, from `quote.exchange_rate`, and how long it holds. */
-function LockedRate({ session, testnet }: { session: CreatedQuote; testnet: boolean }) {
-  const now = useNow();
-  const symbol = session.asset.toUpperCase();
-  const expired = now >= session.expires_at * 1000;
+// While a quote can still be paid at its locked price; the SDK's status line says what happened
+// after (credited, expired, …) and holds the one countdown.
+const PAYABLE: ReadonlySet<CheckoutStatus> = new Set(["loading", "waiting", "seen", "confirming"]);
+
+/** The quote's checkout: the SDK's `<Checkout>`, with the locked rate above it while it applies. */
+function QuoteCheckout({
+  session,
+  account,
+  testnet,
+  appearance,
+  onCredited,
+  onNewTopUp,
+}: {
+  session: CreatedQuote;
+  account: Account;
+  testnet: boolean;
+  appearance: Appearance;
+  onCredited: () => void;
+  onNewTopUp: () => void;
+}) {
+  const [status, setStatus] = useState<CheckoutStatus>("loading");
   return (
-    <div
-      data-testid="locked-rate"
-      className="flex items-center justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-3"
-    >
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="text-xs text-muted-foreground">Locked rate · {tokenName(symbol, testnet)}</span>
-        <span className="text-[0.9375rem] font-semibold tabular-nums">
-          1 {symbol} = {price(session.exchange_rate)}
-        </span>
-      </div>
-      <div className="flex shrink-0 flex-col items-end gap-0.5">
-        <span className="text-xs text-muted-foreground">{expired ? "Expired" : "Locked for"}</span>
-        <span className={cn("font-mono text-[0.9375rem] font-medium tabular-nums", expired && "text-destructive")}>
-          {formatCountdown(session.expires_at, now)}
-        </span>
-      </div>
+    <div className="flex flex-col gap-5">
+      {PAYABLE.has(status) && <LockedRate session={session} testnet={testnet} />}
+      <Suspense fallback={<CheckoutSkeleton />}>
+        <Checkout
+          clientSecret={session.client_secret}
+          expectedAddress={session.expected_address}
+          apiBase={account.api_base}
+          appearance={appearance}
+          onChange={(state) => setStatus(state.status)}
+          onSuccess={onCredited}
+        />
+      </Suspense>
+      <Button type="button" variant="ghost" className="self-center text-muted-foreground" onClick={onNewTopUp}>
+        Start a new top-up
+      </Button>
     </div>
   );
 }
 
-/** The current time in milliseconds, updated every second: a countdown's clock. */
-function useNow(): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
+/** The quote's locked price, from `quote.exchange_rate`. */
+function LockedRate({ session, testnet }: { session: CreatedQuote; testnet: boolean }) {
+  const symbol = session.asset.toUpperCase();
+  return (
+    <div
+      data-testid="locked-rate"
+      className="flex items-baseline justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-3"
+    >
+      <span className="text-xs text-muted-foreground">Locked rate · {tokenName(symbol, testnet)}</span>
+      <span className="text-[0.9375rem] font-semibold tabular-nums">
+        1 {symbol} = {price(session.exchange_rate)}
+      </span>
+    </div>
+  );
 }
 
 /** Where to get test tokens: the test token's public mint, from the visitor's wallet, and gas. */

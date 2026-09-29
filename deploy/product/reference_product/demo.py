@@ -7,11 +7,11 @@ backend runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
   its balance from this product's ledger, the ledger lines behind it, and its payments;
-- `GET api/assets`: the tokens a customer can pay with, from the service's `GET /v1/config`
-  `assets` on the chain the product's pins cover;
-- `POST api/quotes` `{"amount", "asset"?}` (cents; one of `api/assets`, the configured token by
-  default): creates a locked-price quote with the SDK, with an order id in its `metadata`, and
-  returns its `client_secret`, the `expected_address` the SDK recomputed from the pins, for
+- `GET api/assets`: the networks a customer can pay on, each with its tokens, from the service's
+  `GET /v1/config` `assets` on the chains the product has pins for;
+- `POST api/quotes` `{"amount", "chain_id", "asset"}` (cents, and a network and token of
+  `api/assets`): creates a locked-price quote with the SDK, with an order id in its `metadata`,
+  and returns its `client_secret`, the `expected_address` the SDK recomputed from the pins, for
   `<Checkout>`, and its locked `exchange_rate` and `expires_at`;
 - `POST api/deposit_address`: the visitor's single deposit address, for every token on every
   network (`POST /v1/deposit_addresses`), recomputed by the SDK from the pins, with a fresh
@@ -86,6 +86,7 @@ MAX_AMOUNT = 100_000
 MAX_SWEEP_FORWARDERS = 200
 EXPLORERS = {1: "https://etherscan.io", 11155111: "https://sepolia.etherscan.io"}
 NETWORKS = {1: "Ethereum", 11155111: "Sepolia"}
+MAINNETS = {1}
 VERIFY_DOCS = (
     "https://github.com/Phala-Network/phala-pay/blob/main/deploy/README.md"
     "#attestation-ingress-and-egress"
@@ -225,7 +226,7 @@ class DemoConsole:
         self._writes = RateLimiter(60, 60, clock)
         self._reads = RateLimiter(120, 60, clock)
         self._trust: tuple[float, dict[str, Any]] | None = None
-        self._assets: tuple[float, list[dict[str, Any]]] | None = None
+        self._networks: tuple[float, list[dict[str, Any]]] | None = None
         self._sweeps: tuple[float, dict[str, Any]] | None = None
         self._block_times: dict[str, tuple[int, int]] = {}
         with ledger.transaction() as db:
@@ -297,7 +298,7 @@ class DemoConsole:
         if name == "trust" and method == "GET":
             return _json(HTTPStatus.OK, self._trust_view())
         if name == "assets" and method == "GET":
-            return _json(HTTPStatus.OK, {"assets": self._payable_assets()})
+            return _json(HTTPStatus.OK, {"networks": self._payable_networks()})
         account = _cookie_account(headers.get("cookie", ""))
         if name == "account" and method == "GET":
             cookie = None
@@ -439,7 +440,7 @@ class DemoConsole:
                 "chain_id": self.config.chain_id,
                 "name": NETWORKS.get(self.config.chain_id, f"Chain {self.config.chain_id}"),
                 "explorer": EXPLORERS.get(self.config.chain_id),
-                "testnet": self.config.chain_id != 1,
+                "testnet": self.config.chain_id not in MAINNETS,
             },
             "token": {"symbol": self.config.token_symbol, "address": self.config.token},
             "treasury": self.config.treasury,
@@ -454,8 +455,15 @@ class DemoConsole:
         amount = request.get("amount")
         if type(amount) is not int or not MIN_AMOUNT <= amount <= MAX_AMOUNT:
             return _json(HTTPStatus.BAD_REQUEST, {"code": "amount_invalid"})
-        asset = request.get("asset", self.config.token_symbol.lower())
-        if not isinstance(asset, str) or asset not in {a["asset"] for a in self._payable_assets()}:
+        # A token on a network the product offers, as the service's quote request names both.
+        chain_id, asset = request.get("chain_id"), request.get("asset")
+        offered = {
+            (network["chain_id"], each["asset"])
+            for network in self._payable_networks()
+            for each in network["assets"]
+        }
+        pair = (chain_id, asset)
+        if type(chain_id) is not int or not isinstance(asset, str) or pair not in offered:
             return _json(HTTPStatus.BAD_REQUEST, {"code": "asset_invalid"})
         if not (
             self._quotes.allow("global")
@@ -469,7 +477,7 @@ class DemoConsole:
             quote = self._service().create_quote(
                 account,
                 amount,
-                chain_id=self.config.chain_id,
+                chain_id=chain_id,
                 asset=asset,
                 idempotency_key=str(uuid.uuid4()),
                 metadata={"order_id": order_id, "workspace": account},
@@ -505,6 +513,7 @@ class DemoConsole:
                 "expected_address": quote.address,
                 "order_id": order_id,
                 # The price the quote locks until `expires_at`, in USD per token.
+                "chain_id": quote.chain_id,
                 "asset": quote.asset,
                 "amount_atomic": quote.amount_atomic,
                 "exchange_rate": quote.exchange_rate,
@@ -844,36 +853,52 @@ class DemoConsole:
             self._sweeps = (now, view)
         return view
 
-    # Assets -------------------------------------------------------------------------------------
+    # Networks -----------------------------------------------------------------------------------
 
-    def _payable_assets(self) -> list[dict[str, Any]]:
-        """The service's payable assets (`GET /v1/config`) on the chain the product's pins cover:
-        a quote on another chain has no treasury pin to recompute its address from."""
+    def _treasuries(self) -> dict[int, str]:
+        """The chains the product has pins for, and each one's treasury: a quote on any other
+        chain has no treasury to recompute its address from. One chain today (`chain_id`)."""
+        return {self.config.chain_id: self.config.treasury}
+
+    def _payable_networks(self) -> list[dict[str, Any]]:
+        """The networks a customer can pay on, each with its tokens: the service's payable assets
+        (`GET /v1/config`) on the chains of `_treasuries`, in the service's order."""
         now = self._clock()
         with self._lock:
-            if self._assets is not None and now - self._assets[0] < 300:
-                return self._assets[1]
-        config = self._service().get_config()
-        chain = self.config.chain_id
-        assets = [
-            {
-                "asset": asset.asset,
-                "symbol": asset.asset.upper(),
-                "chain_id": asset.chain_id,
-                "network": NETWORKS.get(chain, f"Chain {chain}"),
-                "testnet": chain != 1,
-                "contract": asset.contract,
-                "decimals": asset.decimals,
-                "pricing": asset.pricing,
-                "min_amount": asset.min_amount,
-                "quote_ttl_seconds": asset.quote_ttl_seconds,
-            }
-            for asset in config.assets
-            if asset.chain_id == chain
-        ]
+            if self._networks is not None and now - self._networks[0] < 300:
+                return self._networks[1]
+        chains = self._treasuries()
+        networks: dict[int, dict[str, Any]] = {}
+        for asset in self._service().get_config().assets:
+            chain = asset.chain_id
+            if chain not in chains:
+                continue
+            testnet = chain not in MAINNETS
+            name = NETWORKS.get(chain, f"Chain {chain}")
+            network = networks.setdefault(
+                chain,
+                {
+                    "chain_id": chain,
+                    "name": f"{name} testnet" if testnet else name,
+                    "testnet": testnet,
+                    "assets": [],
+                },
+            )
+            network["assets"].append(
+                {
+                    "asset": asset.asset,
+                    "symbol": asset.asset.upper(),
+                    "contract": asset.contract,
+                    "decimals": asset.decimals,
+                    "pricing": asset.pricing,
+                    "min_amount": asset.min_amount,
+                    "quote_ttl_seconds": asset.quote_ttl_seconds,
+                }
+            )
+        view = list(networks.values())
         with self._lock:
-            self._assets = (now, assets)
-        return assets
+            self._networks = (now, view)
+        return view
 
     # Trust --------------------------------------------------------------------------------------
 
@@ -930,7 +955,7 @@ class DemoConsole:
                     self.config.api_key(),
                     account=self.config.account,
                     forwarder=(self.config.factory, self.config.implementation),
-                    treasuries={self.config.chain_id: self.config.treasury},
+                    treasuries=self._treasuries(),
                     transport=self.recorder,
                 )
             return self._client

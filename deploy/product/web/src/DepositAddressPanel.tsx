@@ -9,7 +9,7 @@ import { FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import type { Account, Asset, DepositAddressResponse } from "./api.js";
+import type { Account, Asset, DepositAddressResponse, Network } from "./api.js";
 import { BRAND_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
 import { dollars, price, statusLabel, tokenName, tokens } from "./format.js";
 import { useCreateDepositAddress } from "./queries.js";
@@ -25,14 +25,16 @@ const DepositAddress = lazy(() => loadSdk().then((sdk) => ({ default: sdk.Deposi
 export function DepositAddressPanel({
   account,
   picker,
+  network,
   asset,
   appearance,
   created,
   onCreated,
 }: {
   account: Account;
-  /** The token choice, shown until the address is. */
+  /** The network and token choice, shown until the address is; the address's view starts there. */
   picker: ReactNode;
+  network: Network | undefined;
   asset: Asset | undefined;
   appearance: Appearance;
   created: DepositAddressResponse | null;
@@ -91,11 +93,21 @@ export function DepositAddressPanel({
           clientSecret={created.client_secret}
           apiBase={account.api_base}
           appearance={appearance}
-          {...(asset === undefined ? {} : { asset: asset.asset, chainId: asset.chain_id })}
+          {...(network === undefined || asset === undefined ? {} : { chainId: network.chain_id, asset: asset.asset })}
         />
       </Suspense>
       <TopUps account={account} />
-      <PayFromWallet account={account} asset={asset} to={view.address ?? view.networks[0]?.address ?? ""} />
+      <PayFromWallet
+        account={account}
+        network={network}
+        asset={asset}
+        to={
+          view.networks.find((each) => each.chain_id === network?.chain_id)?.address ??
+          view.address ??
+          view.networks[0]?.address ??
+          ""
+        }
+      />
     </div>
   );
 }
@@ -147,7 +159,17 @@ function TopUps({ account }: { account: Account }) {
   );
 }
 
-function PayFromWallet({ account, asset, to }: { account: Account; asset: Asset | undefined; to: string }) {
+function PayFromWallet({
+  account,
+  network,
+  asset,
+  to,
+}: {
+  account: Account;
+  network: Network | undefined;
+  asset: Asset | undefined;
+  to: string;
+}) {
   const [amount, setAmount] = useState("25");
   const [invalid, setInvalid] = useState<string | null>(null);
   const id = useId();
@@ -155,7 +177,12 @@ function PayFromWallet({ account, asset, to }: { account: Account; asset: Asset 
   const send = useMutation({
     mutationFn: async (atomic: bigint) => {
       const { transferTokens } = await wallet();
-      return transferTokens(account.network.chain_id, asset?.contract ?? account.token.address, to, atomic);
+      return transferTokens(
+        network?.chain_id ?? account.network.chain_id,
+        asset?.contract ?? account.token.address,
+        to,
+        atomic,
+      );
     },
   });
   const submit = (event: FormEvent) => {
@@ -177,7 +204,9 @@ function PayFromWallet({ account, asset, to }: { account: Account; asset: Asset 
       onSubmit={submit}
       aria-label="Pay to the deposit address from a browser wallet"
     >
-      <FieldLabel htmlFor={id}>Send from your browser wallet ({tokenName(symbol, account.network.testnet)})</FieldLabel>
+      <FieldLabel htmlFor={id}>
+        Send from your browser wallet ({tokenName(symbol, network?.testnet ?? account.network.testnet)})
+      </FieldLabel>
       <div className="flex gap-2">
         <Input
           id={id}

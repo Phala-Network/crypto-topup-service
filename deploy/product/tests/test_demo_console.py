@@ -203,7 +203,10 @@ class Service:
             return httpx.Response(200, json=config)
         if path == "/v1/quotes":
             self.quote = _quote(
-                body["client_reference_id"], metadata=body["metadata"], asset=body["asset"]
+                body["client_reference_id"],
+                metadata=body["metadata"],
+                chain_id=body["chain_id"],
+                asset=body["asset"],
             )
             quote = {**self.quote, "client_secret": f"{QUOTE}_secret_{'ab' * 24}"}
             return httpx.Response(200, json=quote)
@@ -327,7 +330,8 @@ def _get(console: DemoConsole, cookie: str, path: str) -> Any:
 
 
 def _create_quote(console: DemoConsole, cookie: str) -> dict[str, Any]:
-    status, body = _post(console, cookie, "quotes", {"amount": 2500})
+    request = {"amount": 2500, "chain_id": 11155111, "asset": "pha"}
+    status, body = _post(console, cookie, "quotes", request)
     assert status == HTTPStatus.OK
     assert body["client_secret"].startswith(QUOTE)
     # The address the SDK recomputed from the pins, for `<Checkout expectedAddress>`.
@@ -347,24 +351,24 @@ def _steps(console: DemoConsole, cookie: str, path: str = f"quotes/{QUOTE}") -> 
     return {step["key"]: step["state"] for step in body["steps"]}
 
 
-def test_offers_the_services_assets_on_the_products_chain(
+def test_offers_the_services_tokens_by_network_on_the_products_chains(
     demo: tuple[DemoConsole, Service],
 ) -> None:
     console, service = demo
     # Read before a demo account exists, like the attestation.
     response = console.handle("GET", "/api/assets", WEBSITE, b"")
     assert response.status == HTTPStatus.OK
-    assets = json.loads(response.body)["assets"]
-    assert [(a["asset"], a["symbol"], a["chain_id"]) for a in assets] == [
-        ("pha", "PHA", 11155111),
-        ("usdc", "USDC", 11155111),
-    ]
-    assert assets[0] == {
+    # The service also takes PHA on chain 1, which the product has no treasury pin for.
+    [network] = json.loads(response.body)["networks"]
+    assert {key: network[key] for key in ("chain_id", "name", "testnet")} == {
+        "chain_id": 11155111,
+        "name": "Sepolia testnet",
+        "testnet": True,
+    }
+    assert [a["symbol"] for a in network["assets"]] == ["PHA", "USDC"]
+    assert network["assets"][0] == {
         "asset": "pha",
         "symbol": "PHA",
-        "chain_id": 11155111,
-        "network": "Sepolia",
-        "testnet": True,
         "contract": CONFIG.token,
         "decimals": 18,
         "pricing": "spot",
@@ -376,20 +380,28 @@ def test_offers_the_services_assets_on_the_products_chain(
     assert [r.url.path for r in service.requests].count("/v1/config") == 1
 
 
-def test_a_quote_is_for_an_offered_asset_and_returns_its_locked_rate(
+def test_a_quote_is_for_an_offered_network_and_token_and_returns_its_locked_rate(
     demo: tuple[DemoConsole, Service],
 ) -> None:
     console, service = demo
     cookie = _account(console)
-    # A token the service takes only on a chain the product's pins do not cover, or none at all.
-    for asset in ("dai", 7):
-        status, body = _post(console, cookie, "quotes", {"amount": 2500, "asset": asset})
+    for pair in (
+        {"chain_id": 1, "asset": "pha"},  # the service's, on a chain without the product's pins
+        {"chain_id": 11155111, "asset": "dai"},  # no such token
+        {"chain_id": "11155111", "asset": "pha"},
+        {"asset": "pha"},
+        {"chain_id": 11155111},
+    ):
+        status, body = _post(console, cookie, "quotes", {"amount": 2500, **pair})
         assert (status, body) == (HTTPStatus.BAD_REQUEST, {"code": "asset_invalid"})
     assert "/v1/quotes" not in [r.url.path for r in service.requests]
-    status, body = _post(console, cookie, "quotes", {"amount": 2500, "asset": "usdc"})
+    request = {"amount": 2500, "chain_id": 11155111, "asset": "usdc"}
+    status, body = _post(console, cookie, "quotes", request)
     assert status == HTTPStatus.OK
-    assert json.loads(service.requests[-1].content)["asset"] == "usdc"
-    assert (body["asset"], body["exchange_rate"], body["expires_at"]) == (
+    sent = json.loads(service.requests[-1].content)
+    assert (sent["chain_id"], sent["asset"]) == (11155111, "usdc")
+    assert (body["chain_id"], body["asset"], body["exchange_rate"], body["expires_at"]) == (
+        11155111,
         "usdc",
         "25.00000000",
         NOW + 900,
@@ -399,9 +411,6 @@ def test_a_quote_is_for_an_offered_asset_and_returns_its_locked_rate(
     _, account = _get(console, cookie, "account")
     [row] = account["payments"]
     assert (row["asset"], row["exchange_rate"]) == ("usdc", "25.00000000")
-    # Without an asset, the configured token.
-    status, body = _post(console, cookie, "quotes", {"amount": 2500})
-    assert (status, body["asset"]) == (HTTPStatus.OK, "pha")
 
 
 def test_an_expired_quote_without_payment_fails_at_the_transfer(

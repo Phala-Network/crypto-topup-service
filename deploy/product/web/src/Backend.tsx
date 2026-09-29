@@ -5,11 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import type { Account, DepositAddressResponse, Selection, Timeline, Trust } from "./api.js";
+import type { Account, DepositAddressResponse, Network, Selection, Timeline, Trust } from "./api.js";
 import { Detail, Details, Empty, ExplorerLink, InfoTip, LINK, StatusBadge, Subsection } from "./common.js";
 import { AreaLabel } from "./Product.js";
 import { Refunds } from "./Refunds.js";
-import { day, dollars, price, short, signedDollars, statusLabel, time, tokens } from "./format.js";
+import { day, dollars, price, short, signedDollars, statusLabel, time, tokenName, tokens } from "./format.js";
 import { Sweeps } from "./Sweeps.js";
 import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
 
@@ -24,6 +24,7 @@ export function Backend({
   timeline,
   trust,
   address,
+  networks,
   onSelect,
 }: {
   account: Account | null;
@@ -31,6 +32,7 @@ export function Backend({
   timeline: Timeline | null;
   trust: Trust | null;
   address: DepositAddressResponse | null;
+  networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
   const live = timeline?.steps.some((step) => step.state === "current") ?? selected !== null;
@@ -97,7 +99,13 @@ export function Backend({
             </Tab>
           </TabsList>
           <TabsContent value="payments" className="p-5">
-            <PaymentsTab account={account} selected={selected} address={address} onSelect={onSelect} />
+            <PaymentsTab
+              account={account}
+              selected={selected}
+              address={address}
+              networks={networks}
+              onSelect={onSelect}
+            />
           </TabsContent>
           <TabsContent value="refunds" className="p-5">
             {timeline === null || deposit === null || account === null ? (
@@ -165,11 +173,13 @@ function PaymentsTab({
   account,
   selected,
   address,
+  networks,
   onSelect,
 }: {
   account: Account | null;
   selected: Selection | null;
   address: DepositAddressResponse | null;
+  networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
   return (
@@ -291,7 +301,13 @@ function PaymentsTab({
           )}
         </Subsection>
         {account !== null && address !== null && (
-          <AddressView account={account} address={address} selected={selected} onSelect={onSelect} />
+          <AddressView
+            account={account}
+            address={address}
+            networks={networks}
+            selected={selected}
+            onSelect={onSelect}
+          />
         )}
       </div>
     </div>
@@ -302,15 +318,19 @@ function PaymentsTab({
 function AddressView({
   account,
   address,
+  networks,
   selected,
   onSelect,
 }: {
   account: Account;
   address: DepositAddressResponse;
+  networks: Network[] | undefined;
   selected: Selection | null;
   onSelect: (selection: Selection) => void;
 }) {
   const view = address.deposit_address;
+  // Each of the address's networks as the product's selectors name it and its tokens.
+  const named = (chainId: number) => networks?.find((each) => each.chain_id === chainId);
   return (
     <Subsection
       title="Deposit address"
@@ -337,19 +357,29 @@ function AddressView({
           </Detail>
         ) : (
           view.networks.map((network) => (
-            <Detail key={network.chain_id} label={`Chain ${network.chain_id}`} className="font-mono">
+            <Detail
+              key={network.chain_id}
+              label={`Address on ${named(network.chain_id)?.name ?? `chain ${network.chain_id}`}`}
+              className="font-mono"
+            >
               {network.address}
             </Detail>
           ))
         )}
-        <Detail label="Networks">
-          {view.networks
-            .map(
-              (network) =>
-                `${network.chain_id === account.network.chain_id ? account.network.name : `Chain ${network.chain_id}`}: ${network.assets.map((asset) => asset.asset.toUpperCase()).join(", ")}`,
-            )
-            .join(" · ")}
-        </Detail>
+        {view.networks.map((network) => {
+          const known = named(network.chain_id);
+          return (
+            <Detail
+              key={network.chain_id}
+              label={known?.name ?? `Chain ${network.chain_id}`}
+              data-testid="deposit-address-network"
+            >
+              {network.assets
+                .map((asset) => tokenName(asset.asset.toUpperCase(), known?.testnet ?? account.network.testnet))
+                .join(", ")}
+            </Detail>
+          );
+        })}
         <Detail label="Metadata" className="font-mono">
           {JSON.stringify(view.metadata)}
         </Detail>

@@ -9,7 +9,7 @@ import {
   createQuote,
   createRefund,
   getAccount,
-  getAssets,
+  getNetworks,
   getDepositAddress,
   getSweeps,
   getTimeline,
@@ -30,7 +30,7 @@ export const queryClient = new QueryClient({
 
 export const keys = {
   account: ["account"] as const,
-  assets: ["assets"] as const,
+  networks: ["networks"] as const,
   trust: ["trust"] as const,
   depositAddress: ["deposit-address"] as const,
   sweeps: ["sweeps"] as const,
@@ -43,9 +43,9 @@ export function useAccount() {
   return useQuery({ queryKey: keys.account, queryFn: getAccount, refetchInterval: 4000 });
 }
 
-/** The tokens a customer can pay with; the service's config changes rarely. */
-export function useAssets() {
-  return useQuery({ queryKey: keys.assets, queryFn: getAssets, staleTime: 5 * 60_000 });
+/** The networks, and their tokens, a customer can pay with; the service's config changes rarely. */
+export function useNetworks() {
+  return useQuery({ queryKey: keys.networks, queryFn: getNetworks, staleTime: 5 * 60_000 });
 }
 
 /** The service's attestation, checked by the product (cached there for 5 minutes). */

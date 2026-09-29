@@ -6,7 +6,7 @@ import type { CreatedQuote, DepositAddressResponse, Selection } from "./api.js";
 import { Backend } from "./Backend.js";
 import { describe } from "./common.js";
 import { Product, type Method } from "./Product.js";
-import { keys, useAccount, useAssets, useDepositAddress, useTimeline, useTrust } from "./queries.js";
+import { keys, useAccount, useDepositAddress, useNetworks, useTimeline, useTrust } from "./queries.js";
 import { CONTAINER, Hero, Properties, SiteFooter, SiteHeader } from "./Site.js";
 import { useTheme } from "./theme.js";
 
@@ -14,7 +14,7 @@ export function App() {
   const [theme, setTheme] = useTheme();
   const queryClient = useQueryClient();
   const account = useAccount();
-  const assets = useAssets();
+  const networks = useNetworks();
   const trust = useTrust();
   const [method, setMethod] = useState<Method>("quote");
   const [session, setSession] = useState<CreatedQuote | null>(null);
@@ -71,7 +71,7 @@ export function App() {
               <Product
                 account={account.data ?? null}
                 accountError={account.error === null ? null : describe(account.error)}
-                assets={assets.data}
+                networks={networks.data}
                 method={method}
                 onMethodChange={setMethod}
                 session={session}
@@ -91,6 +91,7 @@ export function App() {
                 timeline={timeline.data ?? null}
                 trust={trust.data ?? null}
                 address={current.data ?? null}
+                networks={networks.data}
                 onSelect={setSelected}
               />
             </div>

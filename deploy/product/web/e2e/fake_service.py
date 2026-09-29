@@ -18,10 +18,11 @@ real payments on Anvil the way the service does, compressed in time (one block a
 - the service never sweeps: `Flushed` events of the factory, from whoever sent the flush, are
   indexed once at `FINAL_DEPTH` as sweeps and mark the forwarder's earlier deposits `swept`.
 
-`POST /_test/deposits/{id}/reverse` makes a deposit `reversed`, as the service's finality watch
-does for a proven-dropped transaction, and sends `deposit.reversed`. Addresses, deposit ids, the
-webhook signature, and the attestation binding use the SDK's own helpers, so the product checks
-them exactly as it checks the real service.
+`POST /_test/quotes/{id}/expire` and `/cancel` end an unpaid quote, as its window's end or the
+merchant's cancel does. `POST /_test/deposits/{id}/reverse` makes a deposit `reversed`, as the
+service's finality watch does for a proven-dropped transaction, and sends `deposit.reversed`.
+Addresses, deposit ids, the webhook signature, and the attestation binding use the SDK's own
+helpers, so the product checks them exactly as it checks the real service.
 
     python fake_service.py --port 8545 --rpc http://127.0.0.1:8546 --token 0x… \\
         --product-webhook http://127.0.0.1:8089/webhooks --webhook-seed <64 hex> \\
@@ -667,6 +668,19 @@ class FakeTopup:
             raise RefusedError(HTTPStatus.NOT_FOUND, "resource_missing")
         return refund
 
+    def end_quote(self, quote_id: str, status: str) -> dict[str, Any]:
+        """An unpaid quote's end: `expired` at the end of its window, or `canceled`."""
+        with self.lock:
+            quote = self.quotes.get(quote_id)
+            if quote is None:
+                raise RefusedError(HTTPStatus.NOT_FOUND, "resource_missing")
+            if quote["status"] != "open":
+                raise RefusedError(HTTPStatus.BAD_REQUEST, "quote_not_open")
+            quote["status"] = status
+            if status == "expired":
+                quote["expires_at"] = int(time.time())
+            return self.quote_view(quote)
+
     def reverse(self, deposit_id: str) -> dict[str, Any]:
         """The finality watch's outcome for a proven-dropped transaction."""
         with self.lock:
@@ -887,6 +901,10 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
             body = json.loads(self.rfile.read(length) or b"{}")
             if parts[:2] == ["_test", "deposits"] and parts[3:] == ["reverse"]:
                 self.send(HTTPStatus.OK, _public(fake.reverse(parts[2])))
+                return
+            if parts[:2] == ["_test", "quotes"] and parts[3:] in (["expire"], ["cancel"]):
+                status = "expired" if parts[3] == "expire" else "canceled"
+                self.send(HTTPStatus.OK, fake.end_quote(parts[2], status))
                 return
             if not self.merchant():
                 raise RefusedError(HTTPStatus.UNAUTHORIZED, "api_key_missing")
