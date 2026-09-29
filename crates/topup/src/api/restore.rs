@@ -13,6 +13,7 @@ use axum::Json;
 use axum::extract::State;
 use chrono::DateTime;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::valuation::ValuationSource;
 use uuid::Uuid;
@@ -435,6 +436,22 @@ pub(crate) async fn reissue_deposit_address(
                 .ok_or_else(|| ApiError::invalid_param("id", "id must be a da_ id"))
         })
         .transpose()?;
+    let client_secret_hash = request
+        .client_secret
+        .as_deref()
+        .map(|secret| {
+            request
+                .id
+                .as_deref()
+                .and_then(|id| client_secret_hash(&state, id, secret))
+                .ok_or_else(|| {
+                    ApiError::invalid_param(
+                        "client_secret",
+                        "client_secret is not one the service issued for the address's id",
+                    )
+                })
+        })
+        .transpose()?;
     let scope = Scope::new(account_id, request.livemode);
     let customer =
         super::repository::ensure_customer(&state.pool, scope, &request.client_reference_id)
@@ -461,6 +478,16 @@ pub(crate) async fn reissue_deposit_address(
     )
     .await
     .map_err(super::deposit_addresses::map_error)?;
+    if let Some(secret_hash) = client_secret_hash {
+        sqlx::query(
+            "INSERT INTO deposit_address_client_secrets (secret_hash, deposit_address_id) \
+             VALUES ($1, $2) ON CONFLICT (secret_hash) DO NOTHING",
+        )
+        .bind(secret_hash.as_slice())
+        .bind(reissued.id)
+        .execute(&state.pool)
+        .await?;
+    }
     Ok(Json(RestoreDepositAddressResponse {
         reissued: issued,
         deposit_address: super::deposit_addresses::deposit_address_object(
@@ -475,8 +502,8 @@ pub(crate) async fn reissue_deposit_address(
     path = "/v1/admin/restore/quotes",
     request_body = RestoreQuoteRequest,
     responses(
-        (status = 200, description = "OK: re-issued, or the quote exists already with these terms", body = RestoreQuoteResponse),
-        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), no current route has the chain and asset, the terms are not the route's, the quote exists with other terms, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 200, description = "OK: re-issued, or the quote exists already for the customer at the address", body = RestoreQuoteResponse),
+        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -486,9 +513,11 @@ pub(crate) async fn reissue_deposit_address(
 /// Re-issues a quote the merchant created after the restore point, from its record of the quote
 /// object: the address salt is derived from the account, customer, and `qt_` id, so only the
 /// quote's own address is accepted, backfilled from the restored cursor so the rescan finds a
-/// payment made to it since. The locked price is the merchant's record, not the service's: a
-/// payment to the quote is credited at spot unless an imported `deposit.credited` for it, which the
-/// service signed, carries its credit. Audited.
+/// payment made to it since. A `client_secret` the service issued for the quote is kept, so the
+/// payer's page reads it again. The terms are stored as recorded but never applied: a payment to
+/// the quote is credited at spot unless an imported `deposit.credited` for it, which the service
+/// signed, carries its credit, and the payment window closes at the restore's detection at the
+/// latest. Audited.
 pub(crate) async fn reissue_quote(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -517,37 +546,54 @@ pub(crate) async fn reissue_quote(
         DateTime::from_timestamp(seconds, 0)
             .ok_or_else(|| ApiError::invalid_param(param, format!("{param} must be Unix seconds")))
     };
+    let client_secret_hash = request
+        .client_secret
+        .as_deref()
+        .map(|secret| {
+            client_secret_hash(&state, &request.id, secret).ok_or_else(|| {
+                ApiError::invalid_param(
+                    "client_secret",
+                    "client_secret is not one the service issued for this quote",
+                )
+            })
+        })
+        .transpose()?;
     let terms = ReissuedTerms {
         id,
+        client_reference_id: request.client_reference_id.clone(),
         address,
         amount_atomic: AtomicAmount::new(amount_atomic),
         price,
         credit_minor: MinorAmount::new(request.amount),
         created_at: timestamp("created", request.created)?,
         expires_at: timestamp("expires_at", request.expires_at)?,
+        metadata: super::metadata::on_create(request.metadata.as_ref())?,
+        client_secret_hash,
     };
-    // The current route of the mode with the quote's chain and asset, paused or not: nothing new
-    // is given out, the quote was issued already.
+    // A route of the mode with the quote's chain and asset, paused or not and current or not:
+    // nothing new is given out, the quote was issued already, and only its contracts are used.
     let route = state
         .routes
         .current_in(request.livemode)
+        .chain(
+            state
+                .routes
+                .routes()
+                .iter()
+                .filter(|route| route.livemode == request.livemode),
+        )
         .find(|route| {
-            route.chain.chain_id == request.chain_id && route.asset.symbol == request.asset
+            route.chain.chain_id == request.chain_id
+                && route.asset.symbol.eq_ignore_ascii_case(&request.asset)
         })
-        .ok_or_else(|| {
-            ApiError::invalid_param("asset", "no current route has the chain and asset")
-        })?;
-    let scope = Scope::new(account_id, request.livemode);
-    let customer =
-        super::repository::ensure_customer(&state.pool, scope, &request.client_reference_id)
-            .await?;
+        .ok_or_else(|| ApiError::invalid_param("asset", "no route has the chain and asset"))?;
     let (lock, issued) = locks::reissue(
         &state.pool,
         &account,
-        &customer,
+        request.livemode,
         route,
-        terms,
-        restore.id,
+        &terms,
+        (restore.id, restore.detected_at),
         &restore.restored_cursors,
         &actor,
         &request.reason,
@@ -559,6 +605,16 @@ pub(crate) async fn reissue_quote(
         reissued: issued,
         quote: super::quotes::quote_object(&mut connection, &state.routes, lock).await?,
     }))
+}
+
+/// The SHA-256 of `secret` when it is a client secret the service issued for the object whose
+/// public id is `id` (`crate::client_secret`): its tag proves the service issued that id.
+fn client_secret_hash(state: &AppState, id: &str, secret: &str) -> Option<[u8; 32]> {
+    state
+        .client_reads
+        .key()
+        .verify(id, secret)
+        .then(|| Sha256::digest(secret.as_bytes()).into())
 }
 
 #[utoipa::path(
@@ -653,9 +709,12 @@ pub(crate) async fn import_events(
     }))
 }
 
+/// How many rolls after the restore point, lost with it, [`webhook_public_keys`] allows for.
+const LOST_KEY_ROLLS: u32 = 4;
+
 /// The public webhook keys that may have signed a delivery of `scope`: every version up to the
-/// restored current one, and the next, since a roll after the restore point is lost with it. An
-/// account that does not exist is `404`.
+/// restored current one, and the next [`LOST_KEY_ROLLS`], since rolls after the restore point are
+/// lost with it. An account that does not exist is `404`.
 async fn webhook_public_keys(
     state: &AppState,
     scope: Scope,
@@ -669,7 +728,7 @@ async fn webhook_public_keys(
         .first()
         .map(|key| key.version)
         .ok_or_else(ApiError::internal)?;
-    let versions: Vec<u32> = (1..=current.saturating_add(1)).collect();
+    let versions: Vec<u32> = (1..=current.saturating_add(LOST_KEY_ROLLS)).collect();
     let derived = state
         .attestor
         .webhook_keys(&keys.account, scope.livemode(), &versions)
@@ -746,6 +805,7 @@ pub(crate) async fn unfreeze(
             "deposit_addresses_reissued",
             request.deposit_addresses_reissued,
         ),
+        ("quotes_reissued", request.quotes_reissued),
         (
             "delivered_events_imported",
             request.delivered_events_imported,
@@ -760,7 +820,7 @@ pub(crate) async fn unfreeze(
     }
     let reason = format!(
         "{}; checklist: security_changes_reapplied, deposit_addresses_reissued, \
-         delivered_events_imported",
+         quotes_reissued, delivered_events_imported",
         request.reason.trim()
     );
     let restore = restore_mode::unfreeze(&state.pool, &state.routes, &actor, &reason)

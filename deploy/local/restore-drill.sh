@@ -250,6 +250,10 @@ consistency_salt_v2=0xb284965b0e0bc5759251ed751eee59732336798de341530456cbb3c573
 consistency_address_v2=0xfbf725ff86da685728ec7275c9fc155b4443ea35
 consistency_address_v2_id=da_99999999999999999999999999999992
 consistency_event=c371cbc5-44c4-5e44-a795-6242ab4606d9
+# A quote the merchant created after the backup, for another customer; its address is the quote
+# salt formula's for this account, customer, and id over the route factory and treasury.
+consistency_quote=qt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+consistency_quote_address=0x0594d2d54372b0c02108a544d224a8e3311614f8
 delivered_event=$(jq -cn --arg address "$consistency_address_v2" '{
     id: "evt_c371cbc544c45e44a7956242ab4606d9", object: "event",
     account: "acct_66666666666666666666666666666666", livemode: false,
@@ -269,16 +273,13 @@ lost_key=
 public_origin=
 delivered_delivery=
 
-# The delivery of the event on stdin as the merchant's receiver records it (Standard Webhooks
-# headers and the raw body), signed `v1a` with the account's test-mode webhook key version 1,
-# which the simulator derives at the service's dstack path (crates/core/src/signer.rs) and which is
-# the ed25519 seed itself.
-sign_delivery() {
-    local body id timestamp=1790000031
-    body=$(jq -c .)
-    id=$(jq -r .id <<<"$body")
+# What the simulator derives at a dstack path, as the service derives its keys (the 32 key bytes
+# of GetKey): `pem PATH` prints them as an ed25519 private key (a webhook key is the seed itself),
+# and `secret PATH ID` issues a client secret of object ID under them, `{id}_secret_{nonce}{tag}`
+# with the tag the first 16 bytes of HMAC-SHA256 (crates/topup/src/client_secret.rs).
+dstack_key() {
     dc exec -T mock-product python3 -c '
-import base64, http.client, json, socket, sys
+import base64, hashlib, hmac, http.client, json, secrets, socket, sys
 
 class Dstack(http.client.HTTPConnection):
     def connect(self):
@@ -287,19 +288,35 @@ class Dstack(http.client.HTTPConnection):
 
 connection = Dstack("dstack")
 connection.request("POST", "/GetKey", json.dumps(
-    {"path": sys.argv[1], "purpose": "", "algorithm": "secp256k1"}),
+    {"path": sys.argv[2], "purpose": "", "algorithm": "secp256k1"}),
     {"Content-Type": "application/json"})
 response = connection.getresponse()
 if response.status != 200:
     sys.exit("GetKey answered %d" % response.status)
-seed = bytes.fromhex(json.loads(response.read())["key"])
-if len(seed) != 32:
+key = bytes.fromhex(json.loads(response.read())["key"])
+if len(key) != 32:
     sys.exit("the derived key is not 32 bytes")
-der = bytes.fromhex("302e020100300506032b657004220420") + seed
-print("-----BEGIN PRIVATE KEY-----")
-print(base64.b64encode(der).decode())
-print("-----END PRIVATE KEY-----")
-' "settlement/$consistency_account_id/test/v1" >"$admin_dir/webhook.pem"
+if sys.argv[1] == "pem":
+    der = bytes.fromhex("302e020100300506032b657004220420") + key
+    print("-----BEGIN PRIVATE KEY-----")
+    print(base64.b64encode(der).decode())
+    print("-----END PRIVATE KEY-----")
+else:
+    signed = sys.argv[3] + "_secret_" + secrets.token_hex(16)
+    print(signed + hmac.new(key, signed.encode(), hashlib.sha256).hexdigest()[:32])
+' "$@" </dev/null
+}
+
+webhook_key_path="settlement/$consistency_account_id/test/v1"
+
+# The delivery of the event on stdin as the merchant's receiver records it (Standard Webhooks
+# headers and the raw body), signed `v1a` with the account's test-mode webhook key version 1,
+# which the simulator derives at the service's dstack path (crates/core/src/signer.rs).
+sign_delivery() {
+    local body id timestamp=1790000031
+    body=$(jq -c .)
+    id=$(jq -r .id <<<"$body")
+    dstack_key pem "$webhook_key_path" >"$admin_dir/webhook.pem"
     printf '%s.%s.%s' "$id" "$timestamp" "$body" >"$admin_dir/webhook-content"
     jq -cn --arg id "$id" --arg timestamp "$timestamp" --arg body "$body" \
         --arg signature "v1a,$(openssl pkeyutl -sign -rawin -inkey "$admin_dir/webhook.pem" \
@@ -307,6 +324,14 @@ print("-----END PRIVATE KEY-----")
         '{webhook_id: $id, webhook_timestamp: $timestamp, webhook_signature: $signature,
           body: $body}'
     rm -f "$admin_dir/webhook.pem" "$admin_dir/webhook-content"
+}
+
+# The hex public key of that webhook key, as an attestation lists it.
+webhook_public_key() {
+    dstack_key pem "$webhook_key_path" >"$admin_dir/webhook.pem"
+    openssl pkey -in "$admin_dir/webhook.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 |
+        tr -d ' \n'
+    rm -f "$admin_dir/webhook.pem"
 }
 
 # A well-formed test-mode secret key (crates/topup/src/api_keys.rs): 43 random base62 characters
@@ -448,6 +473,16 @@ check_consistency_after_restore() {
     test "$(call_retry_after "$answer")" = 300
     call_body "$answer" | jq -e '.error.code == "service_restoring"' >/dev/null
 
+    # Restore step 5: the operator attests the instance with the admin API; merchant keys cannot.
+    expect_call 503 "$(merchant_call GET /v1/attestation?nonce=00ff "$kept_key" </dev/null)"
+    answer=$(admin_call GET "/v1/admin/attestation?account=$consistency_account_id&livemode=false&nonce=00112233445566778899aabbccddeeff")
+    expect_call 200 "$answer"
+    key=$(webhook_public_key)
+    call_body "$answer" | jq -e --arg account "$consistency_account_id" \
+        --arg key "$key" '.account == $account and .livemode == false
+        and .webhook_keys[0].version == 1 and .webhook_keys[0].public_key == $key
+        and (.report_data | length) == 64 and (.tdx_quote | length) > 0' >/dev/null
+
     # The restore made the key revoked after the backup valid again, but while frozen no key
     # authenticates, reads included; it is revoked again, by prefix, before the unfreeze.
     local lost_revoked="SELECT revoked_at IS NOT NULL FROM api_keys \
@@ -483,6 +518,31 @@ check_consistency_after_restore() {
          and .deposit_address.address == $address and .deposit_address.status == "active"' \
         >/dev/null
 
+    # The quote created after the backup is re-issued from the merchant's record with the client
+    # secret the service tagged, so the payer's page reads it again; a secret of another quote is
+    # refused.
+    local quote_request secret
+    secret=$(dstack_key secret client-secret/v1 "$consistency_quote")
+    quote_request=$(jq -cn --arg account "$consistency_account_id" --arg id "$consistency_quote" \
+        --arg address "$consistency_quote_address" --arg secret "$secret" \
+        '{account: $account, livemode: false, id: $id, client_reference_id: "restore-drill-qt",
+          chain_id: 11155111, asset: "pha", amount: 25, amount_atomic: "1000000000000000000",
+          exchange_rate: "0.25000000", address: $address, created: 1790000000,
+          expires_at: 1790000900, client_secret: $secret,
+          reason: "restore drill: quoted after the backup"}')
+    answer=$(admin_call POST /v1/admin/restore/quotes "$(jq -c --arg secret \
+        "$(dstack_key secret client-secret/v1 qt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" \
+        '.client_secret = $secret' <<<"$quote_request")")
+    expect_call 400 "$answer"
+    answer=$(admin_call POST /v1/admin/restore/quotes "$quote_request")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e --arg address "$consistency_quote_address" \
+        '.reissued and .quote.address == $address and .quote.amount == 25' >/dev/null
+    expect_call 200 "$(topup_call GET "/v1/quotes/$consistency_quote?client_secret=$secret" </dev/null)"
+    # Its address is watched, its history not read yet (no scanner runs here).
+    test "$(psql_value "SELECT backfilled FROM addresses \
+        WHERE address = '$consistency_quote_address'")" = f
+
     # The event delivered after the backup is imported from its signed delivery, as delivered, and
     # never sent again; a body changed after signing is refused and changes nothing.
     test "$(psql_value "SELECT count(*) FROM events WHERE id = '$consistency_event'")" = 0
@@ -492,6 +552,10 @@ check_consistency_after_restore() {
     expect_call 200 "$answer"
     call_body "$answer" | jq -e '.data == [{id: "evt_c371cbc544c45e44a7956242ab4606d9",
         result: "imported"}]' >/dev/null
+    # Its credit is kept for the deposit the rescan re-derives, which is valued at it.
+    test "$(psql_value "SELECT credit_minor || '|' || price_scaled || '|' || price_source \
+        FROM restore_delivered_credits WHERE deposit_id = 'e2facb38-9b5c-57c6-9f75-01e57d34b8d5'")" \
+        = '25|25000000|spot'
     answer=$(admin_call POST /v1/admin/restore/events \
         "$(jq -c '.body |= (fromjson | .data.object.amount = 26 | tojson)
             | {deliveries: [.], reason: "restore drill: re-valued"}' <<<"$delivered_delivery")")
@@ -503,7 +567,7 @@ check_consistency_after_restore() {
 
     # Nothing scans on the restore-check instance, so the freeze cannot be lifted there.
     answer=$(admin_call POST /v1/admin/restore/unfreeze '{"reason":"restore drill",
-        "security_changes_reapplied":true,"deposit_addresses_reissued":true,
+        "security_changes_reapplied":true,"deposit_addresses_reissued":true,"quotes_reissued":true,
         "delivered_events_imported":true}')
     expect_call 400 "$answer"
     call_body "$answer" | jq -e '.error.code == "restore_rescan_incomplete"' >/dev/null
@@ -874,6 +938,6 @@ printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 if [ "$mode" = controlled ]; then
-    echo 'restore_mode=frozen, merchant reads refused; lost key revoked again; lost deposit address re-issued identically; signed delivered event kept as delivered'
+    echo 'restore_mode=frozen, merchant reads refused; attested by the admin API; lost key revoked again; lost deposit address and quote re-issued identically; signed delivered event and its credit kept as delivered'
 fi
 echo "restore drill $mode passed"

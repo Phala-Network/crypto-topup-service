@@ -62,6 +62,8 @@ struct Harness {
     created: AtomicI64,
     account: db::Account,
     key: String,
+    /// Issues client secrets with the key the API checks them with.
+    client_reads: Arc<topup::api::ClientReadLimiter>,
 }
 
 struct Answer {
@@ -74,6 +76,7 @@ impl Harness {
     async fn new(database: &TestDatabase) -> Result<Self> {
         let pool = database.app_pool.clone();
         let admin_key = SigningKey::from_bytes(&[91; 32]);
+        let client_reads = Arc::new(topup::api::ClientReadLimiter::default());
         let route: RouteFile =
             serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
         let state = AppState {
@@ -89,7 +92,7 @@ impl Harness {
             public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
             attestor: Arc::new(KeyAttestor),
             rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
-            client_reads: Arc::default(),
+            client_reads: Arc::clone(&client_reads),
             rate_limits: Arc::default(),
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
@@ -114,6 +117,7 @@ impl Harness {
             created: AtomicI64::new(Utc::now().timestamp()),
             account,
             key,
+            client_reads,
         })
     }
 
@@ -223,21 +227,122 @@ impl Harness {
     }
 }
 
-/// The service's webhook keys in these tests: one per account, mode, and version.
+/// The service's webhook keys in these tests: one per account, mode, and version, from its
+/// dstack path.
 fn webhook_key(account: &str, livemode: bool, version: u32) -> SigningKey {
-    let secret: [u8; 32] = Sha256::new()
-        .chain_update(format!("{account}/{livemode}/v{version}"))
-        .finalize()
-        .into();
-    SigningKey::from_bytes(&secret)
+    let id = topup_core::WebhookKeyId::new(account, livemode, version).expect("an acct_ id");
+    key_at(&id)
+}
+
+fn key_at(id: &topup_core::WebhookKeyId) -> SigningKey {
+    SigningKey::from_bytes(&Sha256::digest(id.domain().as_bytes()).into())
+}
+
+/// Signs deliveries with [`webhook_key`]s, as the service signs them with dstack's.
+struct KeySigner;
+
+impl topup_core::Signer for KeySigner {
+    async fn sign_webhook(
+        &self,
+        key: &topup_core::WebhookKeyId,
+        payload: &[u8],
+    ) -> Result<topup_core::Ed25519Signature, topup_core::SignerError> {
+        Ok(topup_core::Ed25519Signature(
+            key_at(key).sign(payload).to_bytes(),
+        ))
+    }
+
+    async fn webhook_public_key(
+        &self,
+        key: &topup_core::WebhookKeyId,
+    ) -> Result<Ed25519PublicKey, topup_core::SignerError> {
+        Ok(Ed25519PublicKey(key_at(key).verifying_key().to_bytes()))
+    }
+}
+
+/// A merchant's webhook receiver that records each delivery as it got it: the Standard Webhooks
+/// headers and the raw body.
+#[derive(Clone, Default)]
+struct Receiver(Arc<std::sync::Mutex<Vec<Value>>>);
+
+impl Receiver {
+    /// Serves on a local port; returns its URL.
+    async fn serve(&self) -> Result<String> {
+        let received = self.clone();
+        let app = Router::new().route(
+            "/webhooks",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
+                    let header = |name: &str| {
+                        headers
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned()
+                    };
+                    received.0.lock().expect("receiver lock").push(json!({
+                        "webhook_id": header("webhook-id"),
+                        "webhook_timestamp": header("webhook-timestamp"),
+                        "webhook_signature": header("webhook-signature"),
+                        "body": String::from_utf8_lossy(&body),
+                    }));
+                    StatusCode::NO_CONTENT
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(format!("http://{address}/webhooks"))
+    }
+
+    fn deliveries(&self) -> Vec<Value> {
+        self.0.lock().expect("receiver lock").clone()
+    }
+}
+
+/// Screens every sender clear.
+struct ClearSanctions;
+
+#[async_trait]
+impl topup_adapters::risk::oracle::SanctionsSource for ClearSanctions {
+    async fn sanctions(
+        &self,
+        _address: Address,
+        block_number: u64,
+    ) -> topup_core::screening::SanctionsResult {
+        topup_core::screening::SanctionsResult {
+            provider_a: topup_core::screening::SanctionsAnswer::Clear,
+            provider_b: topup_core::screening::SanctionsAnswer::Clear,
+            block_number,
+        }
+    }
 }
 
 /// Derives [`webhook_key`]s as dstack derives the service's; it attests nothing.
 struct KeyAttestor;
 
 impl Attestor for KeyAttestor {
-    fn attest<'a>(&'a self, _request: AttestationRequest<'a>) -> AttestationFuture<'a> {
-        Box::pin(async { Err(AttestationError::Unavailable) })
+    fn attest<'a>(&'a self, request: AttestationRequest<'a>) -> AttestationFuture<'a> {
+        Box::pin(async move {
+            let webhook_keys = self
+                .webhook_keys(request.account, request.livemode, request.versions)
+                .await?;
+            let report_data = topup_adapters::attestation::report_data(
+                request.nonce,
+                request.account,
+                request.livemode,
+                &webhook_keys,
+            )
+            .ok_or(AttestationError::Unavailable)?;
+            Ok(topup::api::AttestationEvidence {
+                webhook_keys,
+                report_data,
+                quote: vec![0x7d],
+            })
+        })
     }
 
     fn webhook_keys<'a>(
@@ -355,6 +460,23 @@ async fn record_deposit(
 /// Runs the confirm step once on the recorded deposit, the chain showing its transfer to
 /// `recipient` and spot at `spot` scaled dollars.
 async fn confirm(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64) -> Result<()> {
+    let step = confirm_step(harness, deposit, recipient, spot).await?;
+    run_pump(
+        harness,
+        deposit,
+        StepSet::new(Box::new(step), Box::new(Unreached)),
+    )
+    .await
+}
+
+/// The confirm step, the chain showing the recorded deposit's transfer to `recipient` and spot at
+/// `spot` scaled dollars.
+async fn confirm_step(
+    harness: &Harness,
+    deposit: Uuid,
+    recipient: Address,
+    spot: u64,
+) -> Result<ConfirmStep> {
     let recorded = db::get_deposit(&harness.pool, deposit)
         .await?
         .context("recorded deposit")?;
@@ -381,7 +503,7 @@ async fn confirm(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64
             ),
         })) as Arc<dyn PriceSource>
     };
-    let step = ConfirmStep::single(
+    Ok(ConfirmStep::single(
         harness.pool.clone(),
         harness.route.clone(),
         chain.clone(),
@@ -389,15 +511,18 @@ async fn confirm(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64
         price("primary", spot),
         Some(price("check", spot)),
         Some(price("fx", 100_000_000)),
-    );
+    ))
+}
+
+/// Runs one step of the pump on `deposit`, whose events render over the harness's route.
+async fn run_pump(harness: &Harness, deposit: Uuid, steps: StepSet) -> Result<()> {
     let pump = Pump::new(
         harness.pool.clone(),
-        Arc::default(),
-        Arc::new(StepSet::new(
-            Box::new(step),
-            Box::new(Unreached),
-            Box::new(Unreached),
-        )),
+        Arc::new(
+            topup::routes::RouteSet::new(vec![harness.route.clone()])
+                .map_err(anyhow::Error::msg)?,
+        ),
+        Arc::new(steps),
         PumpConfig::default(),
     )?;
     // Another due deposit may be claimed first; the held steps park it.
@@ -410,7 +535,7 @@ async fn confirm(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64
             return Ok(());
         }
     }
-    anyhow::bail!("the confirm step did not run on {deposit}")
+    anyhow::bail!("the pump did not run a step on {deposit}")
 }
 
 /// A chain final past every block, holding one transfer.
@@ -507,6 +632,16 @@ async fn valuation(harness: &Harness, deposit: Uuid) -> Result<(String, String, 
     .await?)
 }
 
+/// A `GET` without credentials, as a payer's page reads a `client_secret` view.
+async fn anonymous(app: &Router, path: &str) -> Result<Answer> {
+    answer(
+        app.clone()
+            .oneshot(Request::get(path).body(Body::empty())?)
+            .await?,
+    )
+    .await
+}
+
 async fn answer(response: axum::response::Response) -> Result<Answer> {
     let status = response.status();
     let retry_after = response
@@ -532,6 +667,7 @@ fn checklist(reason: &str) -> Value {
         "reason": reason,
         "security_changes_reapplied": true,
         "deposit_addresses_reissued": true,
+        "quotes_reissued": true,
         "delivered_events_imported": true,
     })
 }
@@ -1075,12 +1211,14 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
             // After the restore point the merchant rotated the address twice and holds version 3.
             let held = harness.derived_address("team-42", 3);
             let held_id = topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4());
+            let held_secret = harness.client_reads.key().issue(&held_id)?;
             let request = json!({
                 "account": harness.account_id(),
                 "livemode": true,
                 "client_reference_id": "team-42",
                 "address": format!("{held:#x}"),
                 "id": held_id,
+                "client_secret": held_secret,
                 "reason": "the merchant's export",
             });
             let path = "/v1/admin/restore/deposit_addresses";
@@ -1097,9 +1235,27 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
                 .fetch_one(&harness.pool)
                 .await?;
             ensure!(versions == 1);
+            // A client secret the service did not issue for the id is refused.
+            let mut other_secret = request.clone();
+            other_secret["client_secret"] = json!(harness.client_reads.key().issue(
+                &topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4())
+            )?);
+            let refused = harness.admin(Method::POST, path, &other_secret).await?;
+            ensure!(
+                refused.body["error"]["param"] == "client_secret",
+                "{}",
+                refused.body
+            );
             let reissued = harness.admin(Method::POST, path, &request).await?;
             ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
             ensure!(reissued.body["reissued"] == true);
+            // The payer's page reads the address again with the secret it holds.
+            let public = anonymous(
+                &harness.app,
+                &format!("/v1/deposit_addresses/{held_id}?client_secret={held_secret}"),
+            )
+            .await?;
+            ensure!(public.status == StatusCode::OK, "{}", public.body);
             let object = &reissued.body["deposit_address"];
             ensure!(object["id"] == held_id && object["version"] == 3);
             ensure!(object["status"] == "active" && object["address"] == format!("{held:#x}"));
@@ -1307,6 +1463,24 @@ async fn a_delivered_event_is_kept_as_delivered_and_never_sent_again() -> Result
                 )
                 .await?;
             ensure!(answer.body["data"][0]["result"] == "imported", "{}", answer.body);
+            // Up to four rolls lost with the restore are tried, and no more.
+            for (version, verifies) in [(5, true), (6, false)] {
+                let answer = harness
+                    .admin(
+                        Method::POST,
+                        path,
+                        &import(vec![delivery(
+                            &rolled,
+                            &webhook_key(harness.account_id(), true, version),
+                        )]),
+                    )
+                    .await?;
+                ensure!(
+                    (answer.status == StatusCode::OK) == verifies,
+                    "v{version}: {}",
+                    answer.body
+                );
+            }
 
             // Compared with the ledger: pending until the rescan values the deposit.
             let findings = |body: &Value| body["delivered_events"]["findings"].clone();
@@ -1620,7 +1794,10 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 seed::FIXTURE_TREASURY,
                 quote_salt(harness.account_id(), "team-q", &qt),
             );
+            // Terms no route issues today (a window past the route's, another amount) are the
+            // merchant's record all the same: the route may have changed since.
             let created = Utc::now().timestamp() - 60;
+            let secret = harness.client_reads.key().issue(&qt)?;
             let request = json!({
                 "account": harness.account_id(),
                 "livemode": true,
@@ -1633,19 +1810,28 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 "exchange_rate": "0.10000000",
                 "address": format!("{address:#x}"),
                 "created": created,
-                "expires_at": created + 900,
+                "expires_at": created + 3_600,
+                "metadata": {"order_id": "o-1"},
+                "client_secret": secret,
                 "reason": "the merchant's quote log",
             });
             let path = "/v1/admin/restore/quotes";
-            // A forged address or terms the route does not issue are refused.
+            // A forged address, a client secret the service did not issue for the quote, or an
+            // asset no route has is refused, and no customer is created.
+            let other_quote = topup::ids::format(topup::ids::QUOTE, Uuid::new_v4());
             for (field, value) in [
                 (
                     "address",
                     json!(format!("{:#x}", Address::repeat_byte(0x99))),
                 ),
-                ("exchange_rate", json!("0.20000000")),
-                ("amount_atomic", json!("200000000000000000000")),
-                ("expires_at", json!(created + 901)),
+                (
+                    "client_secret",
+                    json!(harness.client_reads.key().issue(&other_quote)?),
+                ),
+                (
+                    "client_secret",
+                    json!(format!("{qt}_secret_{}", "0".repeat(64))),
+                ),
                 ("asset", json!("usdc")),
             ] {
                 let mut forged = request.clone();
@@ -1657,10 +1843,13 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                     refused.body
                 );
             }
-            let quotes: i64 = sqlx::query_scalar("SELECT count(*) FROM quotes")
-                .fetch_one(&harness.pool)
-                .await?;
-            ensure!(quotes == 0);
+            let (quotes, customers): (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM quotes), \
+                        (SELECT count(*) FROM customers WHERE client_reference_id = 'team-q')",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!((quotes, customers) == (0, 0));
 
             let reissued = harness.admin(Method::POST, path, &request).await?;
             ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
@@ -1668,13 +1857,21 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
             let quote = &reissued.body["quote"];
             ensure!(quote["id"] == qt && quote["address"] == format!("{address:#x}"));
             ensure!(quote["amount"] == 1_000 && quote["exchange_rate"] == "0.10000000");
-            ensure!(quote["status"] == "open" && quote["expires_at"] == created + 900);
+            ensure!(quote["metadata"] == json!({"order_id": "o-1"}));
+            // Its lock is never honoured, so its window closes at the restore: its page shows it
+            // expired instead of asking for a payment at the locked price.
+            ensure!(
+                quote["expires_at"] == restore.detected_at.timestamp(),
+                "{quote}"
+            );
+            let public = anonymous(
+                &harness.app,
+                &format!("/v1/quotes/{qt}?client_secret={secret}"),
+            )
+            .await?;
+            ensure!(public.status == StatusCode::OK, "{}", public.body);
             let repeated = harness.admin(Method::POST, path, &request).await?;
             ensure!(repeated.body["reissued"] == false);
-            let mut other_terms = request.clone();
-            other_terms["expires_at"] = json!(created + 600);
-            let refused = harness.admin(Method::POST, path, &other_terms).await?;
-            ensure!(refused.status == StatusCode::BAD_REQUEST);
 
             // The scanner watches it from the restored cursor, so the rescan finds its payment.
             let scanned = db::list_scan_addresses(&harness.pool, 1).await?;
@@ -1769,11 +1966,242 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
 }
 
 #[tokio::test]
+async fn a_credit_delivered_by_the_service_round_trips_through_a_restore() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let receiver = Receiver::default();
+            sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
+                .bind(harness.account.id)
+                .bind(receiver.serve().await?)
+                .execute(&harness.owner)
+                .await?;
+            let address = harness
+                .merchant(
+                    Method::POST,
+                    "/v1/deposit_addresses",
+                    &json!({"client_reference_id": "team-rt"}),
+                )
+                .await?;
+            let forwarder =
+                Address::from_str(address.body["address"].as_str().context("address")?)?;
+            let address_id: Uuid =
+                sqlx::query_scalar("SELECT id FROM addresses WHERE address = $1 AND chain_id = 1")
+                    .bind(format!("{forwarder:#x}"))
+                    .fetch_one(&harness.pool)
+                    .await?;
+
+            // The service credits 100 PHA at $0.25 through the real steps and delivers
+            // deposit.credited, which the merchant's receiver records.
+            let tx_hash = B256::repeat_byte(0x9a);
+            let deposit = record_deposit(
+                &harness,
+                tx_hash,
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            let steps = |confirm: ConfirmStep| -> Result<StepSet> {
+                let screen = topup::steps::screen::ScreenStep::new(
+                    harness.pool.clone(),
+                    [topup::steps::screen::ScreenRoute::new(
+                        harness.route.route.clone(),
+                        harness.route.version,
+                        harness.route.screening.sanctions_oracle,
+                        topup_core::screening::Bounds::from(&harness.route.screening),
+                        Arc::new(ClearSanctions),
+                    )],
+                )?;
+                Ok(StepSet::new(Box::new(confirm), Box::new(screen)))
+            };
+            for _ in ["confirm", "screen and credit"] {
+                let step = confirm_step(&harness, deposit, forwarder, 25_000_000).await?;
+                run_pump(&harness, deposit, steps(step)?).await?;
+            }
+            let credited = valuation(&harness, deposit).await?;
+            ensure!(credited.0 == "credited", "{credited:?}");
+            let valued_at = |pool: PgPool| async move {
+                let at: i64 = sqlx::query_scalar(
+                    "SELECT extract(epoch FROM valuation_at)::bigint FROM deposits WHERE id = $1",
+                )
+                .bind(deposit)
+                .fetch_one(&pool)
+                .await?;
+                anyhow::Ok(at)
+            };
+            let first_valued_at = valued_at(harness.pool.clone()).await?;
+            let worker = topup::outbox::DeliveryWorker::new(
+                harness.pool.clone(),
+                Arc::new(KeySigner),
+                true,
+                topup::outbox::DeliveryConfig {
+                    proxy: None,
+                    ..topup::outbox::DeliveryConfig::default()
+                },
+            )?;
+            ensure!(worker.run_once().await? >= 1);
+            let delivered = receiver
+                .deliveries()
+                .into_iter()
+                .find(|delivery| {
+                    delivery["webhook_id"]
+                        == topup::ids::format(topup::ids::EVENT, credited_event_id(deposit))
+                })
+                .context("the receiver recorded deposit.credited")?;
+
+            // The restore loses the credit and its event: the rescan finds the deposit detected.
+            for statement in [
+                "DELETE FROM webhook_deliveries WHERE event_id = $1",
+                "DELETE FROM events WHERE id = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(credited_event_id(deposit))
+                    .execute(&harness.owner)
+                    .await?;
+            }
+            sqlx::query(
+                "UPDATE deposits SET state = 'detected', valuation_at = NULL, price_scaled = NULL, \
+                 price_source = NULL, credit_minor = NULL, quote = NULL, next_attempt_at = now() \
+                 WHERE id = $1",
+            )
+            .bind(deposit)
+            .execute(&harness.owner)
+            .await?;
+            harness.restore().await?;
+
+            // The delivery as recorded verifies and carries the delivered credit into the ledger,
+            // though spot is now $0.20.
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [delivered], "reason": "the merchant's receiver log"}),
+                )
+                .await?;
+            ensure!(
+                imported.body["data"][0]["result"] == "imported",
+                "{}",
+                imported.body
+            );
+            confirm(&harness, deposit, forwarder, 20_000_000).await?;
+            let restored = valuation(&harness, deposit).await?;
+            ensure!(
+                (
+                    restored.1.as_str(),
+                    restored.2.as_str(),
+                    restored.3.as_str()
+                ) == (
+                    credited.1.as_str(),
+                    credited.2.as_str(),
+                    credited.3.as_str()
+                ),
+                "{restored:?} != {credited:?}"
+            );
+            ensure!(valued_at(harness.pool.clone()).await? == first_valued_at);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_operator_attests_a_frozen_instance_that_merchant_keys_cannot() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            harness.restore().await?;
+            let nonce = "00112233445566778899aabbccddeeff";
+            let merchant = harness
+                .merchant(
+                    Method::GET,
+                    &format!("/v1/attestation?nonce={nonce}"),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(merchant.body["error"]["code"] == "service_restoring");
+            for app in [&harness.app, &harness.read_only] {
+                let attested = harness
+                    .admin_on(
+                        app,
+                        Method::GET,
+                        &format!(
+                            "/v1/admin/attestation?account={}&livemode=true&nonce={nonce}",
+                            harness.account_id()
+                        ),
+                        &Value::Null,
+                    )
+                    .await?;
+                ensure!(attested.status == StatusCode::OK, "{}", attested.body);
+                ensure!(attested.body["account"] == harness.account_id());
+                ensure!(attested.body["livemode"] == true);
+                let key = webhook_key(harness.account_id(), true, 1);
+                ensure!(
+                    attested.body["webhook_keys"][0]["public_key"]
+                        == hex::encode(key.verifying_key().to_bytes())
+                );
+                let expected = topup_adapters::attestation::report_data(
+                    &hex::decode(nonce)?,
+                    harness.account_id(),
+                    true,
+                    &[AttestedWebhookKey {
+                        version: 1,
+                        public_key: Ed25519PublicKey(key.verifying_key().to_bytes()),
+                    }],
+                )
+                .context("report data")?;
+                ensure!(attested.body["report_data"] == hex::encode(expected));
+            }
+            let unknown = harness
+                .admin(
+                    Method::GET,
+                    &format!(
+                        "/v1/admin/attestation?account={}&livemode=true&nonce={nonce}",
+                        topup::ids::format(topup::ids::ACCOUNT, Uuid::new_v4())
+                    ),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(unknown.status == StatusCode::NOT_FOUND);
+            let bad_nonce = harness
+                .admin(
+                    Method::GET,
+                    &format!(
+                        "/v1/admin/attestation?account={}&livemode=true&nonce=zz",
+                        harness.account_id()
+                    ),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(bad_nonce.status == StatusCode::BAD_REQUEST);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
 async fn the_restore_check_instance_takes_only_reads_and_the_restore_reconciliation() -> Result<()>
 {
     support::with_database(|database| {
         Box::pin(async move {
             let harness = Harness::new(database).await?;
+            // restore-check records the freeze in parallel with the read-only API, and may fail
+            // before it does: a merchant key reads nothing there even before the freeze exists.
+            ensure!(!restore_mode::is_frozen(&harness.pool).await?);
+            let early = harness
+                .merchant_with(
+                    &harness.read_only,
+                    Method::GET,
+                    "/v1/account",
+                    &Value::Null,
+                    &harness.key,
+                )
+                .await?;
+            ensure!(
+                early.body["error"]["code"] == "service_restoring",
+                "{}",
+                early.body
+            );
             harness.restore().await?;
             let refused = harness
                 .merchant_with(

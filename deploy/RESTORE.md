@@ -67,8 +67,9 @@ differences, so a verification instance has its own compose hash:
 - `TOPUP_RESTORE_FROM_BACKUP=on`: a base backup is required (an empty prefix fails), archiving is
   off, and `backup` idles, so nothing writes to or deletes from the prefix.
 - `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET`, `HEAD`, and the operator's
-  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`; while
-  frozen, a merchant's API key is refused on reads too), runs
+  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`, and so
+  is every request with a merchant API key: `restore-check` records the freeze in parallel, and may
+  fail before it does), runs
   no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
   `heartbeat` exits.
 - No `dstack-ingress`: `topup` is published on 8081 instead
@@ -217,10 +218,7 @@ live_isolated() {
    curl -fsS "$RESTORE_URL/healthz" | tee healthz.json | jq -e '.mode == "read-only" and .restore_check != null'
    ```
 
-4. **Verify the application identity** with a nonce-bound quote from `$RESTORE_URL`, exactly as in
-   [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress); the verified app
-   id must be the original. Otherwise stop.
-5. **Set its own origin**, so admin-signed requests verify (the admin API checks RFC 9421
+4. **Set its own origin**, so admin-signed requests verify (the admin API checks RFC 9421
    signatures against `TOPUP_PUBLIC_ORIGIN`, which the render derives from `TOPUP_DOMAIN`), and the
    reconciliation's steps 2 to 5 can run here: render the variant again with
    `TOPUP_DOMAIN` set to the host of `$RESTORE_URL` and upgrade this instance only (no `-e`, so
@@ -232,11 +230,24 @@ live_isolated() {
      --no-public-logs --no-public-sysinfo --wait
    ```
 
-   Once `/healthz` is `ok` again, the admin deposit view against `$RESTORE_URL` (the
-   [runbook environment](runbooks/README.md#environment) with `BASE_URL=$RESTORE_URL`,
-   `admin GET /v1/admin/deposits/{id}`) must return deposits known from before the loss in their
-   recorded state, and `admin GET /v1/admin/restore` must show `"frozen": true` with the
-   restore point.
+   Wait until `/healthz` is `ok` again.
+5. **Verify the application identity** with a nonce-bound quote from `$RESTORE_URL`. Merchant
+   keys are refused on this instance, so fetch it with the admin API (the
+   [runbook environment](runbooks/README.md#environment) with `BASE_URL=$RESTORE_URL`), for any
+   account of the Environment, and verify it exactly as `public-attestation.json` in
+   [Attestation, ingress, and egress](README.md#attestation-ingress-and-egress), with the compose
+   hash of the `restore-check.yml` rendered in step 4; the verified app id must be the original.
+   Otherwise stop:
+
+   ```sh
+   export NONCE="$(openssl rand -hex 32)"
+   admin GET "/v1/admin/attestation?account=$ACCOUNT&livemode=true&nonce=$NONCE" \
+     > public-attestation.json
+   ```
+
+   Then the admin deposit view (`admin GET /v1/admin/deposits/{id}`) must return deposits known
+   from before the loss in their recorded state, and `admin GET /v1/admin/restore` must show
+   `"frozen": true` with the restore point.
 
 ### Resume
 
@@ -244,7 +255,7 @@ Real restore only, after a human review of the report, row counts, and incident 
 after steps 1 to 5 of the [reconciliation](runbooks/restore.md) (they run on this instance). Delete
 the failed instance, so only one instance holds the keys and archives into the prefix; merchants
 were sent the restore point in the reconciliation's step 2
-([incident communication](runbooks/incident-communication.md)), and their writes answer
+([incident communication](runbooks/incident-communication.md)), and their API requests answer
 `503 service_restoring` until the unfreeze. Then
 render the service variant (`deploy/render-compose.sh`, no flag) with the Environment's settings
 (its `TOPUP_DOMAIN`, the origin merchants call and admin requests are signed for), upgrade the instance to it (`phala deploy --cvm-id
@@ -311,13 +322,17 @@ complete reconciliation, `503` on writes, the RPO and an RTO of at most 3600 sec
 unchanged object listing. `controlled` also runs the business-consistency scenario: after the last
 archived WAL, and before PostgreSQL is killed (a clean shutdown would archive them), the source
 revokes an API key, rotates a customer's deposit address, and records a
-delivered `deposit.credited`, and those writes are lost with the source. The drill requires that
-the replacement is frozen (merchant writes and reads `503 service_restoring`, `GET /v1/admin/restore`
-`frozen`), that the lost key is refused like every key while frozen and is revoked again by prefix,
-that the lost address is re-issued with the same address and `da_` id, that the delivered event's
-signed delivery is imported exactly as delivered with no delivery while a body changed after
-signing is refused and changes nothing, and that the unfreeze is refused while no chain is
-rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
+delivered `deposit.credited`, and those writes are lost with the source; the merchant's records
+also hold a quote created after the backup and its client secret. The drill requires that the
+replacement is frozen (merchant writes and reads `503 service_restoring`, `GET /v1/admin/restore`
+`frozen`), that [Restore](#restore) step 5's admin attestation answers where the merchant's does
+not, with the account's webhook key, that the lost key is refused like every key while frozen and
+is revoked again by prefix, that the lost address is re-issued with the same address and `da_` id,
+that the quote is re-issued at its own address with its client secret (the payer's read works
+again) while a secret of another quote is refused, that the delivered event's signed delivery is
+imported exactly as delivered with no delivery and its credit kept for the deposit, while a body
+changed after signing is refused and changes nothing, and that the unfreeze is refused while no
+chain is rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
 it every Monday at 03:17 UTC and on demand; the CI `deployment` job runs the bounded WAL-G and
 bootstrap tests on pull requests and pushes to `main`.
 

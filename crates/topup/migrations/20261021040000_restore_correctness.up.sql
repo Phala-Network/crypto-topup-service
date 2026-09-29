@@ -30,7 +30,10 @@ CREATE TABLE restore_delivered_credits (
     )
 );
 CREATE INDEX restore_delivered_credits_restore_idx ON restore_delivered_credits (restore_id);
-REVOKE DELETE ON TABLE restore_delivered_credits FROM topup_app;
+-- The service only records a credit and, once, its discard.
+REVOKE UPDATE, DELETE ON TABLE restore_delivered_credits FROM topup_app;
+GRANT UPDATE (discarded_at, discarded_by, discard_reason) ON TABLE restore_delivered_credits
+    TO topup_app;
 COMMENT ON COLUMN restore_delivered_credits.discarded_at IS
     'When the operator discarded a delivered credit the chain contradicts; the deposit is then valued as any other.';
 

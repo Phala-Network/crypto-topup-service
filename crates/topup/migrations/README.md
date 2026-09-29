@@ -20,7 +20,8 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `transitions`, `audit`, `reconciliation_findings`, `heartbeat`, `events` | `SELECT`, `INSERT` (append-only) |
 | `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
 | `reconciliation_blocks`, `deposit_address_client_secrets` | `SELECT`, `INSERT`, `DELETE` |
-| `reconciliation_deposit_cursors`, `restores`, `restore_delivered_credits` | `SELECT`, `INSERT`, `UPDATE` |
+| `reconciliation_deposit_cursors`, `restores` | `SELECT`, `INSERT`, `UPDATE` |
+| `restore_delivered_credits` | `SELECT`, `INSERT`; `UPDATE` of `discarded_at`, `discarded_by`, and `discard_reason` only |
 | `restore_timeline` | `SELECT`, `UPDATE` |
 | `restore_delivered_events` | `SELECT`, `INSERT` |
 | `_sqlx_migrations` | `SELECT` |

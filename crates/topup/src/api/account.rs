@@ -26,9 +26,9 @@ use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiQuery};
 use super::idempotency::Idempotent;
 use super::models::{
-    AccountObject, AccountSelfPauseRequest, AttestationQuery, AttestationResponse,
-    ConfirmationPolicy, RollWebhookKeyRequest, UpdateAccountObjectRequest, WebhookKeyObject,
-    WebhookKeyVersion,
+    AccountObject, AccountSelfPauseRequest, AdminAttestationQuery, AttestationQuery,
+    AttestationResponse, ConfirmationPolicy, RollWebhookKeyRequest, UpdateAccountObjectRequest,
+    WebhookKeyObject, WebhookKeyVersion,
 };
 
 #[utoipa::path(
@@ -429,10 +429,51 @@ pub(crate) async fn get_attestation(
     Extension(merchant): Extension<Merchant>,
     ApiQuery(query): ApiQuery<AttestationQuery>,
 ) -> Result<Json<AttestationResponse>, ApiError> {
-    let nonce = decode_nonce(&query.nonce)?;
-    let keys = active_keys(&state.pool, merchant.scope)
+    attestation(&state, merchant.scope, &query.nonce)
         .await?
-        .ok_or_else(ApiError::internal)?;
+        .map(Json)
+        .ok_or_else(ApiError::internal)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/attestation",
+    params(AdminAttestationQuery),
+    responses(
+        (status = 200, description = "OK", body = AttestationResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no such account", body = ErrorResponse),
+        (status = 503, description = "Service Unavailable", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// `GET /v1/attestation` of any account and mode, for the operator: the same TDX evidence binding
+/// `nonce` to the account's webhook public keys. It works while the service is frozen after a
+/// restore, when merchant keys do not, so the operator can verify a restored instance's identity
+/// (`deploy/RESTORE.md`).
+pub(crate) async fn admin_get_attestation(
+    State(state): State<AppState>,
+    ApiQuery(query): ApiQuery<AdminAttestationQuery>,
+) -> Result<Json<AttestationResponse>, ApiError> {
+    let account_id = super::handlers::parse_account_id(&query.account)?;
+    attestation(&state, Scope::new(account_id, query.livemode), &query.nonce)
+        .await?
+        .map(Json)
+        .ok_or_else(ApiError::not_found)
+}
+
+/// The attestation of `scope`'s webhook keys bound to `nonce`; `None` without the account.
+async fn attestation(
+    state: &AppState,
+    scope: Scope,
+    nonce: &str,
+) -> Result<Option<AttestationResponse>, ApiError> {
+    let nonce = decode_nonce(nonce)?;
+    let Some(keys) = active_keys(&state.pool, scope).await? else {
+        return Ok(None);
+    };
     let versions: Vec<u32> = keys.versions.iter().map(|key| key.version).collect();
     let evidence = state
         .attestor
@@ -455,7 +496,7 @@ pub(crate) async fn get_attestation(
         tracing::error!("the attestor returned other webhook key versions than requested");
         return Err(ApiError::internal());
     }
-    Ok(Json(AttestationResponse {
+    Ok(Some(AttestationResponse {
         object: "attestation".to_owned(),
         account: keys.account,
         livemode: keys.livemode,

@@ -1336,6 +1336,18 @@ pub struct AttestationQuery {
     pub nonce: String,
 }
 
+/// `GET /v1/admin/attestation` query parameters.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct AdminAttestationQuery {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The mode whose webhook keys are attested.
+    pub livemode: bool,
+    /// Non-empty hexadecimal nonce of at most 32 bytes.
+    pub nonce: String,
+}
+
 /// TDX evidence binding a nonce to the webhook public keys of the caller's account in the
 /// caller's mode (design D11).
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -1951,6 +1963,10 @@ pub struct RestoreDepositAddressRequest {
     /// The `da_` id the merchant holds, kept for the re-issued address.
     #[serde(default)]
     pub id: Option<String>,
+    /// A `client_secret` of the address the merchant holds (needs `id`): kept, so the payer's
+    /// page reads the address again. Only a secret the service issued for the `id` is accepted.
+    #[serde(default)]
+    pub client_secret: Option<String>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
@@ -2056,8 +2072,19 @@ pub struct RestoreQuoteRequest {
     pub address: String,
     /// The quote's `created`, Unix seconds.
     pub created: i64,
-    /// The quote's `expires_at`, Unix seconds.
+    /// The quote's `expires_at`, Unix seconds; the re-issued quote's window closes at the
+    /// restore's detection at the latest.
     pub expires_at: i64,
+    /// The quote's `metadata`.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub metadata: Option<serde_json::Value>,
+    /// The quote's `client_secret`, when the merchant holds it: kept, so the payer's page reads the
+    /// quote again. Only a secret the service issued for the `id` is accepted, and it proves the
+    /// service issued the quote. Optional: without it the quote is re-issued, and found, all the
+    /// same, but its public view is not readable.
+    #[serde(default)]
+    pub client_secret: Option<String>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
 }
@@ -2065,10 +2092,13 @@ pub struct RestoreQuoteRequest {
 /// `POST /v1/admin/restore/quotes` response.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct RestoreQuoteResponse {
-    /// Whether the quote was issued now; `false` when it exists already with these terms.
+    /// Whether the quote was issued now; `false` when it exists already for the customer at the
+    /// address.
     pub reissued: bool,
-    /// The quote. Its locked price is the merchant's record, not the service's, so a payment to it
-    /// is credited at spot unless an imported `deposit.credited` for it carries its credit.
+    /// The quote, with the recorded terms. They are the merchant's record, not the service's, so
+    /// they are never applied: a payment to it is credited at spot unless an imported
+    /// `deposit.credited` for it carries its credit, and `expires_at` is the restore's detection
+    /// at the latest.
     pub quote: Quote,
 }
 
@@ -2081,9 +2111,11 @@ pub struct RestoreUnfreezeRequest {
     /// Every contact confirmed the key revocations, treasury cancellations, and endpoint
     /// deletions made after the restore point, and each was applied again; must be `true`.
     pub security_changes_reapplied: bool,
-    /// Every deposit address and quote given out after the restore point was re-issued; must be
-    /// `true`.
+    /// Every deposit address given out after the restore point was re-issued; must be `true`.
     pub deposit_addresses_reissued: bool,
+    /// Every quote created after the restore point that a merchant reported was re-issued; must be
+    /// `true`.
+    pub quotes_reissued: bool,
     /// Every event delivered after the restore point was imported; must be `true`.
     pub delivered_events_imported: bool,
 }

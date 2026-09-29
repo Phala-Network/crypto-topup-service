@@ -404,6 +404,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::lift_reconciliation_block))
         .routes(routes!(handlers::daily_report))
         .routes(routes!(handlers::metrics))
+        .routes(routes!(account::admin_get_attestation))
         .routes(routes!(restore::get_restore))
         .routes(routes!(restore::revoke_api_key))
         .routes(routes!(restore::verify_treasuries))
@@ -518,8 +519,10 @@ async fn refuse_writes_while_frozen(
 
 /// Builds the router of an instance restored from backup (`TOPUP_SERVICE_ENABLED=read-only`,
 /// `deploy/RESTORE.md`): every request other than `GET`, `HEAD`, and the operator's restore
-/// reconciliation (`/v1/admin/restore/…`) is refused with `503 service_restoring`, and `/healthz`
-/// reports the boot-time `restore-check` result read from `restore_report`.
+/// reconciliation (`/v1/admin/restore/…`) is refused with `503 service_restoring`, and so is every
+/// request with a merchant API key, frozen or not: `restore-check` records the freeze in parallel,
+/// and may fail before it does. `/healthz` reports the boot-time `restore-check` result read from
+/// `restore_report`.
 pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Router {
     let (router, _) = router(state);
     router
@@ -536,8 +539,12 @@ struct ReadOnly {
 }
 
 async fn reject_writes(request: Request, next: Next) -> Response {
-    if matches!(*request.method(), Method::GET | Method::HEAD)
-        || request.uri().path().starts_with("/v1/admin/restore/")
+    let merchant_key = request
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION);
+    if !merchant_key
+        && (matches!(*request.method(), Method::GET | Method::HEAD)
+            || request.uri().path().starts_with("/v1/admin/restore/"))
     {
         next.run(request).await
     } else {

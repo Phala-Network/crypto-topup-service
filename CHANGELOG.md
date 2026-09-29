@@ -22,9 +22,14 @@ webhook receivers must ignore unknown fields. The format follows
   the pump does not process (anything but `detected` or `confirmed`); it was a silent no-op.
 - Admin: `POST /v1/admin/restore/quotes` re-issues a quote given out after the restore point from
   the merchant's record of it (the address must be the one its `qt_` id derives over the current
-  treasury, with terms the route issues), backfilled from the restored cursor so a payment made to
-  it is found. Its locked price is the merchant's record, so a payment to it is credited at spot
-  unless an imported, signed `deposit.credited` carries its credit.
+  treasury), backfilled from the restored cursor so a payment made to it is found. Its terms are
+  the merchant's record, kept but never applied: a payment to it is credited at spot unless an
+  imported, signed `deposit.credited` carries its credit, and its `expires_at` is the restore's
+  detection at the latest. A `client_secret` the service issued for the quote is kept, so the
+  payer's page reads it again; `POST /v1/admin/restore/deposit_addresses` takes one too.
+- Admin: `GET /v1/admin/attestation?account=&livemode=&nonce=` returns `GET /v1/attestation` of any
+  account and mode, so the operator verifies a restored instance, where merchant keys are refused.
+- Admin: `POST /v1/admin/restore/unfreeze` requires `quotes_reissued`.
 - Admin: `POST /v1/admin/restore/delivered_credits/discard` releases a deposit held because its
   transfer contradicts the delivered event imported for it (a `contradicted` finding of
   `GET /v1/admin/restore`); the deposit is then valued from the chain.
@@ -334,7 +339,8 @@ webhook receivers must ignore unknown fields. The format follows
   with `Retry-After` (only writes did). The restored database can hold a key you revoked after the
   restore point as valid; keys work again once the operator has revoked such keys again and
   unfrozen the service. A quote's or deposit address's `client_secret` read, the admin API, and
-  `/healthz` are unaffected.
+  `/healthz` are unaffected. A restore-check instance refuses every merchant key, whether or not
+  the freeze is recorded yet.
 - **Breaking** (nothing is live): Admin: `POST /v1/admin/restore/events` takes `deliveries`, each
   delivery as the merchant's receiver got it (`webhook_id`, `webhook_timestamp`,
   `webhook_signature`, and the raw `body`), instead of bare event objects, and imports only

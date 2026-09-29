@@ -1000,12 +1000,13 @@ POST   /v1/admin/deposits/{id}/nudge          next_attempt_at = now; no state ch
 POST   /v1/admin/reconciliation_blocks/{block_key}/lift {reason}   manual lift (§13); repeat → same lift
 GET    /v1/admin/reports/daily                 unflushed, open quotes, rejected holds, undelivered credits, global exposure, reconciliation blocks
 GET    /v1/admin/metrics                      RPC calls per provider, chain, and method since start (Prometheus text; deploy/README.md)
+GET    /v1/admin/attestation {account, livemode, nonce}   GET /v1/attestation of any account and mode, also while frozen (§14)
 GET    /v1/admin/restore                      restore freeze, rescan per chain, imported events vs the ledger (§14)
 POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   revoke again after a restore
 POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply, reason}   cancellations and crediting pauses again
 POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
 POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, reason}   re-issue identically
-POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, reason}   re-issue identically; the lock never applies
+POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, metadata?, client_secret?, reason}   re-issue identically; the lock never applies
 POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands
 POST   /v1/admin/restore/delivered_credits/discard {deposit, reason}   release a deposit whose transfer contradicts its delivered event
 POST   /v1/admin/restore/unfreeze {reason, checklist}   once every chain is rescanned; audited

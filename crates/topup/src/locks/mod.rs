@@ -452,10 +452,12 @@ pub async fn create_in(
 }
 
 /// A quote as the merchant's records hold it, for [`reissue`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReissuedTerms {
     /// The quote id, from its `qt_` id.
     pub id: Uuid,
+    /// The customer's `client_reference_id`.
+    pub client_reference_id: String,
     /// The address the merchant holds.
     pub address: EvmAddress,
     /// The token amount to pay.
@@ -468,64 +470,52 @@ pub struct ReissuedTerms {
     pub created_at: DateTime<Utc>,
     /// End of the payment window.
     pub expires_at: DateTime<Utc>,
+    /// The quote's `metadata`.
+    pub metadata: BTreeMap<String, String>,
+    /// The SHA-256 of the quote's `client_secret`, checked by the caller, so the payer's page
+    /// reads the quote again.
+    pub client_secret_hash: Option<[u8; 32]>,
 }
 
 /// Re-issues after a restore a quote the merchant created after the restore point and lost with
 /// it (docs/design/multi-tenant.md §13), from its record: the address salt is derived from the
-/// account, customer, and quote id, so only the address over the account's current treasury of the
-/// route's chain is accepted, with terms the route issues (the amount for the credit at the price,
-/// within the route's bounds and window). The address is backfilled from the chain's cursor in
+/// account, customer, and quote id, so only the quote's own address over the account's current
+/// treasury of `route`'s chain is accepted. The address is backfilled from the chain's cursor in
 /// `backfill_from` (the restored cursor), so the rescan finds payments made to it since.
 ///
-/// The price is the merchant's record, not the service's, so the quote is marked re-issued by
-/// `restore` and its lock never applies: a payment to it is credited at spot, unless a delivered
-/// `deposit.credited` the service signed carries its credit (`crate::restore_mode`). A quote that
-/// exists with the same terms is returned as it is, with `false`. Caps and pauses do not apply:
-/// nothing new is given out.
+/// The terms are the merchant's record, not the service's, so they are stored as recorded but
+/// never applied: the quote is marked re-issued by `restore`, a payment to it is credited at spot
+/// unless a delivered `deposit.credited` the service signed carries its credit
+/// (`crate::restore_mode`), and its payment window closes at the restore's detection at the
+/// latest, so its page shows it expired instead of asking for a payment at a price that is not
+/// honoured. The customer is created only once the address matches. A quote that exists already
+/// for the customer at the address is returned as it is, with `false`. Caps and pauses do not
+/// apply: nothing new is given out.
 #[allow(clippy::too_many_arguments)]
 pub async fn reissue(
     pool: &PgPool,
     account: &Account,
-    customer: &Customer,
+    livemode: bool,
     route: &RouteFile,
-    terms: ReissuedTerms,
-    restore: Uuid,
+    terms: &ReissuedTerms,
+    restore: (Uuid, DateTime<Utc>),
     backfill_from: &BTreeMap<u64, u64>,
     actor: &Actor,
     reason: &str,
 ) -> Result<(RateLock, bool), RateLockError> {
-    if customer.account_id != account.id {
-        return Err(RateLockError::NotFound);
-    }
-    if route.livemode != customer.livemode {
+    if route.livemode != livemode {
         return Err(RateLockError::InvalidInput(
-            "the route's mode differs from the customer's",
+            "the route's mode differs from the quote's",
         ));
     }
-    validate_bounds(route, terms.amount_atomic, terms.credit_minor)?;
-    if amount_for_credit(route, terms.credit_minor, terms.price)? != terms.amount_atomic {
-        return Err(RateLockError::InvalidInput(
-            "amount_atomic is not the route's amount for amount at exchange_rate",
-        ));
-    }
-    let window = terms.expires_at.signed_duration_since(terms.created_at);
-    let max_window = i64::try_from(route.rate_lock.window_s)
-        .ok()
-        .and_then(chrono::Duration::try_seconds)
-        .ok_or(RateLockError::Arithmetic)?;
-    if window <= chrono::Duration::zero() || window > max_window {
-        return Err(RateLockError::InvalidInput(
-            "expires_at is not within the route's payment window after created",
-        ));
-    }
-    let scope = Scope::new(account.id, customer.livemode);
+    let (restore_id, detected_at) = restore;
+    let scope = Scope::new(account.id, livemode);
     let mut transaction = pool.begin().await?;
-    lock_customer(&mut transaction, customer).await?;
     crate::treasuries::lock(&mut transaction, scope, false).await?;
     let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
     let salt = quote_salt(
         &account.public_id,
-        &customer.client_reference_id,
+        &terms.client_reference_id,
         &quote_id(terms.id),
     );
     let address = forwarder_address(
@@ -540,16 +530,11 @@ pub async fn reissue(
         ));
     }
     if let Some(existing) = get(&mut *transaction, scope, terms.id).await? {
-        let same = existing.address == terms.address
-            && existing.client_reference_id == customer.client_reference_id
-            && existing.route == route.route
-            && existing.amount_atomic == terms.amount_atomic
-            && existing.price == terms.price
-            && existing.credit_minor == terms.credit_minor
-            && existing.expires_at.timestamp() == terms.expires_at.timestamp();
-        if !same {
+        if existing.address != terms.address
+            || existing.client_reference_id != terms.client_reference_id
+        {
             return Err(RateLockError::InvalidInput(
-                "the quote exists with other terms",
+                "the quote exists with another customer or address",
             ));
         }
         transaction.commit().await?;
@@ -563,26 +548,50 @@ pub async fn reissue(
         return Err(RateLockError::InvalidInput("id belongs to another quote"));
     }
     sqlx::query(
+        "INSERT INTO customers (id, account_id, livemode, client_reference_id) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (account_id, livemode, client_reference_id) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(&terms.client_reference_id)
+    .execute(&mut *transaction)
+    .await?;
+    let customer_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM customers \
+         WHERE account_id = $1 AND livemode = $2 AND client_reference_id = $3 \
+         FOR NO KEY UPDATE",
+    )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(&terms.client_reference_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query(
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-            credit_minor, expires_at, status, exposure_reserved, created_at, restore_id
+            credit_minor, expires_at, status, exposure_reserved, created_at, metadata,
+            client_secret_hash, restore_id
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', false, $10, $11)
+                $9, 'open', false, $10, $11, $12, $13)
         "#,
     )
     .bind(terms.id)
     .bind(scope.account_id())
     .bind(scope.livemode())
-    .bind(customer.id)
+    .bind(customer_id)
     .bind(&route.route)
     .bind(terms.amount_atomic.value().to_string())
     .bind(terms.price.value().to_string())
     .bind(terms.credit_minor.value().to_string())
-    .bind(terms.expires_at)
+    .bind(terms.expires_at.min(detected_at))
     .bind(terms.created_at)
-    .bind(restore)
+    .bind(Json(&terms.metadata))
+    .bind(terms.client_secret_hash.as_ref().map(<[u8; 32]>::as_slice))
+    .bind(restore_id)
     .execute(&mut *transaction)
     .await?;
     let chain_id = i64::try_from(route.chain.chain_id).map_err(|_| RateLockError::Arithmetic)?;

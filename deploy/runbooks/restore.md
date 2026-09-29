@@ -57,9 +57,10 @@ receiver's store, its database, or an `export_account` taken before the loss):
    `.updated`, `.canceled`), with its `status` and `crediting_paused_by`;
 3. webhook endpoints it deleted (`we_…`);
 4. deposit addresses it received: `client_reference_id`, `address`, and `id` (`da_…`) or
-   `version`;
+   `version`, and a `client_secret` it holds for one;
 5. quotes it created: the quote object (`id`, `client_reference_id`, `chain_id`, `asset`,
-   `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`);
+   `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`, `metadata`) and
+   its `client_secret`, if it kept it;
 6. the delivery of every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event it
    received, as its receiver got it: the raw body, byte for byte, with its `webhook-id`,
    `webhook-timestamp`, and `webhook-signature` headers. Only a delivery the service signed is
@@ -158,17 +159,25 @@ treasury is accepted:
 
 ```sh
 admin POST /v1/admin/restore/quotes \
-  '{"account":"acct_…","livemode":true,"id":"qt_…","client_reference_id":"team-42","chain_id":1,"asset":"pha","amount":1000,"amount_atomic":"…","exchange_rate":"0.10000000","address":"0x…","created":1790000000,"expires_at":1790000900,"reason":"INC-…"}' | jq
+  '{"account":"acct_…","livemode":true,"id":"qt_…","client_reference_id":"team-42","chain_id":1,"asset":"pha","amount":1000,"amount_atomic":"…","exchange_rate":"0.10000000","address":"0x…","created":1790000000,"expires_at":1790000900,"metadata":{},"client_secret":"qt_…_secret_…","reason":"INC-…"}' | jq
 ```
 
-The answer's `quote` has the merchant's terms; `reissued` is `false` when it exists already with
-them. Its address is backfilled from the restored cursor, so the rescan finds a payment made to it.
-`400` means the address is not the quote's over the current treasury (check the treasury, then the
-record), no current route has the chain and asset, the terms are not ones the route issues (the
-`amount_atomic` for `amount` at `exchange_rate`, the bounds, a window of at most the route's), or
-the quote exists with other terms. The locked price is the merchant's record, not the service's:
-a payment to the quote is credited at spot, unless the merchant's delivered `deposit.credited` for
-it (step 5) carries the quote's credit. A quote nobody reports stays lost.
+Only the address is checked: the terms are stored as the merchant recorded them, whatever the
+route issues today, and never applied. The locked price is the merchant's record, not the
+service's, so a payment to the quote is credited at spot, unless the merchant's delivered
+`deposit.credited` for it (step 5) carries the quote's credit; and the quote's `expires_at` is the
+restore's detection at the latest, so its payment page shows it expired instead of asking for a
+payment at a price that is not honoured. Send the quote's `client_secret` when the merchant holds
+it: only a secret the service issued for that `qt_` id is accepted (its tag proves it), and it is
+kept, so the payer's page reads the quote again; without it the quote is re-issued and its payment
+found all the same. `reissued` is `false` when the quote exists already for the customer at the
+address. Its address is backfilled from the restored cursor, so the rescan finds a payment made to
+it. `400` means the address is not the quote's over the current treasury (check the treasury, then
+the record), the `client_secret` is not the quote's, or no route has the chain and asset. A quote
+nobody reports stays lost.
+
+The same `client_secret` field on the deposit address re-issue above (with its `id`) keeps a secret
+the merchant holds for the address.
 
 ## 5. Import the events the merchant received
 
@@ -231,13 +240,14 @@ unfreeze is when merchant keys authenticate again:
 
 ```sh
 admin POST /v1/admin/restore/unfreeze \
-  '{"reason":"INC-…: reconciled, signed off by …","security_changes_reapplied":true,"deposit_addresses_reissued":true,"delivered_events_imported":true}'
+  '{"reason":"INC-…: reconciled, signed off by …","security_changes_reapplied":true,"deposit_addresses_reissued":true,"quotes_reissued":true,"delivered_events_imported":true}'
 ```
 
 `400 restore_rescan_incomplete` means a chain is not rescanned yet. The reason and checklist are
 recorded in the restore and in `audit`; crediting, settlement, quote expiry, treasury changes,
 refund verification, and event delivery resume, and merchants' API keys work again, reads and
-writes (`deposit_addresses_reissued` covers the quotes of step 4).
+writes. Each checklist item is a step: `security_changes_reapplied` step 3,
+`deposit_addresses_reissued` and `quotes_reissued` step 4, `delivered_events_imported` step 5.
 
 ## 8. After the unfreeze
 

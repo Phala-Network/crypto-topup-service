@@ -317,6 +317,65 @@
         ],
         "type": "object"
       },
+      "AttestationResponse": {
+        "description": "TDX evidence binding a nonce to the webhook public keys of the caller's account in the\ncaller's mode (design D11).",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "livemode": false,
+          "object": "attestation",
+          "report_data": "9f2c4e6a8b0d1f3a5c7e9b1d3f5a7c9e2b4d6f8a0c1e3a5b7d9f1c3e5a7b9d1f",
+          "tdx_quote": "040002008100000000000000939a7233f79c4ca9940a0db3957f0607",
+          "webhook_keys": [
+            {
+              "expires_at": null,
+              "public_key": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+              "standard_webhooks_public_key": "whpk_O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+              "version": 1
+            }
+          ]
+        },
+        "properties": {
+          "account": {
+            "description": "The caller's account, `acct_…`.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "The caller's mode; each mode has its own key.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `attestation`.",
+            "enum": [
+              "attestation"
+            ],
+            "type": "string"
+          },
+          "report_data": {
+            "description": "`sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖\npublic_key)*)` as lowercase hexadecimal: lengths are one byte, `account` is UTF-8,\n`livemode` is one byte (`1` live, `0` test), and each key of `webhook_keys`, in order, is\nits version as 4 big-endian bytes and its 32 raw public-key bytes.",
+            "type": "string"
+          },
+          "tdx_quote": {
+            "description": "Versioned dstack TDX quote bytes as lowercase hexadecimal.",
+            "type": "string"
+          },
+          "webhook_keys": {
+            "description": "The keys that sign the account's deliveries in this mode: the current one first, then any\nprevious one still signing during a rotation.",
+            "items": {
+              "$ref": "#/components/schemas/WebhookKeyObject"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "object",
+          "account",
+          "livemode",
+          "webhook_keys",
+          "report_data",
+          "tdx_quote"
+        ],
+        "type": "object"
+      },
       "ChainRescan": {
         "description": "One chain's rescan since the restore.",
         "properties": {
@@ -604,7 +663,7 @@
         "type": "object"
       },
       "DeliveredEventFinding": {
-        "description": "An imported event whose deposit is not re-derived yet, or whose amounts differ.",
+        "description": "An imported event whose deposit is not re-derived yet, contradicts it, or whose amounts\ndiffer.",
         "properties": {
           "delivered_amount": {
             "description": "Delivered `amount`, the credit in minor units.",
@@ -643,7 +702,7 @@
             ]
           },
           "status": {
-            "description": "`pending` (the rescan has not re-derived or valued the deposit yet) or `mismatch` (the\nledger's token amount or credit differs from what the merchant received; the delivered\nevent is kept and never sent again).",
+            "description": "`pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the\nrecorded transfer is not the one the delivered event names: the deposit is held, not\ncredited, until the operator discards the delivered credit), or `mismatch` (the ledger's\ntoken amount or credit differs from what the merchant received; the delivered event is\nkept and never sent again).",
             "type": "string"
           },
           "type": {
@@ -681,6 +740,35 @@
         ],
         "type": "object"
       },
+      "DeliveredWebhook": {
+        "additionalProperties": false,
+        "description": "One webhook delivery as the merchant's receiver got it: its Standard Webhooks headers and its\nraw body, which the service signed.",
+        "properties": {
+          "body": {
+            "description": "The request body exactly as received, byte for byte: the event object.",
+            "type": "string"
+          },
+          "webhook_id": {
+            "description": "The `webhook-id` header, the event's `evt_` id.",
+            "type": "string"
+          },
+          "webhook_signature": {
+            "description": "The `webhook-signature` header: one or more `v1a,<base64>` signatures.",
+            "type": "string"
+          },
+          "webhook_timestamp": {
+            "description": "The `webhook-timestamp` header, Unix seconds.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "webhook_id",
+          "webhook_timestamp",
+          "webhook_signature",
+          "body"
+        ],
+        "type": "object"
+      },
       "Deposit": {
         "description": "A transfer to a quote's address or a deposit address at the route's confirmation: valued,\nscreened, and credited, or rejected; `reversed` if its transaction left the chain before\nfinality.\n\nEvery `deposit.*` event carries the whole deposit, with cumulative amounts, so the customer's\nbalance can be recomputed from the latest snapshot whatever order events arrive in: the\ndeposit contributes `amount - amount_refunded - amount_reversed` cents while its `status` is\n`credited` or `reversed`, and nothing while it is `pending` or `rejected`. `status` only moves\nforward (`pending`, then `credited` or `rejected`, then possibly `reversed`) and\n`amount_refunded` only grows, so of two snapshots the later one has the later status or, for\nthe same status, the larger `amount_refunded`.",
         "example": {
@@ -713,8 +801,6 @@
           "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
           "refunded": false,
           "rejection_reason": null,
-          "replaced_by": null,
-          "replaces": null,
           "status": "credited",
           "swept": false,
           "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -832,7 +918,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs.",
             "type": "string"
           },
           "livemode": {
@@ -886,20 +972,6 @@
           },
           "rejection_reason": {
             "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "replaced_by": {
-            "description": "The deposit that took this reversed deposit's place, `dep_…` (its `replaces` is this one);\n`null` otherwise, or when that deposit is in another account or mode.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "replaces": {
-            "description": "The reversed deposit whose place this one took, `dep_…`: its transaction was re-included\nbefore finality against other state (a router or swap output), and the transfer at the same\nposition in the final chain is this deposit. `null` otherwise, or when that deposit is in\nanother account or mode.",
             "type": [
               "string",
               "null"
@@ -1413,6 +1485,19 @@
         ],
         "type": "object"
       },
+      "ExpandableDeposit": {
+        "description": "A deposit id, or the deposit with `expand[]`.",
+        "oneOf": [
+          {
+            "description": "`dep_` id.",
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/Deposit",
+            "description": "The expanded deposit."
+          }
+        ]
+      },
       "ExpandableQuote": {
         "description": "A quote id, or the quote with `expand[]`.",
         "oneOf": [
@@ -1702,6 +1787,177 @@
         ],
         "type": "object"
       },
+      "Quote": {
+        "description": "A quote: a locked price, an exact token amount, and a single-use address to pay it to.",
+        "example": {
+          "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
+          "amount": 2500,
+          "amount_atomic": "202510000000000000000",
+          "asset": "PHA",
+          "chain_id": 1,
+          "client_reference_id": "team-42",
+          "client_secret": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a",
+          "created": 1790553600,
+          "currency": "usd",
+          "deposit": null,
+          "exchange_rate": "0.12345679",
+          "expires_at": 1790554500,
+          "id": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+          "livemode": false,
+          "metadata": {
+            "order_id": "ord_1001"
+          },
+          "object": "quote",
+          "payment": {
+            "amount_atomic": "202510000000000000000",
+            "asset": "PHA",
+            "chain_id": 1,
+            "confirmations": 1,
+            "deposit": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+            "estimated_final_at": 1790554572,
+            "matches_quote": true,
+            "status": "seen",
+            "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e"
+          },
+          "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
+          "status": "open",
+          "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
+        },
+        "properties": {
+          "address": {
+            "description": "Single-use forwarder address to pay.",
+            "type": "string"
+          },
+          "amount": {
+            "description": "Credit in the currency's minor unit.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "amount_atomic": {
+            "description": "The exact token amount to pay, in base units, as a decimal string.",
+            "type": "string"
+          },
+          "asset": {
+            "description": "Asset code.",
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "client_reference_id": {
+            "description": "Your identifier of the customer the quote credits.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "Lets the payer's browser read the quote's public view, `ClientQuote`, from\n`GET /v1/quotes/{id}?client_secret=…` without an API key. Returned only by\n`POST /v1/quotes`; a repeat with the same `Idempotency-Key` within 24 hours replays the\nfirst response, the same secret included. Give it only to the paying customer's page, and\ndo not log it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "Creation time, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "description": "`usd`.",
+            "type": "string"
+          },
+          "deposit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpandableDeposit",
+                "description": "The deposit that completed the quote: its `dep_` id, or the object with `expand[]=deposit`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exchange_rate": {
+            "description": "The locked price in USD per token, a decimal string with 8 decimal places.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "End of the payment window, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "`qt_` id. The quote's address salt is `keccak256(abi.encode(account,\nclient_reference_id, \"quote\", id))` with the types `(string, string, string, string)`,\nwhere `account` is your `acct_` id.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "Whether the quote was created with a live key.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "object": {
+            "description": "Always `quote`.",
+            "enum": [
+              "quote"
+            ],
+            "type": "string"
+          },
+          "payment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Payment",
+                "description": "The payment the checkout page should show, once one is seen on chain; display only."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "payment_uri": {
+            "description": "EIP-681 URI carrying the token, chain, address, and amount.",
+            "type": "string"
+          },
+          "status": {
+            "description": "`open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays\n`open` after `expires_at` until the finalized chain passes it, so a payment mined in time\nis never reported as expired; hide the address once `expires_at` has passed.",
+            "type": "string"
+          },
+          "treasury": {
+            "description": "The treasury the address pays: your treasury of the chain when the quote was created. The\naddress is the factory's `CREATE2` over it and the salt.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "livemode",
+          "client_reference_id",
+          "amount",
+          "currency",
+          "chain_id",
+          "asset",
+          "amount_atomic",
+          "exchange_rate",
+          "address",
+          "treasury",
+          "payment_uri",
+          "status",
+          "expires_at",
+          "created",
+          "metadata"
+        ],
+        "type": "object"
+      },
       "ReceivedTreasury": {
         "description": "A treasury object as the merchant received it; other fields are ignored.",
         "properties": {
@@ -1882,6 +2138,51 @@
         ],
         "type": "object"
       },
+      "RestoreDeliveredCreditDiscardRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/delivered_credits/discard` body.",
+        "example": {
+          "deposit": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+          "reason": "INC-12: the chain shows another amount; settled with the merchant"
+        },
+        "properties": {
+          "deposit": {
+            "description": "The deposit, `dep_…`, of a `contradicted` finding.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes: the incident and how the difference is settled with the merchant.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "deposit",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreDeliveredCreditDiscardResponse": {
+        "description": "`POST /v1/admin/restore/delivered_credits/discard` response.",
+        "example": {
+          "deposit": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
+          "discarded": true
+        },
+        "properties": {
+          "deposit": {
+            "description": "The deposit, `dep_…`.",
+            "type": "string"
+          },
+          "discarded": {
+            "description": "Always `true`: the deposit is valued from the chain as any other.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deposit",
+          "discarded"
+        ],
+        "type": "object"
+      },
       "RestoreDepositAddressRequest": {
         "additionalProperties": false,
         "description": "`POST /v1/admin/restore/deposit_addresses` body: a deposit address the merchant holds, given\nout after the restore point.",
@@ -1908,6 +2209,13 @@
           "client_reference_id": {
             "description": "The customer's `client_reference_id`.",
             "type": "string"
+          },
+          "client_secret": {
+            "description": "A `client_secret` of the address the merchant holds (needs `id`): kept, so the payer's\npage reads the address again. Only a secret the service issued for the `id` is accepted.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "description": "The `da_` id the merchant holds, kept for the re-issued address.",
@@ -1997,64 +2305,23 @@
       },
       "RestoreEventsImportRequest": {
         "additionalProperties": false,
-        "description": "`POST /v1/admin/restore/events` body: `deposit.credited`, `deposit.rejected`, and\n`deposit.reversed` events the merchant received after the restore point, as delivered.",
+        "description": "`POST /v1/admin/restore/events` body: the deliveries of the `deposit.credited`,\n`deposit.rejected`, and `deposit.reversed` events the merchant received after the restore\npoint, as its webhook receiver got them.",
         "example": {
-          "events": [
+          "deliveries": [
             {
-              "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
-              "created": 1790553600,
-              "data": {
-                "object": {
-                  "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
-                  "amount": 2500,
-                  "amount_atomic": "202510000000000000000",
-                  "amount_refunded": 0,
-                  "amount_refunded_atomic": "0",
-                  "amount_reversed": 0,
-                  "asset": "PHA",
-                  "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
-                  "block_number": 21000000,
-                  "chain_id": 1,
-                  "client_reference_id": "team-42",
-                  "created": 1790553624,
-                  "currency": "usd",
-                  "deposit_address": null,
-                  "exchange_rate": "0.12345679",
-                  "final": true,
-                  "final_at": 1790554572,
-                  "from_address": "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a",
-                  "id": "dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516",
-                  "livemode": false,
-                  "log_index": 212,
-                  "metadata": {
-                    "order_id": "ord_1001"
-                  },
-                  "object": "deposit",
-                  "price_source": "quote",
-                  "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
-                  "refunded": false,
-                  "rejection_reason": null,
-                  "replaced_by": null,
-                  "replaces": null,
-                  "status": "credited",
-                  "swept": false,
-                  "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
-                  "valued_at": 1790553630
-                }
-              },
-              "id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
-              "livemode": false,
-              "object": "event",
-              "type": "deposit.credited"
+              "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790553600,\"data\":{\"object\":{\"address\":\"0x2f3e91325b2288bce392711f85f5359661062a91\",\"amount\":2500,\"amount_atomic\":\"202510000000000000000\",\"amount_refunded\":0,\"amount_refunded_atomic\":\"0\",\"amount_reversed\":0,\"asset\":\"PHA\",\"asset_contract\":\"0x6c5ba91642f10282b576d91922ae6448c9d52f4e\",\"block_number\":21000000,\"chain_id\":1,\"client_reference_id\":\"team-42\",\"created\":1790553624,\"currency\":\"usd\",\"deposit_address\":null,\"exchange_rate\":\"0.12345679\",\"final\":true,\"final_at\":1790554572,\"from_address\":\"0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a\",\"id\":\"dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516\",\"livemode\":false,\"log_index\":212,\"metadata\":{\"order_id\":\"ord_1001\"},\"object\":\"deposit\",\"price_source\":\"quote\",\"quote\":\"qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10\",\"refunded\":false,\"rejection_reason\":null,\"status\":\"credited\",\"swept\":false,\"tx_hash\":\"0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e\",\"valued_at\":1790553630}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"deposit.credited\"}",
+              "webhook_id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
+              "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
+              "webhook_timestamp": "1790553631"
             }
           ],
           "reason": "delivered after the restore point, from the merchant's receiver; INC-12"
         },
         "properties": {
-          "events": {
-            "description": "Up to 100 event objects exactly as delivered.",
+          "deliveries": {
+            "description": "Up to 100 deliveries exactly as received.",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/DeliveredWebhook"
             },
             "type": "array"
           },
@@ -2064,7 +2331,7 @@
           }
         },
         "required": [
-          "events",
+          "deliveries",
           "reason"
         ],
         "type": "object"
@@ -2194,6 +2461,164 @@
           "detected_by",
           "timeline_id",
           "restored_cursors"
+        ],
+        "type": "object"
+      },
+      "RestoreQuoteRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/quotes` body: a quote the merchant created after the restore point, as\nits records hold the quote object.",
+        "example": {
+          "account": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
+          "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
+          "amount": 2500,
+          "amount_atomic": "202510000000000000000",
+          "asset": "PHA",
+          "chain_id": 1,
+          "client_reference_id": "team-42",
+          "client_secret": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a",
+          "created": 1790553600,
+          "exchange_rate": "0.12345679",
+          "expires_at": 1790554500,
+          "id": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+          "livemode": false,
+          "metadata": {
+            "order_id": "ord_1001"
+          },
+          "reason": "created after the restore point, from the merchant's records; INC-12"
+        },
+        "properties": {
+          "account": {
+            "description": "Account id, `acct_…`.",
+            "type": "string"
+          },
+          "address": {
+            "description": "The quote's `address`.",
+            "type": "string"
+          },
+          "amount": {
+            "description": "The quote's `amount`, the credit in minor units.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "amount_atomic": {
+            "description": "The quote's `amount_atomic`.",
+            "type": "string"
+          },
+          "asset": {
+            "description": "The quote's `asset`.",
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "The quote's `chain_id`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "client_reference_id": {
+            "description": "The quote's `client_reference_id`.",
+            "type": "string"
+          },
+          "client_secret": {
+            "description": "The quote's `client_secret`, when the merchant holds it: kept, so the payer's page reads the\nquote again. Only a secret the service issued for the `id` is accepted, and it proves the\nservice issued the quote. Optional: without it the quote is re-issued, and found, all the\nsame, but its public view is not readable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "description": "The quote's `created`, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "exchange_rate": {
+            "description": "The quote's `exchange_rate`.",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "The quote's `expires_at`, Unix seconds; the re-issued quote's window closes at the\nrestore's detection at the latest.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The quote's `qt_` id: its address salt is derived from it.",
+            "type": "string"
+          },
+          "livemode": {
+            "description": "The mode.",
+            "type": "boolean"
+          },
+          "metadata": {
+            "description": "The quote's `metadata`.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "livemode",
+          "id",
+          "client_reference_id",
+          "chain_id",
+          "asset",
+          "amount",
+          "amount_atomic",
+          "exchange_rate",
+          "address",
+          "created",
+          "expires_at",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreQuoteResponse": {
+        "description": "`POST /v1/admin/restore/quotes` response.",
+        "example": {
+          "quote": {
+            "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
+            "amount": 2500,
+            "amount_atomic": "202510000000000000000",
+            "asset": "PHA",
+            "chain_id": 1,
+            "client_reference_id": "team-42",
+            "client_secret": null,
+            "created": 1790553600,
+            "currency": "usd",
+            "deposit": null,
+            "exchange_rate": "0.12345679",
+            "expires_at": 1790555400,
+            "id": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+            "livemode": false,
+            "metadata": {
+              "order_id": "ord_1001"
+            },
+            "object": "quote",
+            "payment": null,
+            "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
+            "status": "open",
+            "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
+          },
+          "reissued": true
+        },
+        "properties": {
+          "quote": {
+            "$ref": "#/components/schemas/Quote",
+            "description": "The quote, with the recorded terms. They are the merchant's record, not the service's, so\nthey are never applied: a payment to it is credited at spot unless an imported\n`deposit.credited` for it carries its credit, and `expires_at` is the restore's detection\nat the latest."
+          },
+          "reissued": {
+            "description": "Whether the quote was issued now; `false` when it exists already for the customer at the\naddress.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reissued",
+          "quote"
         ],
         "type": "object"
       },
@@ -2379,6 +2804,7 @@
         "example": {
           "delivered_events_imported": true,
           "deposit_addresses_reissued": true,
+          "quotes_reissued": true,
           "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
           "security_changes_reapplied": true
         },
@@ -2389,6 +2815,10 @@
           },
           "deposit_addresses_reissued": {
             "description": "Every deposit address given out after the restore point was re-issued; must be `true`.",
+            "type": "boolean"
+          },
+          "quotes_reissued": {
+            "description": "Every quote created after the restore point that a merchant reported was re-issued; must be\n`true`.",
             "type": "boolean"
           },
           "reason": {
@@ -2404,6 +2834,7 @@
           "reason",
           "security_changes_reapplied",
           "deposit_addresses_reissued",
+          "quotes_reissued",
           "delivered_events_imported"
         ],
         "type": "object"
@@ -2822,6 +3253,38 @@
         },
         "required": [
           "livemode"
+        ],
+        "type": "object"
+      },
+      "WebhookKeyObject": {
+        "description": "One version of an account's webhook signing key, with its public key.",
+        "properties": {
+          "expires_at": {
+            "description": "When a rolled key stops signing, Unix seconds; `null` for the current key.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "public_key": {
+            "description": "Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:\nevery delivery carries a `v1a` signature by it.",
+            "type": "string"
+          },
+          "standard_webhooks_public_key": {
+            "description": "`public_key` in Standard Webhooks' serialization, `whpk_` and the standard base64 of its\nraw bytes, for a Standard Webhooks library. It is derived from `public_key` and not bound\nby `report_data`: check that it encodes the attested `public_key` before pinning it.\nAlways present; optional in the schema so clients read a service that predates it.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Key version, from 1; it grows by one per roll.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "public_key"
         ],
         "type": "object"
       }
@@ -3906,6 +4369,141 @@
         ]
       }
     },
+    "/v1/admin/attestation": {
+      "get": {
+        "operationId": "admin_get_attestation",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`.",
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The mode whose webhook keys are attested.",
+            "in": "query",
+            "name": "livemode",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Non-empty hexadecimal nonce of at most 32 bytes.",
+            "in": "query",
+            "name": "nonce",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no such account",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "`GET /v1/attestation` of any account and mode, for the operator: the same TDX evidence binding\n`nonce` to the account's webhook public keys. It works while the service is frozen after a\nrestore, when merchant keys do not, so the operator can verify a restored instance's identity\n(`deploy/RESTORE.md`).",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/v1/admin/deposits/{id}": {
       "get": {
         "operationId": "admin_get_deposit",
@@ -4459,6 +5057,122 @@
         ]
       }
     },
+    "/v1/admin/restore/delivered_credits/discard": {
+      "post": {
+        "operationId": "discard_delivered_credit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreDeliveredCreditDiscardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreDeliveredCreditDiscardResponse"
+                }
+              }
+            },
+            "description": "OK: discarded, or discarded already",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no delivered credit was imported for the deposit",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Discards the delivered credit of a deposit whose recorded transfer contradicts it (a finding\n`contradicted` of `GET /v1/admin/restore`): the deposit, held until now, is valued from the\nchain as any other, and the operator settles the difference with the merchant. Works frozen or\nnot, since the confirm step can find a contradiction after the unfreeze. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/v1/admin/restore/deposit_addresses": {
       "post": {
         "operationId": "reissue_deposit_address",
@@ -4615,7 +5329,7 @@
                 }
               }
             },
-            "description": "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`",
+            "description": "Bad Request: a delivery's signature does not verify with its account's webhook keys, or its event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -4678,6 +5392,24 @@
                 }
               }
             }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable: the webhook keys cannot be derived",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4685,7 +5417,123 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Imports the deposit events a merchant received after the restore point, exactly as delivered:\neach is stored as the event it is, with no delivery, so when the rescan re-derives the deposit\nits event is recorded already and nothing is sent again with another body. An event recorded\nalready keeps its stored snapshot; a different delivered body is reported as `mismatch`.\nAudited.",
+        "summary": "Imports the deposit events a merchant received after the restore point, from its webhook\nreceiver's record of each delivery. Only a delivery the service signed is imported: its\n`webhook-signature` must verify over its id, timestamp, and raw body with one of its account's\nwebhook keys in its mode. Each event is stored as delivered, with no delivery, so when the rescan\nre-derives the deposit its event is recorded already and nothing is sent again with another\nbody; the credit a `deposit.credited` or `deposit.reversed` carries is kept, so the deposit is\nvalued at it, not re-valued. An event recorded already keeps its stored snapshot; a different\ndelivered body is reported as `mismatch`. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/quotes": {
+      "post": {
+        "operationId": "reissue_quote",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreQuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreQuoteResponse"
+                }
+              }
+            },
+            "description": "OK: re-issued, or the quote exists already for the customer at the address",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Re-issues a quote the merchant created after the restore point, from its record of the quote\nobject: the address salt is derived from the account, customer, and `qt_` id, so only the\nquote's own address is accepted, backfilled from the restored cursor so the rescan finds a\npayment made to it since. A `client_secret` the service issued for the quote is kept, so the\npayer's page reads it again. The terms are stored as recorded but never applied: a payment to\nthe quote is credited at spot unless an imported `deposit.credited` for it, which the service\nsigned, carries its credit, and the payment window closes at the restore's detection at the\nlatest. Audited.",
         "tags": [
           "admin"
         ]
@@ -4881,7 +5729,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Lifts the freeze after a restore once every chain is rescanned and the operator confirms the\nchecklist: crediting, settlement, quote expiry, treasury changes, refund verification, and\nevent delivery resume, and merchants can write again. The reason and checklist are recorded\nin the restore and in `audit`.",
+        "summary": "Lifts the freeze after a restore once every chain is rescanned and the operator confirms the\nchecklist: crediting, settlement, quote expiry, treasury changes, refund verification, and\nevent delivery resume, and merchants' API keys authenticate again. The reason and checklist are\nrecorded in the restore and in `audit`.",
         "tags": [
           "admin"
         ]

@@ -426,13 +426,15 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "address": QUOTE_ADDRESS,
             "created": CREATED,
             "expires_at": CREATED + 900,
+            "metadata": {"order_id": "ord_1001"},
+            "client_secret": format!("{QUOTE}_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a"),
             "reason": "created after the restore point, from the merchant's records; INC-12",
         }),
         "RestoreQuoteResponse" => {
             let mut quote = quote();
             quote["payment"] = Value::Null;
             quote["client_secret"] = Value::Null;
-            quote["metadata"] = json!({});
+            quote["expires_at"] = json!(CREATED + 1_800);
             json!({"reissued": true, "quote": quote})
         }
         "RestoreEventsImportRequest" => {
@@ -473,6 +475,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
             "security_changes_reapplied": true,
             "deposit_addresses_reissued": true,
+            "quotes_reissued": true,
             "delivered_events_imported": true,
         }),
         _ => return None,

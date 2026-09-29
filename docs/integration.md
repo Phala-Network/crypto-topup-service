@@ -1565,11 +1565,13 @@ own records since then, for:
   the address is derived from your account, mode, customer, and version, so the operator issues
   the same address again, and payments made to it since are credited;
 - the quotes you created (the quote object: `id`, `client_reference_id`, `chain_id`, `asset`,
-  `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`): the address is
-  derived from the quote id, so the operator issues the same quote again, and a payment made to it
-  since is credited. Your record of its locked price is not proof the service issued it, so the
-  payment is credited at spot, unless you also hold its `deposit.credited`, which carries the
-  quote's credit;
+  `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`, `metadata`, and
+  its `client_secret` if you kept it): the address is derived from the quote id, so the operator
+  issues the same quote again, and a payment made to it since is credited. Your record of its
+  locked price is not proof the service issued it, so the payment is credited at spot, unless you
+  also hold its `deposit.credited`, which carries the quote's credit; the re-issued quote's window
+  closes at the restore, so its page shows it expired, and with its `client_secret` the page reads
+  it again (the same holds for a deposit address's `client_secret`);
 - the delivery of every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event you
   received, as your receiver got it: the raw body and its `webhook-id`, `webhook-timestamp`, and
   `webhook-signature` headers. The operator imports only what the service signed. Each is kept as
