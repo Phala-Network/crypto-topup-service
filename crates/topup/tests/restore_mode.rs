@@ -2020,9 +2020,11 @@ async fn a_credit_delivered_by_the_service_round_trips_through_a_restore() -> Re
             }
             let credited = valuation(&harness, deposit).await?;
             ensure!(credited.0 == "credited", "{credited:?}");
+            // In whole seconds, as the API renders `valued_at` and the delivery carries it.
             let valued_at = |pool: PgPool| async move {
                 let at: i64 = sqlx::query_scalar(
-                    "SELECT extract(epoch FROM valuation_at)::bigint FROM deposits WHERE id = $1",
+                    "SELECT floor(extract(epoch FROM valuation_at))::bigint FROM deposits \
+                     WHERE id = $1",
                 )
                 .bind(deposit)
                 .fetch_one(&pool)
