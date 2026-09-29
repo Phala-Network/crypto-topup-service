@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a defect in the service, the contracts, an SDK, or the deployment files.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities:** do not report them here. Use
+        [private vulnerability reporting](https://github.com/Phala-Network/phala-pay/security/advisories/new)
+        as described in [SECURITY.md](https://github.com/Phala-Network/phala-pay/blob/main/SECURITY.md).
+
+        Remove API keys, webhook secrets, private keys, and personal data from everything you paste.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Service (topup)
+        - Contracts
+        - "@phala/pay (JavaScript SDK)"
+        - "phala-pay (Python SDK)"
+        - Deployment, backups, or runbooks
+        - Documentation
+        - Website or demo
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit or image digest of the service, or the SDK version.
+      placeholder: "sha-1234567890ab, or @phala/pay 0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what the service, SDK, or script did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A minimal sequence of requests, commands, or code. Include the `Request-Id` of a failing API response.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or responses
+      description: Relevant log lines or error objects, with secrets removed.
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Chain and route, test or live mode, local stack or CVM, and anything else that matters.

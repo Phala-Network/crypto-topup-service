@@ -1,0 +1,7 @@
+# Link check of the Markdown documentation (CI's docs job; CONTRIBUTING.md, "Documentation"):
+# relative links and their anchors, offline. External URLs are not checked.
+offline = true
+include_fragments = "full"
+hidden = true
+extensions = ["md"]
+exclude_path = ["(^|/)contracts/lib/"]

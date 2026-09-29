@@ -4,7 +4,7 @@ Phala Pay is open-source, self-hosted software. An operator runs its own instanc
 dstack confidential VM (CVM) on Phala Cloud, for its own merchants, each an account (`acct_…`)
 that the operator creates. Phala runs an instance only for Phala Cloud and offers no hosted
 service to third parties; its staging instance and the demo at [pay.phala.com](https://pay.phala.com/)
-are Phala's own, on Sepolia. Nothing in an instance depends on Phala's: you build your own
+are Phala's own, on Sepolia and Base Sepolia. Nothing in an instance depends on Phala's: you build your own
 images from your fork, deploy to your own Phala Cloud workspace, serve your own domain, and hold
 your own admin key. The only shared piece is the forwarder factory, a permissionless contract at
 one address on every chain.
@@ -87,7 +87,7 @@ the merchant's steps with the account's keys, never with the admin key.
    [deploy/README.md, "One-time setup"](../deploy/README.md#one-time-setup-human-only-repository-owner)
    and ["Attested settings"](../deploy/README.md#attested-settings). The reference product's
    variables (`STAGING_PRODUCT_CVM_ID`, `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`) are for
-   Phala's demo and not needed.
+   Phala's demo ([Phala's instance](../deploy/phala.md)) and not needed.
 6. **The other workflows a fork inherits.** CI runs on pull requests and needs no settings.
    [Restore drill](../.github/workflows/restore-drill.yml) runs weekly on a local stack, with no
    secrets. [Verify contracts](../.github/workflows/verify-contracts.yml) runs daily in the
@@ -111,7 +111,7 @@ files are committed and attested: a new route is a pull request to your fork and
   Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin; and the
   same two tokens on Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and
   `phala-cloud-base-sepolia-usdc-usd`, credited at the OP-stack `safe` head, with providers of
-  their own ([deploy/README.md, "Staging routes"](../deploy/README.md#staging-routes)).
+  their own ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
 - **Your own routes.** The fields and their defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment), and
   [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A
@@ -145,8 +145,9 @@ files are committed and attested: a new route is a pull request to your fork and
   (`NETWORK` from `networks.json`, the URLs with their keys).
   Only where it is missing, deploy it (**HUMAN-ONLY**, a funded throwaway EOA) as in
   [deploy/CONTRACTS.md](../deploy/CONTRACTS.md); if anyone deployed it first, the broadcast sends
-  nothing. It is deployed on Sepolia; Phala deploys it on mainnet after the contracts' independent
-  security review ([plan](plan.md)), which an operator going live before then should weigh.
+  nothing. It is deployed on Sepolia and Base Sepolia; Phala deploys it on mainnet after the
+  contracts' independent security review ([plan](plan.md)), which an operator going live before
+  then should weigh.
 
 ## 4. Release and provision
 

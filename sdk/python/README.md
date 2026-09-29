@@ -10,14 +10,7 @@ the signed `deposit.credited` webhook.
 uv add phala-pay        # or: pip install phala-pay
 ```
 
-Until the first PyPI release, install from the repository (read access is required):
-
-```sh
-uv add "phala-pay @ git+https://github.com/Phala-Network/phala-pay#subdirectory=sdk/python"
-```
-
-Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to uv, for example);
-install with `uv` or `pip` directly, and switch to the PyPI package once it is released.
+`phala-pay[eoa]` adds the signer an EOA treasury's proof needs (`pay.treasuries.set_eoa`).
 
 ## Quickstart
 

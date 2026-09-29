@@ -2,7 +2,7 @@ name: Deploy
 
 # Provisions or upgrades one CVM on Phala Cloud (deploy/README.md, "Deploy"): target `topup`, the
 # service, in the GitHub Environment `staging` or `production`; or target `product`, the staging
-# reference product (deploy/README.md, "Staging reference product"), in `staging` only. Nothing is
+# reference product (deploy/phala.md, "Staging reference product"), in `staging` only. Nothing is
 # deployed from a laptop.
 #
 # Controls: only a user with write access can dispatch this workflow; the job runs only from
@@ -117,7 +117,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           status=0
-          # Derived settings (deploy/README.md, "Environment variables"); a set variable overrides.
+          # Derived settings (deploy/README.md, "One-time setup", step 4); a set variable overrides.
           if [[ "$AWS_ENDPOINT" =~ ^https://[0-9a-f]+\.r2\.cloudflarestorage\.com$ ]]; then
             AWS_REGION=${AWS_REGION:-auto} AWS_S3_FORCE_PATH_STYLE=${AWS_S3_FORCE_PATH_STYLE:-true}
           fi

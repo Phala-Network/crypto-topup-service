@@ -1,12 +1,12 @@
 # Integrator sandbox
 
-The sandbox lets a merchant integrate before live mode (`docs/architecture.md` section 12, work
-package E4): Sepolia, a test token, a test-mode account, and scripted late, under, over, rejected,
-and refused payment scenarios driven through the reference product (`deploy/product`). The same
-scenarios run against a disposable local stack (`make sandbox-local`) and, unchanged, against
-production test mode with a test key. There is no separate integrator sandbox: integrators use
-their operator's production test mode (design §9), and an operator's staging, if it runs one, stays
-internal pre-production.
+The sandbox lets a merchant integrate before live mode
+([architecture §12](../../docs/architecture.md#12-api-and-events)): Sepolia, a test token, a
+test-mode account, and scripted late, under, over, rejected, and refused payment scenarios driven
+through the reference product (`deploy/product`). The same scenarios run against a disposable
+local stack (`make sandbox-local`) and, unchanged, against production test mode with a test key.
+There is no separate integrator sandbox: integrators use their operator's production test mode
+(design §9), and an operator's staging, if it runs one, stays internal pre-production.
 
 Every step that deploys contracts, changes a CVM, or creates an account with an admin key is
 marked **HUMAN-ONLY**; agents and CI never run them.
@@ -18,7 +18,7 @@ marked **HUMAN-ONLY**; agents and CI never run them.
 | `routes/sandbox-sepolia.template.yaml` | Capped test-mode route (chain id 11155111) for the local stack or an internal Sepolia sandbox; any test-mode account quotes on it. |
 | `render-route.sh` | Renders the template from environment variables; refuses leftover placeholders. |
 | `set-treasury.sh` | Proves a test EOA as an account's treasury on a chain (`POST /v1/treasuries/challenge`, `personal_sign`, `POST /v1/treasuries`). |
-| `deploy-test-contracts.sh` | Deploys the test token (A1 `MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
+| `deploy-test-contracts.sh` | Deploys the test token (`MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
 | `docker-compose.sepolia.yml`, `render-sepolia-compose.sh` | Overlay for `deploy/docker-compose.yml` and the renderer that inlines the sandbox route into the attested compose. |
 | `docker-compose.local.yml`, `run-local.sh` | Local stack (the attested compose with the `deploy/local` overlay, plus Anvil) and the end-to-end driver. |
 | `scenarios/docker_restart.py` | The local `restart_command`: restarts the service container through the Docker API. |
@@ -100,8 +100,9 @@ Integrators never get a sandbox deployment of their own. An internal Sepolia san
 sandbox-only contracts (a mintable test token, a second token for `unsupported_asset`, and
 `MockSanctionsOracle`), is for the operator's own rehearsals.
 
-1. **HUMAN-ONLY:** deploy the forwarder factory on Sepolia with the A2 procedure in
-   `deploy/CONTRACTS.md` (it is deterministic: skip it if the factory already has code there), then
+1. **HUMAN-ONLY:** deploy the forwarder factory on Sepolia as
+   [deploy/CONTRACTS.md](../CONTRACTS.md#sepolia) describes (it is deterministic: skip it if the
+   factory already has code there), then
    the sandbox-only contracts, signed by a Foundry keystore account:
 
    ```sh
@@ -200,7 +201,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
   password (read as a password file, as Foundry does). `payer` (an unlocked address) is only for
   Anvil.
 - Without a mode the reference product runs the product (`serve`) and one deposit (`deposit`) in
-  one process; the two modes also run separately, as for staging (deploy/README.md, "Staging
+  one process; the two modes also run separately, as for staging (deploy/phala.md, "Staging
   reference product").
 - Set `webhook_public_keys` (hex, current first) after verifying the attestation quote; otherwise
   the product fetches `GET /v1/attestation` with its API key, checks only its binding to the
@@ -222,4 +223,4 @@ the route's quote window (`quote_ttl_seconds`; 120 seconds on the sandbox route)
 
 Phala's staging credits its own reference-product CVM and stays internal, so the scenarios do not
 run there; the deposit driver's options play their payments through that product instead
-(deploy/README.md, "Abnormal paths").
+(deploy/phala.md, "Abnormal paths").

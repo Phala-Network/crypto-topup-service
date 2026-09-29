@@ -7,23 +7,6 @@ webhook receivers must ignore unknown fields. The format follows
 
 ## [Unreleased]
 
-### Changed (breaking; nothing is live)
-
-- Open-quote caps are per account and mode only (design §12), set by the operator per account
-  and mode (defaults: 1 000 open quotes, $50 000 of open quotes per account, $5 000 per customer
-  in live mode; 100, $10 000, and $5 000 in test mode). There is no global cap, and test-mode
-  quotes never count against live mode. `GET /v1/config` reports the effective caps:
-  `max_open_quotes` and `max_open_amount_per_customer` are new, and `max_open_amount_per_account`
-  is now the account's cap in the mode (it was the per-customer cap). `400 exposure_cap_exceeded`
-  also answers a quote past `max_open_quotes`. Route files no longer take
-  `limits.max_open_minor`.
-- Admin: `POST /v1/admin/accounts/{account}` takes `limits {livemode, max_open_quotes,
-  max_open_amount_per_account, max_open_amount_per_customer, max_active_deposit_addresses}`, and
-  the admin account response carries the effective `limits` of both modes.
-- Deploy runs one production deployment for both modes: every route's `livemode` must match its
-  chain (live on a mainnet, test on a test network), and staging takes no live route
-  (`deploy/check-route-modes.sh`); production no longer requires every route to be on chain 1.
-
 ### Added
 
 - Deposits carry `final_at` (Unix seconds; `null` until `final`), when the finality watch found
@@ -37,7 +20,7 @@ webhook receivers must ignore unknown fields. The format follows
   (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update
   the forwarder you pin; accounts, keys, treasuries, endpoints, and webhook keys are created anew.
 - Staging adds a second test-mode route, `phala-cloud-sepolia-usdc-usd`: Circle's testnet USDC on
-  Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; https://faucet.circle.com),
+  Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; <https://faucet.circle.com>),
   valued at one dollar (pricing mode `stablecoin`) with no quote spread, so a $10 quote asks 10 USDC.
   `GET /v1/config` lists it beside PHA, and a deposit address takes both tokens.
 - Staging adds Base Sepolia (84532), with the same two test-mode routes:
@@ -131,8 +114,6 @@ webhook receivers must ignore unknown fields. The format follows
   gas, emits `FlushFailed` for its own target only; a `flush` whose gas cannot cover a call's
   whole bound reverts with `InsufficientGas`. The factory and implementation addresses change
   (`deploy/CONTRACTS.md`).
-
-### Added
 
 - Events carry `request: {id, idempotency_key}` (the request that caused them; `null` for the
   service's workers), and every `*.updated` event `data.previous_attributes`. New events
@@ -254,7 +235,63 @@ webhook receivers must ignore unknown fields. The format follows
 - `livemode` on quotes, deposits, refunds, and `/v1/config`; events carry `account` (`acct_…`) and
   `livemode`.
 
+- `GET /v1/account`; `GET|POST /v1/api_keys`, `GET|DELETE /v1/api_keys/{id}`, and
+  `POST /v1/api_keys/{id}/roll {expires_in}` (the old key works for up to 7 days; `0` revokes it).
+- Events `api_key.created`, `api_key.updated`, `api_key.revoked`, and `account.updated`; every
+  event records its `actor` (an API key id, `admin`, or `system`).
+- Stripe-style `metadata` on quotes, deposits, and refunds (docs/design/multi-tenant.md D15,
+  [docs.stripe.com/api/metadata](https://docs.stripe.com/api/metadata)): up to 50 string
+  key/value pairs, keys of up to 40 characters without square brackets, values of up to 500
+  characters. Set it with `metadata` on `POST /v1/quotes` and `POST /v1/refunds`; update it with
+  the new `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}`, which
+  merge (`""` unsets a key, `metadata: ""` unsets all). Invalid metadata is
+  `400 parameter_invalid` with `param` `metadata[key]` or `metadata`. A deposit starts with a
+  copy of its quote's metadata, so it arrives in `deposit.credited`'s `data.object`. Objects and
+  webhook payloads always carry `metadata` (`{}` when empty); the `client_secret` view does not.
+  Secret keys gain `deposits.write`. Do not store sensitive information in metadata.
+
+- Accounts and tenancy (docs/design/multi-tenant.md §14, D13, PR 3). The tenant is an account,
+  `acct_…`. Its request signing key id is `{acct_…}/v1`, and the key is live or test: it quotes on
+  the routes of its mode and reads only its mode's objects. Another account's object, or the same
+  account's object in the other mode, answers `404` like a missing one. Webhook events go to every
+  enabled endpoint of the event's account and mode.
+- `POST /v1/admin/accounts {name, livemode, public_key, webhook_url}` issues an account and
+  `PUT /v1/admin/accounts/{account}` replaces its key and webhook URL;
+  `POST /v1/admin/accounts/{account}/customers/{customer}/pause | resume` pauses one customer.
+  The admin deposit view carries the deposit's `account` and `livemode`.
+
+- Fast credit and reversal (docs/design/multi-tenant.md §4, D1). A route's
+  `chain.confirmations` (a depth, `safe`, or `finalized`, per chain family; default 2 on
+  Ethereum L1, `safe` on OP-stack, `finalized` elsewhere) sets when a deposit is credited: at the
+  default, `deposit.credited` is sent about 30 seconds after paying instead of about 15 minutes.
+  Deposits are watched to finality. A transaction re-included in another block keeps its deposit
+  and is followed; one proven dropped (its nonce consumed by another transaction), or whose
+  transfer is missing from its final receipt, makes the deposit `reversed` and sends
+  **`deposit.reversed`** (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`) when the
+  deposit was reported credited or rejected. Claw the credit back as for `deposit.refunded`. A
+  quote the deposit completed opens again while its window lasts, otherwise expires with
+  `quote.expired`. `confirmations: finalized` keeps the earlier behaviour.
+- `GET /v1/config` assets carry `confirmations` (`"2"`, `"safe"`, or `"finalized"`) and
+  `typical_credit_seconds`; the admin deposit view carries `receipt_log_index` and `final_at`.
+- `POST /v1/refunds` answers `409 deposit_not_final` for a deposit that is not final yet, so
+  nothing is paid back for a payment that could still be reversed.
+
 ### Changed
+
+- **Breaking** (nothing is live): Open-quote caps are per account and mode only (design §12), set by the operator per account
+  and mode (defaults: 1 000 open quotes, $50 000 of open quotes per account, $5 000 per customer
+  in live mode; 100, $10 000, and $5 000 in test mode). There is no global cap, and test-mode
+  quotes never count against live mode. `GET /v1/config` reports the effective caps:
+  `max_open_quotes` and `max_open_amount_per_customer` are new, and `max_open_amount_per_account`
+  is now the account's cap in the mode (it was the per-customer cap). `400 exposure_cap_exceeded`
+  also answers a quote past `max_open_quotes`. Route files no longer take
+  `limits.max_open_minor`.
+- **Breaking** (nothing is live): Admin: `POST /v1/admin/accounts/{account}` takes `limits {livemode, max_open_quotes,
+  max_open_amount_per_account, max_open_amount_per_customer, max_active_deposit_addresses}`, and
+  the admin account response carries the effective `limits` of both modes.
+- **Breaking** (nothing is live): Deploy runs one production deployment for both modes: every route's `livemode` must match its
+  chain (live on a mainnet, test on a test network), and staging takes no live route
+  (`deploy/check-route-modes.sh`); production no longer requires every route to be on chain 1.
 
 - **Breaking**: quotes and deposit address networks pay the account's treasury of the chain, set
   through the API, instead of the route's: `POST /v1/quotes` is `409 treasury_not_set` on a chain
@@ -301,51 +338,6 @@ webhook receivers must ignore unknown fields. The format follows
   contact, or the webhook URL, and enabling live mode returns the first live key;
   `POST /v1/admin/accounts/{account}/api_keys {livemode, revoke_existing, reason}` issues a
   recovery key. Customer pauses take `livemode`.
-
-### Added
-
-- `GET /v1/account`; `GET|POST /v1/api_keys`, `GET|DELETE /v1/api_keys/{id}`, and
-  `POST /v1/api_keys/{id}/roll {expires_in}` (the old key works for up to 7 days; `0` revokes it).
-- Events `api_key.created`, `api_key.updated`, `api_key.revoked`, and `account.updated`; every
-  event records its `actor` (an API key id, `admin`, or `system`).
-- Stripe-style `metadata` on quotes, deposits, and refunds (docs/design/multi-tenant.md D15,
-  [docs.stripe.com/api/metadata](https://docs.stripe.com/api/metadata)): up to 50 string
-  key/value pairs, keys of up to 40 characters without square brackets, values of up to 500
-  characters. Set it with `metadata` on `POST /v1/quotes` and `POST /v1/refunds`; update it with
-  the new `POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, and `POST /v1/refunds/{id}`, which
-  merge (`""` unsets a key, `metadata: ""` unsets all). Invalid metadata is
-  `400 parameter_invalid` with `param` `metadata[key]` or `metadata`. A deposit starts with a
-  copy of its quote's metadata, so it arrives in `deposit.credited`'s `data.object`. Objects and
-  webhook payloads always carry `metadata` (`{}` when empty); the `client_secret` view does not.
-  Secret keys gain `deposits.write`. Do not store sensitive information in metadata.
-
-- Accounts and tenancy (docs/design/multi-tenant.md §14, D13, PR 3). The tenant is an account,
-  `acct_…`. Its request signing key id is `{acct_…}/v1`, and the key is live or test: it quotes on
-  the routes of its mode and reads only its mode's objects. Another account's object, or the same
-  account's object in the other mode, answers `404` like a missing one. Webhook events go to every
-  enabled endpoint of the event's account and mode.
-- `POST /v1/admin/accounts {name, livemode, public_key, webhook_url}` issues an account and
-  `PUT /v1/admin/accounts/{account}` replaces its key and webhook URL;
-  `POST /v1/admin/accounts/{account}/customers/{customer}/pause | resume` pauses one customer.
-  The admin deposit view carries the deposit's `account` and `livemode`.
-
-- Fast credit and reversal (docs/design/multi-tenant.md §4, D1). A route's
-  `chain.confirmations` (a depth, `safe`, or `finalized`, per chain family; default 2 on
-  Ethereum L1, `safe` on OP-stack, `finalized` elsewhere) sets when a deposit is credited: at the
-  default, `deposit.credited` is sent about 30 seconds after paying instead of about 15 minutes.
-  Deposits are watched to finality. A transaction re-included in another block keeps its deposit
-  and is followed; one proven dropped (its nonce consumed by another transaction), or whose
-  transfer is missing from its final receipt, makes the deposit `reversed` and sends
-  **`deposit.reversed`** (event id `uuid_v5(NS, "deposit.reversed:" + deposit UUID)`) when the
-  deposit was reported credited or rejected. Claw the credit back as for `deposit.refunded`. A
-  quote the deposit completed opens again while its window lasts, otherwise expires with
-  `quote.expired`. `confirmations: finalized` keeps the earlier behaviour.
-- `GET /v1/config` assets carry `confirmations` (`"2"`, `"safe"`, or `"finalized"`) and
-  `typical_credit_seconds`; the admin deposit view carries `receipt_log_index` and `final_at`.
-- `POST /v1/refunds` answers `409 deposit_not_final` for a deposit that is not final yet, so
-  nothing is paid back for a payment that could still be reversed.
-
-### Changed
 
 - Every issued address is scanned at every block, not only open quotes' addresses: a late,
   repeated, or wrong-amount payment, or one to a persistent address, is credited at the route's
@@ -437,8 +429,6 @@ webhook receivers must ignore unknown fields. The format follows
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
   destination minor units (#94). The field is optional in the schema so clients also parse reports
   from servers that predate it.
-
-### Changed
 
 - **Breaking**: webhooks are Stripe's Event object, `{"id": "evt_…", "object": "event", "type",
   "created", "data": {"object": …}}`, where `data.object` is the deposit (`deposit.credited`,

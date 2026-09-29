@@ -1,5 +1,5 @@
 // pay.phala.com: the page built from this directory, served by a Worker with static assets only (no
-// Worker script). Cloudflare Workers Builds deploys it from this repository (deploy/README.md,
+// Worker script). Cloudflare Workers Builds deploys it from this repository (deploy/phala.md,
 // "Website"): root directory deploy/product/web, build command `npm run build:cloudflare`, then
 // the default `npx wrangler deploy`, or `npx wrangler versions upload` on other branches. Workers
 // Builds ignores a `build` section here, so there is none.

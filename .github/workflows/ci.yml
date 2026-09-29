@@ -35,6 +35,23 @@ jobs:
       - name: Format, clippy with all and with default features, and cargo-deny
         run: make lint
 
+  # Every Markdown file, linted with .markdownlint-cli2.jsonc, and its relative links and anchors
+  # checked offline with lychee.toml (CONTRIBUTING.md, "Documentation").
+  docs:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Lint the Markdown
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: "**/*.md"
+      - name: Check the documentation's links and anchors
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: --no-progress .
+          jobSummary: false
+
   # The whole workspace once, with PostgreSQL and Foundry. The database and Anvil test helpers fail
   # instead of skipping when CI=true (set by Actions). The dstack simulator test still skips by
   # design: no simulator runs here.
@@ -154,7 +171,7 @@ jobs:
       - name: Typecheck, lint, and build the page
         working-directory: deploy/product/web
         run: pnpm run check
-      # What Workers Builds deploys (deploy/README.md, "Website"): the config and the asset upload.
+      # What Workers Builds deploys (deploy/phala.md, "Website"): the config and the asset upload.
       - name: Check the Cloudflare config without deploying
         working-directory: deploy/product/web
         env:

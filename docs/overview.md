@@ -1,0 +1,106 @@
+# How Phala Pay works
+
+Phala Pay is open-source, self-hosted software for an API-only, multi-tenant crypto payments
+service in Stripe's shape. This page explains the model for every audience. The
+[architecture](architecture.md) is the specification, and the [design](design/multi-tenant.md)
+records why each decision was made.
+
+## Operators, merchants, and customers
+
+Each operator runs its own instance in its own dstack confidential VM (CVM), for its own
+merchants. [Self-hosting](self-hosting.md) is the path from a fork to a credited deposit. Phala
+runs an instance only for Phala Cloud and offers no hosted service to others.
+
+The operator onboards each merchant as an account (`acct_…`) through the admin API. The merchant
+does everything else with its API keys and the SDKs; there is no dashboard. Phala Cloud is an
+ordinary account of Phala's instance.
+
+The service turns deposits of configured ERC-20 tokens into USD-valued credits. It tells the
+merchant what to credit with signed `deposit.credited` webhooks, which the merchant fulfills once
+per deposit.
+
+It is software, not custody:
+
+- Deposit addresses are CREATE2 forwarder contracts that can only pay the merchant's own treasury.
+- The service holds no funds and sends no transactions.
+- The merchant sweeps and refunds from its own wallet or Safe.
+- The service runs inside a dstack CVM, and each account pins its own webhook signing key from
+  attestation.
+
+## Quotes and deposit addresses
+
+A **quote** locks a price: the customer receives an exact amount and a single-use address, and
+pays within the window.
+
+Each customer can also have one persistent, rotatable **deposit address** for every supported
+token on every chain (the same address wherever the treasury is the same). Any amount sent to it
+is credited at spot, like the stable bank-transfer details of Stripe's customer balance.
+
+## Routes
+
+A route is one chain and one token, in test or live mode. Routes are files that each operator
+commits to its fork, so they are part of the attested deployment; further merchants are accounts,
+not configuration.
+
+The repository's committed routes are test routes on Sepolia and Base Sepolia, for a test PHA
+token and Circle's testnet USDC ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
+Phala's first live route will be Ethereum Mainnet PHA for Phala Cloud's account
+([examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml)); it is not deployed yet.
+
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    payer(["Payer"])
+    subgraph merchant["Merchant (e.g. Phala Cloud)"]
+        ui["Web app<br/>&lt;Checkout&gt; from @phala/pay"]
+        backend["Backend<br/>phala-pay SDK, pinned addresses"]
+        wallet["Merchant wallet or Safe"]
+    end
+    subgraph cvm["Phala Pay (dstack CVM, attested)"]
+        api["HTTP API<br/>/v1/quotes, deposit_addresses, deposits, refunds"]
+        worker["Scanner, pump, finality watch,<br/>outbox, reconciler"]
+    end
+    subgraph chain["EVM chain"]
+        fwd["CREATE2 forwarders<br/>(clone arg: treasury)"]
+        treasury[("Merchant treasury")]
+    end
+    payer -->|"wallet, QR, or manual transfer"| fwd
+    ui -->|"client_secret: status"| api
+    ui <--> backend
+    backend -->|"Bearer API key: quotes, refunds, keys, treasuries"| api
+    worker -->|"deposit.credited, signed with the account's key"| backend
+    worker -->|"reads logs (2 RPC providers)"| fwd
+    wallet -->|"factory flush, pays gas (anyone may flush)"| fwd
+    fwd -->|"can only pay"| treasury
+```
+
+## Payment lifecycle
+
+```text
+merchant backend creates a quote (or the customer's deposit address) with its API key
+  → service locks the price and computes a CREATE2 forwarder address over the merchant's treasury
+  → the merchant recomputes the address from its own pins before showing it
+  → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
+  → recorded once its block reaches the confirmation (2 on Ethereum, `safe` on an OP-stack chain,
+    or the account's stricter policy)
+  → a second RPC provider confirms block hash and log; the quote is taken at that instant
+  → sanctions screening and per-deposit bounds
+  → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
+  → watched to finality; a dropped transaction becomes deposit.reversed
+  → the merchant (or anyone) flushes forwarders to its treasury; the service marks deposits swept
+    from the finalized Flushed events
+  → reconciliation of chain and service ledger per forwarder
+```
+
+No payment needs an operator step, and there is no failure state: anything that cannot complete
+retries with backoff and raises an alert on age. Deterministic denials are recorded with evidence
+and never credited.
+
+## Who owns what
+
+| Party | Owns |
+|---|---|
+| Service | Addresses, chain evidence, finality, screening, pricing, deposit state, credits and their webhooks, the swept status it reads from the chain, and reconciliation. |
+| Operator | Creating accounts, deciding live access, issuing first and recovery keys, and handling incidents. |
+| Merchant | Its keys, treasuries, webhook endpoints, sweeps, and refunds (and their gas), and its customers' identity, balances, entitlements, and billing policy. |

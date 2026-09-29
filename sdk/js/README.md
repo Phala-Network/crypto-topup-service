@@ -19,34 +19,34 @@ connects a wallet with wagmi, RainbowKit, ConnectKit, or AppKit, pass it in inst
 
 ## Quickstart
 
-1. Your backend creates a quote (`POST /v1/quotes` with its secret key, for example
+1. Your backend creates a quote (`POST /v1/quotes` with its API key, for example
    `phala-pay`'s `pay.quotes.create`), recomputes its address from the pinned forwarder (the
    Python SDK does it on every call), and returns only its `client_secret` and that address to
    the signed-in user's browser.
 2. Render the checkout with them:
 
-```tsx
-"use client";
-import { Checkout } from "@phala/pay/react";
+   ```tsx
+   "use client";
+   import { Checkout } from "@phala/pay/react";
 
-export function TopUp(props: {
-  clientSecret: string;
-  expectedAddress: string;
-  onPaid: () => void;
-  onRetry: () => void;
-}) {
-  return (
-    <Checkout
-      clientSecret={props.clientSecret}
-      expectedAddress={props.expectedAddress}
-      apiBase="https://pay.example.com"
-      onSuccess={props.onPaid}
-      onExpire={props.onRetry}
-      buttonText="Pay with crypto"
-    />
-  );
-}
-```
+   export function TopUp(props: {
+     clientSecret: string;
+     expectedAddress: string;
+     onPaid: () => void;
+     onRetry: () => void;
+   }) {
+     return (
+       <Checkout
+         clientSecret={props.clientSecret}
+         expectedAddress={props.expectedAddress}
+         apiBase="https://pay.example.com"
+         onSuccess={props.onPaid}
+         onExpire={props.onRetry}
+         buttonText="Pay with crypto"
+       />
+     );
+   }
+   ```
 
 3. Credit the account when your webhook endpoint receives `deposit.credited`. `onSuccess` is for the
    UI only: the browser is not a trusted source of payment.
@@ -102,12 +102,12 @@ ConnectKit, and AppKit, that is `useWalletClient()`:
 import { Checkout } from "@phala/pay/react";
 import { useWalletClient } from "wagmi";
 
-export function TopUp({ clientSecret }: { clientSecret: string }) {
+export function TopUp(props: { clientSecret: string; expectedAddress: string }) {
   const { data: walletClient } = useWalletClient();
   return (
     <Checkout
-      clientSecret={clientSecret}
-      expectedAddress={expectedAddress}
+      clientSecret={props.clientSecret}
+      expectedAddress={props.expectedAddress}
       apiBase="https://pay.example.com"
       walletClient={walletClient}
     />
@@ -121,7 +121,7 @@ as usual. The QR code and manual tabs do not change.
 ### A customer's deposit address
 
 For top-ups of any amount, your backend creates the customer's persistent deposit address with
-`POST /v1/deposit_addresses` (secret key) and passes its `address` and `networks` to the page:
+`POST /v1/deposit_addresses` (its API key) and passes its `address` and `networks` to the page:
 one address for all supported tokens and networks. `<DepositAddress>` lets the payer pick a
 network and a token and shows a QR code of that token's transfer request, the token contract, and
 the address to copy, with "send only supported tokens" and "credited at the market rate when it

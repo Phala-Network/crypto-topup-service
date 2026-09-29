@@ -1,0 +1,18 @@
+// Markdown lint of the documentation (CI's docs job; CONTRIBUTING.md, "Documentation").
+{
+  "config": {
+    "default": true,
+    // Prose wraps at 100 columns; tables, links, and commands cannot.
+    "MD013": false,
+    // Tables use the compact `|---|` delimiter row.
+    "MD060": false,
+    // Changelogs repeat `Added`, `Changed`, ... under each release.
+    "MD024": { "siblings_only": true },
+    // Explicit anchors that keep existing links working.
+    "MD033": { "allowed_elements": ["a"] }
+  },
+  "gitignore": true,
+  "globs": ["**/*.md"],
+  // Submodules, and the pull request template, which starts at a second-level heading.
+  "ignores": ["contracts/lib/**", ".github/PULL_REQUEST_TEMPLATE.md"]
+}

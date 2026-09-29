@@ -1,5 +1,5 @@
 # Staging route on Sepolia: a test-mode route (`livemode: false`) any account can quote on and pay
-# its own treasury through; the staging reference-product CVM uses it (deploy/README.md, "Staging
+# its own treasury through; the staging reference-product CVM uses it (deploy/phala.md, "Staging
 # reference product"). Route files carry no treasury: each account proves its own per chain
 # through the API (docs/design/multi-tenant.md D10). The factory and implementation are the
 # deterministic deployment of deploy/CONTRACTS.md, the same address on every chain.

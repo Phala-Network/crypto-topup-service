@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- markdownlint-disable-file MD024 -->
+
 All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
 (section 5.9); versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

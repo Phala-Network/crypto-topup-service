@@ -1035,7 +1035,7 @@ guide); runbooks: remove gas refill, flush-reverted, operator-key compromise, tr
 product-key compromise, rejected funds at treasury, refund execution; add merchant onboarding
 (due diligence record, creation, key hand-over, live enablement), key recovery, sweep guide (EOA
 and Safe Transaction Builder), reversal handling, restore notice. HUMAN-ONLY, listed not
-executed: staging reset (`deploy/README.md`, "Staging reset") and factory deployments.
+executed: staging reset (`deploy/phala.md`, "Staging reset") and factory deployments.
 
 **PR 12 — restricted keys** follows §7 and the launch hardening amendment; **PR 13 — account
 closure** follows §13.
