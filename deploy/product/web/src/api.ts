@@ -54,8 +54,6 @@ export interface Asset {
   faucet: string | null;
   /** The demo merchant's own promotion on credits paid in this token, in basis points. */
   bonus_bps: number;
-  /** USD per token for display: 1.00 for a stablecoin, else the latest quote's locked rate. */
-  rate: string | null;
 }
 
 export interface LedgerLine {
@@ -352,12 +350,11 @@ export async function getNetworks(): Promise<Network[]> {
     faucet: network.faucet ?? null,
     treasury: network.treasury ?? "",
     assets: (network.assets ?? []).map(
-      (asset: Omit<Asset, "mintable" | "faucet" | "bonus_bps" | "rate"> & Partial<Asset>) => ({
+      (asset: Omit<Asset, "mintable" | "faucet" | "bonus_bps"> & Partial<Asset>) => ({
         ...asset,
         mintable: asset.mintable ?? false,
         faucet: asset.faucet ?? null,
         bonus_bps: asset.bonus_bps ?? 0,
-        rate: asset.rate ?? (asset.pricing === "stablecoin" ? "1.00000000" : null),
       }),
     ),
   }));

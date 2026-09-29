@@ -19,7 +19,7 @@ import type { Account, Asset, CreatedQuote, DepositAddressResponse, Network } fr
 import { ChainIcon, TokenIcon, assetOf, networkOf, tokenFullName } from "./chains.js";
 import { BRAND_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
-import { dollars, percent, price, rate, signedDollars, tokenName } from "./format.js";
+import { dollars, percent, rate, signedDollars, tokenName } from "./format.js";
 import { useCreateQuote } from "./queries.js";
 
 const Checkout = lazy(() => loadSdk().then((sdk) => ({ default: sdk.Checkout })));
@@ -260,7 +260,7 @@ function CheckoutSkeleton() {
 
 /**
  * The network, then the token, as checkouts and wallets ask for them: a network select, and the
- * network's tokens as a list with each one's price and terms. Shown even with one option each, so
+ * network's tokens as a list with each one's price terms. Shown even with one option each, so
  * the customer sees what they pay with (a test token, on a testnet) before paying.
  */
 function PaymentOptions({
@@ -333,7 +333,7 @@ function PaymentOptions({
 
 /**
  * A token row: its mark, symbol, and name; on the right the demo merchant's bonus, if any, and its
- * price; checked, a tick. In a narrow list the bonus moves under the name.
+ * price terms; checked, a tick. In a narrow list the bonus moves under the name.
  */
 function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet: boolean }) {
   const bonus =
@@ -362,15 +362,17 @@ function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet
           <span className="w-full truncate text-xs font-normal text-muted-foreground">
             {testnet ? `Test ${tokenFullName(asset.asset)}` : tokenFullName(asset.asset)}
           </span>
-          {bonus !== null && <span className="@sm:hidden">{bonus}</span>}
+          {bonus !== null && <span className="@md:hidden">{bonus}</span>}
         </span>
-        {bonus !== null && <span className="hidden @sm:inline-flex">{bonus}</span>}
-        <span
-          className="shrink-0 text-sm font-normal tabular-nums"
-          data-testid="token-price"
-          title={asset.pricing === "stablecoin" ? "A stablecoin, valued at $1.00" : "The rate the latest quote locked"}
-        >
-          {asset.rate === null ? <span className="text-xs text-muted-foreground">Market rate</span> : price(asset.rate)}
+        {bonus !== null && <span className="hidden @md:inline-flex">{bonus}</span>}
+        {/* A stablecoin is valued at $1.00; any other token's rate is known only once a quote
+            locks it (the locked-rate line). */}
+        <span className="shrink-0 text-sm font-normal tabular-nums" data-testid="token-price">
+          {asset.pricing === "stablecoin" ? (
+            "$1.00"
+          ) : (
+            <span className="text-xs text-muted-foreground">Price locked at checkout</span>
+          )}
         </span>
         <span
           className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 peer-data-checked:opacity-100"

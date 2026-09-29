@@ -171,7 +171,9 @@ async function expectPaymentOptions(product: Locator) {
   await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
   const rows = product.getByTestId("token-option");
   await expect(rows.filter({ hasText: "PHA" })).toContainText("+10% bonus");
+  // A stablecoin is $1.00; a spot token's rate is known only once a quote locks it.
   await expect(rows.filter({ hasText: "USDC" }).getByTestId("token-price")).toHaveText("$1.00");
+  await expect(rows.filter({ hasText: "PHA" }).getByTestId("token-price")).toHaveText("Price locked at checkout");
   await expect(rows.filter({ hasText: "USDC" })).not.toContainText("bonus");
 }
 
