@@ -2,6 +2,7 @@ import { Cpu, ShieldCheck, Terminal, Wallet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -45,14 +46,16 @@ export function Backend({
   const order = timeline?.quote?.metadata["order_id"];
   const deposit = timeline?.deposit ?? null;
   return (
-    // At lg and up the console follows the scroll beside the product, whichever is taller.
-    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:self-start">
+    // At lg and up, a live log beside the product: pinned below the site header at the viewport's
+    // height, its header fixed and the stream with its tabs scrolling inside. Below lg, its natural
+    // height in the page's flow.
+    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:h-[calc(100svh-6rem)] lg:self-start">
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"
-        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm lg:min-h-0 lg:flex-1"
       >
-        <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
           <h2 className="text-sm font-medium">Event stream</h2>
           <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground" data-testid="stream-status">
             <span className="relative flex size-2" aria-hidden="true">
@@ -68,63 +71,67 @@ export function Backend({
             </dl>
           )}
         </header>
-        <div className="px-3 py-3" aria-live="off">
-          <EventStream timeline={timeline} loading={selected?.id ?? null} />
-        </div>
-        <Tabs defaultValue="credits" className="gap-0 border-t">
-          <TabsList
-            variant="line"
-            aria-label="Backend"
-            className="h-11! w-full justify-start gap-2 overflow-x-auto rounded-none border-b px-3.5 py-0 sm:gap-5 sm:px-5"
-          >
-            <Tab value="credits" count={account?.payments.length}>
-              Credits
-            </Tab>
-            <Tab value="refunds" count={timeline?.refunds.length}>
-              Refunds
-            </Tab>
-            <Tab value="sweeps">Sweeps</Tab>
-            <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
-              API
-            </Tab>
-            <Tab value="trust">Trust</Tab>
-          </TabsList>
-          <TabsContent value="credits" className="p-5">
-            <CreditsTab
-              account={account}
-              selected={selected}
-              address={address}
-              networks={networks}
-              onSelect={onSelect}
-            />
-          </TabsContent>
-          <TabsContent value="refunds" className="p-5">
-            {timeline === null || deposit === null || account === null ? (
-              <Empty>Follow a payment with a deposit to see its ledger and refunds.</Empty>
-            ) : (
-              <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-                {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
-                <Refunds timeline={timeline} deposit={deposit} />
-              </div>
-            )}
-          </TabsContent>
-          <TabsContent value="sweeps" className="p-5">
-            <Sweeps />
-          </TabsContent>
-          <TabsContent value="api" className="p-5">
-            {timeline === null ? (
-              <Empty>Follow a payment to see its webhooks and the product's API requests.</Empty>
-            ) : (
-              <div className="flex flex-col gap-8">
-                <EventsLog events={timeline.events} />
-                <Requests exchanges={timeline.api} title="API requests" id="api-title" />
-              </div>
-            )}
-          </TabsContent>
-          <TabsContent value="trust" className="p-5">
-            <TrustDetails trust={trust} networks={networks} />
-          </TabsContent>
-        </Tabs>
+        {/* Radix's viewport wraps its content in a table-display box, which would let wide tables
+            widen the console: a block box keeps the content at the card's width. */}
+        <ScrollArea className="lg:min-h-0 lg:flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+          <div className="px-3 py-3" aria-live="off">
+            <EventStream timeline={timeline} loading={selected?.id ?? null} />
+          </div>
+          <Tabs defaultValue="credits" className="gap-0 border-t">
+            <TabsList
+              variant="line"
+              aria-label="Backend"
+              className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-5 py-0 sm:gap-5"
+            >
+              <Tab value="credits" count={account?.payments.length}>
+                Credits
+              </Tab>
+              <Tab value="refunds" count={timeline?.refunds.length}>
+                Refunds
+              </Tab>
+              <Tab value="sweeps">Sweeps</Tab>
+              <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
+                API
+              </Tab>
+              <Tab value="trust">Trust</Tab>
+            </TabsList>
+            <TabsContent value="credits" className="p-5">
+              <CreditsTab
+                account={account}
+                selected={selected}
+                address={address}
+                networks={networks}
+                onSelect={onSelect}
+              />
+            </TabsContent>
+            <TabsContent value="refunds" className="p-5">
+              {timeline === null || deposit === null || account === null ? (
+                <Empty>Follow a payment with a deposit to see its ledger and refunds.</Empty>
+              ) : (
+                <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+                  {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
+                  <Refunds timeline={timeline} deposit={deposit} />
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="sweeps" className="p-5">
+              <Sweeps />
+            </TabsContent>
+            <TabsContent value="api" className="p-5">
+              {timeline === null ? (
+                <Empty>Follow a payment to see its webhooks and the product's API requests.</Empty>
+              ) : (
+                <div className="flex flex-col gap-8">
+                  <EventsLog events={timeline.events} />
+                  <Requests exchanges={timeline.api} title="API requests" id="api-title" />
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="trust" className="p-5">
+              <TrustDetails trust={trust} networks={networks} />
+            </TabsContent>
+          </Tabs>
+        </ScrollArea>
       </aside>
     </div>
   );

@@ -1,7 +1,7 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
-import { AppWindow, Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock } from "lucide-react";
+import { AppWindow, Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -371,10 +371,16 @@ function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet
   );
 }
 
+/**
+ * A row of the test tokens card, the same for its action and its links: the token's mark and what
+ * the row does, and at its end the kind of action (the wallet, or a link out).
+ */
+const TOKEN_ROW = "h-9 w-full justify-between";
+
 /** A faucet, off the page: its mark and name, and the external-link icon at the row's end. */
 function FaucetLink({ href, icon, title, children }: { href: string; icon: ReactNode; title?: string; children: ReactNode }) {
   return (
-    <Button asChild variant="outline" className="h-9 w-full justify-between">
+    <Button asChild variant="outline" className={TOKEN_ROW}>
       <a href={href} target="_blank" rel="noreferrer" title={title}>
         <span className="flex items-center gap-2">
           {icon}
@@ -617,8 +623,8 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
 
 /**
  * Where to get test tokens on the selected network, whatever token is selected: the mintable test
- * token's public mint, from the visitor's wallet (an action in this page); then, as links out,
- * another test token's issuer faucet and the network's gas faucets.
+ * token's public mint, from the visitor's wallet (a button, marked with the wallet); then, as
+ * links out, another test token's issuer faucet and the network's gas faucets.
  */
 function TestTokens({ network, className }: { network: Network; className?: string }) {
   const mintable = network.assets.find((each) => each.mintable);
@@ -646,9 +652,12 @@ function TestTokens({ network, className }: { network: Network; className?: stri
       </div>
       <div className="flex flex-col gap-2 px-5 pt-3 pb-4 sm:px-6">
         {mintable !== undefined && (
-          <Button type="button" variant="secondary" className="h-9 w-full" onClick={() => mint.mutate(mintable)} disabled={mint.isPending}>
-            <TokenIcon asset={mintable.asset} className="size-4" />
-            {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${mintable.symbol}`}
+          <Button type="button" variant="outline" className={TOKEN_ROW} onClick={() => mint.mutate(mintable)} disabled={mint.isPending}>
+            <span className="flex items-center gap-2">
+              <TokenIcon asset={mintable.asset} className="size-4" />
+              {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${mintable.symbol}`}
+            </span>
+            <Wallet aria-hidden="true" />
           </Button>
         )}
         {fromFaucet !== undefined && fromFaucet.faucet !== null && (

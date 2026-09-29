@@ -230,7 +230,7 @@ function StreamStep({
                 {clock(since)}
               </time>
             ) : (
-              <span className="text-muted-foreground/40" aria-hidden="true">
+              <span className="text-muted-foreground" aria-hidden="true">
                 --:--:--
               </span>
             )}

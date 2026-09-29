@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import type { Asset, Network } from "./api.js";
 import baseIcon from "./icons/base.svg";
 import ethereumIcon from "./icons/ethereum.svg";
-import phaIcon from "./icons/pha.svg";
+import phaIcon from "./icons/pha-token.svg";
 import usdcIcon from "./icons/usdc.svg";
 
 // Chain and token marks (./icons, from web3icons), bundled with the page: its CSP allows images

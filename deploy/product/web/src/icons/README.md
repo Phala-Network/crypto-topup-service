@@ -7,6 +7,8 @@ its own origin): `ethereum.svg`, `usdc.svg`, and `pha.svg` from `dist/svgs/*/bac
 mark). `pha.svg` swaps the background variant's colours to Phala's lime mark on black. The same
 "P" mark is Phala Pay's logo: the header's wordmark, `public/favicon.svg`, and, rendered by
 `brand/render.ts`, the PNG icons and the link preview (`brand/app-icon.svg`, `brand/og-image.svg`).
+`pha-token.svg` is the same mark at 65%, so that it reads as a circle, like the other token marks,
+where the page rounds it as a token.
 
 `github.svg` is GitHub's mark, `mark-github-16.svg` from [Primer Octicons](https://github.com/primer/octicons),
 MIT-licensed (see [LICENCE-octicons](LICENCE-octicons)); it links to the repository, as GitHub's
