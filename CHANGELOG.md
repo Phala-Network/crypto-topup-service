@@ -20,6 +20,19 @@ webhook receivers must ignore unknown fields. The format follows
   date: the retry waits at least that long, at most an hour.
 - Admin: `POST /v1/admin/deposits/{id}/nudge` answers `400 deposit_unexpected_state` for a deposit
   the pump does not process (anything but `detected` or `confirmed`); it was a silent no-op.
+- Admin: `POST /v1/admin/restore/quotes` re-issues a quote given out after the restore point from
+  the merchant's record of it (the address must be the one its `qt_` id derives over the current
+  treasury), backfilled from the restored cursor so a payment made to it is found. Its terms are
+  the merchant's record, kept but never applied: a payment to it is credited at spot unless an
+  imported, signed `deposit.credited` carries its credit, and its `expires_at` is the restore's
+  detection at the latest. A `client_secret` the service issued for the quote is kept, so the
+  payer's page reads it again; `POST /v1/admin/restore/deposit_addresses` takes one too.
+- Admin: `GET /v1/admin/attestation?account=&livemode=&nonce=` returns `GET /v1/attestation` of any
+  account and mode, so the operator verifies a restored instance, where merchant keys are refused.
+- Admin: `POST /v1/admin/restore/unfreeze` requires `quotes_reissued`.
+- Admin: `POST /v1/admin/restore/delivered_credits/discard` releases a deposit held because its
+  transfer contradicts the delivered event imported for it (a `contradicted` finding of
+  `GET /v1/admin/restore`); the deposit is then valued from the chain.
 - Deposits carry `final_at` (Unix seconds; `null` until `final`), when the finality watch found
   the deposit's block final, in the object and every `deposit.*` snapshot.
 - A path or method the API does not serve answers `404 resource_missing` with the error object
@@ -141,12 +154,13 @@ webhook receivers must ignore unknown fields. The format follows
   `created[lte]`, all compared at whole seconds.
 - The OpenAPI documents have `servers`, `tags`, and an example of every object and body.
 - Restore mode (docs/design/multi-tenant.md §13, architecture §14): after a restore from backup
-  the service is frozen until the operator has reconciled it. Every write answers
-  `503 service_restoring` with `Retry-After: 300`, reads work, and no event is delivered and no
-  deposit credited meanwhile. Merchants give the operator their records since the restore point
+  the service is frozen until the operator has reconciled it. Every request with an API key
+  answers `503 service_restoring` with `Retry-After: 300`, reads included, and no event is
+  delivered and no deposit credited meanwhile. Merchants give the operator their records since the restore point
   (integration guide §5.12). Operators: `GET /v1/admin/restore` and
   `POST /v1/admin/restore/{api_keys/revoke, treasuries/verify, webhook_endpoints/delete,
-  deposit_addresses, events, unfreeze}` (`deploy/runbooks/restore.md`); `treasuries/verify`
+  deposit_addresses, quotes, events, delivered_credits/discard, unfreeze}`
+  (`deploy/runbooks/restore.md`); `treasuries/verify`
   re-applies lost treasury cancellations and the merchant's crediting pauses and resumes. On a restore-check
   instance, writes other than these answer `503 service_restoring` (was `503 unavailable`).
 - `POST /v1/account {confirmation_policies}` requires, per chain, a confirmation stricter than the
@@ -320,6 +334,17 @@ webhook receivers must ignore unknown fields. The format follows
 - **Breaking** (nothing is live): Deploy runs one production deployment for both modes: every route's `livemode` must match its
   chain (live on a mainnet, test on a test network), and staging takes no live route
   (`deploy/check-route-modes.sh`); production no longer requires every route to be on chain 1.
+- **Breaking** (nothing is live): while the service is frozen after a restore from backup, no API
+  key authenticates, reads included: every request with a key answers `503 service_restoring`
+  with `Retry-After` (only writes did). The restored database can hold a key you revoked after the
+  restore point as valid; keys work again once the operator has revoked such keys again and
+  unfrozen the service. A quote's or deposit address's `client_secret` read, the admin API, and
+  `/healthz` are unaffected. A restore-check instance refuses every merchant key, whether or not
+  the freeze is recorded yet.
+- **Breaking** (nothing is live): Admin: `POST /v1/admin/restore/events` takes `deliveries`, each
+  delivery as the merchant's receiver got it (`webhook_id`, `webhook_timestamp`,
+  `webhook_signature`, and the raw `body`), instead of bare event objects, and imports only
+  deliveries whose `v1a` signature verifies with the account's webhook keys.
 
 - **Breaking**: quotes and deposit address networks pay the account's treasury of the chain, set
   through the API, instead of the route's: `POST /v1/quotes` is `409 treasury_not_set` on a chain
@@ -646,6 +671,12 @@ happens only from two-provider finalized data.
   whatever the order. The new transfer was never recorded, and custody reconciliation froze the
   chain. Existing deposit ids are unchanged, and a transaction re-included unchanged keeps its
   deposit.
+- After a restore from backup, a deposit the merchant was told was credited keeps that credit: the
+  amount, exchange rate, price source, and valuation time of the imported `deposit.credited` or
+  `deposit.reversed` are the deposit's valuation when the rescan re-derives it, instead of a
+  re-valuation at spot, so `amount`, `amount_refunded`, and `amount_reversed` match what was
+  delivered. A deposit whose transfer on chain contradicts the delivered event is held, not
+  credited, until the operator discards the delivered credit.
 - A token without a route sent to an issued address is again recorded as
   `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block
   scanning change, routes in token mode (the default) never saw such transfers: the missing-deposit

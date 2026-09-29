@@ -12,7 +12,7 @@ mod types;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
-pub use accounts::{Account, Customer, get_account, get_customer};
+pub use accounts::{Account, Customer, ensure_customer_in, get_account, get_customer};
 pub use addresses::{Address, get_address, list_chain_addresses};
 pub(crate) use deposits::Evidence;
 pub use deposits::{

@@ -21,6 +21,7 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `flushed`, `flush_failures` | `SELECT`, `INSERT` (finalized chain facts) |
 | `reconciliation_blocks`, `deposit_address_client_secrets` | `SELECT`, `INSERT`, `DELETE` |
 | `reconciliation_deposit_cursors`, `restores` | `SELECT`, `INSERT`, `UPDATE` |
+| `restore_delivered_credits` | `SELECT`, `INSERT`; `UPDATE` of `discarded_at`, `discarded_by`, and `discard_reason` only |
 | `restore_timeline` | `SELECT`, `UPDATE` |
 | `restore_delivered_events` | `SELECT`, `INSERT` |
 | `_sqlx_migrations` | `SELECT` |
@@ -240,3 +241,11 @@ deposits recorded at the position before a row (0 for every existing one, whose 
 partial unique index `deposits_chain_event_live_unique` keeps at most one deposit that is not
 reversed per position. Its down migration refuses to run once a deposit with a revision above 0
 exists.
+
+`20261021160000_restore_correctness` keeps a restore from changing what merchants were told
+(architecture §14, design §13): `restore_delivered_credits` holds the credit of each deposit in a
+signature-verified delivered `deposit.credited` or `deposit.reversed` imported after a restore,
+which the confirm step values the re-derived deposit at (a deposit whose transfer contradicts it is
+held until the operator discards it, `discarded_at`); `quotes.restore_id` marks a quote re-issued
+from the merchant's record, whose locked price is never applied. Its down migration drops both;
+run it only while no re-issued quote is open.

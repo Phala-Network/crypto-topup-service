@@ -63,3 +63,43 @@ pub async fn get_customer(pool: &PgPool, id: Uuid) -> Result<Option<Customer>, s
     .fetch_optional(pool)
     .await
 }
+
+/// The customer `client_reference_id` of an account in a mode, created if it does not exist, and
+/// locked `FOR NO KEY UPDATE` to the end of `connection`'s transaction (as quote and address
+/// issuance lock it, without blocking foreign-key checks of scanner inserts). Created in the
+/// caller's transaction, so a request refused later leaves no customer behind.
+pub async fn ensure_customer_in(
+    connection: &mut sqlx::PgConnection,
+    account_id: Uuid,
+    livemode: bool,
+    client_reference_id: &str,
+) -> Result<Customer, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO customers (id, account_id, livemode, client_reference_id) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (account_id, livemode, client_reference_id) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(livemode)
+    .bind(client_reference_id)
+    .execute(&mut *connection)
+    .await?;
+    let (id, paused_scopes): (Uuid, Vec<String>) = sqlx::query_as(
+        "SELECT id, paused_scopes FROM customers \
+         WHERE account_id = $1 AND livemode = $2 AND client_reference_id = $3 \
+         FOR NO KEY UPDATE",
+    )
+    .bind(account_id)
+    .bind(livemode)
+    .bind(client_reference_id)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(Customer {
+        id,
+        account_id,
+        livemode,
+        client_reference_id: client_reference_id.to_owned(),
+        paused_scopes,
+    })
+}

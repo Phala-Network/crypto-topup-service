@@ -411,7 +411,7 @@ pub struct ReissueTarget {
     pub address: Option<EvmAddress>,
 }
 
-/// Re-issues after a restore the customer's deposit address that was given out after the restore
+/// Re-issues after a restore the deposit address of the customer `client_reference_id` that was given out after the restore
 /// point and lost with it (docs/design/multi-tenant.md §13). The salt is derived from the account,
 /// mode, customer, and version, so the address is the one the merchant holds on every chain whose
 /// treasury is unchanged. Versions between the restored latest one and `target` are issued retired,
@@ -425,7 +425,8 @@ pub struct ReissueTarget {
 pub async fn reissue(
     pool: &PgPool,
     account: &Account,
-    customer: &Customer,
+    livemode: bool,
+    client_reference_id: &str,
     chains: &[ChainContracts],
     target: ReissueTarget,
     id: Option<Uuid>,
@@ -433,12 +434,12 @@ pub async fn reissue(
     actor: &Actor,
     reason: &str,
 ) -> Result<(DepositAddress, bool), DepositAddressError> {
-    if customer.account_id != account.id {
-        return Err(DepositAddressError::NotFound);
-    }
-    let scope = Scope::new(account.id, customer.livemode);
+    let scope = Scope::new(account.id, livemode);
     let mut transaction = pool.begin().await?;
-    lock_customer(&mut transaction, customer).await?;
+    // In this transaction: a re-issue refused below rolls the customer back with it.
+    let customer =
+        &crate::db::ensure_customer_in(&mut transaction, account.id, livemode, client_reference_id)
+            .await?;
     let issuable = chains;
     let chains = with_treasuries(&mut transaction, scope, issuable).await?;
     require_chains(issuable, &chains)?;

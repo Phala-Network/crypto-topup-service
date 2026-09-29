@@ -451,6 +451,211 @@ pub async fn create_in(
     Ok((lock, client_secret))
 }
 
+/// A quote as the merchant's records hold it, for [`reissue`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReissuedTerms {
+    /// The quote id, from its `qt_` id.
+    pub id: Uuid,
+    /// The customer's `client_reference_id`.
+    pub client_reference_id: String,
+    /// The address the merchant holds.
+    pub address: EvmAddress,
+    /// The token amount to pay.
+    pub amount_atomic: AtomicAmount,
+    /// The locked price.
+    pub price: ScaledPrice,
+    /// The credit.
+    pub credit_minor: MinorAmount,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+    /// End of the payment window.
+    pub expires_at: DateTime<Utc>,
+    /// The quote's `metadata`.
+    pub metadata: BTreeMap<String, String>,
+    /// The SHA-256 of the quote's `client_secret`, checked by the caller, so the payer's page
+    /// reads the quote again.
+    pub client_secret_hash: Option<[u8; 32]>,
+}
+
+/// Re-issues after a restore a quote the merchant created after the restore point and lost with
+/// it (docs/design/multi-tenant.md §13), from its record: the address salt is derived from the
+/// account, customer, and quote id, so only the quote's own address over the account's current
+/// treasury of `route`'s chain is accepted. The address is backfilled from the chain's cursor in
+/// `backfill_from` (the restored cursor), so the rescan finds payments made to it since.
+///
+/// The terms are the merchant's record, not the service's, so they are stored as recorded but
+/// never applied: the quote is marked re-issued by `restore`, a payment to it is credited at spot
+/// unless a delivered `deposit.credited` the service signed carries its credit
+/// (`crate::restore_mode`), and its payment window closes at the restore's detection at the
+/// latest, so its page shows it expired instead of asking for a payment at a price that is not
+/// honoured. The customer is created only once the address matches. A quote that exists already
+/// for the customer at the address is returned as it is, with `false`; a re-issued one without a
+/// client secret takes the one in `terms`. Caps and pauses do not
+/// apply: nothing new is given out.
+#[allow(clippy::too_many_arguments)]
+pub async fn reissue(
+    pool: &PgPool,
+    account: &Account,
+    livemode: bool,
+    route: &RouteFile,
+    terms: &ReissuedTerms,
+    restore: (Uuid, DateTime<Utc>),
+    backfill_from: &BTreeMap<u64, u64>,
+    actor: &Actor,
+    reason: &str,
+) -> Result<(RateLock, bool), RateLockError> {
+    if route.livemode != livemode {
+        return Err(RateLockError::InvalidInput(
+            "the route's mode differs from the quote's",
+        ));
+    }
+    let (restore_id, detected_at) = restore;
+    let scope = Scope::new(account.id, livemode);
+    let mut transaction = pool.begin().await?;
+    crate::treasuries::lock(&mut transaction, scope, false).await?;
+    let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
+    let salt = quote_salt(
+        &account.public_id,
+        &terms.client_reference_id,
+        &quote_id(terms.id),
+    );
+    let address = forwarder_address(
+        route.chain.contracts.forwarder_factory,
+        route.chain.contracts.implementation,
+        treasury,
+        salt,
+    );
+    if address != terms.address {
+        return Err(RateLockError::InvalidInput(
+            "the address is not the quote's over the account's current treasury",
+        ));
+    }
+    if let Some(existing) = get(&mut *transaction, scope, terms.id).await? {
+        if existing.address != terms.address
+            || existing.client_reference_id != terms.client_reference_id
+        {
+            return Err(RateLockError::InvalidInput(
+                "the quote exists with another customer or address",
+            ));
+        }
+        // A quote re-issued without its secret takes the one the merchant finds later; a quote the
+        // service issued, or one re-issued with a secret, keeps its own.
+        if let Some(secret_hash) = &terms.client_secret_hash {
+            let added = sqlx::query(
+                "UPDATE quotes SET client_secret_hash = $2 \
+                 WHERE id = $1 AND restore_id IS NOT NULL AND client_secret_hash IS NULL",
+            )
+            .bind(terms.id)
+            .bind(secret_hash.as_slice())
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                > 0;
+            if added {
+                audit::insert(
+                    &mut *transaction,
+                    &audit::Entry {
+                        account_id: Some(scope.account_id()),
+                        actor,
+                        action: "quote.client_secret_restore",
+                        subject: &format!("quote:{}", quote_id(terms.id)),
+                        reason,
+                    },
+                )
+                .await?;
+            }
+        }
+        transaction.commit().await?;
+        return Ok((existing, false));
+    }
+    let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM quotes WHERE id = $1)")
+        .bind(terms.id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    if taken {
+        return Err(RateLockError::InvalidInput("id belongs to another quote"));
+    }
+    let customer_id = crate::db::ensure_customer_in(
+        &mut transaction,
+        scope.account_id(),
+        scope.livemode(),
+        &terms.client_reference_id,
+    )
+    .await?
+    .id;
+    sqlx::query(
+        r#"
+        INSERT INTO quotes (
+            id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
+            credit_minor, expires_at, status, exposure_reserved, created_at, metadata,
+            client_secret_hash, restore_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
+                $9, 'open', false, $10, $11, $12, $13)
+        "#,
+    )
+    .bind(terms.id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(customer_id)
+    .bind(&route.route)
+    .bind(terms.amount_atomic.value().to_string())
+    .bind(terms.price.value().to_string())
+    .bind(terms.credit_minor.value().to_string())
+    .bind(terms.expires_at.min(detected_at))
+    .bind(terms.created_at)
+    .bind(Json(&terms.metadata))
+    .bind(terms.client_secret_hash.as_ref().map(<[u8; 32]>::as_slice))
+    .bind(restore_id)
+    .execute(&mut *transaction)
+    .await?;
+    let chain_id = i64::try_from(route.chain.chain_id).map_err(|_| RateLockError::Arithmetic)?;
+    let restored_block = backfill_from
+        .get(&route.chain.chain_id)
+        .map(|block| i64::try_from(*block))
+        .transpose()
+        .map_err(|_| RateLockError::Arithmetic)?;
+    sqlx::query(
+        r#"
+        INSERT INTO addresses (
+            id, account_id, livemode, chain_id, quote_id, salt, treasury, address, created_block
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            LEAST(COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $4), 0),
+                  $9::bigint)
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(chain_id)
+    .bind(terms.id)
+    .bind(format!("{salt:#x}"))
+    .bind(format!("{treasury:#x}"))
+    .bind(format!("{address:#x}"))
+    .bind(restored_block)
+    .execute(&mut *transaction)
+    .await?;
+    audit::insert(
+        &mut *transaction,
+        &audit::Entry {
+            account_id: Some(scope.account_id()),
+            actor,
+            action: "quote.reissue",
+            subject: &format!("quote:{}", quote_id(terms.id)),
+            reason,
+        },
+    )
+    .await?;
+    let lock = get(&mut *transaction, scope, terms.id)
+        .await?
+        .ok_or(RateLockError::DatabaseInvariant)?;
+    transaction.commit().await?;
+    Ok((lock, true))
+}
+
 /// The scope's current treasury of `chain_id`, or `TreasuryNotSet`.
 async fn treasury(
     connection: &mut sqlx::PgConnection,

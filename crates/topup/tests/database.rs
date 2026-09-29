@@ -516,6 +516,8 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("restore_timeline", &["SELECT", "UPDATE"]),
     ("restores", &["SELECT", "INSERT", "UPDATE"]),
     ("restore_delivered_events", &["SELECT", "INSERT"]),
+    // Plus `UPDATE` of its discard columns only, checked below.
+    ("restore_delivered_credits", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),
     ("accounts", OPERATIONAL),
     ("confirmation_policies", OPERATIONAL),
@@ -583,6 +585,23 @@ async fn application_role_privileges_match_the_documented_grants() -> Result<()>
                         "topup_app {privilege} on {table}: granted={granted}"
                     );
                 }
+            }
+            // A delivered credit is recorded once; only its discard is ever written.
+            for (column, expected) in [
+                ("discarded_at", true),
+                ("discarded_by", true),
+                ("discard_reason", true),
+                ("credit_minor", false),
+                ("price_scaled", false),
+            ] {
+                let granted: bool = sqlx::query_scalar(
+                    "SELECT has_column_privilege('topup_app', \
+                     'public.restore_delivered_credits', $1, 'UPDATE')",
+                )
+                .bind(column)
+                .fetch_one(&context.owner_pool)
+                .await?;
+                ensure!(granted == expected, "UPDATE of {column}: granted={granted}");
             }
             Ok(())
         })

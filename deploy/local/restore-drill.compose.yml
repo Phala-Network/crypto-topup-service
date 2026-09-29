@@ -20,9 +20,12 @@ services:
       - drill_routes:/etc/topup/routes:ro
     ports: !reset []
 
+  # The merchant's receiver: the drill signs the delivery it records with the webhook key the
+  # simulator derives for the service, as the service would have signed it.
   mock-product:
     volumes: !override
       - drill_mock_product:/opt/topup:ro
+      - dstack_socket:/run/dstack
 
   restore-check:
     volumes: !override

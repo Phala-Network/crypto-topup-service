@@ -663,13 +663,23 @@ pub(super) fn decimal(scaled: u64) -> String {
     format!("{integer}.{fraction}")
 }
 
+/// The scaled price of an exact decimal string as [`decimal`] writes it, such as `0.24875621`.
+pub(super) fn parse_decimal(text: &str) -> Option<u64> {
+    let (integer, fraction) = text.split_once('.')?;
+    let scaled = format!("{integer}{fraction}")
+        .parse::<u64>()
+        .ok()
+        .filter(|_| fraction.len() == 8 && integer.bytes().all(|byte| byte.is_ascii_digit()))?;
+    (decimal(scaled) == text).then_some(scaled)
+}
+
 fn has_quotes_pause(account: &Account, customer: &Customer, route_scopes: &[String]) -> bool {
     account.paused_scopes.iter().any(|scope| scope == "quotes")
         || customer.paused_scopes.iter().any(|scope| scope == "quotes")
         || route_scopes.iter().any(|scope| scope == "quotes")
 }
 
-fn map_error(error: RateLockError) -> ApiError {
+pub(super) fn map_error(error: RateLockError) -> ApiError {
     match error {
         RateLockError::InvalidInput(message) => ApiError::bad_request(message),
         RateLockError::AmountTooSmall(message) => ApiError::amount_too_small("amount", message),
@@ -703,5 +713,22 @@ mod tests {
         assert_eq!(decimal(100_000_000), "1.00000000");
         assert_eq!(decimal(1_234_500_000_001), "12345.00000001");
         assert_eq!(decimal(0), "0.00000000");
+    }
+
+    #[test]
+    fn rendered_prices_parse_back_and_nothing_else_does() {
+        for scaled in [24_875_621, 100_000_000, 1_234_500_000_001, 0] {
+            assert_eq!(parse_decimal(&decimal(scaled)), Some(scaled));
+        }
+        for text in [
+            "0.2487562",
+            "00.24875621",
+            "+0.24875621",
+            "1",
+            "1.000000000",
+            ".24875621",
+        ] {
+            assert_eq!(parse_decimal(text), None, "{text}");
+        }
     }
 }

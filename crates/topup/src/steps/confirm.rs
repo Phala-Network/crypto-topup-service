@@ -33,6 +33,7 @@ use crate::db::{
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
 use crate::pump::{Step, StepResult};
+use crate::restore_mode::ImportedCredit;
 use crate::routes::RouteSet;
 
 #[async_trait]
@@ -193,7 +194,11 @@ impl ConfirmStep {
     }
 
     async fn execute(&self, deposit: &Deposit) -> StepResult {
-        let context = match self.context_lookup.load(deposit.address_id).await {
+        let context = match self
+            .context_lookup
+            .load(deposit.address_id, deposit.id)
+            .await
+        {
             Ok(context) => context,
             Err(error) => {
                 tracing::error!(deposit_id = %deposit.id, %error, "confirm context load failed");
@@ -266,6 +271,26 @@ impl ConfirmStep {
             );
         };
 
+        // After a restore, the credit the merchant was told for this deposit stands: a settled
+        // amount is immutable. A delivered transfer that is not the chain's holds the deposit
+        // until the operator discards the delivered credit (deploy/runbooks/restore.md).
+        if let Some(delivered) = &context.delivered {
+            if let Some(field) = delivered.contradiction(deposit, &canonical) {
+                return retry(
+                    RetryError::InvariantViolation,
+                    json!({
+                        "stage": "restore",
+                        "error": "delivered_event_contradicts_chain",
+                        "event": crate::ids::format(crate::ids::EVENT, delivered.event_id),
+                        "field": field,
+                        "providers": provider_evidence(&canonical),
+                    }),
+                    effects,
+                );
+            }
+            return carried_forward(deposit, &canonical, &context, delivered, effects);
+        }
+
         let valuation_at = Utc::now();
         let quote = match runtime.pricing.fetch(&runtime.route).await {
             Ok(quote) => quote,
@@ -273,20 +298,26 @@ impl ConfirmStep {
                 return retry(RetryError::PriceUnavailable, evidence, effects);
             }
         };
-        let lock = context.lock.as_ref().and_then(|lock| {
-            if lock.route == runtime.route.route {
-                Some(LockTerms {
-                    asset: canonical.token,
-                    amount: lock.amount,
-                    price: lock.price,
-                    credit_minor: lock.credit_minor,
-                    expires_at: lock.expires_at,
-                    block_time: unix_seconds(canonical.block_time)?,
-                })
-            } else {
-                None
-            }
-        });
+        // A quote re-issued after a restore carries the merchant's record of its terms, never
+        // applied: a payment to it is valued at spot.
+        let lock = context
+            .lock
+            .as_ref()
+            .filter(|lock| !lock.restored)
+            .and_then(|lock| {
+                if lock.route == runtime.route.route {
+                    Some(LockTerms {
+                        asset: canonical.token,
+                        amount: lock.amount,
+                        price: lock.price,
+                        credit_minor: lock.credit_minor,
+                        expires_at: lock.expires_at,
+                        block_time: unix_seconds(canonical.block_time)?,
+                    })
+                } else {
+                    None
+                }
+            });
         let valuation = value_deposit(
             canonical.amount,
             quote.price,
@@ -372,6 +403,49 @@ impl ConfirmStep {
     }
 }
 
+/// Values the deposit at the credit a delivered event told the merchant, and consumes the quote it
+/// paid when that credit was the quote's.
+fn carried_forward(
+    deposit: &Deposit,
+    canonical: &TransferLog,
+    context: &ConfirmationContext,
+    delivered: &ImportedCredit,
+    mut effects: TransitionEffects,
+) -> StepResult {
+    let credit = &delivered.credit;
+    let event = crate::ids::format(crate::ids::EVENT, delivered.event_id);
+    if credit.source == ValuationSource::Lock && context.lock.is_some() {
+        effects.lock_consumption = Some(LockConsumption {
+            address_id: deposit.address_id,
+            idempotent: false,
+        });
+    }
+    effects.valuation = Some(stored_valuation(
+        credit.valuation_at,
+        credit.price,
+        credit.source,
+        credit.credit_minor,
+        json!({"source": "delivered_event", "event": event}),
+    ));
+    StepResult {
+        outcome: StepOutcome::Advance,
+        evidence: json!({
+            "stage": "confirmed",
+            "providers": provider_evidence(canonical),
+            "corrected": effects.canonical_evidence.is_some(),
+            "valuation": {
+                "price_scaled": credit.price.value().to_string(),
+                "price_source": valuation_source_code(credit.source),
+                "credit_minor": credit.credit_minor.value().to_string(),
+                "valuation_at": credit.valuation_at,
+                "delivered_event": event,
+            },
+        }),
+        events: Vec::new(),
+        effects,
+    }
+}
+
 #[async_trait]
 impl Step for ConfirmStep {
     async fn run(&self, deposit: &Deposit) -> StepResult {
@@ -385,10 +459,14 @@ struct ConfirmationContext {
     lock: Option<StoredLock>,
     /// The account's stricter confirmation for the chain (design D1), if it set one.
     policy: Option<Confirmations>,
+    /// The credit a delivered event imported after a restore told the merchant.
+    delivered: Option<ImportedCredit>,
 }
 
 #[derive(Clone)]
 struct StoredLock {
+    /// Re-issued after a restore from the merchant's record: its terms are never applied.
+    restored: bool,
     route: String,
     amount: AtomicAmount,
     price: ScaledPrice,
@@ -398,23 +476,35 @@ struct StoredLock {
 
 #[async_trait]
 trait ContextLookup: Send + Sync {
-    async fn load(&self, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error>;
+    async fn load(
+        &self,
+        address_id: Uuid,
+        deposit_id: Uuid,
+    ) -> Result<ConfirmationContext, sqlx::Error>;
 }
 
 struct PostgresContextLookup(PgPool);
 
 #[async_trait]
 impl ContextLookup for PostgresContextLookup {
-    async fn load(&self, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
-        load_context(&self.0, address_id).await
+    async fn load(
+        &self,
+        address_id: Uuid,
+        deposit_id: Uuid,
+    ) -> Result<ConfirmationContext, sqlx::Error> {
+        load_context(&self.0, address_id, deposit_id).await
     }
 }
 
-async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
+async fn load_context(
+    pool: &PgPool,
+    address_id: Uuid,
+    deposit_id: Uuid,
+) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT address.address, policy.required AS policy,
-               quote.route, quote.amount_atomic::text AS amount_atomic,
+               quote.restore_id IS NOT NULL AS restored, quote.route, quote.amount_atomic::text AS amount_atomic,
                quote.price_scaled::text AS price_scaled,
                quote.credit_minor::text AS credit_minor,
                quote.expires_at, quote.consumed_by, quote.status AS lock_status
@@ -442,6 +532,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
         let credit_minor: Option<String> = row.try_get("credit_minor")?;
         let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
         Some(StoredLock {
+            restored: row.try_get("restored")?,
             route: route.ok_or_else(|| sqlx::Error::Decode("lock route is missing".into()))?,
             amount: AtomicAmount::new(
                 U256::from_str(
@@ -487,6 +578,7 @@ async fn load_context(pool: &PgPool, address_id: Uuid) -> Result<ConfirmationCon
         address,
         lock,
         policy,
+        delivered: crate::restore_mode::imported_credit(pool, deposit_id).await?,
     })
 }
 
@@ -867,7 +959,11 @@ mod tests {
 
     #[async_trait]
     impl ContextLookup for MockContext {
-        async fn load(&self, _address_id: Uuid) -> Result<ConfirmationContext, sqlx::Error> {
+        async fn load(
+            &self,
+            _address_id: Uuid,
+            _deposit_id: Uuid,
+        ) -> Result<ConfirmationContext, sqlx::Error> {
             Ok(self.0.clone())
         }
     }
@@ -1378,6 +1474,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reissued_quotes_lock_is_never_applied() {
+        let now = now_seconds();
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let restored = StoredLock {
+            restored: true,
+            ..lock(now)
+        };
+        let result = step(
+            route(PricingMode::Spot),
+            chain(100, vec![log.clone()]),
+            chain(100, vec![log]),
+            prices(now),
+            context(Some(restored)),
+        )
+        .run(&deposit)
+        .await;
+        assert_eq!(result.outcome, StepOutcome::Advance);
+        let valuation = result.effects.valuation.expect("valuation");
+        assert_eq!(valuation.price_source, "spot");
+        assert_eq!(valuation.credit_minor, MinorAmount::new(100));
+        assert!(result.effects.lock_consumption.is_none());
+    }
+
+    fn delivered(deposit: &Deposit, source: ValuationSource) -> ImportedCredit {
+        ImportedCredit {
+            event_id: event_id("deposit.credited", deposit.id),
+            account_id: deposit.account_id,
+            livemode: deposit.livemode,
+            credit: crate::restore_mode::DeliveredCredit {
+                chain_id: deposit.chain_id,
+                tx_hash: deposit.tx_hash,
+                address: recipient(),
+                asset_contract: deposit.asset_contract,
+                from_address: deposit.from_address,
+                amount_atomic: deposit.amount_atomic,
+                price: ScaledPrice::new(25_000_000, PRICE_SCALE).expect("price"),
+                source,
+                credit_minor: MinorAmount::new(250),
+                valuation_at: DateTime::from_timestamp(1_790_000_000, 0).expect("time"),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delivered_credit_is_carried_forward_instead_of_revaluing_the_deposit() {
+        let now = now_seconds();
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        for (source, lock) in [
+            (ValuationSource::Spot, None),
+            (ValuationSource::Lock, Some(lock(now))),
+        ] {
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![log.clone()]),
+                chain(100, vec![log.clone()]),
+                prices(now),
+                ConfirmationContext {
+                    delivered: Some(delivered(&deposit, source)),
+                    ..context(lock.clone())
+                },
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(result.outcome, StepOutcome::Advance);
+            // Spot would credit 100 cents at 0.10; the merchant was told 250 at 0.25.
+            let valuation = result.effects.valuation.expect("valuation");
+            assert_eq!(valuation.credit_minor, MinorAmount::new(250));
+            assert_eq!(valuation.price_scaled, 25_000_000);
+            assert_eq!(valuation.price_source, valuation_source_code(source));
+            assert_eq!(valuation.valuation_at.timestamp(), 1_790_000_000);
+            assert_eq!(valuation.quote["source"], "delivered_event");
+            // The quote it paid is consumed, as when it was first credited.
+            assert_eq!(result.effects.lock_consumption.is_some(), lock.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delivered_credit_the_chain_contradicts_holds_the_deposit() {
+        let now = now_seconds();
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let mut other_recipient = delivered(&deposit, ValuationSource::Spot);
+        other_recipient.credit.address = Address::repeat_byte(9);
+        let mut other_amount = delivered(&deposit, ValuationSource::Spot);
+        other_amount.credit.amount_atomic = AtomicAmount::new(U256::from(999_u64));
+        let mut other_account = delivered(&deposit, ValuationSource::Spot);
+        other_account.account_id = Uuid::new_v4();
+        for (delivered, field) in [
+            (other_recipient, "address"),
+            (other_amount, "amount_atomic"),
+            (other_account, "account"),
+        ] {
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![log.clone()]),
+                chain(100, vec![log.clone()]),
+                prices(now),
+                ConfirmationContext {
+                    delivered: Some(delivered),
+                    ..context(None)
+                },
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(
+                result.outcome,
+                StepOutcome::Retry {
+                    error: RetryError::InvariantViolation
+                }
+            );
+            assert_eq!(
+                result.evidence["error"],
+                "delivered_event_contradicts_chain"
+            );
+            assert_eq!(result.evidence["field"], field);
+            assert!(result.effects.valuation.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn below_minimum_rejects_and_keeps_quote_fields() {
         let now = now_seconds();
         let mut route = route(PricingMode::Spot);
@@ -1555,11 +1773,13 @@ mod tests {
             address: recipient(),
             lock,
             policy: None,
+            delivered: None,
         }
     }
 
     fn lock(now: u64) -> StoredLock {
         StoredLock {
+            restored: false,
             route: "phala-cloud-ethereum-pha-usd".to_owned(),
             amount: AtomicAmount::new(U256::from(1_000_u64)),
             price: ScaledPrice::new(9_000_000, PRICE_SCALE).expect("lock price"),

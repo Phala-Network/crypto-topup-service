@@ -16,13 +16,17 @@
 //! row of `restores`, so it survives the upgrade from the restore-check variant to the service.
 
 use std::collections::BTreeMap;
+use std::str::FromStr as _;
 use std::time::Duration;
 
+use alloy_primitives::{Address, B256, U256};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::{FromRow, PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
+use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
+use topup_core::valuation::ValuationSource;
 use uuid::Uuid;
 
 use crate::audit::{self, Actor};
@@ -39,6 +43,10 @@ pub const UNFREEZE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// `event_id(type, deposit)`: the only events [`import_delivered_event`] accepts.
 pub const REDERIVED_EVENT_TYPES: [&str; 3] =
     ["deposit.credited", "deposit.rejected", "deposit.reversed"];
+
+/// The re-derived events whose deposit was credited: their snapshot carries the credit the
+/// merchant was told, which the restored ledger keeps ([`DeliveredCredit`]).
+pub const CREDITED_EVENT_TYPES: [&str; 2] = ["deposit.credited", "deposit.reversed"];
 
 /// How a restore was detected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -408,6 +416,153 @@ pub struct DeliveredEvent {
     pub actor: String,
     /// The event's `data` exactly as delivered.
     pub data: Value,
+    /// The credit its deposit snapshot carries, for a [`CREDITED_EVENT_TYPES`] event.
+    pub credit: Option<DeliveredCredit>,
+}
+
+/// The credit a delivered `deposit.credited` or `deposit.reversed` told the merchant, and the
+/// transfer it was for. A settled amount is immutable: the confirm step values the deposit the
+/// rescan re-derives at it, unless the chain's transfer contradicts it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveredCredit {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Transfer transaction hash.
+    pub tx_hash: B256,
+    /// The receiving forwarder.
+    pub address: Address,
+    /// Token contract.
+    pub asset_contract: Address,
+    /// Transfer sender.
+    pub from_address: Address,
+    /// Token amount.
+    pub amount_atomic: AtomicAmount,
+    /// The valuation price, `exchange_rate`.
+    pub price: ScaledPrice,
+    /// `spot`, or `lock` (delivered as `quote`).
+    pub source: ValuationSource,
+    /// The credit, `amount`.
+    pub credit_minor: MinorAmount,
+    /// `valued_at`.
+    pub valuation_at: DateTime<Utc>,
+}
+
+/// A delivered credit imported for a deposit and not discarded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedCredit {
+    /// The imported event that carried it.
+    pub event_id: Uuid,
+    /// The event's account.
+    pub account_id: Uuid,
+    /// The event's mode.
+    pub livemode: bool,
+    /// The credit.
+    pub credit: DeliveredCredit,
+}
+
+impl ImportedCredit {
+    /// The first field in which the delivered transfer differs from the chain's: the deposit's
+    /// account, mode, chain, and transaction, and the canonical transfer's recipient, token,
+    /// sender, and amount.
+    #[must_use]
+    pub fn contradiction(
+        &self,
+        deposit: &crate::db::Deposit,
+        transfer: &topup_adapters::chain::evm::TransferLog,
+    ) -> Option<&'static str> {
+        let credit = &self.credit;
+        [
+            ("account", self.account_id == deposit.account_id),
+            ("livemode", self.livemode == deposit.livemode),
+            ("chain_id", credit.chain_id == deposit.chain_id),
+            ("tx_hash", credit.tx_hash == deposit.tx_hash),
+            ("address", credit.address == transfer.to),
+            ("asset_contract", credit.asset_contract == transfer.token),
+            ("from_address", credit.from_address == transfer.from),
+            ("amount_atomic", credit.amount_atomic == transfer.amount),
+        ]
+        .into_iter()
+        .find_map(|(field, same)| (!same).then_some(field))
+    }
+}
+
+#[derive(FromRow)]
+struct ImportedCreditRow {
+    event_id: Uuid,
+    account_id: Uuid,
+    livemode: bool,
+    chain_id: i64,
+    tx_hash: String,
+    address: String,
+    asset_contract: String,
+    from_address: String,
+    amount_atomic: String,
+    price_scaled: String,
+    price_source: String,
+    credit_minor: String,
+    valuation_at: DateTime<Utc>,
+}
+
+impl TryFrom<ImportedCreditRow> for ImportedCredit {
+    type Error = sqlx::Error;
+
+    fn try_from(row: ImportedCreditRow) -> Result<Self, Self::Error> {
+        let invalid = || sqlx::Error::Decode("restore_delivered_credits is invalid".into());
+        let address = |text: &str| Address::from_str(text).map_err(|_| invalid());
+        Ok(Self {
+            event_id: row.event_id,
+            account_id: row.account_id,
+            livemode: row.livemode,
+            credit: DeliveredCredit {
+                chain_id: u64::try_from(row.chain_id).map_err(|_| invalid())?,
+                tx_hash: B256::from_str(&row.tx_hash).map_err(|_| invalid())?,
+                address: address(&row.address)?,
+                asset_contract: address(&row.asset_contract)?,
+                from_address: address(&row.from_address)?,
+                amount_atomic: AtomicAmount::new(
+                    U256::from_str(&row.amount_atomic).map_err(|_| invalid())?,
+                ),
+                price: row
+                    .price_scaled
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|price| ScaledPrice::new(price, PRICE_SCALE).ok())
+                    .ok_or_else(invalid)?,
+                source: match row.price_source.as_str() {
+                    "spot" => ValuationSource::Spot,
+                    "lock" => ValuationSource::Lock,
+                    _ => return Err(invalid()),
+                },
+                credit_minor: MinorAmount::new(
+                    row.credit_minor.parse::<u64>().map_err(|_| invalid())?,
+                ),
+                valuation_at: row.valuation_at,
+            },
+        })
+    }
+}
+
+/// The delivered credit imported for `deposit_id` and not discarded, which the confirm step values
+/// the deposit at.
+pub async fn imported_credit<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    deposit_id: Uuid,
+) -> Result<Option<ImportedCredit>, sqlx::Error> {
+    sqlx::query_as::<_, ImportedCreditRow>(
+        r#"
+        SELECT event_id, account_id, livemode, chain_id, tx_hash, address, asset_contract,
+               from_address, amount_atomic::text AS amount_atomic,
+               price_scaled::text AS price_scaled, price_source,
+               credit_minor::text AS credit_minor, valuation_at
+        FROM restore_delivered_credits
+        WHERE deposit_id = $1 AND discarded_at IS NULL
+        "#,
+    )
+    .bind(deposit_id)
+    .fetch_optional(executor)
+    .await?
+    .map(ImportedCredit::try_from)
+    .transpose()
 }
 
 /// What importing a delivered event did.
@@ -435,8 +590,10 @@ impl ImportOutcome {
 
 /// Stores `event`, delivered to the merchant after the restore point and so lost, as the event it
 /// is: a rescan that re-derives its deposit then finds the event recorded and emits nothing, so
-/// the merchant never receives it again with another body. An event already recorded keeps its
-/// stored snapshot; a different delivered body is a mismatch, logged for the operator.
+/// the merchant never receives it again with another body. Its credit, if any, is kept for the
+/// deposit ([`imported_credit`]). An event already recorded keeps its stored snapshot; a different
+/// delivered body is a mismatch, logged for the operator. The caller verified that the service
+/// signed the delivery.
 pub async fn import_delivered_event(
     pool: &PgPool,
     restore: &Restore,
@@ -470,6 +627,9 @@ pub async fn import_delivered_event(
             .bind(restore.id)
             .execute(&mut *transaction)
             .await?;
+        if let Some(credit) = &event.credit {
+            insert_credit(&mut transaction, restore, event, credit).await?;
+        }
         ImportOutcome::Imported
     } else {
         let stored: Value = sqlx::query_scalar("SELECT data FROM events WHERE id = $1")
@@ -502,6 +662,125 @@ pub async fn import_delivered_event(
     Ok(outcome)
 }
 
+/// Keeps the credit of an imported event for its deposit. A credited and a reversed event of one
+/// deposit carry the same credit: the first one imported is kept, and another is logged.
+async fn insert_credit(
+    connection: &mut PgConnection,
+    restore: &Restore,
+    event: &DeliveredEvent,
+    credit: &DeliveredCredit,
+) -> Result<(), sqlx::Error> {
+    let chain_id =
+        i64::try_from(credit.chain_id).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO restore_delivered_credits (
+            deposit_id, event_id, restore_id, account_id, livemode, chain_id, tx_hash, address,
+            asset_contract, from_address, amount_atomic, price_scaled, price_source, credit_minor,
+            valuation_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::numeric, $12::text::numeric,
+                $13, $14::text::numeric, $15)
+        ON CONFLICT (deposit_id) DO NOTHING
+        "#,
+    )
+    .bind(event.deposit_id)
+    .bind(event.id)
+    .bind(restore.id)
+    .bind(event.account_id)
+    .bind(event.livemode)
+    .bind(chain_id)
+    .bind(format!("{:#x}", credit.tx_hash))
+    .bind(format!("{:#x}", credit.address))
+    .bind(format!("{:#x}", credit.asset_contract))
+    .bind(format!("{:#x}", credit.from_address))
+    .bind(credit.amount_atomic.value().to_string())
+    .bind(credit.price.value().to_string())
+    .bind(match credit.source {
+        ValuationSource::Spot => "spot",
+        ValuationSource::Lock => "lock",
+    })
+    .bind(credit.credit_minor.value().to_string())
+    .bind(credit.valuation_at)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        > 0;
+    if !inserted
+        && imported_credit(&mut *connection, event.deposit_id)
+            .await?
+            .is_some_and(|kept| kept.credit != *credit)
+    {
+        tracing::error!(
+            event_id = %event.id,
+            deposit_id = %event.deposit_id,
+            "delivered events of one deposit carry different credits; the first imported is kept"
+        );
+    }
+    Ok(())
+}
+
+/// Why [`discard_credit`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscardError {
+    /// No delivered credit was imported for the deposit.
+    #[error("no delivered credit was imported for the deposit")]
+    NotFound,
+    /// PostgreSQL rejected or failed the operation.
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
+}
+
+/// Discards the delivered credit of `deposit_id` (a finding `contradicted`: its transfer is not
+/// the chain's), so the deposit is valued from the chain as any other; the operator settles the
+/// difference with the merchant. Audited; discarding again changes nothing.
+pub async fn discard_credit(
+    pool: &PgPool,
+    deposit_id: Uuid,
+    actor: &Actor,
+    reason: &str,
+) -> Result<(), DiscardError> {
+    let mut transaction = pool.begin().await?;
+    let (account_id, restore_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT account_id, restore_id FROM restore_delivered_credits WHERE deposit_id = $1 \
+         FOR UPDATE",
+    )
+    .bind(deposit_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(DiscardError::NotFound)?;
+    let discarded = sqlx::query(
+        "UPDATE restore_delivered_credits \
+         SET discarded_at = now(), discarded_by = $2, discard_reason = $3 \
+         WHERE deposit_id = $1 AND discarded_at IS NULL",
+    )
+    .bind(deposit_id)
+    .bind(actor.to_string())
+    .bind(reason)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected()
+        > 0;
+    if discarded {
+        audit::insert(
+            &mut *transaction,
+            &audit::Entry {
+                account_id: Some(account_id),
+                actor,
+                action: "restore.delivered_credit_discard",
+                subject: &format!(
+                    "deposit:{}",
+                    crate::ids::format(crate::ids::DEPOSIT, deposit_id)
+                ),
+                reason: &format!("restore {restore_id}: {}", reason.trim()),
+            },
+        )
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// An imported event whose deposit the ledger does not yet hold as delivered.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredEventFinding {
@@ -511,8 +790,10 @@ pub struct DeliveredEventFinding {
     pub event_type: String,
     /// The deposit.
     pub deposit_id: Uuid,
-    /// `pending` (the rescan has not re-derived or valued the deposit yet) or `mismatch` (the
-    /// ledger's token amount or credit differs from the delivered one).
+    /// `pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the
+    /// recorded transfer is not the delivered one: the deposit is held until the operator
+    /// discards the delivered credit), or `mismatch` (the ledger's token amount or credit differs
+    /// from the delivered one).
     pub status: &'static str,
     /// Delivered `amount_atomic`.
     pub delivered_amount_atomic: Option<String>,
@@ -533,11 +814,13 @@ struct ImportedRow {
     delivered_amount: Option<String>,
     ledger_amount_atomic: Option<String>,
     ledger_amount: Option<String>,
+    contradicted: bool,
 }
 
 /// Imported events of `restore` compared with the ledger: the count, and each one whose deposit
-/// is not re-derived yet or whose amounts differ from what the merchant received. The delivered
-/// snapshot stays the event; a mismatch is the operator's to settle with the merchant.
+/// is not re-derived yet, whose recorded transfer contradicts its delivered credit, or whose
+/// amounts differ from what the merchant received. The delivered snapshot stays the event; a
+/// contradiction or a mismatch is the operator's to settle with the merchant.
 pub async fn delivered_event_findings(
     pool: &PgPool,
     restore: &Restore,
@@ -548,10 +831,21 @@ pub async fn delivered_event_findings(
                event.data #>> '{object,amount_atomic}' AS delivered_amount_atomic,
                event.data #>> '{object,amount}' AS delivered_amount,
                deposit.amount_atomic::text AS ledger_amount_atomic,
-               deposit.credit_minor::text AS ledger_amount
+               deposit.credit_minor::text AS ledger_amount,
+               COALESCE(credit.account_id <> deposit.account_id
+                        OR credit.livemode <> deposit.livemode
+                        OR credit.chain_id <> deposit.chain_id
+                        OR credit.tx_hash <> deposit.tx_hash
+                        OR credit.address <> address.address
+                        OR credit.asset_contract <> deposit.asset_contract
+                        OR credit.from_address <> deposit.from_address
+                        OR credit.amount_atomic <> deposit.amount_atomic, false) AS contradicted
         FROM restore_delivered_events AS imported
         JOIN events AS event ON event.id = imported.event_id
         LEFT JOIN deposits AS deposit ON deposit.id = event.object_id
+        LEFT JOIN addresses AS address ON address.id = deposit.address_id
+        LEFT JOIN restore_delivered_credits AS credit
+            ON credit.deposit_id = event.object_id AND credit.discarded_at IS NULL
         WHERE imported.restore_id = $1
         ORDER BY event.created, event.id
         "#,
@@ -568,6 +862,7 @@ pub async fn delivered_event_findings(
                 &row.delivered_amount,
                 &row.ledger_amount,
             ) {
+                _ if row.contradicted => "contradicted",
                 (None, _, _) | (Some(_), Some(_), None) => "pending",
                 (Some(ledger), _, _) if Some(ledger) != row.delivered_amount_atomic.as_ref() => {
                     "mismatch"

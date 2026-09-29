@@ -413,17 +413,59 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "reissued": true,
             "deposit_address": deposit_address(),
         }),
-        "RestoreEventsImportRequest" => json!({
-            "events": [{
+        "RestoreQuoteRequest" => json!({
+            "account": ACCOUNT,
+            "livemode": false,
+            "id": QUOTE,
+            "client_reference_id": "team-42",
+            "chain_id": 1,
+            "asset": "PHA",
+            "amount": 2500,
+            "amount_atomic": "202510000000000000000",
+            "exchange_rate": "0.12345679",
+            "address": QUOTE_ADDRESS,
+            "created": CREATED,
+            "expires_at": CREATED + 900,
+            "metadata": {"order_id": "ord_1001"},
+            "client_secret": format!("{QUOTE}_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a"),
+            "reason": "created after the restore point, from the merchant's records; INC-12",
+        }),
+        "RestoreQuoteResponse" => {
+            let mut quote = quote();
+            quote["payment"] = Value::Null;
+            quote["client_secret"] = Value::Null;
+            quote["expires_at"] = json!(CREATED + 1_800);
+            json!({"reissued": true, "quote": quote})
+        }
+        "RestoreEventsImportRequest" => {
+            let body = json!({
                 "id": EVENT,
                 "object": "event",
                 "account": ACCOUNT,
                 "livemode": false,
                 "type": "deposit.credited",
                 "created": CREATED,
+                "actor": "system",
+                "request": null,
                 "data": {"object": deposit()},
-            }],
-            "reason": "delivered after the restore point, from the merchant's receiver; INC-12",
+            });
+            json!({
+                "deliveries": [{
+                    "webhook_id": EVENT,
+                    "webhook_timestamp": (CREATED + 31).to_string(),
+                    "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
+                    "body": body.to_string(),
+                }],
+                "reason": "delivered after the restore point, from the merchant's receiver; INC-12",
+            })
+        }
+        "RestoreDeliveredCreditDiscardRequest" => json!({
+            "deposit": DEPOSIT,
+            "reason": "INC-12: the chain shows another amount; settled with the merchant",
+        }),
+        "RestoreDeliveredCreditDiscardResponse" => json!({
+            "deposit": DEPOSIT,
+            "discarded": true,
         }),
         "RestoreEventsImportResponse" => json!({
             "object": "list",
@@ -433,6 +475,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
             "security_changes_reapplied": true,
             "deposit_addresses_reissued": true,
+            "quotes_reissued": true,
             "delivered_events_imported": true,
         }),
         _ => return None,
