@@ -21,10 +21,14 @@ x-walg-environment: &walg-environment
 # (staging.env.example), empty for a keyless URL. A route that names none uses provider-a and
 # provider-b.
 x-rpc-providers: &rpc-providers
+  # Sepolia.
   TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
   TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
   TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
   TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
+  # Base Sepolia: keyless public endpoints, so no key.
+  TOPUP_RPC_BASE_SEPOLIA_A_URL: "${TOPUP_RPC_BASE_SEPOLIA_A_URL:-}"
+  TOPUP_RPC_BASE_SEPOLIA_B_URL: "${TOPUP_RPC_BASE_SEPOLIA_B_URL:-}"
 
 services:
   # With topup, restore-check, and dstack-ingress, the only container with the dstack socket: it
@@ -123,6 +127,10 @@ services:
       - --bind
       - 0.0.0.0:8080
       - --route
+      - /etc/topup/routes/phala-cloud-base-sepolia-pha.yaml
+      - --route
+      - /etc/topup/routes/phala-cloud-base-sepolia-usdc.yaml
+      - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-usdc.yaml
@@ -153,6 +161,10 @@ services:
       - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
     configs:
+      - source: topup_route_phala_cloud_base_sepolia_pha
+        target: /etc/topup/routes/phala-cloud-base-sepolia-pha.yaml
+      - source: topup_route_phala_cloud_base_sepolia_usdc
+        target: /etc/topup/routes/phala-cloud-base-sepolia-usdc.yaml
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
       - source: topup_route_phala_cloud_sepolia_usdc
@@ -295,6 +307,10 @@ services:
       - topup
       - restore-check
       - --route
+      - /etc/topup/routes/phala-cloud-base-sepolia-pha.yaml
+      - --route
+      - /etc/topup/routes/phala-cloud-base-sepolia-usdc.yaml
+      - --route
       - /etc/topup/routes/phala-cloud-sepolia-pha.yaml
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-usdc.yaml
@@ -311,6 +327,10 @@ services:
       - db_owner:/run/db-owner:ro
       - observability:/run/topup-observability
     configs:
+      - source: topup_route_phala_cloud_base_sepolia_pha
+        target: /etc/topup/routes/phala-cloud-base-sepolia-pha.yaml
+      - source: topup_route_phala_cloud_base_sepolia_usdc
+        target: /etc/topup/routes/phala-cloud-base-sepolia-usdc.yaml
       - source: topup_route_phala_cloud_sepolia_pha
         target: /etc/topup/routes/phala-cloud-sepolia-pha.yaml
       - source: topup_route_phala_cloud_sepolia_usdc
@@ -381,6 +401,90 @@ configs:
       WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'topup_service')
       \gexec
       SQL
+
+  topup_route_phala_cloud_base_sepolia_pha:
+    content: |
+      # Staging route on Base Sepolia, the PHA route of Sepolia on a second chain: a test-mode route
+      # (`livemode: false`) any account can quote on and pay its own treasury through. Test PHA here is
+      # the same MockERC20 as on Sepolia (18 decimals, public `mint`). Route files carry no treasury
+      # (design D10); the factory and implementation are the deterministic deployment of
+      # deploy/CONTRACTS.md, the same address on every chain.
+      # Every value not written here is a code default (docs/architecture.md §14); `topup route show` prints the resolved route.
+      route: phala-cloud-base-sepolia-pha-usd
+      version: 1
+      livemode: false
+
+      chain:
+        chain_id: 84532
+        forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+        # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
+        # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
+        # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
+        confirmations: safe
+        rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/README.md, "Staging routes")
+        sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
+
+      asset:
+        symbol: pha
+        contract: "0x1a6F260377e42ead1418C7C1afDFD5DE371A9284"
+        decimals: 18
+        # No transfer since it was deployed (the last 100 000 blocks, Sep 2026): one token-wide log
+        # request per range. The USDC route still puts the whole chain in address mode (architecture §8).
+        backstop: token
+
+      pricing:
+        primary: { source: coinmetrics, asset: pha }
+        check: { source: binance, symbol: PHAUSDT }
+
+      limits:
+        min_credit_minor: 100
+        max_deposit_atomic: "200000000000000000000000"
+        min_refund_atomic: "20000000000000000000"
+
+  topup_route_phala_cloud_base_sepolia_usdc:
+    content: |
+      # Staging route on Base Sepolia for Circle's testnet USDC (https://faucet.circle.com), beside the
+      # PHA route: a test-mode route (`livemode: false`) any account can quote on and pay its own
+      # treasury through. The token is the one Circle lists for Base Sepolia
+      # (https://developers.circle.com/stablecoins/usdc-contract-addresses): FiatTokenV2_2 behind
+      # Circle's proxy, a plain ERC-20 with no transfer fee or rebasing. The chain section is the PHA
+      # route's: one chain has one set of chain settings. Route files carry no treasury (design D10).
+      # Every value not written here is a code default (docs/architecture.md §14); `topup route show` prints the resolved route.
+      route: phala-cloud-base-sepolia-usdc-usd
+      version: 1
+      livemode: false
+
+      chain:
+        chain_id: 84532
+        forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+        # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
+        # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
+        # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
+        confirmations: safe
+        rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/README.md, "Staging routes")
+        sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
+
+      asset:
+        symbol: usdc
+        contract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+        decimals: 6
+        # About 1 to 1.5 transfers per block on Base Sepolia (1 740 to 3 065 in 2 000 blocks, up to 14 in
+        # one, Sep 2026): a token-wide 2 000-block backstop window would be up to 1.9 MB and a third of
+        # providers' 10 000-log response caps. Address mode puts the whole chain, PHA included, on
+        # requests by recipient (architecture §8).
+        backstop: addresses
+
+      pricing:
+        mode: stablecoin # credited at 1.00 while Coin Metrics' USDC reference rate is within 1% of it
+        primary: { source: coinmetrics, asset: usdc }
+
+      quote:
+        spread_bps: 0 # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
+
+      limits:
+        min_credit_minor: 100 # USD 1.00, as on the PHA route
+        max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
+        min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA
 
   topup_route_phala_cloud_sepolia_pha:
     content: |

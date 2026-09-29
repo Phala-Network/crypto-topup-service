@@ -80,6 +80,7 @@ the merchant's steps with the account's keys, never with the admin key.
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`, empty and used by no other app |
    | `TOPUP_ADMIN_PUBLIC_KEY` | step 3's `public_key` |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the committed Sepolia routes' two providers' URLs, with `{key}` in place of an API key; a route on another chain adds one `TOPUP_RPC_<ID>_URL` per provider it names (section 3) |
+   | `TOPUP_RPC_BASE_SEPOLIA_A_URL`, `TOPUP_RPC_BASE_SEPOLIA_B_URL` | the committed Base Sepolia routes' two providers' URLs; the first must serve `eth_getLogs` over 2 000 blocks and with no contract address ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |
 
    The meaning of each, the derived settings (`AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`,
    `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT`), and why all but the first two are attested are in
@@ -101,13 +102,16 @@ A route is one chain and token that accounts quote on and are paid through, in o
 files are committed and attested: a new route is a pull request to your fork and a Deploy
 `upgrade`, never a runtime setting.
 
-- **The committed routes** are in test mode on Sepolia, and any instance can use them; keep them
-  for a first instance in test mode:
+- **The committed routes** are in test mode on Sepolia and Base Sepolia, and any instance can use
+  them; keep them for a first instance in test mode:
   `phala-cloud-sepolia-pha-usd`
   ([deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)),
   a test PHA token (`MockERC20`, public `mint`), and `phala-cloud-sepolia-usdc-usd`
   ([deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)),
-  Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin.
+  Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin; and the
+  same two tokens on Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and
+  `phala-cloud-base-sepolia-usdc-usd`, credited at the OP-stack `safe` head, with providers of
+  their own ([deploy/README.md, "Staging routes"](../deploy/README.md#staging-routes)).
 - **Your own routes.** The fields and their defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment), and
   [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A

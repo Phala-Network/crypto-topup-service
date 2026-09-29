@@ -20,7 +20,9 @@ settings=(AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
     SENTRY_ENVIRONMENT=staging
     TOPUP_DOMAIN=topup.example TOPUP_GATEWAY_DOMAIN=gateway.dstack.example
     TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia
-    TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia)
+    TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
+    TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia
+    TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia)
 render() {
     env TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres "${settings[@]}" "$@"
 }
