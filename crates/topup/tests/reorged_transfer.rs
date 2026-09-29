@@ -511,7 +511,6 @@ impl Scenario {
             .inserted)
     }
 
-    /// The reconciler's missing-deposit repair of `transfer`; returns the deposits it recorded.
     /// The per-block scan's commit of `transfer`, read at the route's confirmation; returns the
     /// deposits it recorded.
     async fn fast_scan(&self, transfer: &TransferLog) -> Result<u64> {
@@ -523,6 +522,7 @@ impl Scenario {
         )
     }
 
+    /// The reconciler's missing-deposit repair of `transfer`; returns the deposits it recorded.
     async fn reconciler_scan(&self, transfer: &TransferLog) -> Result<u64> {
         let deposit = self.deposit_of(transfer)?;
         Ok(

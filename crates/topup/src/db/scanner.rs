@@ -177,8 +177,9 @@ pub async fn get_confirmed_cursor(
 
 /// Commits deposits the fast scanner found at the route confirmation and advances its cursor
 /// to `confirmed_block`, atomically. A receipt position whose deposits were all reversed is final,
-/// so a transfer read there before finality is stale, and it is left to finalized evidence. The cursor never moves backwards, and it needs a finalized
-/// cursor row: the fast scan starts above the finalized scanner's range.
+/// so a transfer read there before finality is stale, and it is left to finalized evidence. The
+/// cursor never moves backwards, and it needs a finalized cursor row: the fast scan starts above
+/// the finalized scanner's range.
 pub async fn commit_confirmed_scan(
     pool: &PgPool,
     chain_id: u64,

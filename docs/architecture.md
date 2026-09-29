@@ -1443,7 +1443,11 @@ merchant ignores the repeat and keeps its first credit (§11). When the backup l
 was reversed because another transfer took its position (§7), the rescan finds only the final
 transfer and records it at revision 0, under the reversed deposit's id, not its successor's: the
 reversed deposit's imported events then show as `mismatch` when the amounts differ, and the
-successor's stay `pending`, and the operator settles them with the merchant as one incident. The restore drill runs weekly in CI
+successor's stay `pending`, and the operator settles them with the merchant as one incident. The
+reversal and its successor commit in one transaction, so a backup holding the reversed deposit
+holds its successor too; should one ever lack it, the rescan records the final transfer at
+revision 1 with `replaces` `null`, and the quote the reversed deposit completed is not handed over
+(the reversal reopened or expired it as for any reversal). The restore drill runs weekly in CI
 on a local stack, including the freeze and the reconciliation; the staging drill restores
 staging's real backups. Ingress via the
 dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, Sentry, and merchants' webhook URLs,

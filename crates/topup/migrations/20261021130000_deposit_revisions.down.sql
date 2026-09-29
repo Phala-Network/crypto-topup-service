@@ -1,4 +1,4 @@
--- Restores the schema before 20261021120000_deposit_revisions. It refuses to run while a deposit
+-- Restores the schema before 20261021130000_deposit_revisions. It refuses to run while a deposit
 -- recorded after a reversed one at the same receipt position exists.
 DO $$
 BEGIN
