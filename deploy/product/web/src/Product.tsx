@@ -171,7 +171,7 @@ export function Product({
           </section>
         </div>
       </section>
-      {network?.testnet === true && asset !== undefined && <TestTokens network={network} asset={asset} />}
+      {network?.testnet === true && <TestTokens key={network.chain_id} network={network} />}
     </div>
   );
 }
@@ -617,75 +617,56 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
 }
 
 /**
- * Where to get the selected token on the selected network: a mintable test token's public mint,
- * from the visitor's wallet; another test token's issuer faucet; and the network's gas faucets.
+ * Where to get test tokens on the selected network, whatever token is selected: the mintable test
+ * token's public mint, from the visitor's wallet; another test token's issuer faucet; and the
+ * network's gas faucets.
  */
-function TestTokens({ network, asset }: { network: Network; asset: Asset }) {
+function TestTokens({ network }: { network: Network }) {
+  const mintable = network.assets.find((each) => each.mintable);
+  const fromFaucet = network.assets.find((each) => !each.mintable && each.faucet !== null);
   const mint = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (token: Asset) => {
       const { mintTestTokens } = await wallet();
-      return mintTestTokens(network.chain_id, asset.contract, "1000", asset.decimals);
+      return mintTestTokens(network.chain_id, token.contract, "1000", token.decimals);
     },
   });
   const chain = network.name.replace(/ testnet$/, "");
-  const row = "flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:px-6";
   return (
     <div role="note" aria-label="Test tokens" className="rounded-xl border bg-card text-sm text-card-foreground shadow-sm">
-      <div className="flex items-center justify-between gap-2 border-b px-5 py-3 sm:px-6">
+      <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
         <span className="font-medium">Need test tokens?</span>
         <InfoTip label="About test tokens" className="translate-y-0">
-          {asset.mintable
-            ? `Test ${asset.symbol} is free: its contract lets anyone mint it, so your own wallet mints it.`
-            : `Test ${asset.symbol} is free from its issuer's faucet.`}{" "}
+          {mintable !== undefined && `Test ${mintable.symbol} is free: its contract lets anyone mint it, so your own wallet mints it. `}
+          {fromFaucet !== undefined && `Test ${fromFaucet.symbol} is free from Circle's faucet: pick ${chain} as the network there. `}
           Gas is {chain} ETH, also free, from a public faucet.
         </InfoTip>
       </div>
-      <ul className="divide-y">
-        <li className={row}>
-          <span className="flex min-w-0 flex-1 items-center gap-3">
-            <TokenIcon asset={asset.asset} className="size-6" />
-            <span className="flex min-w-0 flex-col">
-              <span className="font-medium">Test {asset.symbol}</span>
-              <span className="text-xs text-muted-foreground" data-testid={asset.mintable ? undefined : "faucet-hint"}>
-                {asset.mintable
-                  ? `Minted by your wallet on ${chain}`
-                  : asset.faucet !== null
-                    ? `On the faucet, pick ${chain} as the network.`
-                    : "Not available from a faucet"}
-              </span>
-            </span>
-          </span>
-          {asset.mintable ? (
-            <Button type="button" size="sm" variant="outline" onClick={() => mint.mutate()} disabled={mint.isPending}>
-              {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${asset.symbol}`}
-            </Button>
-          ) : asset.faucet !== null ? (
-            <Button asChild size="sm" variant="outline">
-              <a href={asset.faucet} target="_blank" rel="noreferrer">
-                Get test {asset.symbol} from Circle
-                <ExternalLink aria-hidden="true" />
-              </a>
-            </Button>
-          ) : null}
-        </li>
-        {network.faucet !== null && (
-          <li className={row}>
-            <span className="flex min-w-0 flex-1 items-center gap-3">
-              <ChainIcon chainId={network.chain_id} className="size-6" />
-              <span className="flex min-w-0 flex-col">
-                <span className="font-medium">{chain} ETH</span>
-                <span className="text-xs text-muted-foreground">For gas, from a public faucet</span>
-              </span>
-            </span>
-            <Button asChild size="sm" variant="outline">
-              <a href={network.faucet} target="_blank" rel="noreferrer">
-                {chain} ETH faucets
-                <ExternalLink aria-hidden="true" />
-              </a>
-            </Button>
-          </li>
+      <div className="flex flex-wrap items-center gap-2 px-5 pt-3 pb-4 sm:px-6">
+        {mintable !== undefined && (
+          <Button type="button" size="sm" variant="outline" onClick={() => mint.mutate(mintable)} disabled={mint.isPending}>
+            <TokenIcon asset={mintable.asset} className="size-4" />
+            {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${mintable.symbol}`}
+          </Button>
         )}
-      </ul>
+        {fromFaucet !== undefined && fromFaucet.faucet !== null && (
+          <Button asChild size="sm" variant="outline">
+            <a href={fromFaucet.faucet} target="_blank" rel="noreferrer" title={`On the faucet, pick ${chain} as the network.`}>
+              <TokenIcon asset={fromFaucet.asset} className="size-4" />
+              Circle {fromFaucet.symbol} faucet
+              <ExternalLink aria-hidden="true" />
+            </a>
+          </Button>
+        )}
+        {network.faucet !== null && (
+          <Button asChild size="sm" variant="outline">
+            <a href={network.faucet} target="_blank" rel="noreferrer">
+              <ChainIcon chainId={network.chain_id} className="size-4 rounded-sm" />
+              {chain} ETH faucets
+              <ExternalLink aria-hidden="true" />
+            </a>
+          </Button>
+        )}
+      </div>
       <p aria-live="polite" className="border-t px-5 py-3 text-xs text-muted-foreground empty:hidden sm:px-6">
         {mint.isSuccess && (
           <>
