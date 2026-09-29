@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local (offline) preflight checks: the example env file, a zero-address route, a stale render, a
-# source that does not render, the wrong variant, invalid settings, routes on two chains, and an
-# OS image other than the approved one must be refused, an RPC key must fit its URL and never be
-# published or printed, and a complete env file with filled routes must pass.
+# source that does not render, the wrong variant, invalid settings, and an OS image other than the
+# approved one must be refused, an RPC key must fit its URL and never be published or printed,
+# every route's providers must be in the compose and each chain's its own, and a complete env file
+# with filled routes, alone or beside a second chain's, must pass.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -52,10 +53,10 @@ expect_failure example-env "AWS_ACCESS_KEY_ID still contains replace-me" \
     --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml" \
     --source "$tmp/zero-source.yml"
 expect_failure zero-route \
-    "route phala-cloud-sepolia-pha-usd forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
+    "route phala-cloud-sepolia-pha-usd: forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
     --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
 # Every attested route is checked, not only the first.
-grep -qF "route phala-cloud-sepolia-usdc-usd contract is the placeholder or zero address" \
+grep -qF "route phala-cloud-sepolia-usdc-usd: contract is the placeholder or zero address" \
     "$tmp/zero-route.err" || {
     echo "preflight did not check the second route:" >&2
     cat "$tmp/zero-route.err" >&2
@@ -86,11 +87,12 @@ grep -qF 'must carry exactly one ${..._RENDERED_SHA256:-} label' "$tmp/bad-sourc
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
 
-# The compose has one pair of RPC providers: routes on two chains are refused.
+# A provider serves one chain: a route on another chain that names no providers, and so uses
+# Sepolia's provider-a and provider-b, is refused.
 awk '/^        chain_id: / && ++seen == 2 { sub(/11155111/, "560048") } { print }' \
     "$root/deploy/docker-compose.yml" >"$tmp/two-chains-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/two-chains-source.yml" >"$tmp/two-chains.yml"
-expect_failure two-chains "the compose's RPC providers serve one chain" \
+expect_failure two-chains "RPC provider provider-a is named on chain 11155111 and chain 560048" \
     --env "$tmp/complete.env" --compose "$tmp/two-chains.yml" --source "$tmp/two-chains-source.yml"
 
 # The restore-check variant passes only with --restore-check, and the service variant only without.
@@ -106,7 +108,7 @@ expect_failure service-as-restore-check "the compose is not the --restore-check 
 # Settings are checked in the rendered compose; a hand-edited value is also a stale render.
 TOPUP_RPC_PROVIDER_B_URL=$TOPUP_RPC_PROVIDER_A_URL "$root/deploy/render-compose.sh" \
     "$tmp/filled-source.yml" >"$tmp/same-rpc.yml"
-expect_failure same-rpc "the two RPC provider URLs must be different providers" \
+expect_failure same-rpc "RPC providers provider-a and provider-b have the same URL" \
     --env "$tmp/complete.env" --compose "$tmp/same-rpc.yml" --source "$tmp/filled-source.yml"
 # A keyed provider is attested with {key} and its key sealed; a URL with the key itself is refused
 # without printing it, and a key must fit its URL.
@@ -133,6 +135,55 @@ if grep -rqE 'aB3dEfGhIjKlMnOpQrStUvWxYz012345|sealed-key-0123456789|sealed/key'
     echo "preflight printed an RPC key" >&2
     exit 1
 fi
+
+# A second chain is configuration: its route and its own providers beside Sepolia's.
+# second_chain NAME RPC_PROVIDERS ID...: renders a source with a Base Sepolia route naming
+# RPC_PROVIDERS and the providers ID... added to x-rpc-providers.
+second_chain() {
+    local name=$1 providers=$2
+    shift 2
+    {
+        awk -v ids="$*" '
+            { print }
+            /^  TOPUP_RPC_PROVIDER_B_KEY:/ {
+                count = split(ids, id, " ")
+                for (i = 1; i <= count; i++) {
+                    variable = toupper(id[i])
+                    gsub("-", "_", variable)
+                    printf "  TOPUP_RPC_%s_URL: \"${TOPUP_RPC_%s_URL:-}\"\n", variable, variable
+                }
+            }' "$tmp/filled-source.yml"
+        echo "  topup_route_base_sepolia_pha:"
+        echo "    content: |"
+        awk -v providers="$providers" '
+            /^route:/ { $0 = "route: base-sepolia-pha-usd" }
+            { sub(/chain_id: 11155111/, "chain_id: 84532"); print (length($0) ? "      " $0 : "") }
+            /^chain:/ { print "        rpc_providers: " providers }
+        ' "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml"
+    } >"$tmp/$name-source.yml"
+    "$root/deploy/render-compose.sh" "$tmp/$name-source.yml" >"$tmp/$name.yml"
+}
+export TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia
+export TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia
+export TOPUP_RPC_BASE_SEPOLIA_C_URL=https://rpc-c.example/base-sepolia
+second_chain base "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b
+"$preflight" --env "$tmp/complete.env" --compose "$tmp/base.yml" --source "$tmp/base-source.yml" \
+    --offline >/dev/null
+second_chain undefined "[base-sepolia-a, base-sepolia-c]" base-sepolia-a base-sepolia-b
+expect_failure undefined \
+    "route base-sepolia-pha-usd names RPC provider base-sepolia-c, but the compose has no TOPUP_RPC_BASE_SEPOLIA_C_URL" \
+    --env "$tmp/complete.env" --compose "$tmp/undefined.yml" --source "$tmp/undefined-source.yml"
+second_chain unused "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b base-sepolia-c
+expect_failure unused "the compose has TOPUP_RPC_BASE_SEPOLIA_C_URL, but no route names provider base-sepolia-c" \
+    --env "$tmp/complete.env" --compose "$tmp/unused.yml" --source "$tmp/unused-source.yml"
+# A keyed provider needs a sealed TOPUP_RPC_<ID>_KEY, in staging.env.example.
+TOPUP_RPC_BASE_SEPOLIA_A_URL='https://base-sepolia.g.alchemy.com/v2/{key}' \
+    second_chain unsealable "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b
+expect_failure unsealable \
+    "TOPUP_RPC_BASE_SEPOLIA_A_URL has a {key} placeholder, but staging.env.example and the compose have no TOPUP_RPC_BASE_SEPOLIA_A_KEY" \
+    --env "$tmp/complete.env" --compose "$tmp/unsealable.yml" --source "$tmp/unsealable-source.yml" \
+    --unsealed
+
 sed 's|s3://topup-staging/postgres|s3://other/postgres|' "$tmp/filled-route.yml" >"$tmp/edited.yml"
 expect_failure edited "differs from a fresh render" \
     --env "$tmp/complete.env" --compose "$tmp/edited.yml" --source "$tmp/filled-source.yml"

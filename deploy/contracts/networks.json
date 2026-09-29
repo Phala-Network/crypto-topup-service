@@ -3,6 +3,9 @@
     "sepolia": {
       "chain_id": 11155111
     },
+    "base-sepolia": {
+      "chain_id": 84532
+    },
     "mainnet": {
       "chain_id": 1
     }

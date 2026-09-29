@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Writes the unsealed staging env file for provisioning: exactly the names of
-# deploy/staging.env.example, each empty. Every name there is an owner-sealed secret, never read
+# deploy/staging.env.example (with each keyed RPC provider's TOPUP_RPC_<ID>_KEY), each empty. Every name there is an owner-sealed secret, never read
 # from the environment or held by GitHub; the names alone fix the CVM's allowed_envs. Public
 # settings are not env values: deploy/render-compose.sh renders them into the attested compose.
 # The owner later seals the secrets from their own machine (deploy/README.md).

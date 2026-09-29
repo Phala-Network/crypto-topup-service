@@ -14,6 +14,18 @@ x-walg-environment: &walg-environment
   WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
   WALG_LIBSODIUM_KEY_TRANSFORM: hex
 
+# The RPC providers the routes name in `chain.rpc_providers` (deploy/README.md, "RPC providers"),
+# each chain its own two or more: per provider id, its URL TOPUP_RPC_<ID>_URL (the id upper-cased,
+# `-` as `_`), an attested setting from the Environment variable of the same name, with `{key}` in
+# place of an API key; and, for a keyed URL, the owner-sealed key TOPUP_RPC_<ID>_KEY
+# (staging.env.example), empty for a keyless URL. A route that names none uses provider-a and
+# provider-b.
+x-rpc-providers: &rpc-providers
+  TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
+  TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
+  TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
+  TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
+
 services:
   # With topup, restore-check, and dstack-ingress, the only container with the dstack socket: it
   # derives the WAL-G key and the database credentials (deploy/README.md, "Database credentials")
@@ -115,14 +127,10 @@ services:
       - --route
       - /etc/topup/routes/phala-cloud-sepolia-usdc.yaml
     environment:
+      <<: *rpc-providers
       DATABASE_URL: postgres://topup_service@postgres:5432/topup
       PGPASSFILE: /run/db-app/topup_service.pgpass
       TOPUP_SERVICE_ENABLED: "${TOPUP_SERVICE_ENABLED:-}"
-      TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
-      TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
-      # Owner-sealed: the API key each URL takes in place of `{key}`, empty for a keyless URL.
-      TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
-      TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
       TOPUP_ADMIN_KID: "${TOPUP_ADMIN_KID:-}"
       TOPUP_ADMIN_PUBLIC_KEY: "${TOPUP_ADMIN_PUBLIC_KEY:-}"
       # The API's one public origin: the custom domain dstack-ingress serves, or the restore-check
@@ -293,13 +301,9 @@ services:
     command: []
     user: "999:999"
     environment:
+      <<: *rpc-providers
       MIGRATE_DATABASE_URL: postgres://postgres@postgres:5432/topup
       PGPASSFILE: /run/db-owner/postgres.pgpass
-      TOPUP_RPC_PROVIDER_A_URL: "${TOPUP_RPC_PROVIDER_A_URL:-}"
-      TOPUP_RPC_PROVIDER_B_URL: "${TOPUP_RPC_PROVIDER_B_URL:-}"
-      # Owner-sealed: the API key each URL takes in place of `{key}`, empty for a keyless URL.
-      TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
-      TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
       TOPUP_RESTORE_FROM_BACKUP: "${TOPUP_RESTORE_FROM_BACKUP:-}"
       TOPUP_RESTORE_REPORT_FILE: /run/topup-observability/restore-check.json
     volumes:

@@ -42,24 +42,25 @@ if jq -e '.services.topup.environment | has("MIGRATE_DATABASE_URL")' "$rendered"
     exit 1
 fi
 
-jq -e '
-    .services.topup.command == [
-        "topup",
-        "run",
-        "--bind",
-        "0.0.0.0:8080",
-        "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
-        "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
-    ]
+# Every route file of config/routes is an inline config of the same name (`-` as `_`) that topup
+# and restore-check mount and load, and the compose has no other route.
+routes=$(for file in "$root"/deploy/config/routes/*.yaml; do
+    printf '/etc/topup/routes/%s\n' "${file##*/}"
+done | jq -Rsc 'split("\n") | map(select(length > 0))')
+route_jq='def routes: [$routes[] | {source: ("topup_route_"
+        + (ltrimstr("/etc/topup/routes/") | rtrimstr(".yaml") | gsub("-"; "_"))), target: .}];
+    def route_args: [$routes[] | "--route", .];
+    def mounts_routes: [.configs[]? | select(.source | startswith("topup_route_"))] == routes;'
+jq -e --argjson routes "$routes" "$route_jq"'
+    .services.topup.command == ["topup", "run", "--bind", "0.0.0.0:8080"] + route_args
+    and (.services.topup | mounts_routes)
+    and ([.configs | keys[] | select(startswith("topup_route_"))] == [routes[].source])
     and (.services.topup.environment | has("DATABASE_URL"))
     and (.services.topup.environment | has("TOPUP_ADMIN_KID"))
     and (.services.topup.environment | has("TOPUP_ADMIN_PUBLIC_KEY"))
     and (.services.topup.environment | has("TOPUP_PUBLIC_ORIGIN"))
-    and (.services.topup.environment | has("TOPUP_RPC_PROVIDER_A_URL"))
 ' "$rendered" >/dev/null || {
-    echo "topup command or required runtime environment is misconfigured" >&2
+    echo "topup command, routes, or required runtime environment is misconfigured" >&2
     exit 1
 }
 
@@ -78,25 +79,18 @@ jq -e '
     exit 1
 }
 
-jq -e '
-    .services["restore-check"].entrypoint == [
-        "topup",
-        "restore-check",
-        "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
-        "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
-    ]
+# Both read the RPC providers of x-rpc-providers (deploy/README.md, "RPC providers").
+jq -e --argjson routes "$routes" "$route_jq"'
+    def rpc: .environment | with_entries(select(.key | startswith("TOPUP_RPC_")));
+    .services["restore-check"].entrypoint == ["topup", "restore-check"] + route_args
     and (.services["restore-check"].environment | has("MIGRATE_DATABASE_URL"))
     and (.services["restore-check"].volumes | any(.target == "/var/run/dstack.sock"))
-    and (.services["restore-check"].environment | has("TOPUP_RPC_PROVIDER_A_URL"))
-    and ([.services["restore-check"].configs[].target] == [.services.topup.configs[].target])
-    and ([.services.topup.configs[].target] == [
-        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
-        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
-    ])
+    and (.services["restore-check"] | mounts_routes)
+    and (.services.topup | rpc | length > 0)
+    and (.services.topup | rpc) == (.services["restore-check"] | rpc)
 ' "$rendered_tools" >/dev/null || {
-    echo "restore-check must use owner credentials, the dstack socket, and the attested routes" >&2
+    echo "restore-check must use owner credentials, the dstack socket, and the attested routes and" \
+        "RPC providers" >&2
     exit 1
 }
 
@@ -174,9 +168,9 @@ compare_config() {
 
 compare_config postgres_init_topup_role "$root/deploy/postgres-init/10-topup-role.sh" \
     escape-dollars
-# Every committed route file is attested verbatim.
-for path in "$root"/deploy/config/routes/*.yaml; do
-    compare_config "topup_route_$(basename "$path" .yaml | tr - _)" "$path"
+for file in "$root"/deploy/config/routes/*.yaml; do
+    name=${file##*/}
+    compare_config "topup_route_$(printf '%s' "${name%.yaml}" | tr - _)" "$file"
 done
 
 # The rendered compose reads only the owner-sealed secrets from the env.

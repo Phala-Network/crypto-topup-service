@@ -1,6 +1,8 @@
 //! Shared RPC provider-id configuration.
 //!
-//! A provider id's URL is an attested setting, `TOPUP_RPC_<ID>_URL`. A provider that authenticates
+//! Routes name their chain's providers by id (`chain.rpc_providers`); deploy preflight checks that
+//! each provider serves the chain of every route naming it. A provider id's URL is an attested
+//! setting, `TOPUP_RPC_<ID>_URL`. A provider that authenticates
 //! with an API key in the URL (Alchemy, Infura, QuickNode, ...) has the placeholder `{key}` where
 //! its documentation puts the key, and the key itself is the owner-sealed secret
 //! `TOPUP_RPC_<ID>_KEY`, so the attested URL fixes the endpoint without publishing the key.

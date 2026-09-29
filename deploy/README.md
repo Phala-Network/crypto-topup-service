@@ -72,14 +72,15 @@ key, and the database passwords: that is a key migration, not an image bump.
    | `AWS_ENDPOINT` | the object store's endpoint, for R2 `https://<account>.r2.cloudflarestorage.com` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
+   | `TOPUP_RPC_<ID>_URL`, one per [RPC provider](#rpc-providers) of the compose | the provider's HTTPS RPC URL for its chain, with `{key}` in place of an API key; the Sepolia routes use `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL` |
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only, for the optional [staging reference product](#staging-reference-product) |
    | `PRODUCT_DOMAIN` | `staging` only, likewise: the reference product's [custom domain](#custom-domain) (Phala's: `pay-demo-api.phala.com`; the [website](#website), `pay.phala.com`, is on Cloudflare) |
 
    No variable or secret names a treasury or a transaction-signing key: treasuries are each
    account's own, set through the API, and the service sends no transactions.
 
-   That is eight variables for the service, and three more for the staging reference product.
+   That is six variables and one per RPC provider (eight with Sepolia's two) for the service, and
+   three more for the staging reference product.
    All but the first two are [attested settings](#attested-settings). Deploy derives the rest, and
    a variable of the same name overrides a derived value where noted:
 
@@ -153,9 +154,10 @@ drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) Phala's o
 
 The CVM's encrypted env holds exactly the names of [staging.env.example](staging.env.example),
 the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the object store's token),
-`SENTRY_DSN` (empty turns Sentry off), and `TOPUP_RPC_PROVIDER_A_KEY`, `TOPUP_RPC_PROVIDER_B_KEY`:
-the API key topup puts in place of `{key}` in the provider's attested URL, empty for a keyless URL
-(as in Phala's staging). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
+`SENTRY_DSN` (empty turns Sentry off), and a `TOPUP_RPC_<ID>_KEY` per [RPC provider](#rpc-providers)
+that may take a key (`TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY` for Sepolia's): the
+API key topup puts in place of `{key}` in the provider's attested URL, empty for a keyless URL (as
+in Phala's staging). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
 URL and key disagree (a `{key}` without a key, or a key without a `{key}`). Redaction keeps the URL
 and the key out of every log line and error. A new CVM waits for them: PostgreSQL initializes a cluster
 only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-from-backup)).
@@ -175,11 +177,12 @@ The CVM restarts, `/healthz` answers, and backups have started once a WAL segmen
 minutes is listed (`aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1`).
 Re-seal the same way whenever a secret changes; never change a setting with `envs update`.
 
-A CVM sealed before the RPC keys existed allows only the first three names, and Deploy `upgrade`
-keeps a CVM's allowed names, so its attestation check would refuse the upgrade. Once, before that
-upgrade, run only the `envs update` above with `.env.ENV` holding all five names (the keys empty for
-keyless URLs): the running compose ignores the two new names, and preflight against it would refuse
-them.
+**A new sealed name** (a new keyed provider's `TOPUP_RPC_<ID>_KEY`, or a CVM sealed before the
+RPC keys existed) changes the CVM's allowed names, and Deploy `upgrade` keeps a CVM's allowed
+names, so its attestation check would refuse the upgrade. Once, before that upgrade, run only the
+`envs update` above with `.env.ENV` holding every name of the new `staging.env.example` (the keys
+empty for keyless URLs): the running compose ignores the new names, and preflight against it would
+refuse them. A new keyless provider adds no name.
 
 ### Attested settings
 
@@ -193,7 +196,7 @@ an RPC provider's API key is not one: its URL has `{key}` where the key goes, an
 
 | Setting | Source |
 |---|---|
-| `AWS_ENDPOINT`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the Environment variables of the same name |
+| `AWS_ENDPOINT`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, every `TOPUP_RPC_<ID>_URL` | the Environment variables of the same name |
 | `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT` | derived ([One-time setup](#one-time-setup-human-only-repository-owner), step 4) |
 | `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variable, and the CVM node's gateway: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` (the product's `PRODUCT_DOMAIN` and `PRODUCT_GATEWAY_DOMAIN` likewise, with `PRODUCT_PUBLIC_URL` `https://$PRODUCT_DOMAIN`) |
 | `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE` | the release's digests; the image digest is also the Sentry release |
@@ -201,10 +204,45 @@ an RPC provider's API key is not one: its URL has `{key}` where the key goes, an
 | ingress | the variant: the service runs `dstack-ingress` on 443 and publishes no topup port; `--restore-check` runs no ingress and publishes topup on 8081 (blocks after `# only-in: VARIANT` in the compose) |
 | `dstack-ingress` image | pinned in [docker-compose.yml](docker-compose.yml) by digest ([Custom domain](#custom-domain)) |
 | route files (inline configs) | committed in [docker-compose.yml](docker-compose.yml), checked against `config/routes/` by [validate-compose.sh](validate-compose.sh) |
+| RPC provider ids | the `x-rpc-providers` block of [docker-compose.yml](docker-compose.yml) ([RPC providers](#rpc-providers)) |
 
 Every service also carries the label `phala-pay.rendered-sha256`, so any rendered change
 recreates it. To change a setting, change the variable (or the route, by PR) and run Deploy
 `upgrade`. [product/render-compose.sh](product/render-compose.sh) renders the product the same way.
+
+### RPC providers
+
+Every route names its chain's RPC providers by id in `chain.rpc_providers`, at least two different
+providers, and a route that names none uses `provider-a` and `provider-b` (the committed Sepolia
+routes do). An id is lowercase letters, digits, and `-`, and names its two variables, the id
+upper-cased with `-` as `_`:
+
+| Variable | What | Where |
+|---|---|---|
+| `TOPUP_RPC_<ID>_URL` | the provider's HTTPS URL for its chain; a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) | an [attested setting](#attested-settings): the Environment variable of the same name |
+| `TOPUP_RPC_<ID>_KEY` | the key that fills `{key}`; only for a provider that may take one | [sealed](#sealing-the-secrets): a name of [staging.env.example](staging.env.example) |
+
+A provider serves one chain: routes of the same chain name the same providers, and a route of
+another chain names providers of its own, even from the same company (`alchemy-base-sepolia` beside
+`alchemy-sepolia`). The chain must carry the canonical Multicall3
+([contracts/multicall3.json](contracts/multicall3.json)).
+
+The `x-rpc-providers` block of [docker-compose.yml](docker-compose.yml) lists each provider once,
+its URL and, if it may take a key, its key, and gives them to `topup` and `restore-check`.
+[Preflight](preflight.sh) requires every provider a route names there and no other, an `https` URL
+that does not embed a key, a key where the URL has `{key}` and none where it has not, each route's
+providers at different URLs, and, online, each provider reporting the chain of every route that
+names it, with the route's contracts and asset on it.
+
+**Adding a chain** is configuration, in one PR and one Deploy `upgrade`: the route file and its
+copy in the compose ([self-hosting, "Routes and contracts"](../docs/self-hosting.md#3-routes-and-contracts)),
+with `chain.rpc_providers` naming two new ids; their `TOPUP_RPC_<ID>_URL` lines in
+`x-rpc-providers`; for a keyed provider, its `TOPUP_RPC_<ID>_KEY` line there, in
+[staging.env.example](staging.env.example), and in [app-compose.example.json](app-compose.example.json)'s
+`allowed_envs`; the chain in [check-route-modes.sh](check-route-modes.sh) and
+[contracts/networks.json](contracts/networks.json) if they lack it; and, before the upgrade, the
+Environment variables `TOPUP_RPC_<ID>_URL` in every Environment and, for a new sealed name, the
+[re-seal](#sealing-the-secrets) with it.
 
 ### Custom domain
 
