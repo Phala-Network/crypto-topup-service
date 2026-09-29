@@ -13,6 +13,6 @@ sdk/js/dist
 sdk/js/test-results
 sdk/js/playwright-report
 deploy/product/web/node_modules
-deploy/product/web/dist
+deploy/product/web/.cloudflare
 deploy/product/web/test-results
 deploy/product/web/playwright-report

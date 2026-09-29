@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createTestClient, http, publicActions, walletActions, type Address, type Hash, type Hex } from "viem";
 import { baseSepolia, sepolia } from "viem/chains";
-import { build, preview, type PreviewServer } from "vite";
+import { createBuilder, preview, type PreviewServer } from "vite";
 
 const web = resolve(import.meta.dirname, "..");
 const root = resolve(web, "../../..");
+// cf's Build Output, where the Cloudflare Vite plugin (vite.config.ts) builds the page.
+const buildOutput = join(web, ".cloudflare/output");
 // The deterministic deployment (deploy/CONTRACTS.md) and staging's treasury Safe, the same on every
 // chain, as the product pins them.
 const FACTORY = "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747";
@@ -41,6 +43,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await site?.close();
     await Promise.all(children.map(stop));
     rmSync(work, { recursive: true, force: true });
+    rmSync(buildOutput, { recursive: true, force: true });
   };
   try {
     execFileSync(
@@ -229,27 +232,21 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     await waitFor(() => fetchOk(`${service}/evidences/quote.json`), 600);
     await waitFor(() => fetchOk(`${product}/healthz`), 600);
 
-    // The page as `build:cloudflare` builds it, with the local API's origin instead of staging's.
-    const dist = join(work, "dist");
+    // The page as `build:cloudflare` builds it, with the local API's origin instead of staging's,
+    // into the Build Output (.cloudflare/output, removed at teardown so it is never deployed), and
+    // served by the Workers runtime as Cloudflare serves it, with the headers of its _headers, whose
+    // CSP connects to the local origins instead.
     process.env["VITE_DEMO_API_ORIGIN"] = product;
-    await build({ root: web, logLevel: "warn", build: { outDir: dist } });
+    await (await createBuilder({ root: web, logLevel: "warn" })).buildApp();
     const stagingApi = "https://pay-demo-api.phala.com";
     const stagingService = "https://pay-api-staging.phala.com";
-    const csp = /^\s+Content-Security-Policy: (.+)$/m.exec(readFileSync(join(web, "public/_headers"), "utf8"))?.[1];
-    if (csp === undefined || !csp.includes(` ${stagingApi} ${stagingService};`)) {
+    const headersFile = join(buildOutput, "v0/workers/default/assets/_headers");
+    const headers = readFileSync(headersFile, "utf8");
+    if (!/^\s+Content-Security-Policy: .+$/m.exec(headers)?.[0].includes(` ${stagingApi} ${stagingService};`)) {
       throw new Error(`public/_headers has no CSP connecting to ${stagingApi} and ${stagingService}`);
     }
-    site = await preview({
-      root: web,
-      logLevel: "warn",
-      build: { outDir: dist },
-      preview: {
-        host: "127.0.0.1",
-        port: sitePort,
-        strictPort: true,
-        headers: { "content-security-policy": csp.replace(stagingApi, product).replace(stagingService, service) },
-      },
-    });
+    writeFileSync(headersFile, headers.replace(` ${stagingApi} ${stagingService};`, ` ${product} ${service};`));
+    site = await preview({ root: web, logLevel: "warn", preview: { host: "127.0.0.1", port: sitePort, strictPort: true } });
 
     Object.assign(process.env, {
       SITE_URL: `${origin}/`,
