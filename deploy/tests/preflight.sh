@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Local (offline) preflight checks: the example env file, a zero-address route, a stale render, a
-# source that does not render, the wrong variant, invalid settings, and an OS image other than the
-# approved one must be refused, an RPC key must fit its URL and never be published or printed,
-# and a complete env file with a filled route must pass.
+# source that does not render, the wrong variant, invalid settings, routes on two chains, and an
+# OS image other than the approved one must be refused, an RPC key must fit its URL and never be
+# published or printed, and a complete env file with filled routes must pass.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -52,8 +52,15 @@ expect_failure example-env "AWS_ACCESS_KEY_ID still contains replace-me" \
     --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml" \
     --source "$tmp/zero-source.yml"
 expect_failure zero-route \
-    "route forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
+    "route phala-cloud-sepolia-pha-usd forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
     --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
+# Every attested route is checked, not only the first.
+grep -qF "route phala-cloud-sepolia-usdc-usd contract is the placeholder or zero address" \
+    "$tmp/zero-route.err" || {
+    echo "preflight did not check the second route:" >&2
+    cat "$tmp/zero-route.err" >&2
+    exit 1
+}
 if grep -v 'placeholder or zero address' "$tmp/zero-route.err" | grep -q '^FAIL'; then
     echo "the complete env file failed a check:" >&2
     cat "$tmp/zero-route.err" >&2
@@ -78,6 +85,13 @@ grep -qF 'must carry exactly one ${..._RENDERED_SHA256:-} label' "$tmp/bad-sourc
 
 "$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
     --source "$tmp/filled-source.yml" --offline >/dev/null
+
+# The compose has one pair of RPC providers: routes on two chains are refused.
+awk '/^        chain_id: / && ++seen == 2 { sub(/11155111/, "560048") } { print }' \
+    "$root/deploy/docker-compose.yml" >"$tmp/two-chains-source.yml"
+"$root/deploy/render-compose.sh" "$tmp/two-chains-source.yml" >"$tmp/two-chains.yml"
+expect_failure two-chains "the compose's RPC providers serve one chain" \
+    --env "$tmp/complete.env" --compose "$tmp/two-chains.yml" --source "$tmp/two-chains-source.yml"
 
 # The restore-check variant passes only with --restore-check, and the service variant only without.
 "$root/deploy/render-compose.sh" --restore-check "$tmp/filled-source.yml" >"$tmp/restore-check.yml"

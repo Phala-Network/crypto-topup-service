@@ -123,11 +123,15 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The committed Sepolia route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) uses the #202 build's
-deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
+The committed Sepolia routes (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and
+`phala-cloud-sepolia-usdc.yaml`) use the #202 build's deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
 (`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
-`topup run` checks the factory's `implementation()` and both runtime code hashes at startup. The
+`topup run` checks the factory's `implementation()` and both runtime code hashes at startup.
+Circle's Sepolia USDC (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, `FiatTokenV2_2` behind
+Circle's proxy) fits the factory's bounds: on a Sepolia fork (September 2026), a cold
+`balanceOf` through the proxy used 9 750 of `BALANCE_OF_GAS` (30 000), and a forwarder's first
+flush to a treasury holding no USDC used 37 822 of `FLUSH_GAS` (200 000). The
 commands below are the record of that deployment and the procedure for any other test network
 where the factory is missing (add the network to `deploy/contracts/networks.json`).
 

@@ -178,7 +178,8 @@ contract ForwarderFactory {                            // no roles, no admin, no
   (`deploy/CONTRACTS.md`). Each route records `forwarder_factory` and
   its `implementation`; the treasury is the account's, set through the API per chain and mode
   (§9, "Treasuries"), and every address row stores the treasury it was issued over.
-- Plain ERC-20s with verified behaviour (PHA), including tokens whose `transfer` returns nothing.
+- Plain ERC-20s with verified behaviour (PHA, USDC), including tokens whose `transfer` returns
+  nothing.
   Fee-on-transfer and rebasing tokens are unsupported and must not be enabled in a route.
 - Startup verifies on chain, on every provider: the canonical Multicall3 code hash (balance and
   `addressOf` reads go through it, §14; `topup run` refuses a chain without it), the factory and

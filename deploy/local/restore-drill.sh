@@ -465,7 +465,7 @@ storage_listing() {
 
 # Creates the overlay's project volumes and copies the drill inputs into them through the API.
 seed_drill_volumes() {
-    local volume
+    local volume route
     for volume in drill_routes drill_mock_product; do
         docker volume create \
             --label "com.docker.compose.project=$project" \
@@ -477,7 +477,9 @@ seed_drill_volumes() {
         --volume "${project}_drill_routes:/seed/routes" \
         --volume "${project}_drill_mock_product:/seed/mock-product" \
         --entrypoint /bin/true "$TOPUP_LOCAL_POSTGRES_IMAGE" >/dev/null
-    docker cp "$routes_dir/phala-cloud-sepolia-pha.yaml" "$seed_container:/seed/routes/"
+    for route in "$routes_dir"/*.yaml; do
+        docker cp "$route" "$seed_container:/seed/routes/"
+    done
     docker cp "$root/deploy/local/mock-product.py" "$seed_container:/seed/mock-product/"
     docker rm "$seed_container" >/dev/null
 }
@@ -595,10 +597,11 @@ openssl genpkey -algorithm ed25519 -out "$admin_dir/admin.pem" 2>/dev/null
 TOPUP_LOCAL_ADMIN_PUBLIC_KEY=$(openssl pkey -in "$admin_dir/admin.pem" -pubout -outform DER |
     tail -c 32 | base64)
 export TOPUP_LOCAL_ADMIN_PUBLIC_KEY TOPUP_LOCAL_ADMIN_KID=local-admin/v1
-sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
-    "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" \
-    >"$routes_dir/phala-cloud-sepolia-pha.yaml"
-chmod 0644 "$routes_dir/phala-cloud-sepolia-pha.yaml"
+for route in "$root"/deploy/config/routes/*.yaml; do
+    sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
+        "$route" >"$routes_dir/$(basename "$route")"
+    chmod 0644 "$routes_dir/$(basename "$route")"
+done
 
 compose_version=$(docker compose version --short)
 if [ "$(printf '%s\n' 2.24.4 "$compose_version" | sort -V | head -1)" != 2.24.4 ]; then

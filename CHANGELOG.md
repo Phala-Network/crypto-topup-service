@@ -36,6 +36,10 @@ webhook receivers must ignore unknown fields. The format follows
   is version 3 on the deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`
   (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update
   the forwarder you pin; accounts, keys, treasuries, endpoints, and webhook keys are created anew.
+- Staging adds a second test-mode route, `phala-cloud-sepolia-usdc-usd`: Circle's testnet USDC on
+  Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; https://faucet.circle.com),
+  valued at one dollar (pricing mode `stablecoin`) with no quote spread, so a $10 quote asks 10 USDC.
+  `GET /v1/config` lists it beside PHA, and a deposit address takes both tokens.
 
 - Launch hardening (docs/design/multi-tenant.md, "launch hardening" amendment):
   - Restricted keys: `POST /v1/api_keys {"type": "restricted", "permissions": [...]}` issues a

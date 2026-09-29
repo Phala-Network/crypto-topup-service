@@ -1025,9 +1025,12 @@ You integrate with your operator's instance, at its service URL; which chains, t
 it offers are its routes, listed by `GET /v1/config`. One deployment serves both modes, and your
 key selects the mode (§5.2): `ppay_*_test_` keys act on test routes (test networks such as
 Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live mode, on live
-routes. Integrate in test mode. The repository's test route, with its forwarder factory,
-implementation, and test PHA token (a `MockERC20` whose `mint(address,uint256)` is public), is
-[deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml);
+routes. Integrate in test mode. The repository's test routes, with their forwarder factory and
+implementation, are
+[deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)
+(a test PHA token, a `MockERC20` whose `mint(address,uint256)` is public) and
+[deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)
+(Circle's testnet USDC, from [Circle's faucet](https://faucet.circle.com), credited at one dollar);
 route files carry no treasury, so set your own on each chain first (§1.6).
 
 For example, Phala's own instance, which serves only Phala Cloud's account: production

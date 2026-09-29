@@ -7,8 +7,8 @@
 #    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
 #    (deploy/contracts: canonical proxy, mock Safe checked by verify-safe.sh, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
-# 3. Writes the staging route with those addresses, inlines it into the compose exactly where the
-#    committed route lives, and renders the compose with the rehearsal's settings and the staging
+# 3. Writes the staging routes with those addresses, inlines them into the compose exactly where the
+#    committed routes live, and renders the compose with the rehearsal's settings and the staging
 #    domain, as Deploy provisions. dstack-ingress does not run (cvm-rehearsal.compose.yml).
 # 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy does (exactly
 #    the names of deploy/staging.env.example, all empty), and runs `docker compose up` on the
@@ -221,31 +221,49 @@ oracle=$(jq -er .sanctions_oracle "$tmp/test-contracts.json")
 printf 'factory=%s implementation=%s safe=%s token=%s sanctions_oracle=%s\n' \
     "$factory" "$implementation" "$safe" "$token" "$oracle"
 
-echo "== writing the route and rendering the staging compose"
-# The committed staging route with real addresses; the reference product is its product.
-sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
-    -e "s|^\(  contract: \).*|\1\"$token\"|" \
-    -e "s|^\(  sanctions_oracle: \).*|\1\"$oracle\"|" \
-    "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml" >"$tmp/route.yaml"
-if grep -Eiq '0x([0-9a-f])\1{39}' "$tmp/route.yaml"; then
-    die "the rehearsal route still has a placeholder address"
-fi
-docker run --rm -i "$TOPUP_IMAGE" topup route validate /dev/stdin <"$tmp/route.yaml"
+echo "== writing the routes and rendering the staging compose"
+# The committed staging routes with this chain's addresses, one file per inline config. The test
+# token stands in for PHA, the reference product's asset, and the second mock token for USDC.
+second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
+mkdir "$tmp/routes"
+for path in "$root"/deploy/config/routes/*.yaml; do
+    name=$(basename "$path" .yaml)
+    case "$name" in
+        phala-cloud-sepolia-pha) asset=$token ;;
+        phala-cloud-sepolia-usdc) asset=$second_token ;;
+        *) die "no rehearsal token for the route $name" ;;
+    esac
+    route="$tmp/routes/topup_route_${name//-/_}.yaml"
+    sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
+        -e "s|^\(  contract: \).*|\1\"$asset\"|" \
+        -e "s|^\(  sanctions_oracle: \).*|\1\"$oracle\"|" \
+        "$path" >"$route"
+    if grep -Eiq '0x([0-9a-f])\1{39}' "$route"; then
+        die "the rehearsal route $name still has a placeholder address"
+    fi
+    docker run --rm -i "$TOPUP_IMAGE" topup route validate /dev/stdin <"$route"
+done
 # The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
 admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
-# Replace the inline route in a copy of the attested compose, as the operator's route commit
+# Replace the inline routes in a copy of the attested compose, as the operator's route commit
 # does, then render it with the production renderer.
-awk -v route="$tmp/route.yaml" '
-    /^  topup_route_phala_cloud_sepolia_pha:$/ { print; in_config = 1; next }
-    in_config && /^    content: [|]$/ {
+awk -v routes="$tmp/routes" '
+    /^  topup_route_[a-z0-9_]+:$/ {
+        print
+        route = routes "/" substr($1, 1, length($1) - 1) ".yaml"
+        skipping = 0
+        next
+    }
+    route != "" && /^    content: [|]$/ {
         print
         while ((getline line < route) > 0) print (line == "" ? "" : "      " line)
+        close(route)
         skipping = 1
         next
     }
     skipping && (/^      / || /^$/) { next }
-    { skipping = 0; in_config = 0; print }
+    { skipping = 0; route = ""; print }
 ' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
 # render_topup ADMIN_KID: the settings Deploy renders from the `staging` Environment
 # variables, for this network. Provider A is keyless, as staging's; provider B is attested with a
@@ -263,8 +281,16 @@ render_topup() {
 render_topup rehearsal-admin/v0
 compose_file="$cvm/docker-compose.yaml"
 dc config --format json >"$tmp/stack.json"
-jq -j '.configs.topup_route_phala_cloud_sepolia_pha.content' "$tmp/stack.json" |
-    cmp -s - "$tmp/route.yaml" || die "the rendered compose does not carry the rehearsal route"
+jq -r '.configs | keys[] | select(startswith("topup_route_"))' "$tmp/stack.json" |
+    LC_ALL=C sort >"$tmp/configs"
+for route in "$tmp"/routes/*.yaml; do
+    basename "$route" .yaml
+done | LC_ALL=C sort | cmp -s - "$tmp/configs" ||
+    die "the rendered compose does not carry one inline config per rehearsal route"
+for route in "$tmp"/routes/*.yaml; do
+    jq -j --arg name "$(basename "$route" .yaml)" '.configs[$name].content' "$tmp/stack.json" |
+        cmp -s - "$route" || die "the rendered compose does not carry the rehearsal route $route"
+done
 jq -e --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" \
     '[.services[] | select(.image | startswith("127.0.0.1:")) | .image] | unique == ([$topup, $postgres] | sort)' \
     "$tmp/stack.json" >/dev/null || die "the rendered compose does not use the pushed digests"

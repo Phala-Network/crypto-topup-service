@@ -49,7 +49,9 @@ jq -e '
         "--bind",
         "0.0.0.0:8080",
         "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
+        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
+        "--route",
+        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
     ]
     and (.services.topup.environment | has("DATABASE_URL"))
     and (.services.topup.environment | has("TOPUP_ADMIN_KID"))
@@ -81,15 +83,20 @@ jq -e '
         "topup",
         "restore-check",
         "--route",
-        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"
+        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
+        "--route",
+        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
     ]
     and (.services["restore-check"].environment | has("MIGRATE_DATABASE_URL"))
     and (.services["restore-check"].volumes | any(.target == "/var/run/dstack.sock"))
     and (.services["restore-check"].environment | has("TOPUP_RPC_PROVIDER_A_URL"))
-    and (.services["restore-check"].configs
-        | any(.target == "/etc/topup/routes/phala-cloud-sepolia-pha.yaml"))
+    and ([.services["restore-check"].configs[].target] == [.services.topup.configs[].target])
+    and ([.services.topup.configs[].target] == [
+        "/etc/topup/routes/phala-cloud-sepolia-pha.yaml",
+        "/etc/topup/routes/phala-cloud-sepolia-usdc.yaml"
+    ])
 ' "$rendered_tools" >/dev/null || {
-    echo "restore-check must use owner credentials, the dstack socket, and the attested route" >&2
+    echo "restore-check must use owner credentials, the dstack socket, and the attested routes" >&2
     exit 1
 }
 
@@ -167,8 +174,10 @@ compare_config() {
 
 compare_config postgres_init_topup_role "$root/deploy/postgres-init/10-topup-role.sh" \
     escape-dollars
-compare_config topup_route_phala_cloud_sepolia_pha \
-    "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml"
+# Every committed route file is attested verbatim.
+for path in "$root"/deploy/config/routes/*.yaml; do
+    compare_config "topup_route_$(basename "$path" .yaml | tr - _)" "$path"
+done
 
 # The rendered compose reads only the owner-sealed secrets from the env.
 docker compose -f "$compose" config --variables |

@@ -30,6 +30,8 @@ mod tests {
     const TEMPLATE: &str = include_str!("../../../examples/phala-cloud-pha.yaml");
     const DEPLOY_ROUTE: &str =
         include_str!("../../../deploy/config/routes/phala-cloud-sepolia-pha.yaml");
+    const DEPLOY_USDC_ROUTE: &str =
+        include_str!("../../../deploy/config/routes/phala-cloud-sepolia-usdc.yaml");
 
     #[test]
     fn valid_fixture_parses_and_validates() {
@@ -76,8 +78,48 @@ mod tests {
     }
 
     #[test]
+    fn staging_usdc_route_is_a_stablecoin_route_beside_pha() {
+        let pha = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
+        let usdc = parse_and_validate(DEPLOY_USDC_ROUTE, false).expect("USDC route must pass");
+        assert!(!usdc.livemode, "Sepolia is a test route");
+        assert_eq!(
+            usdc.chain, pha.chain,
+            "one chain has one set of chain settings"
+        );
+        assert_eq!(
+            (usdc.asset.symbol.as_str(), usdc.asset.decimals),
+            ("usdc", 6)
+        );
+        assert_eq!(usdc.asset.backstop, topup_core::route::Backstop::Addresses);
+        assert_eq!(
+            usdc.pricing.mode,
+            topup_core::route::PricingMode::Stablecoin
+        );
+        assert_eq!(
+            (
+                usdc.pricing.primary.source.as_str(),
+                usdc.pricing.primary.asset.as_str()
+            ),
+            ("coinmetrics", "usdc")
+        );
+        assert_eq!(usdc.pricing.check, None);
+        assert_eq!(
+            usdc.rate_lock.spread_bps.value(),
+            0,
+            "a fixed price needs no spread"
+        );
+
+        // The service loads both, and the USDC route puts the whole chain in address mode.
+        let routes = topup::routes::RouteSet::new(vec![pha, usdc]).expect("both routes load");
+        assert_eq!(routes.current_in(false).count(), 2);
+        let chains = topup::scanner::chain_routes(&routes);
+        assert_eq!(chains.len(), 1);
+        assert!(!chains[0].token_mode());
+    }
+
+    #[test]
     fn resolved_json_parses_back_to_the_same_route() {
-        for yaml in [VALID, DEPLOY_ROUTE] {
+        for yaml in [VALID, DEPLOY_ROUTE, DEPLOY_USDC_ROUTE] {
             let route = parse_and_validate(yaml, false).expect("route must pass");
             let resolved = resolved_json(&route).expect("route serializes");
             assert!(resolved.contains("\"implementation\"") && resolved.contains("\"window_s\""));
