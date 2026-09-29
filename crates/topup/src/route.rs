@@ -103,6 +103,11 @@ mod tests {
             ("coinmetrics", "usdc")
         );
         assert_eq!(usdc.pricing.check, None);
+        assert_eq!(
+            usdc.rate_lock.spread_bps.value(),
+            0,
+            "a fixed price needs no spread"
+        );
 
         // The service loads both, and the USDC route puts the whole chain in address mode.
         let routes = topup::routes::RouteSet::new(vec![pha, usdc]).expect("both routes load");
