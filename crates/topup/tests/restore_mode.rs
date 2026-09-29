@@ -1318,12 +1318,23 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
             let mut foreign = request.clone();
             foreign["address"] = json!(format!("{:#x}", Address::repeat_byte(0x99)));
             foreign["id"] = Value::Null;
+            foreign["client_secret"] = Value::Null;
             let refused = harness.admin(Method::POST, path, &foreign).await?;
             ensure!(
                 refused.status == StatusCode::BAD_REQUEST,
                 "{}",
                 refused.body
             );
+            // Refused for a customer the account never had, it leaves no customer behind.
+            foreign["client_reference_id"] = json!("team-ghost");
+            let refused = harness.admin(Method::POST, path, &foreign).await?;
+            ensure!(refused.status == StatusCode::BAD_REQUEST);
+            let ghosts: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM customers WHERE client_reference_id = 'team-ghost'",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(ghosts == 0);
             let audited: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM audit WHERE action = 'deposit_address.reissue'",
             )
@@ -1851,9 +1862,18 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
             .await?;
             ensure!((quotes, customers) == (0, 0));
 
-            let reissued = harness.admin(Method::POST, path, &request).await?;
+            // Re-issued first without its secret, found later in the merchant's records.
+            let mut without_secret = request.clone();
+            without_secret["client_secret"] = Value::Null;
+            let reissued = harness.admin(Method::POST, path, &without_secret).await?;
             ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
             ensure!(reissued.body["reissued"] == true);
+            let public_read = |secret: String| {
+                let app = harness.app.clone();
+                let path = format!("/v1/quotes/{qt}?client_secret={secret}");
+                async move { anonymous(&app, &path).await }
+            };
+            ensure!(public_read(secret.clone()).await?.status == StatusCode::NOT_FOUND);
             let quote = &reissued.body["quote"];
             ensure!(quote["id"] == qt && quote["address"] == format!("{address:#x}"));
             ensure!(quote["amount"] == 1_000 && quote["exchange_rate"] == "0.10000000");
@@ -1864,14 +1884,25 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 quote["expires_at"] == restore.detected_at.timestamp(),
                 "{quote}"
             );
-            let public = anonymous(
-                &harness.app,
-                &format!("/v1/quotes/{qt}?client_secret={secret}"),
-            )
-            .await?;
-            ensure!(public.status == StatusCode::OK, "{}", public.body);
+            // A repeat with its secret adds it; the payer's page reads the quote again.
             let repeated = harness.admin(Method::POST, path, &request).await?;
+            ensure!(repeated.body["reissued"] == false, "{}", repeated.body);
+            let public = public_read(secret.clone()).await?;
+            ensure!(public.status == StatusCode::OK, "{}", public.body);
+            // Once it has one, another secret of the quote does not replace it.
+            let other = harness.client_reads.key().issue(&qt)?;
+            let mut other_secret = request.clone();
+            other_secret["client_secret"] = json!(other);
+            let repeated = harness.admin(Method::POST, path, &other_secret).await?;
             ensure!(repeated.body["reissued"] == false);
+            ensure!(public_read(other).await?.status == StatusCode::NOT_FOUND);
+            ensure!(public_read(secret.clone()).await?.status == StatusCode::OK);
+            let secret_restored: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE action = 'quote.client_secret_restore'",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(secret_restored == 1);
 
             // The scanner watches it from the restored cursor, so the rescan finds its payment.
             let scanned = db::list_scan_addresses(&harness.pool, 1).await?;

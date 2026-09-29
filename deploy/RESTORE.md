@@ -240,10 +240,13 @@ live_isolated() {
    Otherwise stop:
 
    ```sh
+   export ACCOUNT=acct_…  # any live account of the Environment, from the operator's records
    export NONCE="$(openssl rand -hex 32)"
    admin GET "/v1/admin/attestation?account=$ACCOUNT&livemode=true&nonce=$NONCE" \
      > public-attestation.json
    ```
+
+   An Environment with no live account yet uses a test-mode one with `livemode=false`.
 
    Then the admin deposit view (`admin GET /v1/admin/deposits/{id}`) must return deposits known
    from before the loss in their recorded state, and `admin GET /v1/admin/restore` must show

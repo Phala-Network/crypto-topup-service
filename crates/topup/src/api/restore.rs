@@ -452,10 +452,6 @@ pub(crate) async fn reissue_deposit_address(
                 })
         })
         .transpose()?;
-    let scope = Scope::new(account_id, request.livemode);
-    let customer =
-        super::repository::ensure_customer(&state.pool, scope, &request.client_reference_id)
-            .await?;
     // Every chain of the mode with a current route, paused or frozen or not: nothing new is
     // given out, the address was issued already.
     let chains: Vec<ChainContracts> = state
@@ -468,7 +464,8 @@ pub(crate) async fn reissue_deposit_address(
     let (reissued, issued) = deposit_addresses::reissue(
         &state.pool,
         &account,
-        &customer,
+        request.livemode,
+        &request.client_reference_id,
         &chains,
         target,
         id,

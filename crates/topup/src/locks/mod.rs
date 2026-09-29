@@ -489,7 +489,8 @@ pub struct ReissuedTerms {
 /// (`crate::restore_mode`), and its payment window closes at the restore's detection at the
 /// latest, so its page shows it expired instead of asking for a payment at a price that is not
 /// honoured. The customer is created only once the address matches. A quote that exists already
-/// for the customer at the address is returned as it is, with `false`. Caps and pauses do not
+/// for the customer at the address is returned as it is, with `false`; a re-issued one without a
+/// client secret takes the one in `terms`. Caps and pauses do not
 /// apply: nothing new is given out.
 #[allow(clippy::too_many_arguments)]
 pub async fn reissue(
@@ -537,6 +538,33 @@ pub async fn reissue(
                 "the quote exists with another customer or address",
             ));
         }
+        // A quote re-issued without its secret takes the one the merchant finds later; a quote the
+        // service issued, or one re-issued with a secret, keeps its own.
+        if let Some(secret_hash) = &terms.client_secret_hash {
+            let added = sqlx::query(
+                "UPDATE quotes SET client_secret_hash = $2 \
+                 WHERE id = $1 AND restore_id IS NOT NULL AND client_secret_hash IS NULL",
+            )
+            .bind(terms.id)
+            .bind(secret_hash.as_slice())
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected()
+                > 0;
+            if added {
+                audit::insert(
+                    &mut *transaction,
+                    &audit::Entry {
+                        account_id: Some(scope.account_id()),
+                        actor,
+                        action: "quote.client_secret_restore",
+                        subject: &format!("quote:{}", quote_id(terms.id)),
+                        reason,
+                    },
+                )
+                .await?;
+            }
+        }
         transaction.commit().await?;
         return Ok((existing, false));
     }
@@ -547,27 +575,14 @@ pub async fn reissue(
     if taken {
         return Err(RateLockError::InvalidInput("id belongs to another quote"));
     }
-    sqlx::query(
-        "INSERT INTO customers (id, account_id, livemode, client_reference_id) \
-         VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (account_id, livemode, client_reference_id) DO NOTHING",
+    let customer_id = crate::db::ensure_customer_in(
+        &mut transaction,
+        scope.account_id(),
+        scope.livemode(),
+        &terms.client_reference_id,
     )
-    .bind(Uuid::new_v4())
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(&terms.client_reference_id)
-    .execute(&mut *transaction)
-    .await?;
-    let customer_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM customers \
-         WHERE account_id = $1 AND livemode = $2 AND client_reference_id = $3 \
-         FOR NO KEY UPDATE",
-    )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(&terms.client_reference_id)
-    .fetch_one(&mut *transaction)
-    .await?;
+    .await?
+    .id;
     sqlx::query(
         r#"
         INSERT INTO quotes (

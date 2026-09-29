@@ -242,7 +242,7 @@ partial unique index `deposits_chain_event_live_unique` keeps at most one deposi
 reversed per position. Its down migration refuses to run once a deposit with a revision above 0
 exists.
 
-`20261021040000_restore_correctness` keeps a restore from changing what merchants were told
+`20261021160000_restore_correctness` keeps a restore from changing what merchants were told
 (architecture §14, design §13): `restore_delivered_credits` holds the credit of each deposit in a
 signature-verified delivered `deposit.credited` or `deposit.reversed` imported after a restore,
 which the confirm step values the re-derived deposit at (a deposit whose transfer contradicts it is

@@ -170,7 +170,7 @@ restore's detection at the latest, so its payment page shows it expired instead 
 payment at a price that is not honoured. Send the quote's `client_secret` when the merchant holds
 it: only a secret the service issued for that `qt_` id is accepted (its tag proves it), and it is
 kept, so the payer's page reads the quote again; without it the quote is re-issued and its payment
-found all the same. `reissued` is `false` when the quote exists already for the customer at the
+found all the same, and a repeat with the secret, once the merchant finds it, adds it. `reissued` is `false` when the quote exists already for the customer at the
 address. Its address is backfilled from the restored cursor, so the rescan finds a payment made to
 it. `400` means the address is not the quote's over the current treasury (check the treasury, then
 the record), the `client_secret` is not the quote's, or no route has the chain and asset. A quote
