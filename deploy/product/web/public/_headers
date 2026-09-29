@@ -29,6 +29,8 @@
   Cache-Control: public, max-age=86400
 /icon-512.png
   Cache-Control: public, max-age=86400
+/icon-maskable-512.png
+  Cache-Control: public, max-age=86400
 /og-image.png
   Cache-Control: public, max-age=86400
 /site.webmanifest
@@ -38,6 +40,6 @@
 /sitemap.xml
   Cache-Control: public, max-age=86400
 
-# Branch builds' preview versions (wrangler.jsonc) stay out of search results.
+# Branch Previews on workers.dev stay out of search results.
 https://:version.:subdomain.workers.dev/*
   X-Robots-Tag: noindex
