@@ -98,26 +98,34 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
 }
 
 /**
- * The logo: the mark and the name in Geist SemiBold, as brand/lockup-light.svg and, with the mark's
- * edge on the dark theme, brand/lockup-dark.svg. The edge is a 4/3-unit ring, 1 px at this 24 px
- * mark. The name is 16 px, 7.5 px away: the gap is 6 px plus the P's side bearing. Its box is
- * trimmed to the caps, which centres them on the mark; its line box, with Geist's ascent and
- * descent rounded to whole pixels, put them 0.6 px high.
+ * The logo, as brand/lockup-light.svg and, with the mark's edge on the dark theme,
+ * brand/lockup-dark.svg: the mark and PHALA PAY in the lettering of Phala's logo, laid out in that
+ * logo's units, where the mark is 48 units and the caps 16 (brand/README.md). At 32 px, the edge's
+ * 1-unit ring is 1 px.
  */
 function Lockup() {
   return (
-    <span className="flex items-center gap-1.5 text-base font-semibold tracking-tight">
-      <svg viewBox="0 0 32 32" aria-hidden="true" className="size-6 shrink-0">
+    <svg viewBox="0 0 192 48" role="img" aria-label="Phala Pay" className="h-8 w-32 shrink-0">
+      <g transform="scale(1.5)">
         <rect width="32" height="32" rx="8" className="fill-neutral-950" />
         <path
           fillRule="evenodd"
-          d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 1.333A6.667 6.667 0 0 0 1.333 8V24A6.667 6.667 0 0 0 8 30.667H24A6.667 6.667 0 0 0 30.667 24V8A6.667 6.667 0 0 0 24 1.333Z"
+          d="M8 0H24A8 8 0 0 1 32 8V24A8 8 0 0 1 24 32H8A8 8 0 0 1 0 24V8A8 8 0 0 1 8 0ZM8 1A7 7 0 0 0 1 8V24A7 7 0 0 0 8 31H24A7 7 0 0 0 31 24V8A7 7 0 0 0 24 1Z"
           className="hidden fill-white/15 dark:block"
         />
         <rect x="10" y="10" width="12" height="12" rx="3" className="fill-brand" />
-      </svg>
-      <span className="[text-box:trim-both_cap_alphabetic]">Phala Pay</span>
-    </span>
+      </g>
+      <g className="fill-foreground">
+        <path d="M71.8631 21.5534C71.8631 25.2787 69.5299 27.4266 65.459 27.4266H62.2804V31.9977H58.6666V15.9998H65.459C69.5299 15.9998 71.8631 18.0111 71.8631 21.5534ZM68.4325 21.6676C68.4325 19.8852 67.2886 18.9941 65.2763 18.9941H62.2804V24.4105H65.2763C67.2886 24.4105 68.4325 23.4958 68.4325 21.6676Z" />
+        <path d="M77.5266 15.9998V23.999H84.7766V15.9998H88.3883V31.9977H84.7766V27.1982H77.5266V31.9977H73.916V15.9998H77.5266Z" />
+        <path d="M102.261 28.798H94.9242L93.6297 31.9998H89.9017L96.8542 16.002H100.582L107.421 31.9998H103.555L102.261 28.798ZM100.974 25.5962L98.6133 19.7711L96.2332 25.5984L100.974 25.5962Z" />
+        <path d="M112.686 15.9998V28.8439H119.547V31.9977H109.072V15.9998H112.686Z" />
+        <path d="M132.71 28.798H125.373L124.078 31.9998H120.35L127.303 16.002H131.031L137.867 31.9998H134.001L132.71 28.798ZM131.423 25.5962L129.064 19.7689L126.684 25.5962H131.423Z" />
+        <path transform="translate(87.15)" d="M71.8631 21.5534C71.8631 25.2787 69.5299 27.4266 65.459 27.4266H62.2804V31.9977H58.6666V15.9998H65.459C69.5299 15.9998 71.8631 18.0111 71.8631 21.5534ZM68.4325 21.6676C68.4325 19.8852 67.2886 18.9941 65.2763 18.9941H62.2804V24.4105H65.2763C67.2886 24.4105 68.4325 23.4958 68.4325 21.6676Z" />
+        <path transform="translate(69.32)" d="M102.261 28.798H94.9242L93.6297 31.9998H89.9017L96.8542 16.002H100.582L107.421 31.9998H103.555L102.261 28.798ZM100.974 25.5962L98.6133 19.7711L96.2332 25.5984L100.974 25.5962Z" />
+        <path d="M176.19 16H180.056L182.8794 22.9868L185.7267 16H189.4547L184.6856 26.9738V32H181.0731V27.4227Z" />
+      </g>
+    </svg>
   );
 }
 
