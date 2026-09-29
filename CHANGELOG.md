@@ -9,6 +9,13 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- `GET /v1/attestation`'s webhook keys carry `standard_webhooks_public_key`, `public_key` as
+  Standard Webhooks' `whpk_` and base64. `report_data` binds `public_key` only: pin the derived
+  form only if it encodes the attested key (`verify_attestation_binding` checks it).
+- Webhook delivery honors a receiver's `Retry-After` on `429` and `503`, in seconds or as an HTTP
+  date: the retry waits at least that long, at most an hour.
+- Admin: `POST /v1/admin/deposits/{id}/nudge` answers `400 deposit_unexpected_state` for a deposit
+  the pump does not process (anything but `detected` or `confirmed`); it was a silent no-op.
 - Deposits carry `final_at` (Unix seconds; `null` until `final`), when the finality watch found
   the deposit's block final, in the object and every `deposit.*` snapshot.
 - A path or method the API does not serve answers `404 resource_missing` with the error object
@@ -278,6 +285,17 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking** (nothing is live): A `client_secret` is `{id}_secret_{nonce}{tag}`, 64 lowercase hex
+  digits after `_secret_` (was 48), where `tag` is the service's HMAC of everything before it. A
+  forged or malformed secret is refused in memory (`404`) without touching the database or any
+  budget, so forgeries can no longer throttle checkout polling; a genuine secret is limited to 120
+  reads per minute of its quote or deposit address, with `Retry-After`. Secrets issued before this
+  release no longer read anything, on staging included: start the checkout from a new quote, and
+  call `POST /v1/deposit_addresses` again for a customer's page (it returns the same active
+  address with a new secret).
+- **Breaking** (nothing is live): Route files no longer take `unit_decimals`: credit is always USD
+  cents, the API's `amount`. A route file that sets it is refused, including a `topup route show`
+  output saved before this release, which carries `"unit_decimals": 2`: delete that key.
 - **Breaking** (nothing is live): Open-quote caps are per account and mode only (design §12), set by the operator per account
   and mode (defaults: 1 000 open quotes, $50 000 of open quotes per account, $5 000 per customer
   in live mode; 100, $10 000, and $5 000 in test mode). There is no global cap, and test-mode

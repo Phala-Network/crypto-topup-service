@@ -9,12 +9,12 @@ use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
 use axum::response::{IntoResponse as _, Response};
 use chrono::{DateTime, TimeDelta, Utc};
-use rand::TryRng as _;
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
 use uuid::Uuid;
 
+use crate::client_secret::ClientSecretKey;
 use crate::db::{Account, Customer};
 use crate::deposit_addresses::{self, ChainContracts, DepositAddressError, ListFilter, Status};
 use crate::ids;
@@ -23,7 +23,7 @@ use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
 use super::auth::Merchant;
-use super::client_limit::SecretHash;
+use super::client_limit;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
 use super::handlers::validate_client_reference_id;
@@ -484,16 +484,11 @@ async fn respond_with_client_secret(
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<Json<DepositAddress>> {
     let mut object = deposit_address_response(&state.pool, &state.routes, address).await?;
-    let secret = issue_client_secret(&state.pool, address.id).await?;
-    state
-        .client_reads
-        .issued(Sha256::digest(secret.as_bytes()).into());
-    object.client_secret = Some(secret);
+    object.client_secret =
+        Some(issue_client_secret(&state.pool, state.client_reads.key(), address.id).await?);
     Ok(Json(object))
 }
 
-/// Random bytes after `_secret_` in a client secret, as a quote's.
-const CLIENT_SECRET_BYTES: usize = 24;
 /// Client secrets of one address that stay valid: the newest, for several open pages.
 const CLIENT_SECRETS_KEPT: i64 = 10;
 /// How far back the public view lists payments.
@@ -501,21 +496,15 @@ const CLIENT_PAYMENTS_WINDOW: TimeDelta = TimeDelta::hours(24);
 /// How many payments the public view lists.
 const CLIENT_PAYMENTS_SHOWN: usize = 10;
 
-/// Issues a `client_secret`, `da_…_secret_` and 48 random hex digits, storing only its SHA-256
-/// and dropping the address's secrets older than the newest [`CLIENT_SECRETS_KEPT`].
-async fn issue_client_secret(pool: &PgPool, id: Uuid) -> ApiResult<String> {
-    let mut random = [0_u8; CLIENT_SECRET_BYTES];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut random)
+/// Issues a `client_secret` ([`crate::client_secret`]), storing only its SHA-256 and dropping the
+/// address's secrets older than the newest [`CLIENT_SECRETS_KEPT`].
+async fn issue_client_secret(pool: &PgPool, key: &ClientSecretKey, id: Uuid) -> ApiResult<String> {
+    let secret = key
+        .issue(&deposit_addresses::public_id(id))
         .map_err(|error| {
-            tracing::error!(%error, "OS RNG failed; no client secret issued");
+            tracing::error!(%error, "no client secret issued");
             ApiError::internal()
         })?;
-    let secret = format!(
-        "{}_secret_{}",
-        deposit_addresses::public_id(id),
-        hex::encode(random)
-    );
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO deposit_address_client_secrets (secret_hash, deposit_address_id) \
@@ -545,18 +534,22 @@ async fn client_deposit_address(
     client_secret: Option<&str>,
 ) -> ApiResult<ClientDepositAddress> {
     let address_id = ids::parse(ids::DEPOSIT_ADDRESS, id).ok_or_else(ApiError::not_found)?;
-    let client_secret = client_secret
-        .filter(|secret| {
-            secret
-                .strip_prefix(id)
-                .is_some_and(|rest| rest.starts_with("_secret_"))
-        })
-        .ok_or_else(ApiError::not_found)?;
-    let secret: SecretHash = Sha256::digest(client_secret.as_bytes()).into();
-    let _read = state
+    let client_secret = client_secret.ok_or_else(ApiError::not_found)?;
+    let _slot = state
         .client_reads
-        .begin(&secret)
-        .map_err(ApiError::client_reads_limited)?;
+        .admit(id, address_id, client_secret)
+        .await?;
+    let secret = Sha256::digest(client_secret.as_bytes());
+    client_limit::bounded(client_deposit_address_view(state, address_id, &secret)).await
+}
+
+/// The public view of the deposit address `address_id` if `secret_hash` is the SHA-256 of one of
+/// its valid client secrets.
+async fn client_deposit_address_view(
+    state: &AppState,
+    address_id: Uuid,
+    secret_hash: &[u8],
+) -> ApiResult<ClientDepositAddress> {
     // The secret authenticates for its address's account and mode, as an API key does for its
     // own; the scope comes from the stored row, never from the request.
     let owner: Option<(Uuid, bool)> = sqlx::query_as(
@@ -565,19 +558,12 @@ async fn client_deposit_address(
          JOIN deposit_addresses AS address ON address.id = secret.deposit_address_id \
          WHERE secret.secret_hash = $1 AND address.id = $2",
     )
-    .bind(secret.as_slice())
+    .bind(secret_hash)
     .bind(address_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((account_id, livemode)) = owner else {
-        state.client_reads.failed(&secret);
-        return Err(ApiError::not_found());
-    };
+    let (account_id, livemode) = owner.ok_or_else(ApiError::not_found)?;
     let scope = Scope::new(account_id, livemode);
-    state
-        .client_reads
-        .verified(secret, address_id, scope)
-        .map_err(ApiError::client_reads_limited)?;
     let address = deposit_addresses::get(&state.pool, scope, address_id)
         .await
         .map_err(map_error)?

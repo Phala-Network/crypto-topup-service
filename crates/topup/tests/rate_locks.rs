@@ -209,10 +209,11 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .as_str()
             .context("client_secret")?
             .to_owned();
+        // `{quote_id}_secret_`, then a 16-byte nonce and its 16-byte tag in hex.
         let random = first_secret
             .strip_prefix(&format!("{quote_id}_secret_"))
             .context("client_secret names its quote")?;
-        ensure!(random.len() == 48 && random.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        ensure!(random.len() == 64 && random.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
         // A retry with the same key and request replays the first response, secret included.
         let retried = app
@@ -290,7 +291,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             (other_quote.as_str(), client_secret),
             (
                 quote_id.as_str(),
-                &format!("{quote_id}_secret_{}", "0".repeat(48)),
+                &format!("{quote_id}_secret_{}", "0".repeat(64)),
             ),
         ] {
             let refused = app.clone().oneshot(client_read(path, secret)?).await?;
@@ -606,6 +607,112 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
 }
 
 #[tokio::test]
+async fn client_secret_reads_are_limited_per_object_and_forgeries_cost_nothing() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let admin_key = SigningKey::from_bytes(&[46; 32]);
+        let (product, product_key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        seed_account(&database.app_pool, product.id, "flooded").await?;
+        let app = topup::api::router(AppState {
+            pool: database.app_pool.clone(),
+            routes: Arc::new(
+                topup::routes::RouteSet::new(vec![test_route()]).map_err(anyhow::Error::msg)?,
+            ),
+            admin_key: VerificationKey::from_base64(
+                ADMIN_KID.to_owned(),
+                &public_key_base64(&admin_key),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: Arc::new(FixedQuote),
+            client_reads: Arc::default(),
+            rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        })
+        .0;
+        let create = |key: &str| -> Result<_> {
+            let body = serde_json::to_vec(&json!({
+                "client_reference_id": "flooded", "amount": 100, "currency": "usd",
+                "chain_id": 1, "asset": "pha"
+            }))?;
+            Ok(merchant_request_with_key(
+                Method::POST,
+                "/v1/quotes",
+                body,
+                &product_key,
+                key,
+            ))
+        };
+        let mut quotes = Vec::new();
+        for key in ["flood-1", "flood-2"] {
+            let created = response_json(app.clone().oneshot(create(key)?).await?).await?;
+            let id = created["id"].as_str().context("id")?.to_owned();
+            let secret = created["client_secret"]
+                .as_str()
+                .context("secret")?
+                .to_owned();
+            quotes.push((id, secret));
+        }
+        let read = |id: &str, secret: &str| {
+            let app = app.clone();
+            let request = client_read(id, secret);
+            async move { Ok::<_, anyhow::Error>(app.oneshot(request?).await?) }
+        };
+        let (flooded, genuine) = (&quotes[0].0, &quotes[0].1);
+
+        // A new quote's secret reads at once.
+        ensure!(read(flooded, genuine).await?.status() == StatusCode::OK);
+
+        // Forged secrets, well formed or not, for the quote and for made-up ids are refused
+        // before the database and charge no budget: the genuine reader keeps all of its reads.
+        let forgeries = (0..2_000_u32).map(|index| {
+            let id = if index % 2 == 0 {
+                flooded.clone()
+            } else {
+                format!("qt_{}", Uuid::new_v4().simple())
+            };
+            let secret = match index % 3 {
+                0 => format!("{id}_secret_{:064x}", index),
+                // The genuine secret with its last tag digit changed, or moved to another id.
+                1 if id == *flooded => format!(
+                    "{}{}",
+                    &genuine[..genuine.len() - 1],
+                    if genuine.ends_with('0') { '1' } else { '0' }
+                ),
+                1 => genuine.replacen(flooded.as_str(), &id, 1),
+                _ => format!("{id}_secret_x"),
+            };
+            (id, secret)
+        });
+        for (id, secret) in forgeries {
+            let refused = read(&id, &secret).await?;
+            ensure!(refused.status() == StatusCode::NOT_FOUND, "{id} {secret}");
+        }
+
+        // A flood with the genuine secret is limited to its quote's budget of 120 a minute (one
+        // read spent above), with `Retry-After`, and does not starve another quote.
+        for _ in 1..120 {
+            ensure!(read(flooded, genuine).await?.status() == StatusCode::OK);
+        }
+        let limited = read(flooded, genuine).await?;
+        ensure!(limited.status() == StatusCode::TOO_MANY_REQUESTS);
+        let retry_after: u64 = limited.headers()["retry-after"].to_str()?.parse()?;
+        ensure!((1..=60).contains(&retry_after), "{retry_after}");
+        ensure!(limited.headers()["access-control-allow-origin"] == "*");
+        ensure!(response_json(limited).await?["error"]["code"] == "rate_limit");
+        ensure!(read(&quotes[1].0, &quotes[1].1).await?.status() == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+#[tokio::test]
 async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
@@ -633,6 +740,7 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
         let (lock, _) = locks::create(
             &database.app_pool,
             &quotes,
+            &client_secret_key(),
             &product,
             &account,
             &route,
@@ -780,6 +888,7 @@ async fn caps_are_per_account_and_mode_and_expiry_releases_them() -> Result<()> 
                     locks::create(
                         &pool,
                         &quotes,
+                        &client_secret_key(),
                         &account,
                         &customer,
                         &route,
@@ -1039,6 +1148,7 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
             locks::create(
                 &database.app_pool,
                 &quotes,
+                &client_secret_key(),
                 &product,
                 &account,
                 &route,
@@ -1149,6 +1259,7 @@ async fn concurrent_creations_never_exceed_the_shared_exposure_cap() -> Result<(
                 locks::create(
                     &pool,
                     &quotes,
+                    &client_secret_key(),
                     &product,
                     &account,
                     &route,
@@ -1373,6 +1484,7 @@ async fn exposure_is_exact_after_concurrent_create_consume_cancel_and_expire() -
                     locks::create(
                         &pool,
                         &quotes,
+                        &client_secret_key(),
                         &product,
                         &account,
                         &route,
@@ -1556,6 +1668,7 @@ async fn create_lock(
     let (lock, _) = locks::create(
         &database.app_pool,
         quotes,
+        &client_secret_key(),
         product,
         account,
         route,
@@ -1765,4 +1878,9 @@ async fn response_json(response: axum::response::Response) -> Result<Value> {
 #[allow(dead_code)]
 fn empty_body() -> Body {
     Body::empty()
+}
+
+/// A client-secret key for quotes created outside the API.
+fn client_secret_key() -> topup::client_secret::ClientSecretKey {
+    topup::client_secret::ClientSecretKey::ephemeral()
 }

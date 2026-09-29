@@ -488,7 +488,7 @@ fn quote() -> Value {
             "deposit": DEPOSIT,
         },
         "deposit": null,
-        "client_secret": format!("{QUOTE}_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a49382"),
+        "client_secret": format!("{QUOTE}_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a"),
         "metadata": {"order_id": "ord_1001"},
     })
 }
@@ -571,7 +571,7 @@ fn deposit_address() -> Value {
             }],
         }],
         "payments": [],
-        "client_secret": format!("{DEPOSIT_ADDRESS}_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071"),
+        "client_secret": format!("{DEPOSIT_ADDRESS}_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"),
         "retired_at": null,
         "created": CREATED,
         "metadata": {"plan": "pro"},

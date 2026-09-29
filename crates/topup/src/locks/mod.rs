@@ -10,8 +10,6 @@ use std::time::Duration;
 use alloy_primitives::{Address as EvmAddress, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rand::TryRng as _;
-use rand::rngs::SysRng;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::types::Json;
@@ -27,6 +25,7 @@ use topup_core::route::{RouteFile, UNIT_DECIMALS};
 use uuid::Uuid;
 
 use crate::audit::{self, Actor};
+use crate::client_secret::ClientSecretKey;
 use crate::db::{Account, Customer};
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
@@ -253,9 +252,11 @@ pub enum RateLockError {
 /// The quote is scoped to the customer's account and mode, and `route` must be a route of that
 /// mode. Repeated requests are answered by the API's `Idempotency-Key` layer before they reach
 /// this function.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
     quotes: &Arc<dyn QuoteProvider>,
+    client_secrets: &ClientSecretKey,
     account: &Account,
     customer: &Customer,
     route: &RouteFile,
@@ -304,7 +305,10 @@ pub async fn create(
     let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
-    let client_secret = new_client_secret(id)?;
+    let client_secret = client_secrets.issue(&quote_id(id)).map_err(|error| {
+        tracing::error!(%error, "no client secret issued");
+        RateLockError::EntropyUnavailable
+    })?;
     let salt = quote_salt(
         &account.public_id,
         &customer.client_reference_id,
@@ -398,20 +402,6 @@ async fn treasury(
         Err(crate::treasuries::TreasuryError::Database(error)) => Err(error.into()),
         Err(_) => Err(RateLockError::DatabaseInvariant),
     }
-}
-
-/// Random bytes after `_secret_` in a client secret.
-const CLIENT_SECRET_BYTES: usize = 24;
-
-/// A new `client_secret` of quote `id`: `qt_…_secret_` followed by 48 random hex digits. Only its
-/// SHA-256 is stored.
-fn new_client_secret(id: Uuid) -> Result<String, RateLockError> {
-    let mut random = [0_u8; CLIENT_SECRET_BYTES];
-    SysRng.try_fill_bytes(&mut random).map_err(|error| {
-        tracing::error!(%error, "OS RNG failed; no client secret issued");
-        RateLockError::EntropyUnavailable
-    })?;
-    Ok(format!("{}_secret_{}", quote_id(id), hex::encode(random)))
 }
 
 /// The account and mode of quote `id` when `secret_hash` is the SHA-256 of its client secret.

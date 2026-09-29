@@ -12,7 +12,9 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 - `Webhook.construct_event` and `load_public_key` accept a public key in Standard Webhooks' `whpk_`
   form (`whpk_` and base64), beside hex and base64.
-- `WebhookKeyObject.standard_webhooks_public_key`, the attested key in that form.
+- `WebhookKeyObject.standard_webhooks_public_key`, the attested key in that form;
+  `verify_attestation_binding` refuses a response where it is not the bound `public_key`, which
+  `report_data` covers alone.
 
 ### Fixed
 

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use futures_util::future::{Fuse, FusedFuture as _, FutureExt as _};
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
@@ -521,7 +521,7 @@ where
             }
         };
         let status = response.status();
-        let retry_after = retry_after(status, response.headers());
+        let retry_after = retry_after(status, response.headers(), Utc::now());
         let (body, body_error) =
             read_response_body(response, self.config.response_body_limit).await;
         Ok(if status.is_success() {
@@ -832,21 +832,35 @@ fn reach(notice: bool, outcome: &Outcome) -> Reach {
     }
 }
 
-/// The wait a `429` or `503` asks for in `Retry-After` as delay-seconds (Standard Webhooks),
-/// at most [`MAX_RETRY_AFTER`]. An HTTP date, a malformed value, or any other status asks for
+/// The wait a `429` or `503` asks for in `Retry-After` (Standard Webhooks; RFC 9110 §10.2.3),
+/// delay-seconds or an HTTP date after `now`, at most [`MAX_RETRY_AFTER`]: a value too large to
+/// represent is the maximum, a past date no wait. A malformed value or any other status asks for
 /// nothing, and the backoff alone applies.
-fn retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
+fn retry_after(status: StatusCode, headers: &HeaderMap, now: DateTime<Utc>) -> Option<Duration> {
     if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE {
         return None;
     }
-    let seconds: u64 = headers
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let wait = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value.parse().map_or(MAX_RETRY_AFTER, Duration::from_secs)
+    } else {
+        let date = http_date(value)?;
+        date.signed_duration_since(now)
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
+/// An HTTP date in any of RFC 9110's three formats: IMF-fixdate, RFC 850, or asctime.
+fn http_date(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(date) = DateTime::parse_from_rfc2822(value) {
+        return Some(date.with_timezone(&Utc));
+    }
+    ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+        .map(|date| date.and_utc())
 }
 
 fn retry_delay(attempts: i32, entropy: &dyn JitterSource) -> Duration {
@@ -915,26 +929,34 @@ mod tests {
             headers.insert(RETRY_AFTER, value.parse().expect("header value"));
             headers
         };
+        let now = DateTime::parse_from_rfc3339("2026-10-21T07:28:00Z")
+            .expect("time")
+            .with_timezone(&Utc);
         let limited = StatusCode::TOO_MANY_REQUESTS;
+        let read = |value: &str| retry_after(limited, &headers(value), now);
+        assert_eq!(read("120"), Some(Duration::from_secs(120)));
         assert_eq!(
-            retry_after(limited, &headers("120")),
-            Some(Duration::from_secs(120))
-        );
-        assert_eq!(
-            retry_after(StatusCode::SERVICE_UNAVAILABLE, &headers(" 5 ")),
+            retry_after(StatusCode::SERVICE_UNAVAILABLE, &headers(" 5 "), now),
             Some(Duration::from_secs(5))
         );
+        // Too long, or too large to represent, is the ceiling.
+        assert_eq!(read("86400"), Some(MAX_RETRY_AFTER));
+        assert_eq!(read(&"9".repeat(40)), Some(MAX_RETRY_AFTER));
+        // HTTP dates in each format: two minutes on, and one in the past.
+        let two_minutes = Some(Duration::from_secs(120));
+        assert_eq!(read("Wed, 21 Oct 2026 07:30:00 GMT"), two_minutes);
+        assert_eq!(read("Wednesday, 21-Oct-26 07:30:00 GMT"), two_minutes);
+        assert_eq!(read("Wed Oct 21 07:30:00 2026"), two_minutes);
+        assert_eq!(read("Wed, 21 Oct 2026 07:00:00 GMT"), Some(Duration::ZERO));
+        assert_eq!(read("Thu, 21 Oct 2027 07:28:00 GMT"), Some(MAX_RETRY_AFTER));
+        for malformed in ["-1", "1.5", "soon", ""] {
+            assert_eq!(read(malformed), None, "{malformed}");
+        }
+        assert_eq!(retry_after(limited, &HeaderMap::new(), now), None);
         assert_eq!(
-            retry_after(limited, &headers("86400")),
-            Some(MAX_RETRY_AFTER)
-        );
-        assert_eq!(
-            retry_after(limited, &headers("Wed, 21 Oct 2026 07:28:00 GMT")),
+            retry_after(StatusCode::BAD_GATEWAY, &headers("120"), now),
             None
         );
-        assert_eq!(retry_after(limited, &headers("-1")), None);
-        assert_eq!(retry_after(limited, &HeaderMap::new()), None);
-        assert_eq!(retry_after(StatusCode::BAD_GATEWAY, &headers("120")), None);
     }
 
     #[test]

@@ -24,10 +24,11 @@ class WebhookKeyObject:
             every delivery carries a `v1a` signature by it.
         version (int): Key version, from 1; it grows by one per roll.
         expires_at (int | None | Unset): When a rolled key stops signing, Unix seconds; `null` for the current key.
-        standard_webhooks_public_key (str | Unset): The same key in Standard Webhooks' serialization, `whpk_` and the
+        standard_webhooks_public_key (str | Unset): `public_key` in Standard Webhooks' serialization, `whpk_` and the
             standard base64 of its
-            raw bytes, for a Standard Webhooks library. Always present; optional in the schema so
-            clients read a service that predates it.
+            raw bytes, for a Standard Webhooks library. It is derived from `public_key` and not bound
+            by `report_data`: check that it encodes the attested `public_key` before pinning it.
+            Always present; optional in the schema so clients read a service that predates it.
     """
 
     public_key: str

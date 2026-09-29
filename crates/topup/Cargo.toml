@@ -28,6 +28,7 @@ crc.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 hex.workspace = true
+hmac.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 sentry.workspace = true

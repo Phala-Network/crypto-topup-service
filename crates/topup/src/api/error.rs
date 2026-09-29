@@ -118,6 +118,11 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
         "The quote is `complete` or `expired`; only an `open` quote can be canceled.",
     ),
     (
+        "deposit_unexpected_state",
+        400,
+        "Admin: only a deposit the pump processes, `detected` or `confirmed`, can be nudged; a credited deposit waits for its sweep, which only a finalized `Flushed` event records.",
+    ),
+    (
         "deposit_not_refundable",
         400,
         "The deposit cannot be refunded: it is not credited or rejected, or it was reversed.",
@@ -460,6 +465,16 @@ impl ApiError {
             StatusCode::BAD_REQUEST,
             "quote_unexpected_state",
             format!("the quote is {status}"),
+        )
+    }
+
+    /// Returns a nudge of a deposit in `state`, which the pump never claims.
+    #[must_use]
+    pub fn deposit_unexpected_state(state: &str) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "deposit_unexpected_state",
+            format!("the deposit is {state}; only a detected or confirmed deposit can be nudged"),
         )
     }
 
@@ -963,6 +978,7 @@ mod tests {
             ApiError::treasury_change_pending(),
             ApiError::treasury_unchanged(),
             ApiError::treasury_unexpected_state("current"),
+            ApiError::deposit_unexpected_state("credited"),
             ApiError::paused(""),
             ApiError::chain_frozen(),
             ApiError::service_unavailable(""),

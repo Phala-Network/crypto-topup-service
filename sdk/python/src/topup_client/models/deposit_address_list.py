@@ -25,7 +25,8 @@ class DepositAddressList:
 
     Example:
         {'data': [{'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'client_reference_id': 'team-42',
-            'client_secret': 'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071',
+            'client_secret':
+            'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3_secret_0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9',
             'created': 1790553600, 'id': 'da_7b2e9c4a1f6d48b3a5c0e2d4f6a8b1c3', 'livemode': False, 'metadata': {'plan':
             'pro'}, 'networks': [{'address': '0x0f45147a02e4c9d91aff20024e22095536fd5053', 'assets': [{'asset': 'PHA',
             'contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'payment_uri': 'ethereum:0x6c5ba91642f

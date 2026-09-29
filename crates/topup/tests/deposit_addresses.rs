@@ -845,7 +845,7 @@ async fn a_payment_is_seen_within_a_block_and_readable_by_client_secret() -> Res
             ensure!(other["id"] != object["id"]);
             for secret in [
                 other_secret.replace(other["id"].as_str().context("id")?, id),
-                format!("{id}_secret_{}", "0".repeat(48)),
+                format!("{id}_secret_{}", "0".repeat(64)),
             ] {
                 let (status, _) = fixture.client_read(id, &secret).await?;
                 ensure!(status == StatusCode::NOT_FOUND, "{secret}");
@@ -1047,7 +1047,7 @@ fn without_secret(mut body: Value) -> Result<(Value, String)> {
         .and_then(|secret| secret.as_str().map(str::to_owned))
         .context("client_secret")?;
     let id = object.get("id").and_then(Value::as_str).context("id")?;
-    ensure!(secret.starts_with(&format!("{id}_secret_")) && secret.len() == id.len() + 56);
+    ensure!(secret.starts_with(&format!("{id}_secret_")) && secret.len() == id.len() + 72);
     Ok((body, secret))
 }
 

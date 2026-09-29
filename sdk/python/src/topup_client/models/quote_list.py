@@ -26,15 +26,16 @@ class QuoteList:
     Example:
         {'data': [{'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount': 2500, 'amount_atomic':
             '202510000000000000000', 'asset': 'PHA', 'chain_id': 1, 'client_reference_id': 'team-42', 'client_secret':
-            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a49382', 'created':
-            1790553600, 'currency': 'usd', 'deposit': None, 'exchange_rate': '0.12345679', 'expires_at': 1790554500, 'id':
-            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'livemode': False, 'metadata': {'order_id': 'ord_1001'}, 'object':
-            'quote', 'payment': {'amount_atomic': '202510000000000000000', 'asset': 'PHA', 'chain_id': 1, 'confirmations':
-            1, 'deposit': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'estimated_final_at': 1790554572, 'matches_quote': True,
-            'status': 'seen', 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e'},
-            'payment_uri': 'ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711
-            f85f5359661062a91&uint256=202510000000000000000', 'status': 'open', 'treasury':
-            '0x936c1991f8da9a919fa11b557a3514719f5a4504'}], 'has_more': False, 'object': 'list', 'url': '/v1/quotes'}
+            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a',
+            'created': 1790553600, 'currency': 'usd', 'deposit': None, 'exchange_rate': '0.12345679', 'expires_at':
+            1790554500, 'id': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'livemode': False, 'metadata': {'order_id':
+            'ord_1001'}, 'object': 'quote', 'payment': {'amount_atomic': '202510000000000000000', 'asset': 'PHA',
+            'chain_id': 1, 'confirmations': 1, 'deposit': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'estimated_final_at':
+            1790554572, 'matches_quote': True, 'status': 'seen', 'tx_hash':
+            '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e'}, 'payment_uri': 'ethereum:0x6c5ba91642f102
+            82b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000
+            000000', 'status': 'open', 'treasury': '0x936c1991f8da9a919fa11b557a3514719f5a4504'}], 'has_more': False,
+            'object': 'list', 'url': '/v1/quotes'}
 
     Attributes:
         data (list[Quote]): The quotes.

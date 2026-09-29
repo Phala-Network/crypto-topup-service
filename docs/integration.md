@@ -300,7 +300,9 @@ confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the 
 confirmation, being valued and screened), `credited`, `rejected` (contact support), or `reversed`
 (the credited payment's transaction left the chain before finality: it did not happen). It
 carries no account, price, deposit id,
-or transaction hash, and is rate-limited per quote. Only `POST /v1/quotes` returns the secret; a
+or transaction hash, and is rate-limited per quote. The secret is `{quote id}_secret_` and 64
+lowercase hex digits (a nonce and the service's tag of it); treat it as opaque. A malformed or
+forged secret reads nothing (`404`). Only `POST /v1/quotes` returns the secret; a
 repeat with the same `Idempotency-Key` within 24 hours returns the same response, secret included.
 `@phala/pay`'s `<Checkout>` is this page.
 
@@ -874,7 +876,7 @@ Standard Webhooks, not `Stripe-Signature`, because you hold only the service's p
 - Answer `2xx` only after the credit and the event are durably stored. Anything else, a
   redirect (never followed), or no answer within 20 s is retried with full-jitter backoff whose
   ceiling starts at 30 s and doubles to 1 h, until delivered; a `429` or `503` with
-  `Retry-After` in seconds waits at least that long, up to 1 h. An endpoint is never disabled for
+  `Retry-After` (seconds or an HTTP date) waits at least that long, up to 1 h. An endpoint is never disabled for
   failing, so a credit is never dropped. While your endpoint keeps failing it is probed about once
   an hour, one event at a time; once it answers `2xx` its backlog is delivered. Answer `410 Gone`
   only to stop deliveries for good: it disables the endpoint at once (`disabled_reason: "gone"`)
@@ -1212,7 +1214,10 @@ print([key.public_key for key in response.webhook_keys])  # hex, current first; 
 worthless without the verifier step: it proves only that the response is self-consistent.
 
 Each key also comes as `standard_webhooks_public_key`, Standard Webhooks' `whpk_` and the base64
-of the same raw bytes, for a Standard Webhooks library. Both SDK verifiers accept either form.
+of the same raw bytes, for a Standard Webhooks library. It is derived from `public_key`, which is
+the value `report_data` binds: pin it only if it encodes the attested `public_key`
+(`verify_attestation_binding` refuses a response where it does not). Both SDK verifiers accept
+either form.
 
 `report_data` is `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
 public_key)*)`: one-byte lengths, the UTF-8 `acct_` id, one byte `1` live or `0` test, and each
