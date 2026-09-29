@@ -6,6 +6,8 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
 ### Changed (breaking)
 
 - `quoteAddress(forwarder, quote, treasury, account)` takes the treasury explicitly, like
@@ -131,7 +133,8 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   without trailing zeros (`1,273.9185`); `tokenAmount(quote)` is the plain decimal a wallet
   accepts, which `<Checkout>`'s "Exact amount" copies.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.2...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...HEAD
+[0.2.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.2...sdk-js-v0.2.0
 [0.1.2]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.1...sdk-js-v0.1.2
 [0.1.1]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.0...sdk-js-v0.1.1
 [0.1.0]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-js-v0.1.0
