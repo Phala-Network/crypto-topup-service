@@ -1,7 +1,7 @@
 # Design: standard multi-tenant Phala Pay
 
-Status: accepted (the owner delegated every decision; owner rulings of 2026-09-27 and
-2026-09-28 are applied). Scope: turn Phala Pay from Phala Cloud's internal cashier into a
+Status: accepted (the owner delegated every decision; owner rulings of 2026-09-27, 2026-09-28,
+and 2026-09-29 are applied). Scope: turn Phala Pay from Phala Cloud's internal cashier into a
 Stripe-shaped, API-only crypto payments **software service** for any merchant the operator
 onboards. Phala Cloud becomes an ordinary account. This document records decisions; the
 [architecture](../architecture.md) stays the specification and is rewritten by the PRs in §16.
@@ -15,6 +15,10 @@ onboarding. The operator creates every account through the admin API after due d
 offline; merchants manage everything else through the API and SDKs with secret keys. Users,
 login, passkeys, members, sessions, and email are removed; PRs 1–3 are implemented and the plan
 (§16) is re-numbered.
+
+**Amendment of 2026-09-29 (owner ruling): self-hosted.** Phala Pay is open-source, self-hosted
+software ([self-hosting](../self-hosting.md)). Phala's instance serves only Phala Cloud; Phala
+offers no hosted service.
 
 **Amendment of 2026-09-28 (owner ruling, PR 8 review): webhooks are never auto-disabled.** The
 3-day retry limit followed by disabling the endpoint (Stripe's live mode) is reversed: deliveries

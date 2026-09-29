@@ -38,11 +38,6 @@ concurrency:
   group: release-images-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  TOPUP_REPOSITORY: ghcr.io/phala-network/phala-pay
-  POSTGRES_WALG_REPOSITORY: ghcr.io/phala-network/postgres-walg
-  REFERENCE_PRODUCT_REPOSITORY: ghcr.io/phala-network/phala-pay-reference-product
-
 jobs:
   publish:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -52,6 +47,17 @@ jobs:
         run: |
           test "$GITHUB_REF" = refs/heads/main ||
             { echo "::error::Release images publishes only from main, not $GITHUB_REF"; exit 1; }
+      # The repository owner's GHCR namespace, so a fork publishes to its own packages (its
+      # GITHUB_TOKEN can push nowhere else); GHCR names are lowercase, which expressions cannot do.
+      - name: Choose the image repositories
+        shell: bash
+        run: |
+          namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "TOPUP_REPOSITORY=$namespace/phala-pay"
+            echo "POSTGRES_WALG_REPOSITORY=$namespace/postgres-walg"
+            echo "REFERENCE_PRODUCT_REPOSITORY=$namespace/phala-pay-reference-product"
+          } >>"$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

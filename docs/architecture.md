@@ -35,7 +35,9 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 
 An API-only, multi-tenant crypto payments **software service**, in Stripe's shape
 ([design](design/multi-tenant.md)). The operator onboards each merchant as an account (`acct_…`)
-through the admin API; there is no dashboard, signup, or user. For every account the service
+through the admin API; there is no dashboard, signup, or user. It is open-source, self-hosted
+software: each operator runs its own instance ([self-hosting](self-hosting.md)), and Phala's
+serves only Phala Cloud. For every account the service
 turns confirmed and screened deposits of configured tokens into USD-valued credits and tells the
 merchant what to credit with one signed webhook per deposit, which the merchant fulfills once. It
 holds no funds, sends no transactions, pays no merchant gas, and charges no fee (design §2):

@@ -45,7 +45,7 @@ admin POST "/v1/admin/accounts/$ACCOUNT/api_keys" \
    `admin`. A live key needs the account enabled for live mode (`403 testmode_charges_only`
    otherwise).
 3. Send the key to the contact through an encrypted channel. The merchant rolls it on receipt, so
-   no one at Phala holds a working key.
+   no one at the operator holds a working key.
 4. Review what the old key could have done: the merchant reviews every refund created since the
    exposure (`GET /v1/refunds`; the daily report's `refunds_by_status` counts them per route) and
    cancels those it did not make (`POST /v1/refunds/{id}/cancel`), and checks its customers' pause

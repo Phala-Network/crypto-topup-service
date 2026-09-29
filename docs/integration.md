@@ -1,17 +1,20 @@
 # Integration guide
 
 For a merchant's backend team, who connect the merchant's Phala Pay account (`acct_…`) to the
-API. Phala Pay is API-only: the operator creates your account (§5.1), and you manage everything
-else with your API keys and the SDKs; there is no dashboard. Phala Cloud integrates exactly this
-way, as an ordinary account. Where this guide and the code disagree, the code wins. The contract
-is defined by:
+API. Phala Pay is open-source, self-hosted software: your **operator** runs its own instance
+([self-hosting](self-hosting.md)), and you integrate with that instance, at the service URL the
+operator gives you (its `TOPUP_PUBLIC_ORIGIN`); Phala offers no hosted service. The samples write
+it as `https://api.phala-pay.example`. Phala Pay is API-only: the operator creates your account
+(§5.1), and you manage everything else with your API keys and the SDKs; there is no dashboard.
+Phala Cloud integrates exactly this way, as an ordinary account of Phala's own instance. Where
+this guide and the code disagree, the code wins. The contract is defined by:
 
 - [crates/topup/openapi.json](../crates/topup/openapi.json): every request and response shape,
   with an example of each, also served at `GET /openapi.json` and published as the
   [API reference](https://phala-network.github.io/phala-pay/) (its `Errors` section is where each
   error's `doc_url` points); the operator's admin API is the separate `openapi.admin.json`;
 - [deploy/product/reference_product](../deploy/product/reference_product): a complete Python
-  merchant backend (fulfillment, holds, refunds), run on staging;
+  merchant backend (fulfillment, holds, refunds), run on Phala's staging;
 - [architecture.md](architecture.md): the specification, especially §11 (the fulfillment
   webhook), §12 (API, events, customer UI), §14 (attestation, restore), and §15 (refunds and
   policies).
@@ -48,7 +51,8 @@ Some resolvers drop the `#subdirectory=` fragment (PDM delegating resolution to 
 example) and fail to find the package; install it with `uv` or `pip` directly, and switch to
 `phala-pay` from PyPI once it is released.
 
-**Configure.** The operator creates your account and sends your contact its first secret key,
+**Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
+account and sends your contact its first secret key,
 `ppay_sk_test_…` (§5.1); roll it at once and keep the new key offline, for administration.
 Create a restricted key for your servers (§5.4). Pin your account's webhook key for the mode from
 its attestation (§5.3). Set your treasury on each chain you accept (§1.6): payments go only there,
@@ -136,7 +140,7 @@ A Node backend verifies the same way with `constructEvent(rawBody, headers, WEBH
 { expectedAccount: ACCOUNT, expectedLivemode: false })` from `@phala/pay/server`.
 [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) is this backend in full, with an
 idempotent, snapshot-driven SQLite ledger (`apply_deposit`) and tests of partial refunds,
-reversals, and out-of-order delivery; the staging reference product runs the Phala Pay demo, a
+reversals, and out-of-order delivery; Phala's staging reference product runs the Phala Pay demo, a
 cloud console's billing page, on [pay.phala.com](https://pay.phala.com/).
 
 ## 1. Quotes
@@ -340,7 +344,7 @@ no longer be reversed, and only a final one is refunded), and `swept` once a fin
 it moved its forwarder's balance to your treasury (§1.7). Nothing is reported as a deposit before
 the route's confirmation (two blocks on Ethereum)
 ([architecture §7](architecture.md#7-states-and-pump)).
-The staging deposit driver asserts these outcomes on Sepolia
+Phala's staging deposit driver asserts these outcomes on Sepolia
 ([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
@@ -1015,23 +1019,21 @@ POST /v1/refunds/re_…/mark_paid
 
 ## 4. Testing and go-live
 
-### 4.1 Environments
+### 4.1 Your operator's service
 
-| | Origin | Modes and chains | Status |
-|---|---|---|---|
-| Production | `https://pay-api.phala.com` | live: Ethereum Mainnet (1); test: Sepolia (11155111) | Not deployed yet |
-| Staging | `https://pay-api-staging.phala.com` | test: Sepolia (11155111) | Internal pre-production |
-
-One deployment serves both modes, and your key selects the mode (§5.2): `ppay_*_test_` keys act on
-test routes (Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live
-mode, on live routes. Integrate in test mode; until production is deployed, the operator creates
-integration accounts on staging. Staging is reset for the multi-tenant schema (a HUMAN-ONLY step,
-[deploy/README.md](../deploy/README.md#staging-reset-human-only)): accounts, keys,
-treasuries, and endpoints from before the reset do not exist, and the operator issues each account
-again. Staging's route, with its forwarder factory, implementation, and test PHA token (a
-`MockERC20` whose `mint(address,uint256)` is public), is
+You integrate with your operator's instance, at its service URL; which chains, tokens, and modes
+it offers are its routes, listed by `GET /v1/config`. One deployment serves both modes, and your
+key selects the mode (§5.2): `ppay_*_test_` keys act on test routes (test networks such as
+Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live mode, on live
+routes. Integrate in test mode. The repository's test route, with its forwarder factory,
+implementation, and test PHA token (a `MockERC20` whose `mint(address,uint256)` is public), is
 [deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml);
-route files carry no treasury, so set your own on Sepolia first (§1.6).
+route files carry no treasury, so set your own on each chain first (§1.6).
+
+For example, Phala's own instance, which serves only Phala Cloud's account: production
+`https://pay-api.phala.com` (live: Ethereum Mainnet; test: Sepolia; not deployed yet) and staging
+`https://pay-api-staging.phala.com` (test: Sepolia; internal pre-production, reset for the
+multi-tenant schema, [deploy/README.md](../deploy/README.md#staging-reset-human-only)).
 
 ### 4.2 Testing your receiver
 
@@ -1054,12 +1056,12 @@ of `--amount` cents for `--client-reference-id`. The reference product's tests
 
 ### 4.3 Test mode
 
-With a test key, your Sepolia treasury set (§1.6), and your endpoint registered (§5.11), pay test
-quotes and deposit addresses with minted test PHA and Sepolia ETH for gas, and play the abnormal
-payments of §1.3; then sweep (§1.7) and refund (§3) one of them. Sepolia deposits are credited
-about 30 seconds after paying and final about 15 minutes later. The staging reference product
+With a test key, your test-mode treasury set (§1.6), and your endpoint registered (§5.11), pay
+test quotes and deposit addresses on your operator's test route (on the repository's Sepolia
+route, with minted test PHA and Sepolia ETH for gas), and play the abnormal payments of §1.3; then sweep (§1.7) and refund (§3) one of them. Sepolia deposits are credited
+about 30 seconds after paying and final about 15 minutes later. The reference product
 ([deploy/product/reference_product](../deploy/product/reference_product)) is a complete merchant
-backend on staging, the model for fulfillment, holds, and refunds.
+backend, run on Phala's staging, the model for fulfillment, holds, and refunds.
 
 ### 4.4 Go-live checklist
 
@@ -1115,7 +1117,7 @@ The operator then:
    ([deploy/README.md](../deploy/README.md#operator-onboarding)), which returns its id, `acct_…`,
    and its first secret key of test mode, `ppay_sk_test_…`;
 2. sends the key to your contact through an encrypted channel. **Roll it on receipt** (§5.4), so
-   no one at Phala holds a working key.
+   no one at your operator holds a working key.
 
 Live mode is the operator's decision (`charges_enabled`); enabling it returns your first live key,
 `ppay_sk_live_…`, handed over and rolled the same way. Until then a live key answers
@@ -1142,7 +1144,7 @@ and the key is stable across releases. Pin it only from verified attestation, fe
 key of the mode (`account.read`) ([architecture §14](architecture.md#14-configuration-and-deployment)):
 
 ```sh
-export TOPUP_ORIGIN=https://pay-api-staging.phala.com
+export TOPUP_ORIGIN=https://api.phala-pay.example   # your operator's service URL
 export NONCE="$(openssl rand -hex 32)"
 curl -fsS -H "Authorization: Bearer $PHALA_PAY_SECRET_KEY" \
   "$TOPUP_ORIGIN/v1/attestation?nonce=$NONCE" > attestation.json
@@ -1263,7 +1265,7 @@ forwarder = (
     "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",  # implementation (deploy/CONTRACTS.md)
 )
 with PhalaPay(
-    "https://pay-api-staging.phala.com",
+    "https://api.phala-pay.example",  # your operator's service URL
     PHALA_PAY_API_KEY,
     account="acct_…",
     forwarder=forwarder,
@@ -1422,10 +1424,10 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
   move from settlement requests to webhook fulfillment, and the multi-tenant API (design), which
   changed the API without aliases.
 - Announcing means, in one release: `deprecated: true` in OpenAPI (and a `DeprecationWarning` from
-  the SDK), a `Deprecated` changelog entry with the earliest removal date, and notice to every
-  account's recorded contact.
-- Removal happens on staging first, in production no earlier than the announced date. Only a
-  security fix may shorten the window, and its changelog entry says why.
+  the SDK) and a `Deprecated` changelog entry with the earliest removal date; your operator
+  notifies every account's recorded contact when it deploys that release.
+- An operator deploys a removal no earlier than the announced date, to its staging first if it
+  runs one. Only a security fix may shorten the window, and its changelog entry says why.
 
 #### SDK changelog rules
 

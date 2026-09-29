@@ -1,8 +1,14 @@
 # dstack deployment
 
-Every CVM is deployed by GitHub Actions from `main`; nothing is deployed from a laptop. Steps
-outside the workflows that change a registry, Phala Cloud, a CVM, a Safe, a contract, or a secret
-are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Incident response:
+How an operator deploys and runs its own Phala Pay instance. Phala Pay is self-hosted: each
+operator deploys from its own fork, to its own Phala Cloud workspace, on its own domain; the
+[self-hosting guide](../docs/self-hosting.md) is the order of the steps, and this document their
+reference. Names in `$VARIABLES` are the operator's own values; Phala's are given only as labelled
+examples, and the demo that only Phala runs is in [Phala's instance](#phalas-instance).
+
+Every CVM is deployed by GitHub Actions from the fork's `main`; nothing is deployed from a laptop.
+Steps outside the workflows that change a registry, Phala Cloud, a CVM, a Safe, a contract, DNS, or
+a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Incident response:
 [runbooks](runbooks/README.md). Contracts: [CONTRACTS.md](CONTRACTS.md).
 
 ## What runs where
@@ -10,10 +16,10 @@ are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Inciden
 | Where | What | Deployed by |
 |---|---|---|
 | topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `smokescreen` (the [webhook egress](#webhook-egress) proxy), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
-| Staging reference-product CVM | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
-| Object storage (Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
-| Sentry project `phala-network/crypto-topup-service` | errors, alerts, Crons and Uptime monitors | the service itself |
-| Ethereum (Sepolia for staging) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
+| Staging reference-product CVM (Phala's demo; optional) | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
+| Object storage (S3-compatible; Phala's instance: Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
+| The operator's Sentry project (optional; Phala's: `phala-network/crypto-topup-service`) | errors, alerts, Crons and Uptime monitors | the service itself |
+| EVM chains of the routes (the committed route: Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
 | GitHub Actions | [Release images](../.github/workflows/release-images.yml), [Deploy](../.github/workflows/deploy.yml), [Verify contracts](../.github/workflows/verify-contracts.yml) (daily, read-only), [Restore drill](../.github/workflows/restore-drill.yml) (weekly, local stack) | — |
 
 Production CVMs have no SSH, no logs, and no database access. Everything an operator sees comes
@@ -41,34 +47,41 @@ key, and the database passwords: that is a key migration, not an image bump.
 
 ## One-time setup (HUMAN-ONLY, repository owner)
 
-1. **Environments.** Repository Settings > Environments: `staging` and `production`, deployment
-   branches `main` only, no required reviewers (not available on this plan). Whoever dispatches
-   Deploy is accountable; the run's actor, summary, and uploaded record are the audit trail.
+0. **Fork.** Fork the repository and enable Actions on the fork. Release images publishes to the
+   repository owner's namespace, `ghcr.io/<owner, lowercased>/` (Phala's: `ghcr.io/phala-network/`),
+   the only one its `GITHUB_TOKEN` can push to, so a fork changes nothing; its packages are made
+   public in step 6. Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER`
+   names another runner.
+1. **Environments.** Repository Settings > Environments: `production` and, for a pre-production
+   instance with test routes only, `staging` (the names Deploy offers), deployment branches `main`
+   only. Required reviewers are optional (Phala's repository has none: its plan does not offer
+   them). Whoever dispatches Deploy is accountable; the run's actor, summary, and uploaded record
+   are the audit trail.
 2. **Phala Cloud.** Create an API key for the Environment's workspace and store it as the
    Environment secret `PHALA_CLOUD_API_KEY`, the only secret GitHub holds.
-3. **Object storage.** Create an R2 bucket (or prefix) per Environment that the other
-   Environment's keys cannot reach, and a read-write API token for it. The token is sealed into
-   the CVM (below), never stored in GitHub.
+3. **Object storage.** Create a bucket (or prefix) per Environment in an S3-compatible store, such
+   as Cloudflare R2, that the other Environment's keys cannot reach, and a read-write API token for
+   it. The token is sealed into the CVM (below), never stored in GitHub.
 4. **Environment variables**, per Environment:
 
    | Name | Value |
    |---|---|
    | `PHALA_WORKSPACE` | display name of the API key's workspace (preflight checks it) |
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
-   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain): `pay-api-staging.phala.com` (`staging`), `pay-api.phala.com` (`production`) |
-   | `AWS_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
+   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain), a name in the operator's DNS such as `pay-api.example.com` (Phala's instance: `pay-api-staging.phala.com` in `staging`, `pay-api.phala.com` in `production`) |
+   | `AWS_ENDPOINT` | the object store's endpoint, for R2 `https://<account>.r2.cloudflarestorage.com` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
    | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | HTTPS RPC URLs of the route's chain from two different providers; they are published in the compose, so a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) and the key is sealed as `TOPUP_RPC_PROVIDER_A_KEY`/`_B_KEY` ([Sealing the secrets](#sealing-the-secrets)); preflight refuses a URL that embeds a key. The chain must carry the canonical Multicall3 ([contracts/multicall3.json](contracts/multicall3.json)) |
-   | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only: [Staging reference product](#staging-reference-product) |
-   | `PRODUCT_DOMAIN` | `staging` only: the reference product's [custom domain](#custom-domain), `pay-demo-api.phala.com` (the [website](#website), `pay.phala.com`, is on Cloudflare) |
+   | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only, for the optional [staging reference product](#staging-reference-product) |
+   | `PRODUCT_DOMAIN` | `staging` only, likewise: the reference product's [custom domain](#custom-domain) (Phala's: `pay-demo-api.phala.com`; the [website](#website), `pay.phala.com`, is on Cloudflare) |
 
    No variable or secret names a treasury or a transaction-signing key: treasuries are each
    account's own, set through the API, and the service sends no transactions.
 
-   That is ten variables for `staging` and eight for `production`. All but the first two are
-   [attested settings](#attested-settings). Deploy derives the rest, and a variable of the same
-   name overrides a derived value where noted:
+   That is eight variables for the service, and three more for the staging reference product.
+   All but the first two are [attested settings](#attested-settings). Deploy derives the rest, and
+   a variable of the same name overrides a derived value where noted:
 
    | Setting | Derived as |
    |---|---|
@@ -91,8 +104,8 @@ key, and the database passwords: that is a key migration, not an image bump.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
 6. **Packages.** After the first Release images run, make `phala-pay`, `postgres-walg`, and
-   `phala-pay-reference-product` public (organization Packages > package > Package settings >
-   Change visibility; the organization must allow public container packages). This is
+   `phala-pay-reference-product` public (the owner's Packages > package > Package settings >
+   Change visibility; an organization must allow public container packages). This is
    irreversible. CVMs pull without credentials, and preflight fails on a private image.
 
 ## Release and deploy
@@ -124,26 +137,26 @@ every deploy, and uploads the rendered compose and the verification as the run's
    sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back, use a
    forward repair migration.
 
-**Production** additionally needs the factory deployed on mainnet at its deterministic address
-([CONTRACTS.md](CONTRACTS.md#mainnet), HUMAN-ONLY) and a reviewed route PR putting the mainnet
-route into the compose. One production deployment serves both modes: live routes on mainnets
-and test routes (`livemode: false`) on test networks such as Sepolia. Deploy runs
-[check-route-modes.sh](check-route-modes.sh) on the rendered compose and refuses a route whose
-`livemode` does not match its chain, a chain on neither of its lists, a local development chain,
-and any live route in `staging`. After
-the first deploy, in order: seal the secrets; [verify the attestation](#attestation-ingress-and-egress);
-have Finance, Risk, and Operations approve the pilot limits (route bounds, each account's caps
-(`limits`: open quotes and their credit per account and per customer) and `max_unfinalized_credit`; architecture §17) and a passed restore drill
-([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) Phala's own accounts with
+**Production** with live routes additionally needs the factory at its deterministic address on each
+of their chains ([CONTRACTS.md](CONTRACTS.md#mainnet), HUMAN-ONLY, only where it is missing) and a
+reviewed route PR putting the live routes into the compose. One production deployment serves both
+modes: live routes on mainnets and test routes (`livemode: false`) on test networks such as Sepolia.
+Deploy runs [check-route-modes.sh](check-route-modes.sh) on the rendered compose and refuses a route
+whose `livemode` does not match its chain, a chain on neither of its lists, a local development
+chain, and any live route in `staging`. After the first deploy, in order: seal the secrets; [verify
+the attestation](#attestation-ingress-and-egress); have the operator's Finance, Risk, and Operations
+approve the pilot limits (route bounds, each account's caps (`limits`: open quotes and their credit
+per account and per customer) and `max_unfinalized_credit`; architecture §17) and a passed restore
+drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) Phala's own accounts with
 `charges_enabled` (third-party merchants only after the legal review, design §17).
 
 ### Sealing the secrets
 
 The CVM's encrypted env holds exactly the names of [staging.env.example](staging.env.example),
-the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the R2 token),
+the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the object store's token),
 `SENTRY_DSN` (empty turns Sentry off), and `TOPUP_RPC_PROVIDER_A_KEY`, `TOPUP_RPC_PROVIDER_B_KEY`:
 the API key topup puts in place of `{key}` in the provider's attested URL, empty for a keyless URL
-(staging's). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
+(as in Phala's staging). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
 URL and key disagree (a `{key}` without a key, or a key without a `{key}`). Redaction keeps the URL
 and the key out of every log line and error. A new CVM waits for them: PostgreSQL initializes a cluster
 only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-from-backup)).
@@ -211,12 +224,13 @@ socket (its instance id and the evidence quote), which is why it is pinned by di
 with the compose.
 
 The staging reference product is served the same way: the same pinned dstack-ingress in its
-compose terminates TLS for `$PRODUCT_DOMAIN` (`pay-demo-api.phala.com`) and forwards to
+compose terminates TLS for `$PRODUCT_DOMAIN` (Phala's: `pay-demo-api.phala.com`) and forwards to
 `product:8089`, so the demo's API, the product's webhook endpoint, and its account API are at
-`https://$PRODUCT_DOMAIN`. The website, `pay.phala.com`, is not a CVM's: Cloudflare serves it
+`https://$PRODUCT_DOMAIN`. Phala's website, `pay.phala.com`, is not a CVM's: Cloudflare serves it
 ([Website](#website)).
 
-**HUMAN-ONLY, owner of the domain's Cloudflare zone**, once per CVM instance. Every Deploy run
+**HUMAN-ONLY, owner of the domain's DNS zone** (any DNS provider; the Deploy summary's
+wording assumes Cloudflare, as in Phala's instance), once per CVM instance. Every Deploy run
 lists the records for its target's domain (`$DOMAIN`: `$TOPUP_DOMAIN` or `$PRODUCT_DOMAIN`), in
 the tls-alpn-01 format of the pinned README:
 
@@ -226,15 +240,15 @@ the tls-alpn-01 format of the pinned README:
 | TXT | `_dstack-app-address.$DOMAIN` | `<instance_id>:443` |
 | CAA (optional) | `$DOMAIN` | `0 issue "letsencrypt.org;validationmethods=tls-alpn-01;accounturi=<ACME account>"` |
 
-- DNS only (grey cloud): a proxied name resolves to Cloudflare, so neither the CA nor a client
-  reaches the gateway.
+- Not proxied (on Cloudflare, DNS only, grey cloud): a proxied name resolves to the proxy, so
+  neither the CA nor a client reaches the gateway.
 - The TXT names the instance, not the app: the CA's validation must reach the one instance that
   holds the ACME order. An upgrade keeps the instance id; a new instance ([Resume](RESTORE.md#resume))
   serves the domain only after the TXT carries its id.
 - Until both records resolve, dstack-ingress serves a self-signed placeholder and requests no
   certificate, so Deploy's `/healthz` wait on the domain fails.
-- CAA is optional. An existing CAA record on the domain or `phala.com` must permit `tls-alpn-01`
-  (`phala.com` has none as of 2026-09-26). Pinning `accounturi` to the account that
+- CAA is optional. An existing CAA record on the domain or a parent domain must permit
+  `tls-alpn-01` (Phala's `phala.com` has none as of 2026-09-26). Pinning `accounturi` to the account that
   [verify-ingress-evidence.sh](verify-ingress-evidence.sh) prints also means that losing the
   `ingress_certs` volume (a new account) blocks renewal until the record is updated.
 
@@ -455,6 +469,8 @@ implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` at the same addresse
 names only the factory; `topup run` refuses to start unless the chain holds exactly that build's
 code there, so the factory is deployed on a chain before any compose with a route on it.
 
+An operator reuses the factory wherever it is deployed (it is on Sepolia; `verify-deployment.sh`
+below checks a chain read-only) and deploys it only on a chain where it is missing.
 **HUMAN-ONLY, deployer with a funded throwaway EOA**, once per chain ([CONTRACTS.md](CONTRACTS.md)
 has the checks each script makes; `$SEPOLIA_RPC_A` and `$SEPOLIA_RPC_B` are two providers):
 
@@ -471,7 +487,8 @@ jq -e '.passed == true' sepolia-contract-verification.json
 
 The dry run must print the two addresses above; if the factory already has that code (anyone may
 deploy it), the broadcast sends nothing. Then run **Verify contracts** (Actions), which re-checks the
-deployment and the route daily. Mainnet repeats this after the security review
+deployment, the Safe of `contracts/safe-expectations.json` (Phala's), and the committed route daily,
+in the `staging` Environment. Mainnet repeats this after the security review
 ([CONTRACTS.md, "Mainnet"](CONTRACTS.md#mainnet)).
 
 ## Operator onboarding
@@ -494,7 +511,7 @@ helper](runbooks/README.md#environment), in order:
    (`ppay_sk_test_…`) and, with `charges_enabled`, live key; each `secret` is shown only here:
 
    ```sh
-   (umask 077 && admin POST /v1/admin/accounts "$(jq -cn '{name: "Phala Cloud",
+   (umask 077 && admin POST /v1/admin/accounts "$(jq -cn '{name: "<merchant name>",
        contact: {name: "<name>", email: "<security email>"},
        due_diligence: {reference: "<review reference>", reviewed_at: "<YYYY-MM-DD>",
                        reviewed_by: "<reviewer>"},
@@ -533,8 +550,10 @@ with the recorded contact ([API key compromise and key recovery](runbooks/api-ke
 
 ## Merchant setup
 
-These are the merchant's steps, done with its own secret key; for Phala's own accounts (the staging
-reference product, Phala Cloud) Phala's staff do them as the merchant, never with the admin key.
+These are the merchant's steps, done with its own secret key against the operator's
+`https://$TOPUP_DOMAIN`. An operator that is also a merchant of its own instance does them as the
+merchant, never with the admin key (Phala's staff, for Phala Cloud and the staging reference
+product).
 The [integration guide](../docs/integration.md) is the full reference.
 
 ### Treasury setup
@@ -611,7 +630,27 @@ customers, and delivered deposit events. After the unfreeze, send a second notic
 any re-valued deposit flagged, and events after the restore point delivered again. The runbook
 [Incident communication](runbooks/incident-communication.md) has the channels.
 
-## Staging reset (HUMAN-ONLY)
+## Local verification
+
+- `make up` / `make down`: the attested compose rendered with local settings plus the
+  [local overlay](local/docker-compose.yml) (Garage S3, the dstack simulator, a mock product);
+  run manual commands through `deploy/local/compose.sh`.
+- `make cvm-rehearsal`: the staging artifact itself against Anvil, Garage, and the simulator,
+  from the unsealed boot through sealing, operator onboarding of the product's account, its
+  treasury proof and webhook endpoint, and one credited deposit.
+- `make restore-drill`: [RESTORE.md](RESTORE.md#local-and-ci-drills).
+- `make sandbox-local`: the integrator sandbox ([sandbox/README.md](sandbox/README.md)).
+- `deploy/validate-compose.sh`: the compose policy CI enforces.
+
+## Phala's instance
+
+Phala runs an instance only for Phala Cloud and offers no hosted service to others. Its
+`staging` Environment (`https://pay-api-staging.phala.com`, Sepolia) also runs a reference
+product whose API serves the live demo on Phala's website, [pay.phala.com](https://pay.phala.com/).
+This section records that setup; another operator needs none of it, and can run the reference
+product the same way for its own rehearsals.
+
+### Staging reset (HUMAN-ONLY)
 
 The multi-tenant schema (design §14) replaced the migration history and migrates no data
 (`crates/topup/migrations/README.md`), and staging's route now uses the new factory, so the staging
@@ -659,7 +698,7 @@ them. In order:
 11. **Retire the old CVMs** once the new service has run clean for a day: `npx --yes phala@1.1.22
     cvms delete "$OLD_CVM_ID" --force` for each, by the recorded id (never by name or app id); delete the old backup prefix only at the end of its retention.
 
-## Staging reference product
+### Staging reference product
 
 Staging's reference product is a merchant like any other, with its own account, and a second CVM
 running [product/reference_product](product/reference_product): `serve` mode is the webhook
@@ -781,7 +820,7 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
 
 `make cvm-rehearsal` runs this product CVM locally, with one deposit.
 
-### Abnormal paths
+#### Abnormal paths
 
 The driver also plays the sandbox scenarios' abnormal payments against staging, each in a fresh
 workspace, and checks the deposit state, the verified webhooks, and the product ledger
@@ -825,15 +864,3 @@ ignores a `build` section of the Wrangler config.
 - **Pull requests.** Each branch build uploads a preview version with its own `workers.dev` URL,
   to review the page. Its demo API calls are refused by CORS by design: the API allows only
   `https://pay.phala.com`.
-
-## Local verification
-
-- `make up` / `make down`: the attested compose rendered with local settings plus the
-  [local overlay](local/docker-compose.yml) (Garage S3, the dstack simulator, a mock product);
-  run manual commands through `deploy/local/compose.sh`.
-- `make cvm-rehearsal`: the staging artifact itself against Anvil, Garage, and the simulator,
-  from the unsealed boot through sealing, operator onboarding of the product's account, its
-  treasury proof and webhook endpoint, and one credited deposit.
-- `make restore-drill`: [RESTORE.md](RESTORE.md#local-and-ci-drills).
-- `make sandbox-local`: the integrator sandbox ([sandbox/README.md](sandbox/README.md)).
-- `deploy/validate-compose.sh`: the compose policy CI enforces.
