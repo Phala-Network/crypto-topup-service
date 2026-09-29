@@ -40,6 +40,12 @@ webhook receivers must ignore unknown fields. The format follows
   Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; https://faucet.circle.com),
   valued at one dollar (pricing mode `stablecoin`) with no quote spread, so a $10 quote asks 10 USDC.
   `GET /v1/config` lists it beside PHA, and a deposit address takes both tokens.
+- Staging adds Base Sepolia (84532), with the same two test-mode routes:
+  `phala-cloud-base-sepolia-pha-usd` (test PHA `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284`, 18
+  decimals, public `mint`) and `phala-cloud-base-sepolia-usdc-usd` (Circle's testnet USDC
+  `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, 6 decimals, at one dollar with no quote spread), on
+  the same factory and implementation. Deposits there are credited at the chain's `safe` head
+  (`GET /v1/config` reports `confirmations: "safe"`), typically about 5 minutes after inclusion.
 
 - Launch hardening (docs/design/multi-tenant.md, "launch hardening" amendment):
   - Restricted keys: `POST /v1/api_keys {"type": "restricted", "permissions": [...]}` issues a

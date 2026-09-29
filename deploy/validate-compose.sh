@@ -28,7 +28,10 @@ render() {
         SENTRY_ENVIRONMENT=staging \
         TOPUP_DOMAIN=topup.example TOPUP_GATEWAY_DOMAIN=gateway.dstack.example \
         TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example \
-        TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example "$root/deploy/render-compose.sh" "$@"
+        TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example \
+        TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia \
+        TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia \
+        "$root/deploy/render-compose.sh" "$@"
 }
 render >"$compose"
 render --restore-check >"$restore_check_compose"
@@ -222,8 +225,9 @@ jq -e '[.services[].ports[]?] | length == 0' "$rendered" >/dev/null || {
     exit 1
 }
 
-# The CVM rehearsal runs the rendered staging compose with only the simulator, S3, and Anvil
-# added; like the drill it must not bind-mount, and only Anvil may publish a (chosen) port.
+# The CVM rehearsal runs the rendered staging compose with only the simulator, S3, and the Anvils
+# (Sepolia's and Base Sepolia's) added; like the drill it must not bind-mount, and only the Anvils
+# may publish a (chosen) port.
 TOPUP_LOCAL_DSTACK_IMAGE=validate docker compose --project-directory "$root/deploy/local" \
     -f "$compose" -f "$root/deploy/local/cvm-rehearsal.compose.yml" config --format json \
     >"$rendered"
@@ -231,9 +235,9 @@ jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$rende
     echo "the CVM rehearsal stack bind-mounts a host path" >&2
     exit 1
 }
-jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] == ["anvil"]' \
-    "$rendered" >/dev/null || {
-    echo "only Anvil may publish a port in the CVM rehearsal stack" >&2
+jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] | sort
+    == ["anvil", "anvil-base-sepolia"]' "$rendered" >/dev/null || {
+    echo "only the Anvils may publish a port in the CVM rehearsal stack" >&2
     exit 1
 }
 

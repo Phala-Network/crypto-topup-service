@@ -20,6 +20,8 @@ export TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7Ty
 export SENTRY_ENVIRONMENT=staging
 export TOPUP_DOMAIN=pay-api-staging.phala.com TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network
 export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
+export TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia
+export TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia
 # A source compose whose inline route still has zero-address placeholders, as before the route PR.
 sed -E 's/((forwarder_factory|implementation|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
     "$root/deploy/docker-compose.yml" >"$tmp/zero-source.yml"
@@ -89,7 +91,7 @@ grep -qF 'must carry exactly one ${..._RENDERED_SHA256:-} label' "$tmp/bad-sourc
 
 # A provider serves one chain: a route on another chain that names no providers, and so uses
 # Sepolia's provider-a and provider-b, is refused.
-awk '/^        chain_id: / && ++seen == 2 { sub(/11155111/, "560048") } { print }' \
+awk '/^        chain_id: 11155111$/ && ++seen == 2 { sub(/11155111/, "560048") } { print }' \
     "$root/deploy/docker-compose.yml" >"$tmp/two-chains-source.yml"
 "$root/deploy/render-compose.sh" "$tmp/two-chains-source.yml" >"$tmp/two-chains.yml"
 expect_failure two-chains "RPC provider provider-a is named on chain 11155111 and chain 560048" \
@@ -136,49 +138,24 @@ if grep -rqE 'aB3dEfGhIjKlMnOpQrStUvWxYz012345|sealed-key-0123456789|sealed/key'
     exit 1
 fi
 
-# A second chain is configuration: its route and its own providers beside Sepolia's.
-# second_chain NAME RPC_PROVIDERS ID...: renders a source with a Base Sepolia route naming
-# RPC_PROVIDERS and the providers ID... added to x-rpc-providers.
-second_chain() {
-    local name=$1 providers=$2
-    shift 2
-    {
-        awk -v ids="$*" '
-            { print }
-            /^  TOPUP_RPC_PROVIDER_B_KEY:/ {
-                count = split(ids, id, " ")
-                for (i = 1; i <= count; i++) {
-                    variable = toupper(id[i])
-                    gsub("-", "_", variable)
-                    printf "  TOPUP_RPC_%s_URL: \"${TOPUP_RPC_%s_URL:-}\"\n", variable, variable
-                }
-            }' "$tmp/filled-source.yml"
-        echo "  topup_route_base_sepolia_pha:"
-        echo "    content: |"
-        awk -v providers="$providers" '
-            /^route:/ { $0 = "route: base-sepolia-pha-usd" }
-            { sub(/chain_id: 11155111/, "chain_id: 84532"); print (length($0) ? "      " $0 : "") }
-            /^chain:/ { print "        rpc_providers: " providers }
-        ' "$root/deploy/config/routes/phala-cloud-sepolia-pha.yaml"
-    } >"$tmp/$name-source.yml"
-    "$root/deploy/render-compose.sh" "$tmp/$name-source.yml" >"$tmp/$name.yml"
+# A second chain is configuration: the committed Base Sepolia routes name providers of their own,
+# and the complete env above passes with them. Each case below edits the committed source.
+# edited NAME SED_SCRIPT: renders the committed source edited by SED_SCRIPT.
+edited() {
+    sed "$2" "$tmp/filled-source.yml" >"$tmp/$1-source.yml"
+    "$root/deploy/render-compose.sh" "$tmp/$1-source.yml" >"$tmp/$1.yml"
 }
-export TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia
-export TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia
 export TOPUP_RPC_BASE_SEPOLIA_C_URL=https://rpc-c.example/base-sepolia
-second_chain base "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b
-"$preflight" --env "$tmp/complete.env" --compose "$tmp/base.yml" --source "$tmp/base-source.yml" \
-    --offline >/dev/null
-second_chain undefined "[base-sepolia-a, base-sepolia-c]" base-sepolia-a base-sepolia-b
+edited undefined 's/rpc_providers: \[base-sepolia-a, base-sepolia-b\]/rpc_providers: [base-sepolia-a, base-sepolia-c]/'
 expect_failure undefined \
-    "route base-sepolia-pha-usd names RPC provider base-sepolia-c, but the compose has no TOPUP_RPC_BASE_SEPOLIA_C_URL" \
+    "route phala-cloud-base-sepolia-pha-usd names RPC provider base-sepolia-c, but the compose has no TOPUP_RPC_BASE_SEPOLIA_C_URL" \
     --env "$tmp/complete.env" --compose "$tmp/undefined.yml" --source "$tmp/undefined-source.yml"
-second_chain unused "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b base-sepolia-c
+edited unused '/^  TOPUP_RPC_BASE_SEPOLIA_B_URL:/a\
+  TOPUP_RPC_BASE_SEPOLIA_C_URL: "${TOPUP_RPC_BASE_SEPOLIA_C_URL:-}"'
 expect_failure unused "the compose has TOPUP_RPC_BASE_SEPOLIA_C_URL, but no route names provider base-sepolia-c" \
     --env "$tmp/complete.env" --compose "$tmp/unused.yml" --source "$tmp/unused-source.yml"
 # A keyed provider needs a sealed TOPUP_RPC_<ID>_KEY, in staging.env.example.
-TOPUP_RPC_BASE_SEPOLIA_A_URL='https://base-sepolia.g.alchemy.com/v2/{key}' \
-    second_chain unsealable "[base-sepolia-a, base-sepolia-b]" base-sepolia-a base-sepolia-b
+TOPUP_RPC_BASE_SEPOLIA_A_URL='https://base-sepolia.g.alchemy.com/v2/{key}' edited unsealable ''
 expect_failure unsealable \
     "TOPUP_RPC_BASE_SEPOLIA_A_URL has a {key} placeholder, but staging.env.example and the compose have no TOPUP_RPC_BASE_SEPOLIA_A_KEY" \
     --env "$tmp/complete.env" --compose "$tmp/unsealable.yml" --source "$tmp/unsealable-source.yml" \

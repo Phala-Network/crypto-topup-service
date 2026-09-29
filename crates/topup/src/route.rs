@@ -32,6 +32,10 @@ mod tests {
         include_str!("../../../deploy/config/routes/phala-cloud-sepolia-pha.yaml");
     const DEPLOY_USDC_ROUTE: &str =
         include_str!("../../../deploy/config/routes/phala-cloud-sepolia-usdc.yaml");
+    const DEPLOY_BASE_PHA_ROUTE: &str =
+        include_str!("../../../deploy/config/routes/phala-cloud-base-sepolia-pha.yaml");
+    const DEPLOY_BASE_USDC_ROUTE: &str =
+        include_str!("../../../deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml");
 
     #[test]
     fn valid_fixture_parses_and_validates() {
@@ -118,8 +122,62 @@ mod tests {
     }
 
     #[test]
+    fn base_sepolia_routes_credit_at_safe_on_their_own_providers() {
+        let pha = parse_and_validate(DEPLOY_BASE_PHA_ROUTE, false).expect("Base PHA route");
+        let usdc = parse_and_validate(DEPLOY_BASE_USDC_ROUTE, false).expect("Base USDC route");
+        assert!(!pha.livemode, "Base Sepolia is a test route");
+        assert_eq!(
+            pha.chain, usdc.chain,
+            "one chain has one set of chain settings"
+        );
+        // An OP-stack chain credits at `safe`, never at a depth on the unsafe head (design D1).
+        assert_eq!(
+            pha.chain.confirmations,
+            topup_core::route::Confirmations::Safe
+        );
+        assert_eq!(
+            pha.chain.rpc_providers,
+            ["base-sepolia-a", "base-sepolia-b"]
+        );
+        let sepolia = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
+        assert_eq!(pha.chain.contracts, sepolia.chain.contracts);
+        assert_eq!(
+            (pha.asset.backstop, usdc.asset.backstop),
+            (
+                topup_core::route::Backstop::Token,
+                topup_core::route::Backstop::Addresses
+            )
+        );
+        assert_eq!(
+            usdc.pricing.mode,
+            topup_core::route::PricingMode::Stablecoin
+        );
+        assert_eq!(usdc.rate_lock.spread_bps.value(), 0);
+
+        // All four staging routes load together: two chains, each in address mode.
+        let usdc_sepolia = parse_and_validate(DEPLOY_USDC_ROUTE, false).expect("USDC route");
+        let routes = topup::routes::RouteSet::new(vec![sepolia, usdc_sepolia, pha, usdc])
+            .expect("the staging routes load");
+        assert_eq!(routes.current_in(false).count(), 4);
+        let chains = topup::scanner::chain_routes(&routes);
+        assert_eq!(
+            chains
+                .iter()
+                .map(|chain| (chain.chain.chain_id, chain.token_mode()))
+                .collect::<Vec<_>>(),
+            [(84_532, false), (11_155_111, false)]
+        );
+    }
+
+    #[test]
     fn resolved_json_parses_back_to_the_same_route() {
-        for yaml in [VALID, DEPLOY_ROUTE, DEPLOY_USDC_ROUTE] {
+        for yaml in [
+            VALID,
+            DEPLOY_ROUTE,
+            DEPLOY_USDC_ROUTE,
+            DEPLOY_BASE_PHA_ROUTE,
+            DEPLOY_BASE_USDC_ROUTE,
+        ] {
             let route = parse_and_validate(yaml, false).expect("route must pass");
             let resolved = resolved_json(&route).expect("route serializes");
             assert!(resolved.contains("\"implementation\"") && resolved.contains("\"window_s\""));

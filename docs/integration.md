@@ -208,8 +208,9 @@ the payable assets (chain, asset code, contract, decimals), the minimum `amount`
 mode: open quotes (`max_open_quotes`), their credit in cents (`max_open_amount_per_account`), and
 one customer's (`max_open_amount_per_customer`, which also bounds one quote), the
 refund floor, the quote window, spread,
-and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more),
-the typical credit time (`typical_credit_seconds`, 30), and the typical finality time
+and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more;
+`"safe"` on an OP-stack chain such as Base, about 300 s), the typical credit time
+(`typical_credit_seconds`, 30 on Ethereum), and the typical finality time
 (`typical_finality_seconds`, 900). Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
@@ -1050,13 +1051,18 @@ implementation, are
 [deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)
 (a test PHA token, a `MockERC20` whose `mint(address,uint256)` is public) and
 [deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)
-(Circle's testnet USDC, from [Circle's faucet](https://faucet.circle.com), credited at one dollar);
-route files carry no treasury, so set your own on each chain first (§1.6).
+(Circle's testnet USDC, from [Circle's faucet](https://faucet.circle.com), credited at one dollar),
+and the same two tokens on Base Sepolia,
+[deploy/config/routes/phala-cloud-base-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-base-sepolia-pha.yaml)
+and
+[deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml),
+credited once the block is `safe`, typically about 5 minutes; route files carry no treasury, so
+set your own on each chain first (§1.6).
 
 For example, Phala's own instance, which serves only Phala Cloud's account: production
 `https://pay-api.phala.com` (live: Ethereum Mainnet; test: Sepolia; not deployed yet) and staging
-`https://pay-api-staging.phala.com` (test: Sepolia; internal pre-production, reset for the
-multi-tenant schema, [deploy/README.md](../deploy/README.md#staging-reset-human-only)).
+`https://pay-api-staging.phala.com` (test: Sepolia and Base Sepolia; internal pre-production,
+reset for the multi-tenant schema, [deploy/README.md](../deploy/README.md#staging-reset-human-only)).
 
 ### 4.2 Testing your receiver
 

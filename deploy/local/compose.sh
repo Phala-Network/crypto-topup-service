@@ -29,6 +29,7 @@ env -i PATH="$PATH" \
     TOPUP_ADMIN_PUBLIC_KEY="${TOPUP_LOCAL_ADMIN_PUBLIC_KEY:-11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=}" \
     TOPUP_DOMAIN=topup.localhost TOPUP_GATEWAY_DOMAIN=gateway.localhost \
     TOPUP_RPC_PROVIDER_A_URL=http://127.0.0.1:1 TOPUP_RPC_PROVIDER_B_URL=http://127.0.0.1:1 \
+    TOPUP_RPC_BASE_SEPOLIA_A_URL=http://127.0.0.1:1 TOPUP_RPC_BASE_SEPOLIA_B_URL=http://127.0.0.1:1 \
     "$root/deploy/render-compose.sh" "${variant[@]}" >"$rendered"
 # Relative paths in the overlays resolve against deploy/, as for deploy/docker-compose.yml itself.
 docker compose --project-directory "$root/deploy" -f "$rendered" \

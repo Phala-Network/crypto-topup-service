@@ -7,6 +7,8 @@
 #    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
 #    (deploy/contracts: canonical proxy, mock Safe checked by verify-safe.sh, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
+#    A second Anvil with Base Sepolia's chain id gets the same, without the Safe, for the Base
+#    Sepolia routes.
 # 3. Writes the staging routes with those addresses, inlines them into the compose exactly where the
 #    committed routes live, and renders the compose with the rehearsal's settings and the staging
 #    domain, as Deploy provisions. dstack-ingress does not run (cvm-rehearsal.compose.yml).
@@ -56,10 +58,12 @@ client="$project-client"
 product_project="$project-product"
 owner="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
-export SANDBOX_ANVIL_PORT
+export SANDBOX_ANVIL_PORT REHEARSAL_BASE_SEPOLIA_ANVIL_PORT
 SANDBOX_ANVIL_PORT=$(free_port)
+REHEARSAL_BASE_SEPOLIA_ANVIL_PORT=$(free_port)
 registry_port=$(free_port)
 rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
+base_rpc_url="http://127.0.0.1:$REHEARSAL_BASE_SEPOLIA_ANVIL_PORT"
 mapfile -t env_names < <(awk -F= '/^[[:space:]]*($|#)/ { next } { print $1 }' \
     "$root/deploy/staging.env.example")
 local_images=()
@@ -176,10 +180,11 @@ echo "TOPUP_IMAGE=$TOPUP_IMAGE"
 echo "POSTGRES_WALG_IMAGE=$POSTGRES_WALG_IMAGE"
 echo "PRODUCT_IMAGE=$PRODUCT_IMAGE"
 
-echo "== starting Anvil (chain id 11155111) and the client container"
-dc up -d --wait anvil >/dev/null
-# Sepolia carries the canonical Multicall3 that topup's balance and addressOf reads go through.
+echo "== starting Anvil (chain ids 11155111 and 84532) and the client container"
+dc up -d --wait anvil anvil-base-sepolia >/dev/null
+# Both chains carry the canonical Multicall3 that topup's balance and addressOf reads go through.
 install_anvil_multicall3 "$rpc_url"
+install_anvil_multicall3 "$base_rpc_url"
 docker run -d --name "$client" --network "${project}_default" "$client_image" sleep infinity \
     >/dev/null
 # `docker cp` streams through the API, so this works where the daemon cannot see the checkout.
@@ -220,23 +225,44 @@ token=$(jq -er .test_token "$tmp/test-contracts.json")
 oracle=$(jq -er .sanctions_oracle "$tmp/test-contracts.json")
 printf 'factory=%s implementation=%s safe=%s token=%s sanctions_oracle=%s\n' \
     "$factory" "$implementation" "$safe" "$token" "$oracle"
+# Base Sepolia: the same deterministic factory, and test contracts of its own.
+"$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$base_rpc_url" --local-fund --broadcast >/dev/null
+PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
+    "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" --rpc "base-sepolia/a=$base_rpc_url" --broadcast \
+    >/dev/null 2>&1 || die "deploy-factory.sh failed on Base Sepolia"
+"$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" \
+    --rpc "base-sepolia/a=$base_rpc_url" --rpc "base-sepolia/b=$base_rpc_url" \
+    >"$tmp/base-verification.json" ||
+    die "verify-deployment.sh failed on Base Sepolia: $(jq -c '[.chains[].checks]' "$tmp/base-verification.json")"
+[[ "$(jq -er '.chains[0].factory' "$tmp/base-verification.json")" == "$factory" ]] ||
+    die "the Base Sepolia factory is not the Sepolia one"
+"$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" --rpc-url "$base_rpc_url" \
+    >"$tmp/base-test-contracts.json"
+base_token=$(jq -er .test_token "$tmp/base-test-contracts.json")
+base_second_token=$(jq -er .unsupported_token "$tmp/base-test-contracts.json")
+base_oracle=$(jq -er .sanctions_oracle "$tmp/base-test-contracts.json")
+printf 'base-sepolia: token=%s second_token=%s sanctions_oracle=%s\n' \
+    "$base_token" "$base_second_token" "$base_oracle"
 
 echo "== writing the routes and rendering the staging compose"
-# The committed staging routes with this chain's addresses, one file per inline config. The test
-# token stands in for PHA, the reference product's asset, and the second mock token for USDC.
+# The committed staging routes with their chain's addresses, one file per inline config. On each
+# chain the test token stands in for PHA, the reference product's asset, and the second mock token
+# for USDC.
 second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
 mkdir "$tmp/routes"
 for path in "$root"/deploy/config/routes/*.yaml; do
     name=$(basename "$path" .yaml)
     case "$name" in
-        phala-cloud-sepolia-pha) asset=$token ;;
-        phala-cloud-sepolia-usdc) asset=$second_token ;;
+        phala-cloud-sepolia-pha) asset=$token route_oracle=$oracle ;;
+        phala-cloud-sepolia-usdc) asset=$second_token route_oracle=$oracle ;;
+        phala-cloud-base-sepolia-pha) asset=$base_token route_oracle=$base_oracle ;;
+        phala-cloud-base-sepolia-usdc) asset=$base_second_token route_oracle=$base_oracle ;;
         *) die "no rehearsal token for the route $name" ;;
     esac
     route="$tmp/routes/topup_route_${name//-/_}.yaml"
     sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
         -e "s|^\(  contract: \).*|\1\"$asset\"|" \
-        -e "s|^\(  sanctions_oracle: \).*|\1\"$oracle\"|" \
+        -e "s|^\(  sanctions_oracle: \).*|\1\"$route_oracle\"|" \
         "$path" >"$route"
     if grep -Eiq '0x([0-9a-f])\1{39}' "$route"; then
         die "the rehearsal route $name still has a placeholder address"
@@ -268,6 +294,7 @@ awk -v routes="$tmp/routes" '
 # render_topup ADMIN_KID: the settings Deploy renders from the `staging` Environment
 # variables, for this network. Provider A is keyless, as staging's; provider B is attested with a
 # `{key}` placeholder, as a paid provider is, and Anvil ignores the query that carries the key.
+# Base Sepolia's two providers are keyless, as staging's, at two URLs of its Anvil.
 render_topup() {
     AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
         WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=$1 \
@@ -276,6 +303,8 @@ render_topup() {
         TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
         TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 \
         TOPUP_RPC_PROVIDER_B_URL='http://anvil:8545/?key={key}' \
+        TOPUP_RPC_BASE_SEPOLIA_A_URL=http://anvil-base-sepolia:8545 \
+        TOPUP_RPC_BASE_SEPOLIA_B_URL='http://anvil-base-sepolia:8545/?provider=b' \
         "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
 }
 render_topup rehearsal-admin/v0

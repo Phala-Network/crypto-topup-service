@@ -72,7 +72,7 @@ key, and the database passwords: that is a key migration, not an image bump.
    | `AWS_ENDPOINT` | the object store's endpoint, for R2 `https://<account>.r2.cloudflarestorage.com` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
    | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
-   | `TOPUP_RPC_<ID>_URL`, one per [RPC provider](#rpc-providers) of the compose | the provider's HTTPS RPC URL for its chain, with `{key}` in place of an API key; the Sepolia routes use `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL` |
+   | `TOPUP_RPC_<ID>_URL`, one per [RPC provider](#rpc-providers) of the compose | the provider's HTTPS RPC URL for its chain, with `{key}` in place of an API key; the Sepolia routes use `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL`, the Base Sepolia routes `TOPUP_RPC_BASE_SEPOLIA_A_URL` and `TOPUP_RPC_BASE_SEPOLIA_B_URL` ([Staging routes](#staging-routes)) |
    | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only, for the optional [staging reference product](#staging-reference-product) |
    | `PRODUCT_DOMAIN` | `staging` only, likewise: the reference product's [custom domain](#custom-domain) (Phala's: `pay-demo-api.phala.com`; the [website](#website), `pay.phala.com`, is on Cloudflare) |
 
@@ -226,6 +226,13 @@ A provider serves one chain: routes of the same chain name the same providers, a
 another chain names providers of its own, even from the same company (`alchemy-base-sepolia` beside
 `alchemy-sepolia`). The chain must carry the canonical Multicall3
 ([contracts/multicall3.json](contracts/multicall3.json)).
+
+The order matters. The first provider, A, makes every `eth_getLogs` ([Measuring RPC
+usage](#measuring-rpc-usage)): windows of up to 2 000 blocks, and in address mode and the
+reconciler's missing-deposit check, transfers by recipient with no contract address. Some public
+endpoints refuse one or the other (a 1 000-block range cap; a required `address`), so check both
+before naming one first. Provider B never reads logs, only receipts, heads (`latest`, `safe`,
+`finalized`), nonces, and calls.
 
 The `x-rpc-providers` block of [docker-compose.yml](docker-compose.yml) lists each provider once,
 its URL and, if it may take a key, its key, and gives them to `topup` and `restore-check`.
@@ -689,21 +696,32 @@ product the same way for its own rehearsals.
 
 ### Staging routes
 
-Staging serves two test-mode routes on Sepolia, both on the deterministic factory
-([Contracts](#contracts)) with `confirmations: 2`; any test key quotes on both, and
-`GET /v1/config` lists both assets:
+Staging serves four test-mode routes, two on Sepolia and two on Base Sepolia, all on the
+deterministic factory ([Contracts](#contracts)); any test key quotes on all of them, and
+`GET /v1/config` lists each chain's assets:
 
 | Route | Token | Pricing | Test tokens |
 |---|---|---|---|
 | `phala-cloud-sepolia-pha-usd` ([file](config/routes/phala-cloud-sepolia-pha.yaml)) | test PHA `0x8F40e7E99678F44c88158f049E62817580ab113B` (`MockERC20`, 18 decimals) | spot: Coin Metrics `pha`, checked against Binance `PHAUSDT` | `mint(address,uint256)` is public |
 | `phala-cloud-sepolia-usdc-usd` ([file](config/routes/phala-cloud-sepolia-usdc.yaml)) | Circle's testnet USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | stablecoin: 1.00 while Coin Metrics' `usdc` rate is within 1% | [Circle's faucet](https://faucet.circle.com) (Ethereum Sepolia) |
+| `phala-cloud-base-sepolia-pha-usd` ([file](config/routes/phala-cloud-base-sepolia-pha.yaml)) | test PHA `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284` (the same `MockERC20`, 18 decimals) | as on Sepolia | `mint(address,uint256)` is public |
+| `phala-cloud-base-sepolia-usdc-usd` ([file](config/routes/phala-cloud-base-sepolia-usdc.yaml)) | Circle's testnet USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | as on Sepolia | [Circle's faucet](https://faucet.circle.com) (Base Sepolia) |
+
+| Chain | `confirmations` | RPC providers | Sanctions oracle (a `MockSanctionsOracle`) |
+|---|---|---|---|
+| Sepolia (11155111) | `2`, Ethereum L1's default | `provider-a`, `provider-b` | `0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6` |
+| Base Sepolia (84532) | `safe`, the OP-stack default: about 5 minutes, never the sequencer's unsafe head (architecture §8) | `base-sepolia-a` `https://base-sepolia.gateway.tenderly.co`, `base-sepolia-b` `https://base-sepolia-rpc.publicnode.com`, both keyless | `0x8A0C93d85a05aD30741C193068abF2e5E16e7b35` |
 
 There is no USDT route: Tether publishes no testnet USDT, and a third-party token is not one.
-USDC moves about two transfers a block on Sepolia, so its route sets `backstop: addresses`, which
-puts the whole chain, PHA included, on transfer requests by recipient (architecture §8); the RPC
-cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
-usage](#measuring-rpc-usage)). Routes are attested config: adding or changing one is a PR and a
-Deploy `upgrade` of `topup`, never a reset.
+USDC moves one or two transfers a block on both chains, so its routes set `backstop: addresses`,
+which puts each whole chain, PHA included, on transfer requests by recipient (architecture §8); the
+RPC cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
+usage](#measuring-rpc-usage)). Base's public `https://sepolia.base.org` is not a provider: it
+caps `eth_getLogs` at 1 000 blocks. publicnode refuses logs with no contract address, so it is
+provider B ([RPC providers](#rpc-providers)). The head loop polls every 12 s on both chains
+(`--head-poll-interval-s`), six Base blocks, so Base Sepolia costs about what Sepolia does.
+Routes are attested config: adding or changing one is a PR and a Deploy `upgrade` of `topup`,
+never a reset.
 
 ### Staging reset (HUMAN-ONLY)
 

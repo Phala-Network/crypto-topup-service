@@ -36,10 +36,10 @@ factory, so a treasury change never needs a new factory.
 - Two RPC providers for each chain used by post-deployment verification.
 - A funded deployment EOA. Keep `PRIVATE_KEY` only in the operator's environment or secret manager.
 
-`deploy/contracts/networks.json` maps each target network name to its chain id; Sepolia and
-mainnet are prefilled. Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects the expected
-chain id, which the RPC's `eth_chainId` must report, and the optional label distinguishes providers
-in the report.
+`deploy/contracts/networks.json` maps each target network name to its chain id; Sepolia, Base
+Sepolia, and mainnet are prefilled. Targets are written `NETWORK[/LABEL]=URL`; `NETWORK` selects
+the expected chain id, which the RPC's `eth_chainId` must report, and the optional label
+distinguishes providers in the report.
 
 ### Treasury Safe
 
@@ -162,6 +162,37 @@ have deployed it), it accepts only the exact runtime hashes derived from the loc
 `verify-deployment.sh` checks, on every target, the chain id, the proxy, factory, and
 implementation runtime code hashes, `implementation()`, the implementation's `factory()`, and
 `addressOf(treasury, salt)` for every sample forwarder of `contracts/test-vectors/create2.json`.
+
+## Base Sepolia
+
+The committed Base Sepolia routes (`deploy/config/routes/phala-cloud-base-sepolia-pha.yaml` and
+`phala-cloud-base-sepolia-usdc.yaml`) use the same deployment, **deployed on Base Sepolia (84532)
+and verified**: `verify-deployment.sh --rpc base-sepolia/a=… --rpc base-sepolia/b=…` passes on both
+staging providers (September 2026), and every runtime code hash equals Sepolia's. Preflight
+re-checks it on every Deploy; the Verify contracts workflow checks Sepolia only.
+
+| Contract | Address |
+|---|---|
+| `ForwarderFactory` | `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` |
+| forwarder implementation | `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` |
+| sanctions-oracle stand-in (`MockSanctionsOracle`; Base Sepolia has no Chainalysis oracle) | `0x8A0C93d85a05aD30741C193068abF2e5E16e7b35` |
+| test PHA (`MockERC20`, 18 decimals, public `mint`) | `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284` |
+| a second `MockERC20`, the unsupported-token test contract | `0xC60dE2C49c2b546F968C68a51370250148C52e4b` |
+| Circle's testnet USDC (`FiatTokenProxy` to `FiatTokenV2_2` `0xd74cc5d436923b8ba2c179b4bca2841d8a52c5b5`, 6 decimals) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+
+The chain carries the canonical proxy and Multicall3 at their committed code hashes, and the
+mocks' code equals Sepolia's.
+
+**Treasury on Base Sepolia.** The staging treasury is the Safe
+`0x26430107887d4a691B340BdB887096B83E7a5844` on both Sepolia and Base Sepolia: the same SafeL2
+v1.4.1 (singleton `0x29fcB43b46531BcA003ddC8FCB67FFE91900C762`), 1-of-1 with owner
+`0xBfB672596209327979Dc7AB95960286D29e9Af1D`, and the `CompatibilityFallbackHandler`
+`0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99` on each (read on both chains, September 2026).
+**Never use `0x936c1991f8dA9a919fa11b557a3514719f5A4504` on Base Sepolia**, as a treasury or for
+anything else. A Safe exists there at the address of Sepolia's staging finance Safe, but it is an
+unusable copy: its only owner, `0x016a227d4eA58914D5b3EA0790B955BFEa55b737`, is a key that was
+destroyed, so nothing it receives can ever leave. `safe-expectations.json` lists no Base Sepolia
+network, so `verify-safe.sh` refuses a Base Sepolia target instead of checking that copy.
 
 ## Mainnet
 
