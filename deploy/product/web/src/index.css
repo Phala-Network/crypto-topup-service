@@ -98,7 +98,8 @@
 .dark {
     --background: oklch(0.13 0 0);
     --foreground: oklch(0.985 0 0);
-    --card: oklch(0.18 0 0);
+    /* The product's surface, raised above the page; the console sits below it (.console). */
+    --card: oklch(0.195 0 0);
     --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
@@ -116,7 +117,7 @@
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.93 0.19 124);
-    --console: oklch(0.165 0.007 265);
+    --console: oklch(0.095 0.012 265);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
@@ -133,7 +134,9 @@
 }
 
 /* The backend's console: a dark surface in either theme (it also carries `.dark`), with its own
-   quieter layers, so the product and what its backend sees read apart at a glance. */
+   quieter layers, so the product and what its backend sees read apart at a glance: on the light
+   page it is the one dark area; on the dark page it is recessed below it, bluer and darker, while
+   the product is raised above it. */
 .console {
     --background: var(--console);
     --card: oklch(1 0 0 / 3%);
@@ -147,6 +150,11 @@
     --ring: oklch(0.93 0.19 124);
     background-color: var(--console);
     color: var(--foreground);
+}
+html.dark .console {
+    --border: oklch(0.75 0.06 265 / 13%);
+    --muted: oklch(0.75 0.06 265 / 7%);
+    --card: oklch(0.75 0.06 265 / 5%);
 }
 
 @layer base {

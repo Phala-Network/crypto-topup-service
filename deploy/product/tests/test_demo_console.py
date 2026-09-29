@@ -148,6 +148,25 @@ def _list(url: str, data: list[dict[str, Any]]) -> dict[str, Any]:
     return {"object": "list", "url": url, "has_more": False, "data": data}
 
 
+def _config_asset(asset: str, chain_id: int, contract: str) -> dict[str, Any]:
+    return {
+        "asset": asset,
+        "chain_id": chain_id,
+        "confirmations": "2",
+        "contract": contract,
+        "decimals": 18,
+        "max_deposit_atomic": "1" + "0" * 24,
+        "min_amount": 100,
+        "min_refund_atomic": "1" + "0" * 18,
+        "pricing": "spot",
+        "quote_spread_bps": 50,
+        "quote_tolerance_bps": 100,
+        "quote_ttl_seconds": 900,
+        "typical_credit_seconds": 24,
+        "typical_finality_seconds": 900,
+    }
+
+
 class Service:
     """The service's merchant API, as much of it as the demo reads."""
 
@@ -159,13 +178,36 @@ class Service:
         self.wrong_address: str | None = None
         self.customer = "acct"
         self.requests: list[httpx.Request] = []
+        # Test PHA and a second token on the product's chain, and a token on a chain the
+        # product's pins do not cover.
+        self.assets = [
+            _config_asset("pha", 11155111, CONFIG.token),
+            _config_asset("usdc", 11155111, "0x" + "55" * 20),
+            _config_asset("pha", 1, "0x" + "66" * 20),
+        ]
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         path = request.url.path
         body = json.loads(request.content) if request.content else {}
+        if path == "/v1/config":
+            config = {
+                "object": "config",
+                "livemode": False,
+                "currency": "usd",
+                "assets": self.assets,
+                "max_open_amount_per_account": 1_000_000,
+                "max_open_amount_per_customer": 500_000,
+                "max_open_quotes": 100,
+            }
+            return httpx.Response(200, json=config)
         if path == "/v1/quotes":
-            self.quote = _quote(body["client_reference_id"], metadata=body["metadata"])
+            self.quote = _quote(
+                body["client_reference_id"],
+                metadata=body["metadata"],
+                chain_id=body["chain_id"],
+                asset=body["asset"],
+            )
             quote = {**self.quote, "client_secret": f"{QUOTE}_secret_{'ab' * 24}"}
             return httpx.Response(200, json=quote)
         if path.startswith("/v1/quotes/"):
@@ -288,7 +330,8 @@ def _get(console: DemoConsole, cookie: str, path: str) -> Any:
 
 
 def _create_quote(console: DemoConsole, cookie: str) -> dict[str, Any]:
-    status, body = _post(console, cookie, "quotes", {"amount": 2500})
+    request = {"amount": 2500, "chain_id": 11155111, "asset": "pha"}
+    status, body = _post(console, cookie, "quotes", request)
     assert status == HTTPStatus.OK
     assert body["client_secret"].startswith(QUOTE)
     # The address the SDK recomputed from the pins, for `<Checkout expectedAddress>`.
@@ -306,6 +349,68 @@ def _steps(console: DemoConsole, cookie: str, path: str = f"quotes/{QUOTE}") -> 
     status, body = _get(console, cookie, path)
     assert status == HTTPStatus.OK
     return {step["key"]: step["state"] for step in body["steps"]}
+
+
+def test_offers_the_services_tokens_by_network_on_the_products_chains(
+    demo: tuple[DemoConsole, Service],
+) -> None:
+    console, service = demo
+    # Read before a demo account exists, like the attestation.
+    response = console.handle("GET", "/api/assets", WEBSITE, b"")
+    assert response.status == HTTPStatus.OK
+    # The service also takes PHA on chain 1, which the product has no treasury pin for.
+    [network] = json.loads(response.body)["networks"]
+    assert {key: network[key] for key in ("chain_id", "name", "testnet")} == {
+        "chain_id": 11155111,
+        "name": "Sepolia testnet",
+        "testnet": True,
+    }
+    assert [a["symbol"] for a in network["assets"]] == ["PHA", "USDC"]
+    assert network["assets"][0] == {
+        "asset": "pha",
+        "symbol": "PHA",
+        "contract": CONFIG.token,
+        "decimals": 18,
+        "pricing": "spot",
+        "min_amount": 100,
+        "quote_ttl_seconds": 900,
+    }
+    # Cached: the service's config is read once.
+    console.handle("GET", "/api/assets", WEBSITE, b"")
+    assert [r.url.path for r in service.requests].count("/v1/config") == 1
+
+
+def test_a_quote_is_for_an_offered_network_and_token_and_returns_its_locked_rate(
+    demo: tuple[DemoConsole, Service],
+) -> None:
+    console, service = demo
+    cookie = _account(console)
+    for pair in (
+        {"chain_id": 1, "asset": "pha"},  # the service's, on a chain without the product's pins
+        {"chain_id": 11155111, "asset": "dai"},  # no such token
+        {"chain_id": "11155111", "asset": "pha"},
+        {"asset": "pha"},
+        {"chain_id": 11155111},
+    ):
+        status, body = _post(console, cookie, "quotes", {"amount": 2500, **pair})
+        assert (status, body) == (HTTPStatus.BAD_REQUEST, {"code": "asset_invalid"})
+    assert "/v1/quotes" not in [r.url.path for r in service.requests]
+    request = {"amount": 2500, "chain_id": 11155111, "asset": "usdc"}
+    status, body = _post(console, cookie, "quotes", request)
+    assert status == HTTPStatus.OK
+    sent = json.loads(service.requests[-1].content)
+    assert (sent["chain_id"], sent["asset"]) == (11155111, "usdc")
+    assert (body["chain_id"], body["asset"], body["exchange_rate"], body["expires_at"]) == (
+        11155111,
+        "usdc",
+        "25.00000000",
+        NOW + 900,
+    )
+    assert body["amount_atomic"] == "100"
+    # The unpaid quote's row carries its asset and rate.
+    _, account = _get(console, cookie, "account")
+    [row] = account["payments"]
+    assert (row["asset"], row["exchange_rate"]) == ("usdc", "25.00000000")
 
 
 def test_an_expired_quote_without_payment_fails_at_the_transfer(
@@ -577,3 +682,20 @@ def test_the_config_requires_the_website_origin() -> None:
 def test_the_config_requires_an_account_id() -> None:
     with pytest.raises(ValueError, match="acct_"):
         replace(CONFIG, account="phala-cloud")
+
+
+def test_a_ledger_from_before_quotes_kept_their_asset_gains_the_column(tmp_path: Path) -> None:
+    ledger = ProductLedger()
+    with ledger.transaction() as db:
+        db.execute(
+            "CREATE TABLE demo_quotes (id TEXT PRIMARY KEY, account TEXT NOT NULL, "
+            "amount INTEGER NOT NULL, amount_atomic TEXT NOT NULL, exchange_rate TEXT NOT NULL, "
+            "address TEXT NOT NULL, expires_at INTEGER NOT NULL, created INTEGER NOT NULL, "
+            "api TEXT NOT NULL)"
+        )
+    (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
+    for _ in range(2):
+        DemoConsole(replace(CONFIG, api_key_file=str(tmp_path / "product.key")), ledger)
+    with ledger.transaction() as db:
+        columns = [row[1] for row in db.execute("PRAGMA table_info(demo_quotes)")]
+    assert columns[-1] == "asset"

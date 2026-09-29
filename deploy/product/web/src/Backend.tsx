@@ -5,11 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import type { Account, DepositAddressResponse, Selection, Timeline, Trust } from "./api.js";
+import type { Account, DepositAddressResponse, Network, Selection, Timeline, Trust } from "./api.js";
 import { Detail, Details, Empty, ExplorerLink, InfoTip, LINK, StatusBadge, Subsection } from "./common.js";
 import { AreaLabel } from "./Product.js";
 import { Refunds } from "./Refunds.js";
-import { day, dollars, short, signedDollars, statusLabel, time, tokens } from "./format.js";
+import { day, dollars, price, short, signedDollars, statusLabel, time, tokenName, tokens } from "./format.js";
 import { Sweeps } from "./Sweeps.js";
 import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
 
@@ -24,16 +24,16 @@ export function Backend({
   timeline,
   trust,
   address,
+  networks,
   onSelect,
-  onChanged,
 }: {
   account: Account | null;
   selected: Selection | null;
   timeline: Timeline | null;
   trust: Trust | null;
   address: DepositAddressResponse | null;
+  networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
-  onChanged: () => void;
 }) {
   const live = timeline?.steps.some((step) => step.state === "current") ?? selected !== null;
   const order = timeline?.quote?.metadata["order_id"];
@@ -43,7 +43,7 @@ export function Backend({
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"
-        className="dark console @container/console flex min-w-0 flex-col overflow-hidden rounded-2xl border shadow-[0_12px_40px_-12px_rgb(0_0_0/0.35)]"
+        className="dark console @container/console flex min-w-0 flex-col overflow-hidden rounded-2xl border shadow-[0_12px_40px_-12px_rgb(0_0_0/0.35)] dark:shadow-[inset_0_1px_12px_rgb(0_0_0/0.35)]"
       >
         <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-5 py-3.5">
           <span className="flex items-center gap-2 font-mono text-[0.6875rem] tracking-wide uppercase">
@@ -79,7 +79,7 @@ export function Backend({
           <TabsList
             variant="line"
             aria-label="Backend"
-            className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-4 py-0 sm:gap-5 sm:px-5"
+            className="h-11! w-full justify-start gap-2 overflow-x-auto rounded-none border-b px-3.5 py-0 sm:gap-5 sm:px-5"
           >
             <Tab value="payments" count={account?.payments.length}>
               Payments
@@ -99,7 +99,13 @@ export function Backend({
             </Tab>
           </TabsList>
           <TabsContent value="payments" className="p-5">
-            <PaymentsTab account={account} selected={selected} address={address} onSelect={onSelect} />
+            <PaymentsTab
+              account={account}
+              selected={selected}
+              address={address}
+              networks={networks}
+              onSelect={onSelect}
+            />
           </TabsContent>
           <TabsContent value="refunds" className="p-5">
             {timeline === null || deposit === null || account === null ? (
@@ -107,7 +113,7 @@ export function Backend({
             ) : (
               <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
                 {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
-                <Refunds timeline={timeline} deposit={deposit} account={account} onChanged={onChanged} />
+                <Refunds timeline={timeline} deposit={deposit} account={account} />
               </div>
             )}
           </TabsContent>
@@ -146,37 +152,58 @@ function Tab({ value, count, children }: { value: string; count?: number | undef
   );
 }
 
+/** Follows a payment in the event stream above. */
+function FollowButton({ selected, id, onClick }: { selected: boolean; id: string; onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant={selected ? "secondary" : "ghost"}
+      size="xs"
+      className="-my-0.5 w-[4.75rem]"
+      onClick={onClick}
+      aria-label={`Follow ${id}`}
+      aria-pressed={selected}
+    >
+      {selected ? "Following" : "Follow"}
+    </Button>
+  );
+}
+
 function PaymentsTab({
   account,
   selected,
   address,
+  networks,
   onSelect,
 }: {
   account: Account | null;
   selected: Selection | null;
   address: DepositAddressResponse | null;
+  networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
-  const symbol = account?.token.symbol ?? "PHA";
   return (
     <div className="flex flex-col gap-8">
       <section aria-label="Payments" className="flex min-w-0 flex-col text-xs">
         {account === null || account.payments.length === 0 ? (
           <Empty>No top-ups yet.</Empty>
         ) : (
-          <Table className="text-xs">
+          <Table className="text-xs [&_td]:align-top [&_td]:leading-5 [&_th]:h-9 [&_th]:text-muted-foreground">
             <TableHeader>
-              <TableRow>
-                <TableHead scope="col">Date</TableHead>
-                <TableHead scope="col">Method</TableHead>
-                <TableHead scope="col">{symbol}</TableHead>
-                <TableHead scope="col">Transaction</TableHead>
+              <TableRow className="hover:bg-transparent">
+                <TableHead scope="col" className="pl-0">
+                  Payment
+                </TableHead>
+                <TableHead scope="col">Amount</TableHead>
                 <TableHead scope="col">Status</TableHead>
-                <TableHead scope="col">Credited</TableHead>
-                <TableHead scope="col">Refunded</TableHead>
-                <TableHead scope="col">Nets to</TableHead>
-                <TableHead scope="col">
-                  <span className="sr-only">Follow</span>
+                <TableHead scope="col" className="text-right">
+                  Credited
+                </TableHead>
+                <TableHead scope="col" className="text-right">
+                  Nets to
+                </TableHead>
+                <TableHead scope="col" className="pr-0 text-right">
+                  Timeline
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -186,6 +213,7 @@ function PaymentsTab({
                   ? { kind: "deposit", id: row.id }
                   : { kind: "quote", id: row.id };
                 const isSelected = selected?.id === row.id || selected?.id === row.quote;
+                const symbol = (row.asset ?? account.token.symbol).toUpperCase();
                 return (
                   <TableRow
                     key={row.id}
@@ -194,36 +222,41 @@ function PaymentsTab({
                     data-state={isSelected ? "selected" : undefined}
                     aria-selected={isSelected}
                   >
-                    <TableCell className="text-muted-foreground" title={time(row.created)}>
-                      {day(row.created)}
-                    </TableCell>
-                    <TableCell>{row.kind === "quote" ? "Quote" : "Deposit address"}</TableCell>
-                    <TableCell>{tokens(row.amount_atomic, symbol)}</TableCell>
-                    <TableCell>
-                      {row.tx_hash === null ? "—" : <ExplorerLink account={account} kind="tx" value={row.tx_hash} />}
+                    <TableCell className="pl-0">
+                      <div className="font-medium">{row.kind === "quote" ? "Quote" : "Deposit address"}</div>
+                      <div className="text-muted-foreground" title={time(row.created)}>
+                        {day(row.created)}
+                      </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div>{tokens(row.amount_atomic, symbol)}</div>
+                      <div className="text-muted-foreground">
+                        {row.exchange_rate === null ? "—" : `at ${price(row.exchange_rate)} / ${symbol}`}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex max-w-40 flex-wrap gap-1">
                         <StatusBadge status={row.status}>{statusLabel(row.status)}</StatusBadge>
                         {row.final && <Badge variant="outline">final</Badge>}
                         {row.swept && <StatusBadge status="swept">swept</StatusBadge>}
                       </div>
+                      {row.tx_hash !== null && (
+                        <div className="mt-1">
+                          <ExplorerLink account={account} kind="tx" value={row.tx_hash} />
+                        </div>
+                      )}
                     </TableCell>
-                    <TableCell>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</TableCell>
-                    <TableCell>
-                      {row.amount_refunded_atomic === "0" ? "—" : tokens(row.amount_refunded_atomic, symbol)}
-                    </TableCell>
-                    <TableCell className="font-medium">{row.net === null ? "—" : dollars(row.net)}</TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        onClick={() => onSelect(selection)}
-                        aria-label={`Follow ${row.id}`}
-                      >
-                        {isSelected ? "Following" : "Follow"}
-                      </Button>
+                      {row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="font-medium">{row.net === null ? "—" : dollars(row.net)}</div>
+                      {row.amount_refunded_atomic !== "0" && (
+                        <div className="text-muted-foreground">−{tokens(row.amount_refunded_atomic, symbol)} refunded</div>
+                      )}
+                    </TableCell>
+                    <TableCell className="pr-0 text-right">
+                      <FollowButton selected={isSelected} id={row.id} onClick={() => onSelect(selection)} />
                     </TableCell>
                   </TableRow>
                 );
@@ -268,7 +301,13 @@ function PaymentsTab({
           )}
         </Subsection>
         {account !== null && address !== null && (
-          <AddressView account={account} address={address} selected={selected} onSelect={onSelect} />
+          <AddressView
+            account={account}
+            address={address}
+            networks={networks}
+            selected={selected}
+            onSelect={onSelect}
+          />
         )}
       </div>
     </div>
@@ -279,15 +318,19 @@ function PaymentsTab({
 function AddressView({
   account,
   address,
+  networks,
   selected,
   onSelect,
 }: {
   account: Account;
   address: DepositAddressResponse;
+  networks: Network[] | undefined;
   selected: Selection | null;
   onSelect: (selection: Selection) => void;
 }) {
   const view = address.deposit_address;
+  // Each of the address's networks as the product's selectors name it and its tokens.
+  const named = (chainId: number) => networks?.find((each) => each.chain_id === chainId);
   return (
     <Subsection
       title="Deposit address"
@@ -314,19 +357,29 @@ function AddressView({
           </Detail>
         ) : (
           view.networks.map((network) => (
-            <Detail key={network.chain_id} label={`Chain ${network.chain_id}`} className="font-mono">
+            <Detail
+              key={network.chain_id}
+              label={`Address on ${named(network.chain_id)?.name ?? `chain ${network.chain_id}`}`}
+              className="font-mono"
+            >
               {network.address}
             </Detail>
           ))
         )}
-        <Detail label="Networks">
-          {view.networks
-            .map(
-              (network) =>
-                `${network.chain_id === account.network.chain_id ? account.network.name : `Chain ${network.chain_id}`}: ${network.assets.map((asset) => asset.asset.toUpperCase()).join(", ")}`,
-            )
-            .join(" · ")}
-        </Detail>
+        {view.networks.map((network) => {
+          const known = named(network.chain_id);
+          return (
+            <Detail
+              key={network.chain_id}
+              label={known?.name ?? `Chain ${network.chain_id}`}
+              data-testid="deposit-address-network"
+            >
+              {network.assets
+                .map((asset) => tokenName(asset.asset.toUpperCase(), known?.testnet ?? account.network.testnet))
+                .join(", ")}
+            </Detail>
+          );
+        })}
         <Detail label="Metadata" className="font-mono">
           {JSON.stringify(view.metadata)}
         </Detail>
@@ -336,26 +389,29 @@ function AddressView({
       ) : (
         <ul className="flex flex-col divide-y rounded-lg border" aria-label="Payments the product sees" aria-live="polite">
           {view.payments.map((payment) => {
-            const isSelected = selected?.id === payment.deposit;
+            // The deposit's valuation, once the service recorded it.
+            const rate = account.payments.find((row) => row.id === payment.deposit)?.exchange_rate ?? null;
+            const symbol = account.token.symbol;
             return (
               <li key={payment.deposit} data-testid="address-payment" className="flex items-center gap-3 px-3 py-2">
-                <span className="min-w-0 flex-1">
-                  <span className="font-medium tabular-nums">{tokens(payment.amount_atomic, account.token.symbol)}</span>{" "}
-                  <span className="text-muted-foreground">
-                    {payment.status === "seen"
-                      ? `received, ${payment.confirmations ?? 0} confirmation${payment.confirmations === 1 ? "" : "s"}`
-                      : "recorded as a deposit"}
-                  </span>{" "}
-                  · <ExplorerLink account={account} kind="tx" value={payment.tx_hash} />
+                <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+                  <span>
+                    <span className="font-medium tabular-nums">{tokens(payment.amount_atomic, symbol)}</span>{" "}
+                    <span className="text-muted-foreground">
+                      {payment.status === "seen"
+                        ? `received, ${payment.confirmations ?? 0} confirmation${payment.confirmations === 1 ? "" : "s"}`
+                        : rate === null
+                          ? "recorded as a deposit"
+                          : `credited at ${price(rate)} / ${symbol}`}
+                    </span>
+                  </span>
+                  <ExplorerLink account={account} kind="tx" value={payment.tx_hash} />
                 </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
+                <FollowButton
+                  selected={selected?.id === payment.deposit}
+                  id={payment.deposit}
                   onClick={() => onSelect({ kind: "deposit", id: payment.deposit })}
-                >
-                  {isSelected ? "Following" : "Follow"}
-                </Button>
+                />
               </li>
             );
           })}

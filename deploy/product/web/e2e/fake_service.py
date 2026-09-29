@@ -1,6 +1,7 @@
 """A stand-in for the Phala Pay service in the demo's end-to-end test.
 
-It answers the merchant API the demo uses, in the shapes of crates/topup/openapi.json: quotes and
+It answers the merchant API the demo uses, in the shapes of crates/topup/openapi.json: the config
+(test PHA on Sepolia), quotes and
 their public view, deposit addresses and their public view, deposits, refunds (`mark_paid`
 verified on chain), forwarders, the balance, sweeps, attestation, and the TLS evidence. It follows
 real payments on Anvil the way the service does, compressed in time (one block a second):
@@ -17,10 +18,11 @@ real payments on Anvil the way the service does, compressed in time (one block a
 - the service never sweeps: `Flushed` events of the factory, from whoever sent the flush, are
   indexed once at `FINAL_DEPTH` as sweeps and mark the forwarder's earlier deposits `swept`.
 
-`POST /_test/deposits/{id}/reverse` makes a deposit `reversed`, as the service's finality watch
-does for a proven-dropped transaction, and sends `deposit.reversed`. Addresses, deposit ids, the
-webhook signature, and the attestation binding use the SDK's own helpers, so the product checks
-them exactly as it checks the real service.
+`POST /_test/quotes/{id}/expire` and `/cancel` end an unpaid quote, as its window's end or the
+merchant's cancel does. `POST /_test/deposits/{id}/reverse` makes a deposit `reversed`, as the
+service's finality watch does for a proven-dropped transaction, and sends `deposit.reversed`.
+Addresses, deposit ids, the webhook signature, and the attestation binding use the SDK's own
+helpers, so the product checks them exactly as it checks the real service.
 
     python fake_service.py --port 8545 --rpc http://127.0.0.1:8546 --token 0x… \\
         --product-webhook http://127.0.0.1:8089/webhooks --webhook-seed <64 hex> \\
@@ -666,6 +668,19 @@ class FakeTopup:
             raise RefusedError(HTTPStatus.NOT_FOUND, "resource_missing")
         return refund
 
+    def end_quote(self, quote_id: str, status: str) -> dict[str, Any]:
+        """An unpaid quote's end: `expired` at the end of its window, or `canceled`."""
+        with self.lock:
+            quote = self.quotes.get(quote_id)
+            if quote is None:
+                raise RefusedError(HTTPStatus.NOT_FOUND, "resource_missing")
+            if quote["status"] != "open":
+                raise RefusedError(HTTPStatus.BAD_REQUEST, "quote_not_open")
+            quote["status"] = status
+            if status == "expired":
+                quote["expires_at"] = int(time.time())
+            return self.quote_view(quote)
+
     def reverse(self, deposit_id: str) -> dict[str, Any]:
         """The finality watch's outcome for a proven-dropped transaction."""
         with self.lock:
@@ -706,6 +721,33 @@ class FakeTopup:
             }
         ]
         return {"object": "balance", "livemode": False, "unswept": amounts if total else []}
+
+    def config(self) -> dict[str, Any]:
+        pha = {
+            "asset": "pha",
+            "chain_id": CHAIN_ID,
+            "confirmations": str(CREDIT_DEPTH),
+            "contract": self.token,
+            "decimals": 18,
+            "max_deposit_atomic": str(10**24),
+            "min_amount": 100,
+            "min_refund_atomic": str(MIN_REFUND_ATOMIC),
+            "pricing": "spot",
+            "quote_spread_bps": 0,
+            "quote_tolerance_bps": 0,
+            "quote_ttl_seconds": 900,
+            "typical_credit_seconds": CREDIT_DEPTH,
+            "typical_finality_seconds": FINAL_DEPTH,
+        }
+        return {
+            "object": "config",
+            "livemode": False,
+            "currency": "usd",
+            "assets": [pha],
+            "max_open_amount_per_account": 1_000_000,
+            "max_open_amount_per_customer": 500_000,
+            "max_open_quotes": 100,
+        }
 
     def list_forwarders(self, query: dict[str, str]) -> list[dict[str, Any]]:
         with self.lock:
@@ -836,6 +878,8 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
                 self.send(HTTPStatus.OK, _page(path, data))
             elif parts[:2] == ["v1", "refunds"] and len(parts) == 3:
                 self.send(HTTPStatus.OK, fake.refund(parts[2]))
+            elif path == "/v1/config":
+                self.send(HTTPStatus.OK, fake.config())
             elif path == "/v1/balance":
                 self.send(HTTPStatus.OK, fake.balance())
             elif path == "/v1/forwarders":
@@ -857,6 +901,10 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
             body = json.loads(self.rfile.read(length) or b"{}")
             if parts[:2] == ["_test", "deposits"] and parts[3:] == ["reverse"]:
                 self.send(HTTPStatus.OK, _public(fake.reverse(parts[2])))
+                return
+            if parts[:2] == ["_test", "quotes"] and parts[3:] in (["expire"], ["cancel"]):
+                status = "expired" if parts[3] == "expire" else "canceled"
+                self.send(HTTPStatus.OK, fake.end_quote(parts[2], status))
                 return
             if not self.merchant():
                 raise RefusedError(HTTPStatus.UNAUTHORIZED, "api_key_missing")

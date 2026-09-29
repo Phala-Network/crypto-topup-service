@@ -23,6 +23,30 @@ export interface Account {
   payments: PaymentRow[];
 }
 
+/**
+ * A network the customer can pay on, with its tokens: the service's `GET /v1/config` `assets` on
+ * the chains the product has pins for.
+ */
+export interface Network {
+  chain_id: number;
+  /** For display, for example `Sepolia testnet`. */
+  name: string;
+  testnet: boolean;
+  assets: Asset[];
+}
+
+export interface Asset {
+  /** The service's asset code, for example `pha`. */
+  asset: string;
+  symbol: string;
+  contract: string;
+  decimals: number;
+  pricing: string;
+  /** Cents. */
+  min_amount: number;
+  quote_ttl_seconds: number;
+}
+
 export interface LedgerLine {
   deposit: string;
   amount: number;
@@ -39,6 +63,10 @@ export interface PaymentRow {
   created: number;
   amount: number | null;
   amount_atomic: string;
+  /** `null` for a token without a route. */
+  asset: string | null;
+  /** USD per token: the quote's locked price, or the deposit's valuation. */
+  exchange_rate: string | null;
   status: string;
   final: boolean;
   swept: boolean;
@@ -96,6 +124,10 @@ export interface Deposit {
   swept: boolean;
   amount: number | null;
   amount_atomic: string;
+  asset: string | null;
+  /** USD per token the deposit was valued at, once valued. */
+  exchange_rate: string | null;
+  price_source: "quote" | "spot" | null;
   amount_refunded_atomic: string;
   amount_refunded: number;
   amount_reversed: number;
@@ -138,7 +170,14 @@ export interface LedgerView {
 
 export interface Timeline {
   kind: "quote" | "address";
-  quote: { id: string; status: string; metadata: Record<string, string> } | null;
+  quote: {
+    id: string;
+    status: string;
+    asset: string;
+    exchange_rate: string;
+    expires_at: number;
+    metadata: Record<string, string>;
+  } | null;
   deposit: Deposit | null;
   sent: { tx_hash: string; block_number: number; at: number } | null;
   steps: Step[];
@@ -168,6 +207,12 @@ export interface CreatedQuote {
   /** The quote's address as the product's SDK recomputed it from the pins. */
   expected_address: string;
   order_id: string;
+  chain_id: number;
+  asset: string;
+  amount_atomic: string;
+  /** The price the quote locks until `expires_at`, in USD per token. */
+  exchange_rate: string;
+  expires_at: number;
   api: ApiExchange[];
 }
 
@@ -257,9 +302,22 @@ export async function getAccount(): Promise<Account> {
   return expect<Account>(body, ["account_id", "balance", "ledger", "payments", "network", "token"]);
 }
 
-export async function createQuote(amount: number): Promise<CreatedQuote> {
-  const body = await post("quotes", { amount });
-  return expect<CreatedQuote>(body, ["quote", "client_secret", "expected_address", "api"]);
+export async function getNetworks(): Promise<Network[]> {
+  const body = await request("assets");
+  return expect<{ networks: Network[] }>(body, ["networks"]).networks;
+}
+
+export async function createQuote({
+  amount,
+  chainId,
+  asset,
+}: {
+  amount: number;
+  chainId: number;
+  asset: string;
+}): Promise<CreatedQuote> {
+  const body = await post("quotes", { amount, chain_id: chainId, asset });
+  return expect<CreatedQuote>(body, ["quote", "client_secret", "expected_address", "exchange_rate", "expires_at"]);
 }
 
 export async function createDepositAddress(): Promise<DepositAddressResponse> {
@@ -278,11 +336,15 @@ export async function getTimeline(selection: Selection): Promise<Timeline> {
   return expect<Timeline>(body, ["steps", "refunds", "events", "api"]);
 }
 
-export async function createRefund(
-  deposit: string,
-  amountAtomic: string,
-  destinationAddress: string,
-): Promise<Refund> {
+export async function createRefund({
+  deposit,
+  amountAtomic,
+  destinationAddress,
+}: {
+  deposit: string;
+  amountAtomic: string;
+  destinationAddress: string;
+}): Promise<Refund> {
   const body = await post("refunds", {
     deposit,
     amount_atomic: amountAtomic,
@@ -291,11 +353,15 @@ export async function createRefund(
   return expect<{ refund: Refund }>(body, ["refund"]).refund;
 }
 
-export async function markRefundPaid(
-  refund: string,
-  transactionHash: string,
-  receiptLogIndex: number | null,
-): Promise<Refund> {
+export async function markRefundPaid({
+  refund,
+  transactionHash,
+  receiptLogIndex,
+}: {
+  refund: string;
+  transactionHash: string;
+  receiptLogIndex: number | null;
+}): Promise<Refund> {
   const body = await post(`refunds/${encodeURIComponent(refund)}/mark_paid`, {
     transaction_hash: transactionHash,
     ...(receiptLogIndex === null ? {} : { receipt_log_index: receiptLogIndex }),

@@ -129,8 +129,46 @@ async function installWallet(page: Page) {
   );
 }
 
+/** The network, then the token, chosen: one network, Sepolia, with one token, test PHA. */
+async function expectPaymentOptions(product: Locator) {
+  const network = product.getByRole("radiogroup", { name: "Network" });
+  await expect(network.getByRole("radio")).toHaveCount(1);
+  await expect(network.getByRole("radio", { name: "Sepolia testnet", exact: true })).toBeChecked();
+  const token = product.getByRole("radiogroup", { name: "Token" });
+  await expect(token.getByRole("radio")).toHaveCount(1);
+  await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
+}
+
+/** Collects the page's console errors and CSP violations; the flows expect none. */
+async function watchConsole(page: Page): Promise<string[]> {
+  const problems: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      problems.push(message.text());
+    }
+  });
+  page.on("pageerror", (error) => problems.push(error.message));
+  await page.addInitScript(() => {
+    document.addEventListener("securitypolicyviolation", (event) => {
+      console.error(`CSP violation: ${event.violatedDirective} ${event.blockedURI}`);
+    });
+  });
+  return problems;
+}
+
 function step(timeline: Locator, key: string): Locator {
   return timeline.locator(`[data-step="${key}"]`);
+}
+
+/** Opens a step's line to its hint, time, and data (closed lines render none). */
+async function openStep(timeline: Locator, key: string): Promise<Locator> {
+  const line = step(timeline, key);
+  const trigger = line.getByRole("button").first();
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+    await trigger.click();
+  }
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return line;
 }
 
 async function expectComplete(timeline: Locator, keys: string[], timeout = 60_000) {
@@ -166,15 +204,20 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   context,
 }, testInfo) => {
   test.setTimeout(300_000);
+  const problems = await watchConsole(page);
   await installWallet(page);
   const response = await page.goto(env("SITE_URL"));
   expect(response?.headers()["content-security-policy"]).toContain("default-src 'none'");
 
-  // The headline, the testnet notice, the product beside its backend (the attestation in the
-  // backend's Trust tab), and a fresh demo account.
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Crypto payments, without custody.");
-  await expect(page.getByText("Sepolia testnet · mainnet not live yet")).toBeVisible();
+  // The headline, the product (marked as a testnet demo) beside its backend (the attestation in
+  // the backend's Trust tab), and a fresh demo account.
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Crypto payments, self-hosted.");
+  await expect(page.getByRole("link", { name: "Self-host it" })).toHaveAttribute(
+    "href",
+    "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md",
+  );
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
+  await expect(product.getByTestId("testnet-badge")).toHaveText("Testnet");
   const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
   await expect(scenes.getByRole("list", { name: "The steps of a payment" })).toBeVisible();
   const trust = await openTab(scenes, "Trust");
@@ -185,20 +228,34 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const [cookie] = await context.cookies();
   expect(cookie).toMatchObject({ name: "demo_account", path: "/", httpOnly: true, sameSite: "Lax" });
 
-  // The payer mints test PHA from the wallet, as the testnet notice offers.
-  const testnet = page.getByRole("note", { name: "Testnet demo" });
-  await testnet.getByRole("button", { name: "Get 1,000 test PHA" }).click();
-  await expect(testnet).toContainText("Minted:");
+  // The payer mints test PHA from the wallet, as the helper below the product offers.
+  const testTokens = page.getByRole("note", { name: "Test tokens" });
+  await testTokens.getByRole("button", { name: "Mint 1,000 test PHA" }).click();
+  await expect(testTokens).toContainText("Minted:");
   expect(await tokenBalance(env("PAYER_ADDRESS"))).toBe(parseEther("1000"));
 
+  // The customer picks the amount, the network, then the token: the product's one network,
+  // Sepolia, and its one token, test PHA, shown and chosen.
+  await expectPaymentOptions(product);
+
   // $20 at the fake service's 0.25 USD per PHA: exactly 80 PHA, with an order id in its metadata.
+  // The quote is for the chosen network and token.
   await product.getByText("$20.00", { exact: true }).click();
+  const quoteRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  expect((await quoteRequest).postDataJSON()).toEqual({ amount: 2000, chain_id: sepolia.id, asset: "pha" });
+  // The quote's locked rate; the SDK's status line holds the one countdown.
+  const rate = product.getByTestId("locked-rate");
+  await expect(rate).toContainText("Locked rate · Test PHA");
+  await expect(rate).toContainText("1 PHA = $0.25");
+  await expect(product.getByLabel("Time left to pay")).toHaveText(/^1[45]:\d\d$/);
+  await expect(product.getByText(/\d+:\d\d$/)).toHaveCount(1);
   const timeline = scenes.getByRole("list", { name: "Payment timeline" });
   await expect(step(timeline, "quote_created")).toHaveAttribute("data-state", "complete");
   await expect(step(timeline, "sent")).toHaveAttribute("data-state", "current");
-  await expect(step(timeline, "quote_created")).toContainText("0.25000000 USD per PHA");
-  await expect(step(timeline, "quote_created")).toContainText("80 PHA");
+  const created = await openStep(timeline, "quote_created");
+  await expect(created).toContainText("0.25000000 USD per PHA");
+  await expect(created).toContainText("80 PHA");
   const order = (await scenes.getByText(/^Order order_[0-9a-f]{12}/).textContent())?.match(/order_[0-9a-f]{12}/)?.[0];
   expect(order).toBeDefined();
   // Nothing of the backend shows in the product.
@@ -209,13 +266,16 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(product.getByText(/^Transaction sent:/)).toBeVisible();
   await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
   await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00");
+  // Nothing pending once credited: the locked rate is gone with the countdown.
+  await expect(rate).toHaveCount(0);
   await expect(product.getByTestId("balance")).toHaveText("$20.00", { timeout: 10_000 });
   // Real times: the block's, then each step's, with the elapsed time since sending.
-  await expect(step(timeline, "credited")).toContainText("after sending");
-  await expect(step(timeline, "credited")).toContainText("the quote's locked price");
+  const credited = await openStep(timeline, "credited");
+  await expect(credited).toContainText("after sending");
+  await expect(credited).toContainText("the quote's locked price");
   // Each step opens to its data. The order id arrives in the verified deposit.credited's
   // data.object.metadata.
-  await step(timeline, "webhook_received").getByRole("button").first().click();
+  await openStep(timeline, "webhook_received");
   await expect(step(timeline, "webhook_received").getByText("data.object.metadata")).toBeVisible();
   await expect(step(timeline, "webhook_received")).toContainText("verified");
   await expect(step(timeline, "webhook_received")).toContainText(`"order_id": "${order ?? ""}"`);
@@ -236,7 +296,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(sweeps.getByTestId("flush-status")).toContainText("Flush sent: 0x");
   await expectComplete(timeline, ["swept"]);
   expect(await tokenBalance(env("TREASURY"))).toBe(parseEther("80"));
-  await expect(step(timeline, "swept").locator("a").first()).toHaveAttribute(
+  await expect((await openStep(timeline, "swept")).locator("a").first()).toHaveAttribute(
     "href",
     /^https:\/\/sepolia\.etherscan\.io\/tx\/0x[0-9a-f]{64}$/,
   );
@@ -287,6 +347,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const row = scenes.getByTestId("payment").first();
   await expect(row).toContainText("Quote");
   await expect(row).toContainText("80 PHA");
+  await expect(row).toContainText("at $0.25 / PHA");
   await expect(row).toContainText("$15.00");
   await expect(scenes.getByTestId("ledger-line").filter({ hasText: "deposit.refunded" })).toContainText("−$5.00");
 
@@ -295,12 +356,34 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await page.screenshot({ path: testInfo.outputPath("refunds-dark.png"), fullPage: true });
   await page.setViewportSize({ width: 420, height: 900 });
   await page.screenshot({ path: testInfo.outputPath("mobile-dark.png"), fullPage: true });
+
+  // A quote that ends unpaid, expired or canceled, drops its locked rate too.
+  await page.setViewportSize({ width: 1360, height: 1000 });
+  const followed = scenes.locator('[title^="qt_"]');
+  for (const [end, message] of [
+    ["expire", "This quote has expired"],
+    ["cancel", "This quote was canceled"],
+  ] as const) {
+    const before = await followed.getAttribute("title");
+    await product.getByRole("button", { name: "Start a new top-up" }).click();
+    await product.getByText("$5.00", { exact: true }).click();
+    await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+    await expect(rate).toContainText("1 PHA = $0.25");
+    await expect(followed).not.toHaveAttribute("title", before ?? "");
+    const quote = (await followed.getAttribute("title")) ?? "";
+    const ended = await fetch(`${env("SERVICE_URL")}/_test/quotes/${quote}/${end}`, { method: "POST" });
+    expect(ended.status).toBe(200);
+    await expect(product.getByRole("status").first()).toContainText(message, { timeout: 10_000 });
+    await expect(rate).toHaveCount(0);
+  }
+  expect(problems).toEqual([]);
 });
 
 test("a deposit address: one verified address, any amount credited at spot, then reversed", async ({
   page,
 }, testInfo) => {
   test.setTimeout(180_000);
+  const problems = await watchConsole(page);
   await installWallet(page);
   await page.goto(env("SITE_URL"));
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
@@ -313,18 +396,23 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(page.getByRole("tab", { name: "Deposit address" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: "Deposit address" })).toBeFocused();
 
+  await expectPaymentOptions(product);
   await product.getByRole("button", { name: "Show my deposit address" }).click();
   // The backend sees the address checked against the product's pins.
   await expect(scenes.getByTestId("deposit-address-verified")).toContainText("Verified");
+  // Its networks and tokens, named as the product's selectors name them.
+  const tokensOnNetwork = scenes.getByTestId("deposit-address-network");
+  await expect(tokensOnNetwork).toHaveText("Test PHA");
+  await expect(tokensOnNetwork.locator("xpath=..")).toContainText("Sepolia testnet");
   const address = (await scenes.getByTestId("deposit-address").textContent()) ?? "";
   expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
   // The SDK's <DepositAddress> shows the customer the same address to copy.
   await expect(product.getByText(address).first()).toBeVisible();
 
   // Any amount, sent from a wallet as from an exchange.
-  const testnet = page.getByRole("note", { name: "Testnet demo" });
-  await testnet.getByRole("button", { name: "Get 1,000 test PHA" }).click();
-  await expect(testnet).toContainText("Minted:");
+  const testTokens = page.getByRole("note", { name: "Test tokens" });
+  await testTokens.getByRole("button", { name: "Mint 1,000 test PHA" }).click();
+  await expect(testTokens).toContainText("Minted:");
   const form = product.getByRole("form", { name: "Pay to the deposit address from a browser wallet" });
   await form.getByLabel(/^Send from your browser wallet/).fill("25");
   await form.getByRole("button", { name: "Send" }).click();
@@ -348,6 +436,8 @@ test("a deposit address: one verified address, any amount credited at spot, then
   expect(reversed.status).toBe(200);
 
   // 25 PHA at 0.25 USD, credited at spot; the address's metadata arrived with the deposit.
+  await openStep(timeline, "credited");
+  await openStep(timeline, "webhook_received");
   await expect(step(timeline, "credited")).toContainText("spot");
   await expect(step(timeline, "credited")).toContainText("$6.25");
   await expect(step(timeline, "webhook_received")).toContainText('"workspace": "demo-');
@@ -360,11 +450,15 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await openTab(scenes, "API");
   await expect(scenes.getByTestId("webhook-event").filter({ hasText: "deposit.reversed" })).toBeVisible();
   await expect(product.locator(".pp-payments")).toContainText("25 PHA");
+  // The customer sees each payment at the rate it was credited at.
+  await expect(product.getByTestId("top-up").first()).toContainText("25 Test PHA");
+  await expect(product.getByTestId("top-up").first()).toContainText("Credited at $0.25 / PHA, then reversed");
   await openTab(scenes, "Payments");
   const lines = scenes.getByTestId("ledger-line");
   await expect(lines.filter({ hasText: "deposit.credited" })).toContainText("+$6.25");
   await expect(lines.filter({ hasText: "deposit.reversed" })).toContainText("−$6.25");
   await page.screenshot({ path: testInfo.outputPath("deposit-address.png"), fullPage: true });
+  expect(problems).toEqual([]);
 });
 
 test("refuses another browser's payments and refunds, and rate-limits quote creation", async ({ browser }) => {
@@ -380,7 +474,7 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amount: 500 }),
+        body: JSON.stringify({ amount: 500, chain_id: 11155111, asset: "pha" }),
       });
       statuses.push(response.status);
       const body = (await response.json()) as { quote?: string };

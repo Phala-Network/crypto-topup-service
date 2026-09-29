@@ -1,9 +1,10 @@
-import { useCallback, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { getSweeps, type Account, type Sweeps as SweepsView } from "./api.js";
-import { Detail, Details, Disclosure, Empty, ExplorerLink, InfoTip, downloadJson, errorMessage, usePolling, wallet } from "./common.js";
+import type { Account, FlushCall } from "./api.js";
+import { Detail, Details, Disclosure, Empty, ExplorerLink, InfoTip, downloadJson, errorMessage, wallet } from "./common.js";
 import { time, tokens } from "./format.js";
+import { useSweeps } from "./queries.js";
 import { Requests } from "./Timeline.js";
 
 /**
@@ -14,12 +15,13 @@ import { Requests } from "./Timeline.js";
  * whoever sends it pays the gas, and the funds can only reach the treasury.
  */
 export function Sweeps({ account }: { account: Account }) {
-  const [view, setView] = useState<SweepsView | null>(null);
-  const [state, setState] = useState<{ pending: boolean; text: string | null }>({ pending: false, text: null });
-  const refresh = useCallback(() => {
-    getSweeps().then(setView, () => undefined);
-  }, []);
-  usePolling(refresh, 10_000);
+  const view = useSweeps().data ?? null;
+  const send = useMutation({
+    mutationFn: async (call: FlushCall) => {
+      const { sendCall } = await wallet();
+      return sendCall(account.network.chain_id, call);
+    },
+  });
   const symbol = account.token.symbol;
   const flush = view?.flush[0];
   return (
@@ -64,23 +66,8 @@ export function Sweeps({ account }: { account: Account }) {
                   </pre>
                 </Disclosure>
                 <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    disabled={state.pending}
-                    onClick={() => {
-                      setState({ pending: true, text: null });
-                      wallet()
-                        .then(({ sendCall }) => sendCall(account.network.chain_id, flush))
-                        .then(
-                          (hash) => {
-                            setState({ pending: false, text: `Flush sent: ${hash}. It is indexed once final.` });
-                          },
-                          (error: unknown) =>
-                            setState({ pending: false, text: errorMessage(error, "The wallet did not send it.") }),
-                        );
-                    }}
-                  >
-                    {state.pending ? "Confirm in your wallet…" : "Sign the flush from my wallet"}
+                  <Button type="button" disabled={send.isPending} onClick={() => send.mutate(flush)}>
+                    {send.isPending ? "Confirm in your wallet…" : "Sign the flush from my wallet"}
                   </Button>
                   <Button
                     type="button"
@@ -91,7 +78,8 @@ export function Sweeps({ account }: { account: Account }) {
                   </Button>
                 </div>
                 <p className="text-muted-foreground wrap-anywhere" aria-live="polite" data-testid="flush-status">
-                  {state.text}
+                  {send.isSuccess && `Flush sent: ${send.data}. It is indexed once final.`}
+                  {send.isError && errorMessage(send.error, "The wallet did not send it.")}
                 </p>
               </div>
             )}

@@ -78,3 +78,20 @@ export function statusLabel(status: string): string {
   };
   return labels[status] ?? status;
 }
+
+const rate = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 8,
+});
+
+/** A USD-per-token rate as the service states it (8 decimals), without trailing zeros: `$0.0601`. */
+export function price(exchangeRate: string): string {
+  return rate.format(Number(exchangeRate));
+}
+
+/** A token as the customer sees it: `Test PHA` on a testnet, so it is never taken for real money. */
+export function tokenName(symbol: string, testnet: boolean): string {
+  return testnet ? `Test ${symbol}` : symbol;
+}

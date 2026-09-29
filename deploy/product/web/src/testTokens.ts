@@ -5,6 +5,7 @@ import {
   erc20Abi,
   getAddress,
   isHex,
+  parseAbi,
   parseUnits,
   type Account,
   type Chain,
@@ -16,18 +17,7 @@ import {
 // wallet mints, so the demo holds no faucet key. Gas is Sepolia ETH from any public faucet. The
 // same wallet pays to the deposit address, sends a sweep (a flush is permissionless), and may pay
 // a refund, which fails verification unless it comes from the treasury.
-const MINT_ABI = [
-  {
-    type: "function",
-    name: "mint",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "account", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
-    outputs: [],
-  },
-] as const;
+const MINT_ABI = parseAbi(["function mint(address account, uint256 amount)"]);
 
 /** The first wallet the browser announces within 300 ms (EIP-6963, or `window.ethereum`). */
 export function firstWallet(): Promise<Wallet | undefined> {
