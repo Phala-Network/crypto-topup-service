@@ -7,18 +7,19 @@ use std::str::FromStr;
 use alloy_primitives::Address;
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
+use axum::response::Response;
 use chrono::Utc;
 use topup_core::route::RouteFile;
 
 use crate::ids;
 use crate::refunds::DestinationScreening;
-use crate::tenancy::Permission;
 use crate::treasuries::{self, ListFilter, MessageOrigin, Proof, Status, TreasuryError};
 
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
+use super::idempotency::Idempotent;
 use super::models::{
     CreateTreasuryChallengeRequest, CreateTreasuryRequest, Treasury, TreasuryChallenge,
     TreasuryList,
@@ -60,11 +61,9 @@ const MAX_SIGNATURE_BYTES: usize = 8_192;
 pub(crate) async fn create_treasury_challenge(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<CreateTreasuryChallengeRequest>,
-) -> ApiResult<Json<TreasuryChallenge>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryWrite)
-        .await?;
+) -> ApiResult<Response> {
     chain_route(&state, merchant.scope.livemode(), request.chain_id)?;
     let address = parse_address(&request.address)?;
     // A contract wallet's owners need longer than an EOA to sign (design D10).
@@ -77,8 +76,9 @@ pub(crate) async fn create_treasury_challenge(
     } else {
         treasuries::CHALLENGE_TTL
     };
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let challenge = treasuries::create_challenge(
-        &state.pool,
+        &mut *transaction,
         merchant.scope,
         &merchant.account.public_id,
         &MessageOrigin::new(&state.public_origin),
@@ -88,7 +88,7 @@ pub(crate) async fn create_treasury_challenge(
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(TreasuryChallenge {
+    let challenge = Json(TreasuryChallenge {
         object: "treasury_challenge".to_owned(),
         livemode: merchant.scope.livemode(),
         chain_id: challenge.chain_id,
@@ -96,7 +96,8 @@ pub(crate) async fn create_treasury_challenge(
         nonce: challenge.nonce,
         message: challenge.message,
         expires_at: challenge.expires_at.timestamp(),
-    }))
+    });
+    idempotent.commit(transaction, challenge).await
 }
 
 #[utoipa::path(
@@ -143,23 +144,20 @@ pub(crate) async fn create_treasury_challenge(
 pub(crate) async fn create_treasury(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<CreateTreasuryRequest>,
-) -> ApiResult<Json<Treasury>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryWrite)
-        .await?;
+) -> ApiResult<Response> {
     let route = chain_route(&state, merchant.scope.livemode(), request.chain_id)?;
     if request.message.chars().count() > MAX_MESSAGE_CHARS {
         return Err(ApiError::invalid_param("message", "message is too long"));
     }
     let signature = parse_signature(&request.signature)?;
-    let now = Utc::now();
     let challenge = treasuries::find_challenge(
         &state.pool,
         merchant.scope,
         request.chain_id,
         &request.message,
-        now,
+        Utc::now(),
     )
     .await
     .map_err(map_error)?;
@@ -175,8 +173,11 @@ pub(crate) async fn create_treasury(
             ));
         }
     }
+    // The signature and screening checks ran first; the transaction uses the challenge, so one
+    // used or expired meanwhile is refused.
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let treasury = treasuries::submit(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         merchant.scope,
         &merchant.actor(),
@@ -185,11 +186,13 @@ pub(crate) async fn create_treasury(
             kind,
             signature,
         },
-        now,
+        Utc::now(),
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(treasury_object(&treasury)))
+    idempotent
+        .commit(transaction, Json(treasury_object(&treasury)))
+        .await
 }
 
 #[utoipa::path(
@@ -217,9 +220,6 @@ pub(crate) async fn list_treasuries(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<TreasuryList>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryRead)
-        .await?;
     let mut filter = ListFilter::default();
     let mut page = Page::default();
     for (name, value) in query_pairs(query.as_deref()) {
@@ -281,9 +281,6 @@ pub(crate) async fn get_treasury(
     Extension(merchant): Extension<Merchant>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Treasury>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryRead)
-        .await?;
     let id = ids::parse(ids::TREASURY, &id).ok_or_else(ApiError::not_found)?;
     treasuries::get(&state.pool, merchant.scope, id)
         .await
@@ -318,16 +315,17 @@ pub(crate) async fn get_treasury(
 pub(crate) async fn cancel_treasury(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Treasury>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::TREASURY, &id).ok_or_else(ApiError::not_found)?;
-    let treasury = treasuries::cancel(&state.pool, merchant.scope, &merchant.actor(), id)
+    let mut transaction = idempotent.begin(&state.pool).await?;
+    let treasury = treasuries::cancel(&mut *transaction, merchant.scope, &merchant.actor(), id)
         .await
         .map_err(map_error)?;
-    Ok(Json(treasury_object(&treasury)))
+    idempotent
+        .commit(transaction, Json(treasury_object(&treasury)))
+        .await
 }
 
 #[utoipa::path(
@@ -358,9 +356,10 @@ pub(crate) async fn cancel_treasury(
 pub(crate) async fn pause_treasury(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Treasury>> {
-    set_crediting_paused(&state, &merchant, &id, true).await
+) -> ApiResult<Response> {
+    set_crediting_paused(&state, &merchant, &idempotent, &id, true).await
 }
 
 #[utoipa::path(
@@ -390,23 +389,23 @@ pub(crate) async fn pause_treasury(
 pub(crate) async fn resume_treasury(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Treasury>> {
-    set_crediting_paused(&state, &merchant, &id, false).await
+) -> ApiResult<Response> {
+    set_crediting_paused(&state, &merchant, &idempotent, &id, false).await
 }
 
 async fn set_crediting_paused(
     state: &AppState,
     merchant: &Merchant,
+    idempotent: &Idempotent,
     id: &str,
     pause: bool,
-) -> ApiResult<Json<Treasury>> {
-    merchant
-        .require(&state.pool, Permission::TreasuryWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::TREASURY, id).ok_or_else(ApiError::not_found)?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let treasury = treasuries::set_crediting_paused(
-        &state.pool,
+        &mut *transaction,
         merchant.scope,
         id,
         crate::pause::PauseOwner::Merchant,
@@ -420,7 +419,9 @@ async fn set_crediting_paused(
     )
     .await
     .map_err(map_error)?;
-    Ok(Json(treasury_object(&treasury)))
+    idempotent
+        .commit(transaction, Json(treasury_object(&treasury)))
+        .await
 }
 
 /// The API representation of a treasury.

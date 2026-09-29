@@ -23,7 +23,7 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `reconciliation_deposit_cursors`, `restores` | `SELECT`, `INSERT`, `UPDATE` |
 | `restore_timeline` | `SELECT`, `UPDATE` |
 | `restore_delivered_events` | `SELECT`, `INSERT` |
-| `_sqlx_migrations`, `permissions` | `SELECT` |
+| `_sqlx_migrations` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
 A migration adding a table that should not get the full operational grant must narrow it in the
@@ -45,9 +45,9 @@ customer, and a refund with its deposit, so no write can join
 two accounts or two modes. `transitions`, `pending_transfers`, `flushed`, `flush_failures`, and
 `webhook_deliveries` have no `account_id` and are reached only through their scoped parent.
 
-`permissions` is the one authorization table (design D13): each row grants a permission to an API
-key kind (`key:secret`, `key:restricted`); there are no roles. The migrations seed it and the
-service can only read it.
+The permissions each API key kind holds are in code (`crate::tenancy::Principal`, design D13),
+beside the routes that require them; `20261021120000_atomic_idempotency` dropped the
+`permissions` table that held them.
 
 ## Points the schema does not show on its own
 
@@ -225,3 +225,10 @@ from the address's creation block.
 never swept no longer sit at the head of every claim's scan. Transitions the pump wrote for
 credited deposits before (`flush_not_confirmed` waits) are kept: `transitions` is append-only.
 Its down migration restores the index over every non-terminal state.
+
+`20261021120000_atomic_idempotency` makes idempotent requests atomic (architecture §12): it adds
+`idempotency_keys.owner`, the request that holds a key, a fresh id per claim that a takeover
+replaces, so only the owner saves a response, in the transaction of the request's changes. It also
+drops `permissions`: a secret key holds every permission and a restricted key all but
+`api_keys.write`, `treasury.write`, `endpoints.write`, and `account.write`, now in code. Its down
+migration recreates `permissions` with those grants and drops `owner`.

@@ -285,6 +285,12 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking** (nothing is live): A key rolling itself (`POST /v1/api_keys/{id}/roll` with the
+  requesting key's own id) must keep working for at least an hour: `expires_in` under `3600`,
+  including the default `0`, is `400 parameter_invalid`. A replay never returns the new key's
+  secret, so an immediate self-roll whose response was lost locked the account out; now the old
+  key rolls the new one (its id is in the replay) to recover. To stop the old key sooner, revoke
+  it with the new key. Another key may still roll a key with `expires_in: 0`.
 - **Breaking** (nothing is live): A `client_secret` is `{id}_secret_{nonce}{tag}`, 64 lowercase hex
   digits after `_secret_` (was 48), where `tag` is the service's HMAC of everything before it. A
   forged or malformed secret is refused in memory (`404`) without touching the database or any
@@ -609,6 +615,22 @@ happens only from two-provider finalized data.
   the endpoint is admin-only and no service has been deployed.
 
 ### Fixed
+
+- Idempotent requests are atomic (architecture §12; Brandur Leach's
+  [Stripe-like idempotency keys in Postgres](https://brandur.org/idempotency-keys)): every
+  merchant `POST` saves its response in the transaction of its changes, so a retry after a crash,
+  a dropped connection, or a request slower than a minute replays the result and never runs the
+  request twice (a quote, a partial refund, an API key, a webhook endpoint, or a webhook key roll
+  was created twice before). A key whose request never saved a response is still taken over by the
+  same request after a minute, and the request it replaced can no longer commit: it answers
+  `409 idempotency_key_in_use`. A request already making its changes commits, and the repeat
+  waits for it (at most 5 seconds, then `409 idempotency_key_in_use`) and replays its response. A
+  failure while rendering a response now creates nothing and is replayed as it failed (a quote was
+  created before). A request the database cannot begin, or rolls back on a deadlock or
+  serialization failure, is an unsaved `503` with `Retry-After`.
+- Authorization runs before the idempotency lookup, as Stripe's: a restricted key no longer
+  replays a response to a request its permissions refuse, and a `401` or `403` is no longer saved,
+  so the same request by a key that holds the permission then runs.
 
 - A token without a route sent to an issued address is again recorded as
   `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block

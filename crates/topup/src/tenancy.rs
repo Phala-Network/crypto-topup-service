@@ -1,5 +1,5 @@
 //! Tenant isolation (design D13): the server-built [`Scope`] every merchant query takes, and the
-//! one authorization table of API key kinds.
+//! permissions each API key kind holds.
 //!
 //! A merchant request is scoped to one account and one mode. The scope is built by the server from
 //! the authenticated credential, never from a client-supplied account id, and every query that
@@ -12,7 +12,6 @@
 //! operator's admin API act for the platform, not for a merchant, and read across accounts; they
 //! never serve a merchant request.
 
-use sqlx::PgExecutor;
 use uuid::Uuid;
 
 /// The account and mode a merchant request acts in.
@@ -48,7 +47,7 @@ impl Scope {
     }
 }
 
-/// A permission in the authorization table (`permissions`, design D13).
+/// A permission a merchant route requires (design D13).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Permission {
     /// Read the account and its configuration.
@@ -131,7 +130,7 @@ impl Permission {
         Self::parse(&format!("{resource}.read"))
     }
 
-    /// The permission's code in the authorization table.
+    /// The permission's code, as a restricted key's grants name it.
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
@@ -164,49 +163,25 @@ impl Permission {
 pub enum Principal {
     /// A secret API key, which holds every API permission.
     SecretKey,
-    /// A restricted API key, limited further by its own grants (design PR 12). The table never
-    /// grants it `api_keys.write`, `treasury.write`, `endpoints.write`, or `account.write`.
+    /// A restricted API key, limited further by its own grants (design PR 12). It never holds
+    /// `api_keys.write`, `treasury.write`, `endpoints.write`, or `account.write`: keys,
+    /// treasuries, webhook endpoints, webhook keys, and account settings need a secret key.
     RestrictedKey,
 }
 
 impl Principal {
-    /// The principal's code in the authorization table.
+    /// Whether the key kind holds `permission`.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub const fn holds(self, permission: Permission) -> bool {
         match self {
-            Self::SecretKey => "key:secret",
-            Self::RestrictedKey => "key:restricted",
+            Self::SecretKey => true,
+            Self::RestrictedKey => !matches!(
+                permission,
+                Permission::ApiKeysWrite
+                    | Permission::TreasuryWrite
+                    | Permission::EndpointsWrite
+                    | Permission::AccountWrite
+            ),
         }
     }
-}
-
-/// The permissions the authorization table grants to `principal`.
-pub async fn grants<'e>(
-    executor: impl PgExecutor<'e>,
-    principal: Principal,
-) -> Result<Vec<Permission>, sqlx::Error> {
-    let codes: Vec<String> =
-        sqlx::query_scalar("SELECT permission FROM permissions WHERE principal = $1")
-            .bind(principal.code())
-            .fetch_all(executor)
-            .await?;
-    Ok(codes
-        .iter()
-        .filter_map(|code| Permission::parse(code))
-        .collect())
-}
-
-/// Whether the authorization table grants `permission` to `principal`.
-pub async fn holds<'e>(
-    executor: impl PgExecutor<'e>,
-    principal: Principal,
-    permission: Permission,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM permissions WHERE principal = $1 AND permission = $2)",
-    )
-    .bind(principal.code())
-    .bind(permission.code())
-    .fetch_one(executor)
-    .await
 }

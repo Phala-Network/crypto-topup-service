@@ -265,8 +265,8 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
 ];
 
 /// Marks an error response to a request no handler executed, which an `Idempotency-Key` does not
-/// save: a request that failed validation (`parameter_*`), was rate limited, or met a temporary
-/// unavailability, so a retry with the same key runs it (Stripe: "Results are only saved if an
+/// save: a request that failed authentication, authorization, or validation (`parameter_*`), was
+/// rate limited, or met a temporary unavailability, so a retry with the same key runs it (Stripe: "Results are only saved if an
 /// API endpoint started executing", <https://docs.stripe.com/api/idempotent_requests>).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NotExecuted;
@@ -804,6 +804,13 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
     }
 
+    /// A `503` for a request the database could not run now (a connection not available, or a
+    /// transaction rolled back by a conflict), which a retry runs.
+    #[must_use]
+    pub fn database_busy() -> Self {
+        Self::service_unavailable("the database is busy; retry").with_retry_after(1)
+    }
+
     /// Returns a write refused while the service is frozen after a restore from backup
     /// (`crate::restore_mode`), retried after `retry_after` seconds.
     #[must_use]
@@ -871,6 +878,8 @@ impl ApiError {
     /// not save ([`NotExecuted`]).
     fn not_executed(&self) -> bool {
         self.detail.code.starts_with("parameter_")
+            || self.status == StatusCode::UNAUTHORIZED
+            || self.status == StatusCode::FORBIDDEN
             || self.status == StatusCode::TOO_MANY_REQUESTS
             || self.status == StatusCode::SERVICE_UNAVAILABLE
     }
@@ -923,7 +932,18 @@ impl IntoResponse for ApiError {
 }
 
 impl From<sqlx::Error> for ApiError {
+    /// A `500`, except a deadlock or serialization failure (`40P01`, `40001`): PostgreSQL rolled
+    /// the transaction back, so nothing ran and the request is a `503` to retry, which an
+    /// idempotency key does not save.
     fn from(error: sqlx::Error) -> Self {
+        let code = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned());
+        if matches!(code.as_deref(), Some("40P01" | "40001")) {
+            tracing::warn!(%error, "transaction rolled back by a conflict");
+            return Self::database_busy();
+        }
         tracing::error!(%error, "database operation failed");
         Self::internal()
     }

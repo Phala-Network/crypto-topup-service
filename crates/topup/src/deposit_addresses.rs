@@ -26,7 +26,7 @@ use std::str::FromStr;
 use alloy_primitives::{Address as EvmAddress, B256};
 use chrono::{DateTime, Utc};
 use sqlx::types::Json;
-use sqlx::{FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{Acquire, FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use topup_core::address::{deposit_address_salt, forwarder_address};
 use topup_core::route::RouteFile;
 use uuid::Uuid;
@@ -217,8 +217,8 @@ pub enum DepositAddressError {
 /// `metadata`, the request's, is merged into the returned address's, as an update would.
 ///
 /// Returns the address and whether it was issued by this call.
-pub async fn create(
-    pool: &PgPool,
+pub async fn create<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     account: &Account,
     customer: &Customer,
     chains: &[ChainContracts],
@@ -228,7 +228,7 @@ pub async fn create(
         return Err(DepositAddressError::NotFound);
     }
     let scope = Scope::new(account.id, customer.livemode);
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     lock_customer(&mut transaction, customer).await?;
     let issuable = chains;
     let chains = with_treasuries(&mut transaction, scope, issuable).await?;
@@ -290,15 +290,15 @@ pub async fn create(
 
 /// Retires the scope's active address `id` and issues the next version for the same customer on
 /// `chains`, the issuable chains of the mode. The new version carries the retired one's metadata.
-pub async fn rotate(
-    pool: &PgPool,
+pub async fn rotate<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     account: &Account,
     scope: Scope,
     actor: &Actor,
     id: Uuid,
     chains: &[ChainContracts],
 ) -> Result<DepositAddress, DepositAddressError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let customer = sqlx::query_as::<_, (Uuid, String, Vec<String>)>(
         r#"
         SELECT customer.id, customer.client_reference_id, customer.paused_scopes
@@ -723,7 +723,8 @@ fn push_scope(builder: &mut QueryBuilder<Postgres>, scope: Scope) {
         .push_bind(scope.livemode());
 }
 
-async fn get_in(
+/// The scope's deposit address `id`, read on `connection`.
+pub(crate) async fn get_in(
     connection: &mut PgConnection,
     scope: Scope,
     id: Uuid,

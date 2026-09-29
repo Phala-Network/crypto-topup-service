@@ -14,7 +14,7 @@
 //! (`events.signing_key_version`), even after the overlap.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Acquire, PgConnection, Postgres};
 use topup_core::WebhookKeyId;
 
 use crate::audit::{self, Actor};
@@ -160,8 +160,8 @@ pub fn overlap_range(livemode: bool) -> (Duration, Duration) {
 /// stops it at once). Previous versions still in an overlap stop no later than the new one.
 /// Audited, and announced as `account.updated` in the scope's mode, signed by every key still
 /// signing and always by the version it retires.
-pub async fn roll(
-    pool: &PgPool,
+pub async fn roll<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     expires_in: Duration,
@@ -171,7 +171,7 @@ pub async fn roll(
     if expires_in < min || expires_in > max {
         return Err(WebhookKeyError::InvalidExpiry);
     }
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let object = EventObject::Account(scope.account_id());
     let (account, current) = sqlx::query_as::<_, (String, i32)>(
         "SELECT public_id, (webhook_key_version ->> $2)::integer FROM accounts \

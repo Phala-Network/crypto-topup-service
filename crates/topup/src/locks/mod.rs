@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::types::Json;
-use sqlx::{FromRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{Acquire, FromRow, PgPool, Postgres, Row, Transaction};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 use topup_core::address::{forwarder_address, quote_salt};
@@ -247,11 +247,8 @@ pub enum RateLockError {
 
 /// Creates a lock for `credit` on `route` for `customer` of `account`, and returns it with its
 /// `client_secret`, issued in the same transaction: a quote never exists without the secret its
-/// creation returned, so a failed creation leaves nothing a retry would duplicate.
-///
-/// The quote is scoped to the customer's account and mode, and `route` must be a route of that
-/// mode. Repeated requests are answered by the API's `Idempotency-Key` layer before they reach
-/// this function.
+/// creation returned, so a failed creation leaves nothing a retry would duplicate. It prices the
+/// lock ([`price`]) and then creates it in its own transaction ([`create_in`]).
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
@@ -263,6 +260,44 @@ pub async fn create(
     credit_minor: MinorAmount,
     metadata: &BTreeMap<String, String>,
 ) -> Result<(RateLock, String), RateLockError> {
+    let priced = price(pool, quotes, account, customer, route, credit_minor).await?;
+    let mut transaction = pool.begin().await?;
+    let created = create_in(
+        &mut transaction,
+        client_secrets,
+        account,
+        customer,
+        route,
+        &priced,
+        metadata,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(created)
+}
+
+/// A lock's price and amount, fetched and checked before the transaction that creates it.
+#[derive(Clone, Copy, Debug)]
+pub struct PricedLock {
+    credit_minor: MinorAmount,
+    price: ScaledPrice,
+    amount_atomic: AtomicAmount,
+}
+
+/// Prices a lock for `credit_minor` on `route` for `customer` of `account` with the external
+/// price fetch, before any transaction; [`create_in`] then creates it.
+///
+/// The quote is scoped to the customer's account and mode, and `route` must be a route of that
+/// mode. Repeated requests are answered by the API's `Idempotency-Key` layer before they reach
+/// this function.
+pub async fn price(
+    pool: &PgPool,
+    quotes: &Arc<dyn QuoteProvider>,
+    account: &Account,
+    customer: &Customer,
+    route: &RouteFile,
+    credit_minor: MinorAmount,
+) -> Result<PricedLock, RateLockError> {
     if customer.account_id != account.id {
         return Err(RateLockError::NotFound);
     }
@@ -273,7 +308,7 @@ pub async fn create(
     }
     let scope = Scope::new(account.id, customer.livemode);
     // Cheap pre-checks so a rate-limited caller, or one without a treasury, never triggers an
-    // external price fetch; the authoritative checks repeat in the transaction below.
+    // external price fetch; the authoritative checks repeat in `create_in`.
     check_creation_rate(&mut *pool.acquire().await?, customer.id, route).await?;
     treasury(&mut *pool.acquire().await?, scope, route.chain.chain_id).await?;
 
@@ -288,21 +323,48 @@ pub async fn create(
         .map_err(|_| RateLockError::Arithmetic)?;
     let amount_atomic = amount_for_credit(route, credit_minor, locked_price)?;
     validate_bounds(route, amount_atomic, credit_minor)?;
+    Ok(PricedLock {
+        credit_minor,
+        price: locked_price,
+        amount_atomic,
+    })
+}
+
+/// Creates the lock `priced` for `customer` of `account` in `transaction`, with its
+/// `client_secret`, after checking the customer's creation rate, the exposure caps, and the
+/// chain's treasury again; its window starts now.
+pub async fn create_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    client_secrets: &ClientSecretKey,
+    account: &Account,
+    customer: &Customer,
+    route: &RouteFile,
+    priced: &PricedLock,
+    metadata: &BTreeMap<String, String>,
+) -> Result<(RateLock, String), RateLockError> {
+    if customer.account_id != account.id || route.livemode != customer.livemode {
+        return Err(RateLockError::NotFound);
+    }
+    let PricedLock {
+        credit_minor,
+        price: locked_price,
+        amount_atomic,
+    } = *priced;
+    let scope = Scope::new(account.id, customer.livemode);
     let window = i64::try_from(route.rate_lock.window_s).map_err(|_| RateLockError::Arithmetic)?;
     let now = Utc::now();
     let expires_at = now
         .checked_add_signed(chrono::Duration::seconds(window))
         .ok_or(RateLockError::Arithmetic)?;
 
-    let mut transaction = pool.begin().await?;
-    lock_customer(&mut transaction, customer).await?;
-    check_creation_rate(&mut transaction, customer.id, route).await?;
-    check_exposure(&mut transaction, account, customer, credit_minor).await?;
+    lock_customer(transaction, customer).await?;
+    check_creation_rate(transaction, customer.id, route).await?;
+    check_exposure(transaction, account, customer, credit_minor).await?;
     // The account's current treasury of the chain; the shared lock, held to commit, keeps a
     // treasury change from applying meanwhile. The address keeps it for good, as the forwarder
     // does.
-    crate::treasuries::lock(&mut transaction, scope, false).await?;
-    let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
+    crate::treasuries::lock(transaction, scope, false).await?;
+    let treasury = treasury(transaction, scope, route.chain.chain_id).await?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
     let client_secret = client_secrets.issue(&quote_id(id)).map_err(|error| {
@@ -343,7 +405,7 @@ pub async fn create(
     .bind(now)
     .bind(Json(metadata))
     .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only
     // needs to cover it from the chain's committed cursor instead of backfilling from genesis.
@@ -366,9 +428,8 @@ pub async fn create(
     .bind(format!("{salt:#x}"))
     .bind(format!("{treasury:#x}"))
     .bind(format!("{address:#x}"))
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
-    transaction.commit().await?;
     let lock = RateLock {
         id,
         livemode: scope.livemode(),
@@ -516,14 +577,14 @@ pub async fn list(
 /// Any deposit row for the lock address, including a rejected one, means funds already arrived at
 /// the single-use address, so the lock is no longer unpaid and cancellation is refused; such a
 /// lock stays open until it is consumed or expires.
-pub async fn cancel(
-    pool: &PgPool,
+pub async fn cancel<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     actor: &Actor,
     id: Uuid,
 ) -> Result<RateLock, RateLockError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let row = get_in(&mut transaction, scope, id)
         .await?
         .ok_or(RateLockError::NotFound)?;

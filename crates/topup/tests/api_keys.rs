@@ -553,23 +553,68 @@ async fn keys_authenticate_by_bearer_and_expire_or_revoke() -> Result<()> {
         ensure!(expired.status == StatusCode::UNAUTHORIZED);
         ensure!(expired.body["error"]["code"] == "api_key_expired");
 
-        // Rolling with no overlap revokes the old key at once.
+        // A key rolling itself keeps working for at least an hour, so a roll whose response is
+        // lost can be recovered with it: the replay names the new key, without its secret, and
+        // the old key rolls that new key with no overlap, revoking it at once.
         let new_id = rolled.body["id"].as_str().context("id")?.to_owned();
-        let rolled_again = harness
+        let self_roll = format!("/v1/api_keys/{new_id}/roll");
+        for body in [json!({}), json!({"expires_in": 3599})] {
+            let refused = harness
+                .merchant(
+                    Method::POST,
+                    &self_roll,
+                    Some(&body),
+                    &new_key,
+                    Some("self"),
+                )
+                .await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{}",
+                refused.body
+            );
+            ensure!(refused.body["error"]["code"] == "parameter_invalid");
+            ensure!(refused.body["error"]["param"] == "expires_in");
+        }
+        let hour = json!({"expires_in": 3600});
+        let lost = harness
             .merchant(
                 Method::POST,
-                &format!("/v1/api_keys/{new_id}/roll"),
+                &self_roll,
+                Some(&hour),
+                &new_key,
+                Some("self"),
+            )
+            .await?;
+        ensure!(lost.status == StatusCode::OK, "{}", lost.body);
+        let replayed = harness
+            .merchant(
+                Method::POST,
+                &self_roll,
+                Some(&hour),
+                &new_key,
+                Some("self"),
+            )
+            .await?;
+        ensure!(replayed.headers["idempotent-replayed"] == "true");
+        ensure!(replayed.body.get("secret").is_none());
+        let lost_id = replayed.body["id"].as_str().context("id")?.to_owned();
+        ensure!(lost_id == lost.body["id"]);
+        let recovered = harness
+            .merchant(
+                Method::POST,
+                &format!("/v1/api_keys/{lost_id}/roll"),
                 Some(&json!({})),
                 &new_key,
                 None,
             )
             .await?;
-        ensure!(rolled_again.status == StatusCode::OK);
-        let revoked = harness.get("/v1/account", &new_key).await?;
+        ensure!(recovered.status == StatusCode::OK, "{}", recovered.body);
+        let revoked = harness.get("/v1/account", &secret(&lost.body)?).await?;
         ensure!(revoked.body["error"]["code"] == "api_key_invalid");
         ensure!(
             harness
-                .get("/v1/account", &secret(&rolled_again.body)?)
+                .get("/v1/account", &secret(&recovered.body)?)
                 .await?
                 .status
                 == StatusCode::OK
@@ -908,6 +953,164 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
     result.and(cleanup)
 }
 
+/// A request's changes and its saved response commit in one transaction (Brandur Leach,
+/// "Implementing Stripe-like Idempotency Keys in Postgres"): when the response cannot be saved,
+/// nothing is created, and a repeat after the takeover interval runs the request once. A
+/// response the client never received is replayed, never run again.
+#[tokio::test]
+async fn a_saved_result_commits_with_the_changes_it_reports() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits::default())?;
+        let (account, key) = seed_test_account(pool, "atomic").await?;
+        let body = json!({"name": "atomic"});
+        let create = || {
+            harness.merchant(
+                Method::POST,
+                "/v1/api_keys",
+                Some(&body),
+                &key,
+                Some("atomic"),
+            )
+        };
+        let count = || async {
+            anyhow::Ok(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM api_keys WHERE account_id = $1")
+                    .bind(account)
+                    .fetch_one(pool)
+                    .await?,
+            )
+        };
+        let age_key = || async {
+            sqlx::query(
+                "UPDATE idempotency_keys SET created_at = now() - interval '2 minutes' \
+                 WHERE account_id = $1 AND key = 'atomic'",
+            )
+            .bind(account)
+            .execute(pool)
+            .await
+        };
+        let before = count().await?;
+
+        // Saving the response fails, as when the process stops before it: the key the request
+        // created is rolled back with it, and the request keeps holding its idempotency key.
+        for statement in [
+            "CREATE FUNCTION fail_save() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'response not saved'; END $$",
+            "CREATE TRIGGER fail_save BEFORE UPDATE ON idempotency_keys FOR EACH ROW \
+             WHEN (NEW.response IS NOT NULL) EXECUTE FUNCTION fail_save()",
+        ] {
+            sqlx::query(statement).execute(&database.owner_pool).await?;
+        }
+        let failed = create().await?;
+        ensure!(
+            failed.status == StatusCode::INTERNAL_SERVER_ERROR,
+            "{}",
+            failed.body
+        );
+        ensure!(
+            count().await? == before,
+            "nothing commits without its saved response"
+        );
+        sqlx::query("DROP FUNCTION fail_save() CASCADE")
+            .execute(&database.owner_pool)
+            .await?;
+        let in_use = create().await?;
+        ensure!(in_use.status == StatusCode::CONFLICT, "{}", in_use.body);
+        ensure!(count().await? == before);
+
+        // After the takeover interval the repeat runs the request, once.
+        age_key().await?;
+        let ran = create().await?;
+        ensure!(ran.status == StatusCode::OK, "{}", ran.body);
+        ensure!(!ran.headers.contains_key("idempotent-replayed"));
+        ensure!(count().await? == before + 1);
+
+        // Its response is lost on the way back: a repeat, however late, replays it.
+        age_key().await?;
+        let replayed = create().await?;
+        ensure!(replayed.status == StatusCode::OK, "{}", replayed.body);
+        ensure!(replayed.headers["idempotent-replayed"] == "true");
+        ensure!(replayed.body["id"] == ran.body["id"]);
+        ensure!(count().await? == before + 1, "the request ran once");
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Authorization runs before the idempotency layer, as Stripe's: a restricted key cannot replay
+/// the response to a request it may not make, and its `403` does not take the key, so the same
+/// request by a secret key then runs.
+#[tokio::test]
+async fn authorization_runs_before_an_idempotent_replay() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits::default())?;
+        let (_, key) = seed_test_account(pool, "authorized").await?;
+        let restricted = harness
+            .merchant(
+                Method::POST,
+                "/v1/api_keys",
+                Some(&json!({"type": "restricted", "permissions": ["quotes.read"]})),
+                &key,
+                None,
+            )
+            .await?;
+        ensure!(restricted.status == StatusCode::OK, "{}", restricted.body);
+        let restricted = secret(&restricted.body)?;
+        let create = |name: &'static str, key: String, idempotency_key: &'static str| {
+            let harness = &harness;
+            async move {
+                harness
+                    .merchant(
+                        Method::POST,
+                        "/v1/api_keys",
+                        Some(&json!({"name": name})),
+                        &key,
+                        Some(idempotency_key),
+                    )
+                    .await
+            }
+        };
+
+        // A `HEAD` needs what its `GET` needs.
+        let head = harness
+            .merchant(Method::HEAD, "/v1/account", None, &key, None)
+            .await?;
+        ensure!(head.status == StatusCode::OK, "{}", head.body);
+        let head = harness
+            .merchant(Method::HEAD, "/v1/api_keys", None, &restricted, None)
+            .await?;
+        ensure!(head.status == StatusCode::FORBIDDEN);
+
+        let created = create("ci", key.clone(), "shared").await?;
+        ensure!(created.status == StatusCode::OK, "{}", created.body);
+        let refused = create("ci", restricted.clone(), "shared").await?;
+        ensure!(refused.status == StatusCode::FORBIDDEN, "{}", refused.body);
+        ensure!(refused.body["error"]["code"] == "permission_denied");
+        ensure!(!refused.headers.contains_key("idempotent-replayed"));
+
+        let denied = create("later", restricted, "fresh").await?;
+        ensure!(denied.status == StatusCode::FORBIDDEN, "{}", denied.body);
+        let ran = create("later", key.clone(), "fresh").await?;
+        ensure!(ran.status == StatusCode::OK, "{}", ran.body);
+        ensure!(!ran.headers.contains_key("idempotent-replayed"));
+        ensure!(ran.body["name"] == "later" && ran.body.get("secret").is_some());
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 /// Each account and mode has its own rate limit, and test mode shares a platform ceiling.
 #[tokio::test]
 async fn requests_are_rate_limited_per_account_and_mode() -> Result<()> {
@@ -985,21 +1188,6 @@ async fn restricted_keys_hold_only_their_grants() -> Result<()> {
         };
         let harness = Harness::new(pool, limits)?;
         let (account, key) = seed_test_account(pool, "restricted").await?;
-
-        // The authorization table never grants the management writes to restricted keys.
-        let held: Vec<String> = sqlx::query_scalar(
-            "SELECT permission FROM permissions WHERE principal = 'key:restricted' ORDER BY 1",
-        )
-        .fetch_all(pool)
-        .await?;
-        for management in [
-            "account.write",
-            "api_keys.write",
-            "endpoints.write",
-            "treasury.write",
-        ] {
-            ensure!(!held.iter().any(|code| code == management), "{held:?}");
-        }
 
         let create = |body: Value| {
             let harness = &harness;

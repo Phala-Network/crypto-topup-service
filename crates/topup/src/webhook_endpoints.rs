@@ -15,7 +15,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::types::Json;
-use sqlx::{FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{Acquire, FromRow, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::api::error::ApiError;
@@ -275,13 +275,13 @@ pub struct Changes<'a> {
 
 /// Creates an endpoint and announces it as `webhook_endpoint.created`, which the new endpoint
 /// receives too.
-pub async fn create(
-    pool: &PgPool,
+pub async fn create<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     endpoint: &NewEndpoint<'_>,
     actor: &Actor,
 ) -> Result<WebhookEndpoint, EndpointError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     // The account's row lock serializes creations, so the limit holds under concurrency.
     sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
         .bind(scope.account_id())
@@ -439,14 +439,14 @@ pub async fn find_any(
 /// Applies `changes` and announces them as `webhook_endpoint.updated`, with the replaced values
 /// in `data.previous_attributes`; the endpoint receives it first, at its previous URL. An update
 /// that changes nothing writes nothing. Disabling stops the endpoint's pending deliveries.
-pub async fn update(
-    pool: &PgPool,
+pub async fn update<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     id: Uuid,
     changes: &Changes<'_>,
     actor: &Actor,
 ) -> Result<WebhookEndpoint, EndpointError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let before = locked(&mut transaction, scope, id).await?;
     let before_object = snapshot(&mut transaction, &before).await?;
     let metadata = match changes.metadata {
@@ -542,13 +542,13 @@ pub async fn delete(
 
 /// Sends [`TEST_EVENT`] about the endpoint to the endpoint alone, whatever its status and
 /// subscriptions, and returns the event id.
-pub async fn send_test(
-    pool: &PgPool,
+pub async fn send_test<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     id: Uuid,
     actor: &Actor,
 ) -> Result<Uuid, EndpointError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let endpoint = locked(&mut transaction, scope, id).await?;
     let event = new_event(&endpoint, TEST_EVENT, actor);
     let data = json!({ "object": snapshot(&mut transaction, &endpoint).await? });
@@ -564,14 +564,14 @@ pub async fn send_test(
 /// Delivers the scope's event `event_id` again to its enabled endpoint `endpoint_id`, as the
 /// Stripe CLI's `events resend`: due now, whether the event was delivered to it, stopped, or never
 /// sent to it. The event and its body are unchanged.
-pub async fn resend(
-    pool: &PgPool,
+pub async fn resend<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     scope: Scope,
     event_id: Uuid,
     endpoint_id: Uuid,
     actor: &Actor,
 ) -> Result<(), EndpointError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let event: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM events WHERE id = $1 AND account_id = $2 AND livemode = $3",
     )

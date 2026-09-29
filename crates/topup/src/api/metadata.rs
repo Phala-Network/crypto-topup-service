@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use sqlx::PgPool;
 use sqlx::types::Json;
+use sqlx::{Acquire, Postgres};
 use uuid::Uuid;
 
 use crate::tenancy::Scope;
@@ -151,8 +151,8 @@ impl Object {
 /// Applies a `POST /v1/{object}/{id}` update's `metadata` to the scope's object `id`, and returns
 /// whether the object exists in the scope. Without `metadata` nothing changes. A change of an
 /// object with a `*.updated` event (a refund) is announced by it, caused by `actor`.
-pub async fn update(
-    pool: &PgPool,
+pub async fn update<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &crate::routes::RouteSet,
     object: Object,
     scope: Scope,
@@ -167,7 +167,7 @@ pub async fn update(
         Object::Refund => statements!("refunds"),
         Object::DepositAddress => statements!("deposit_addresses"),
     };
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let Some(Json(current)) = sqlx::query_scalar::<_, Json<Metadata>>(select)
         .bind(id)
         .bind(scope.account_id())

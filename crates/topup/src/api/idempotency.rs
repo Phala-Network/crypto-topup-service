@@ -5,24 +5,50 @@
 //! while the first request still runs is `409 idempotency_key_in_use`.
 //!
 //! As Stripe's, the result is saved once the handler starts executing, whatever it is, including
-//! a `500`: a retry after a failure whose effects are unknown replays it rather than running the
-//! request twice (<https://docs.stripe.com/api/idempotent_requests>). A request that did not
-//! execute is not saved, so a retry with the same key runs it: one that failed validation
-//! (`parameter_*`), was rate limited (`429`), or met a temporary unavailability (`503`), marked
-//! [`NotExecuted`]. An API key's `secret` is never stored: a replayed key creation or roll
-//! returns the key without it. A quote's `client_secret` is stored with its response; it reads
-//! only the quote's public view, which anyone holding the database can read anyway. A key held by
-//! a request that never finished (the process stopped) is released to a repeat of the same request
-//! after a minute.
+//! a `500` (<https://docs.stripe.com/api/idempotent_requests>). A request that did not execute is
+//! not saved, so a retry with the same key runs it: one refused by authentication or
+//! authorization (both run before this layer; a handler's `401` or `403`, such as
+//! `testmode_charges_only`, is released too), one that failed validation (`parameter_*`), was
+//! rate limited (`429`), or met a temporary unavailability (`503`), marked [`NotExecuted`].
+//!
+//! The result commits with the request's changes, in one PostgreSQL transaction (Brandur Leach,
+//! "Implementing Stripe-like Idempotency Keys in Postgres",
+//! <https://brandur.org/idempotency-keys>). A request claims its key under a fresh `owner`. Its
+//! handler makes its external calls first (a price fetch, sanctions screening), then opens the
+//! transaction with [`Idempotent::begin`], which locks the key's row and checks the request still
+//! owns it, makes its changes and renders its response in it, and saves the response to the row
+//! and commits with [`Idempotent::commit`]. So a key has a saved response exactly when its
+//! request's changes committed, whether or not the client received it. A key whose request never
+//! saved a response (the process stopped, the client disconnected, or the request is still slow)
+//! is taken over by a repeat of the same request after a minute under a new owner, which runs the
+//! request again: nothing committed, and the former owner can no longer commit (it is fenced by
+//! the row lock and the owner check). A request already inside its transaction when a repeat
+//! arrives holds the row lock: the repeat waits for it (at most five seconds, then `409`),
+//! and finds its saved response. A response the handler returns without committing it, a failure
+//! whose transaction rolled back, is saved afterwards if the request still owns the key.
+//!
+//! This relies on PostgreSQL's READ COMMITTED isolation, the default: a takeover's
+//! `INSERT … ON CONFLICT DO UPDATE … WHERE` that waited for the row lock re-evaluates its `WHERE`
+//! against the row as the committing transaction left it, so it never takes over a key whose
+//! response was just saved. Under REPEATABLE READ or SERIALIZABLE the takeover would fail with a
+//! serialization error instead.
+//!
+//! An API key's `secret` is never stored: a replayed key creation or roll returns the key without
+//! it. A quote's `client_secret` is stored with its response; it reads only the quote's public
+//! view, which anyone holding the database can read anyway.
+
+use std::convert::Infallible;
 
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::{Request, State};
+use axum::extract::{FromRequestParts, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::{IntoResponse as _, Response};
+use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
+use uuid::Uuid;
 
 use super::AppState;
 use super::auth::Merchant;
@@ -38,7 +64,102 @@ const REPLAYED_HEADER: &str = "idempotent-replayed";
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ContainsSecret;
 
-/// Serves a repeated merchant `POST` from `idempotency_keys`; runs after authentication.
+/// Marks a response [`Idempotent::commit`] saved with its request's changes.
+#[derive(Clone, Copy, Debug)]
+struct Saved;
+
+/// A running request's hold on its key: the key's row, and the owner that claimed it.
+#[derive(Clone, Debug)]
+struct Claim {
+    scope: Scope,
+    key: String,
+    owner: Uuid,
+}
+
+/// The `Idempotency-Key` a merchant `POST` holds, if it sent one: the handler opens the
+/// transaction of its changes with [`Self::begin`] and commits it with its response through
+/// [`Self::commit`].
+pub(crate) struct Idempotent(Option<Claim>);
+
+impl<S: Send + Sync> FromRequestParts<S> for Idempotent {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(parts.extensions.get::<Claim>().cloned()))
+    }
+}
+
+impl Idempotent {
+    /// Begins the transaction of the request's changes. With a key it locks the key's row until
+    /// the transaction ends, and fails with `409 idempotency_key_in_use` once a repeat has taken
+    /// the key over, or with an unsaved `503` when the database cannot begin it.
+    pub(crate) async fn begin(
+        &self,
+        pool: &PgPool,
+    ) -> Result<Transaction<'static, Postgres>, ApiError> {
+        // Nothing ran yet, so a failure here is an unsaved `503` the client retries.
+        let unavailable = |error: sqlx::Error| {
+            tracing::warn!(%error, "the request's transaction did not begin");
+            ApiError::database_busy()
+        };
+        let mut transaction = pool.begin().await.map_err(unavailable)?;
+        if let Some(claim) = &self.0 {
+            let held = sqlx::query(
+                "SELECT 1 FROM idempotency_keys \
+                 WHERE account_id = $1 AND livemode = $2 AND key = $3 AND owner = $4 \
+                   AND response IS NULL \
+                 FOR UPDATE",
+            )
+            .bind(claim.scope.account_id())
+            .bind(claim.scope.livemode())
+            .bind(&claim.key)
+            .bind(claim.owner)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(unavailable)?
+            .is_some();
+            if !held {
+                return Err(ApiError::idempotency_key_in_use());
+            }
+        }
+        Ok(transaction)
+    }
+
+    /// Saves `response` as the key's result in `transaction`, begun by [`Self::begin`], and
+    /// commits the transaction.
+    pub(crate) async fn commit(
+        &self,
+        mut transaction: Transaction<'static, Postgres>,
+        response: impl IntoResponse,
+    ) -> Result<Response, ApiError> {
+        let response = response.into_response();
+        let Some(claim) = &self.0 else {
+            transaction.commit().await?;
+            return Ok(response);
+        };
+        let (mut parts, body) = response.into_parts();
+        let bytes = to_bytes(body, MAX_BODY_BYTES).await.map_err(|error| {
+            tracing::error!(%error, "response body could not be read for idempotency");
+            ApiError::internal()
+        })?;
+        let stored = stored_response(
+            parts.status,
+            &bytes,
+            parts.extensions.get::<ContainsSecret>().is_some(),
+        )
+        .ok_or_else(ApiError::internal)?;
+        // The row is locked since `begin`, so the request still owns it.
+        if !save(&mut *transaction, claim, &stored).await? {
+            return Err(ApiError::idempotency_key_in_use());
+        }
+        transaction.commit().await?;
+        parts.extensions.insert(Saved);
+        Ok(Response::from_parts(parts, Body::from(bytes)))
+    }
+}
+
+/// Serves a repeated merchant `POST` from `idempotency_keys`; runs after authentication and
+/// authorization.
 pub(crate) async fn idempotent_post(
     State(state): State<AppState>,
     request: Request,
@@ -60,7 +181,7 @@ pub(crate) async fn idempotent_post(
         tracing::error!("idempotency layer ran before authentication");
         return ApiError::internal().into_response();
     };
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let Ok(body) = to_bytes(body, MAX_BODY_BYTES).await else {
         return ApiError::bad_request("the request body is too large").into_response();
     };
@@ -72,31 +193,54 @@ pub(crate) async fn idempotent_post(
             .map_or("/", |value| value.as_str()),
         &body,
     );
-    match claim(&state.pool, scope, &key, &fingerprint).await {
-        Ok(Claim::Claimed) => {}
-        Ok(Claim::Replay(stored)) => return replay(&stored),
-        Ok(Claim::InUse) => return ApiError::idempotency_key_in_use().into_response(),
-        Ok(Claim::OtherRequest) => return ApiError::idempotency_key_reused().into_response(),
+    let claim = Claim {
+        scope,
+        key,
+        owner: Uuid::new_v4(),
+    };
+    match acquire(&state.pool, &claim, &fingerprint).await {
+        Ok(Acquired::Claimed) => {}
+        Ok(Acquired::Replay(stored)) => return replay(&stored),
+        Ok(Acquired::InUse) => return ApiError::idempotency_key_in_use().into_response(),
+        Ok(Acquired::OtherRequest) => return ApiError::idempotency_key_reused().into_response(),
+        Err(error) if lock_not_available(&error) => {
+            return ApiError::idempotency_key_in_use().into_response();
+        }
         Err(error) => return ApiError::from(error).into_response(),
     }
+    parts.extensions.insert(claim.clone());
 
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
-    let status = response.status();
-    if response.extensions().get::<NotExecuted>().is_some() {
-        release(&state.pool, scope, &key).await;
+    if response.extensions().get::<Saved>().is_some() {
         return response;
     }
-    let contains_secret = response.extensions().get::<ContainsSecret>().is_some();
+    if response.status().is_success() {
+        // Every merchant `POST` commits its success through `Idempotent::commit`; one that does
+        // not is no longer atomic with its saved response.
+        tracing::error!("a keyed POST succeeded without saving its response with its changes");
+        debug_assert!(false, "a keyed POST succeeded without Idempotent::commit");
+    }
+    if response.extensions().get::<NotExecuted>().is_some() {
+        release(&state.pool, &claim).await;
+        return response;
+    }
+    // A response not committed with the request's changes: its transaction rolled back, so the
+    // response is the request's whole outcome. It is saved unless a repeat took the key over;
+    // if saving fails, a repeat takes the key over after a minute and runs the request again.
     let (parts, body) = response.into_parts();
     let bytes = match to_bytes(body, MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::error!(%error, "response body could not be read for idempotency");
-            release(&state.pool, scope, &key).await;
             return ApiError::internal().into_response();
         }
     };
-    store(&state.pool, scope, &key, status, &bytes, contains_secret).await;
+    let contains_secret = parts.extensions.get::<ContainsSecret>().is_some();
+    if let Some(stored) = stored_response(parts.status, &bytes, contains_secret)
+        && let Err(error) = save(&state.pool, &claim, &stored).await
+    {
+        tracing::error!(%error, "idempotent response was not stored");
+    }
     Response::from_parts(parts, Body::from(bytes))
 }
 
@@ -111,7 +255,7 @@ fn fingerprint(method: &Method, target: &str, body: &[u8]) -> [u8; 32] {
     digest.finalize().into()
 }
 
-enum Claim {
+enum Acquired {
     /// This request holds the key and runs.
     Claimed,
     /// The stored response of the same request.
@@ -122,103 +266,127 @@ enum Claim {
     OtherRequest,
 }
 
-async fn claim(
+async fn acquire(
     pool: &PgPool,
-    scope: Scope,
-    key: &str,
+    claim: &Claim,
     fingerprint: &[u8; 32],
-) -> Result<Claim, sqlx::Error> {
+) -> Result<Acquired, sqlx::Error> {
     sqlx::query("DELETE FROM idempotency_keys WHERE created_at < now() - interval '24 hours'")
         .execute(pool)
         .await?;
-    // A key whose request never stored a response is taken over by the same request after a
-    // minute; an expired row not yet pruned by a concurrent request is replaced.
+    // A key whose request never saved a response is taken over by the same request after a
+    // minute, under the new owner; an expired row not yet pruned by a concurrent request is
+    // replaced. A takeover waits for the row lock of a transaction still committing, and then
+    // finds its saved response; `lock_timeout` bounds the wait, so a long transaction cannot pin
+    // the repeats' connections.
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *transaction)
+        .await?;
     let claimed = sqlx::query(
         r#"
-        INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint, owner)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (account_id, livemode, key) DO UPDATE
-            SET fingerprint = EXCLUDED.fingerprint, response = NULL, created_at = now()
+            SET fingerprint = EXCLUDED.fingerprint, owner = EXCLUDED.owner, response = NULL,
+                created_at = now()
             WHERE idempotency_keys.created_at < now() - interval '24 hours'
                OR (idempotency_keys.response IS NULL
                    AND idempotency_keys.fingerprint = EXCLUDED.fingerprint
                    AND idempotency_keys.created_at < now() - interval '1 minute')
         "#,
     )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(key)
+    .bind(claim.scope.account_id())
+    .bind(claim.scope.livemode())
+    .bind(&claim.key)
     .bind(fingerprint.as_slice())
-    .execute(pool)
+    .bind(claim.owner)
+    .execute(&mut *transaction)
     .await?
     .rows_affected()
         == 1;
     if claimed {
-        return Ok(Claim::Claimed);
+        transaction.commit().await?;
+        return Ok(Acquired::Claimed);
     }
     let stored = sqlx::query_as::<_, (Vec<u8>, Option<Value>)>(
         "SELECT fingerprint, response FROM idempotency_keys \
          WHERE account_id = $1 AND livemode = $2 AND key = $3",
     )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(key)
-    .fetch_optional(pool)
+    .bind(claim.scope.account_id())
+    .bind(claim.scope.livemode())
+    .bind(&claim.key)
+    .fetch_optional(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(match stored {
         // Released between the two statements: the client retries.
-        None => Claim::InUse,
-        Some((stored, _)) if stored.as_slice() != fingerprint.as_slice() => Claim::OtherRequest,
-        Some((_, None)) => Claim::InUse,
-        Some((_, Some(response))) => Claim::Replay(response),
+        None => Acquired::InUse,
+        Some((stored, _)) if stored.as_slice() != fingerprint.as_slice() => Acquired::OtherRequest,
+        Some((_, None)) => Acquired::InUse,
+        Some((_, Some(response))) => Acquired::Replay(response),
     })
 }
 
-async fn store(
-    pool: &PgPool,
-    scope: Scope,
-    key: &str,
-    status: StatusCode,
-    body: &Bytes,
-    contains_secret: bool,
-) {
+/// Whether `error` is PostgreSQL's `lock_not_available` (`55P03`), a `lock_timeout`.
+fn lock_not_available(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| code == "55P03")
+}
+
+/// The stored form of a response, `{"status", "body"}`, without a `secret` when it contains one;
+/// `None` for a body that is not JSON.
+fn stored_response(status: StatusCode, body: &Bytes, contains_secret: bool) -> Option<Value> {
     let mut body = match serde_json::from_slice::<Value>(body) {
         Ok(body) => body,
         Err(error) => {
             tracing::error!(%error, "a merchant POST answered with a non-JSON body");
-            release(pool, scope, key).await;
-            return;
+            return None;
         }
     };
     if contains_secret && let Some(object) = body.as_object_mut() {
         object.remove("secret");
     }
-    let stored = serde_json::json!({"status": status.as_u16(), "body": body});
-    let result = sqlx::query(
-        "UPDATE idempotency_keys SET response = $4 \
-         WHERE account_id = $1 AND livemode = $2 AND key = $3",
-    )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(key)
-    .bind(stored)
-    .execute(pool)
-    .await;
-    if let Err(error) = result {
-        tracing::error!(%error, "idempotent response was not stored");
-        release(pool, scope, key).await;
-    }
+    Some(serde_json::json!({"status": status.as_u16(), "body": body}))
 }
 
-/// Deletes the key's row so a retry runs the request again.
-async fn release(pool: &PgPool, scope: Scope, key: &str) {
+/// Saves `stored` as the key's response while `claim` still owns it; `false` once a repeat took
+/// the key over or a response was saved.
+async fn save<'e>(
+    executor: impl PgExecutor<'e>,
+    claim: &Claim,
+    stored: &Value,
+) -> Result<bool, sqlx::Error> {
+    let saved = sqlx::query(
+        "UPDATE idempotency_keys SET response = $5 \
+         WHERE account_id = $1 AND livemode = $2 AND key = $3 AND owner = $4 \
+           AND response IS NULL",
+    )
+    .bind(claim.scope.account_id())
+    .bind(claim.scope.livemode())
+    .bind(&claim.key)
+    .bind(claim.owner)
+    .bind(stored)
+    .execute(executor)
+    .await?
+    .rows_affected();
+    Ok(saved == 1)
+}
+
+/// Deletes the key's row, while `claim` still owns it and no response is saved, so a retry runs
+/// the request again.
+async fn release(pool: &PgPool, claim: &Claim) {
     let result = sqlx::query(
         "DELETE FROM idempotency_keys \
-         WHERE account_id = $1 AND livemode = $2 AND key = $3 AND response IS NULL",
+         WHERE account_id = $1 AND livemode = $2 AND key = $3 AND owner = $4 \
+           AND response IS NULL",
     )
-    .bind(scope.account_id())
-    .bind(scope.livemode())
-    .bind(key)
+    .bind(claim.scope.account_id())
+    .bind(claim.scope.livemode())
+    .bind(&claim.key)
+    .bind(claim.owner)
     .execute(pool)
     .await;
     if let Err(error) = result {

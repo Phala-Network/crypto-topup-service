@@ -37,7 +37,7 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
 | Merchant fulfillment | Stripe Checkout fulfillment: one signed event per paid session, one idempotent fulfillment function | The signature is asymmetric (the merchant holds only the public key); retries never stop; the event id is derived from the deposit id (§11) |
 | API shape | Stripe's API conventions: top-level resources, the list object, the error object, prefixed ids, `expand[]`, the Event object, `client_secret` | Token amounts are decimal strings; §12 lists every departure |
-| Idempotent API | `Idempotency-Key` on every `POST`, kept per account and mode with a request fingerprint and the response for 24 hours (Stripe; the IETF Idempotency-Key draft) | An API key's secret is never stored for a replay |
+| Idempotent API | `Idempotency-Key` on every `POST`, kept per account and mode with a request fingerprint and the response for 24 hours (Stripe; the IETF Idempotency-Key draft), the response committed with the request's changes (Brandur Leach, [Stripe-like idempotency keys in Postgres](https://brandur.org/idempotency-keys)) | An API key's secret is never stored for a replay |
 | Merchant authentication | Bearer secret keys `ppay_sk_{test,live}_…` and restricted keys `ppay_rk_{test,live}_…`, stored as SHA-256, with GitHub's token format (prefix, random body, CRC32 checksum); Stripe's roll with an overlap of at most 7 days | Keys are created, rolled, and revoked through the API with a secret key; a restricted key holds only its granted permissions and never manages keys, treasuries, endpoints, webhook keys, or account settings; the operator issues the first and recovery keys (design D7, D8, PR 12) |
 | Admin request signing | RFC 9421 HTTP Message Signatures, ed25519, `content-digest` | The operator's admin API only |
 | Webhooks | Standard Webhooks | — |
@@ -260,8 +260,8 @@ crates/topup/tests  integration tests on PostgreSQL and Anvil
 Amounts are `numeric(78,0) CHECK (>= 0)` mapped to `U256`; `transitions` and `audit` are
 append-only. Physical addresses belong to a quote or a deposit address, and so to an account, a
 mode, and a chain;
-routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, confirmation policies, limits, idempotency keys, and
-the authorization table) are listed in [design §14](design/multi-tenant.md#14-data-model); the
+routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, confirmation policies, limits, and idempotency
+keys) are listed in [design §14](design/multi-tenant.md#14-data-model); the
 tables the service uses today:
 
 ```text
@@ -275,8 +275,9 @@ retiring_webhook_keys  account_id, livemode, version, expires_at
 api_keys      id (key_ + hex), account_id, livemode, kind (secret|restricted), name, prefix, last4,
               key_hash UNIQUE (SHA-256), created_by (key_… | admin), expires_at, last_used_at,
               revoked_at                                              -- design D7
-idempotency_keys  account_id, livemode, key, fingerprint, response jsonb, created_at
+idempotency_keys  account_id, livemode, key, fingerprint, owner, response jsonb, created_at
               PRIMARY KEY (account_id, livemode, key)                  -- pruned after 24 h
+              -- owner: the request holding the key, fresh per claim (§12)
 customers     id, account_id, livemode, client_reference_id, paused_scopes text[]
               UNIQUE (account_id, livemode, client_reference_id)
               -- created by the customer's first quote or deposit address
@@ -847,7 +848,7 @@ knows it. Where it departs, the last column says why.
 | Request ids ([request IDs](https://docs.stripe.com/api/request_ids)) | `Request-Id: req_…` on every response; an event's `request` names it | Same |
 | Metadata ([metadata](https://docs.stripe.com/api/metadata)) | `metadata` on updatable objects: ≤ 50 string pairs, keys ≤ 40 characters without `[`/`]`, values ≤ 500; merged on update, `""` unsets a key, `metadata=""` unsets all | Same on quotes, deposits, and refunds, as JSON; a deposit starts with a copy of its quote's (below) |
 | Updates | `POST /v1/{object}/{id}` with the updatable parameters | Same, for `metadata` only |
-| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h; the result is saved once the endpoint starts executing, `500`s included, but not a validation failure | Same, per account and mode (`429` and `503` are not saved either); a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
+| Idempotency ([idempotent requests](https://docs.stripe.com/api/idempotent_requests)) | `Idempotency-Key` on `POST`, pruned after 24 h; the result is saved once the endpoint starts executing, `500`s included, but not an authentication, authorization, or validation failure | Same, per account and mode (`429` and `503` are not saved either), with the result committed in the transaction of the request's changes (below); a different request with the same key is `400`, and a replayed key creation omits the key's `secret` |
 | Browser reads | A PaymentIntent's [`client_secret`](https://docs.stripe.com/api/payment_intents/object#payment_intent_object-client_secret) with a publishable key | A quote's `client_secret` alone, for a public subset (below) |
 | Events ([Event object](https://docs.stripe.com/api/events/object)) | `{id, object: "event", account, livemode, type, created, request, data: {object, previous_attributes}}`, `data` rendered when the event is created; `Stripe-Signature` | Same body, plus `actor`; Standard Webhooks `v1a` signatures by the account's key per mode, asymmetric, so the merchant holds only a public key |
 | Test mode | `livemode` and test keys | Each key is live or test and sees only its mode's routes and objects; every object and event carries `livemode` |
@@ -857,22 +858,46 @@ Every merchant request carries an API key, `Authorization: Bearer ppay_sk_{test,
 or `ppay_rk_{test,live}_…` (restricted, design PR 12); HTTP Basic is refused. A key whose checksum fails is refused without a database read;
 otherwise its SHA-256 is looked up, and a revoked or unknown key is `401 api_key_invalid`, a rolled
 key past its expiry `401 api_key_expired`. The server builds the request's scope, the key's account
-and mode, from the key alone, and every query filters on both (design D13); the authorization
-table (`permissions`) then grants the key kind's permissions, and a restricted key needs the
-permission among its own grants too (`api_keys.permissions`; a `write` includes its resource's
-`read`). `key:restricted` is never granted `api_keys.write`, `treasury.write`, `endpoints.write`,
-or `account.write`: a restricted key cannot manage keys, treasuries and their crediting pause,
+and mode, from the key alone, and every query filters on both (design D13). Each route declares
+the permission it requires where the routes are declared (`crate::api`), checked after
+authentication and before the idempotency layer: a secret key holds every permission, and a
+restricted key one it was granted (`api_keys.permissions`; a `write` includes its resource's
+`read`) that its kind may hold (`crate::tenancy::Principal`). A restricted key never holds
+`api_keys.write`, `treasury.write`, `endpoints.write`, or `account.write`: it cannot manage keys, treasuries and their crediting pause,
 webhook endpoints or resends, webhook keys, or account settings (design, launch hardening). A live key of an account the operator has not
 enabled for live mode is `403 testmode_charges_only`. Requests are rate-limited per account and
 mode in the process, 100 per second live and 25 test, with a 500 per second test-mode ceiling
 across accounts (`429 rate_limit`, `Retry-After: 1`). Every response carries `Request-Id: req_…`,
-and an event a request causes records it with the request's `Idempotency-Key`. Every `POST` is idempotent by `Idempotency-Key` (above). A
-request for another account's object, or for the same account's object in the other mode,
-answers `404` as for a missing one.
+and an event a request causes records it with the request's `Idempotency-Key`. A request for
+another account's object, or for the same account's object in the other mode, answers `404` as for
+a missing one.
+
+Every `POST` is idempotent by `Idempotency-Key` (above), and its result commits with its changes
+(Brandur Leach, [Implementing Stripe-like Idempotency Keys in
+Postgres](https://brandur.org/idempotency-keys)). Authentication and authorization run first, so a
+key never replays a response to a request it may not make, and their refusals are not saved (nor
+is a handler's `401` or `403`, such as `testmode_charges_only`). The
+request then claims its key under a fresh `owner`. Its handler makes its external calls (the price
+fetch, sanctions screening, EIP-1271 checks) before any transaction, then makes its changes,
+rechecking in the transaction what those calls relied on, renders its response, and saves the
+response to the key's row in the same transaction, which first locks the row and checks the request
+still owns it. A saved response therefore exists exactly when the request's changes committed,
+whether or not the client received it: a repeat replays it and never runs the request twice. A key
+without a saved response, whose request stopped, lost its client, or has not reached its
+transaction, is taken over by a repeat of the same request after a minute under a new owner, and
+the repeat runs the request: nothing of the first one committed, and the first one can no longer
+commit. A request already in its transaction holds the row lock, so the repeat waits for it (at
+most five seconds, `lock_timeout`, then `409 idempotency_key_in_use`), and replays its response
+once it commits. This relies on READ COMMITTED, PostgreSQL's default, under which the waiting
+takeover re-checks the committed row. A database that cannot begin the transaction, or a deadlock
+or serialization failure, answers an unsaved `503` to retry. A failure that rolled
+back is saved afterwards as the request's result while the request still owns the key, as Stripe
+saves a `500`.
 
 A secret key manages its mode's keys (`/v1/api_keys`): create (a secret key, or a restricted key
 with a subset of the grantable permissions), list, roll (the old key works for up to 7 days, or is
-revoked at once), and revoke, except the mode's last secret key that is neither revoked nor
+revoked at once; a key rolling itself keeps working for at least an hour, so the response of a
+roll it lost can be recovered with it), and revoke, except the mode's last secret key that is neither revoked nor
 expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
 admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
+use axum::response::Response;
 use chrono::{DateTime, Utc};
 use sqlx::types::Json as JsonColumn;
 use sqlx::{FromRow, PgExecutor, Postgres, QueryBuilder};
@@ -14,12 +15,13 @@ use uuid::Uuid;
 use crate::ids;
 use crate::refunds::DestinationScreening;
 use crate::routes::RouteSet;
-use crate::tenancy::{Permission, Scope};
+use crate::tenancy::Scope;
 
 use super::AppState;
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
+use super::idempotency::Idempotent;
 use super::metadata::{self, Metadata, Object};
 use super::models::{
     CreateRefundRequest, Deposit, DepositList, ExpandableDeposit, ExpandableQuote,
@@ -80,9 +82,6 @@ pub(crate) async fn list_deposits(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<DepositList>> {
-    merchant
-        .require(&state.pool, Permission::DepositsRead)
-        .await?;
     let pairs = query_pairs(query.as_deref());
     let expand = expansions(&pairs, &["data.quote"])?;
     let filters = ListFilters::parse(&pairs)?;
@@ -208,9 +207,6 @@ pub(crate) async fn get_deposit(
     ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Deposit>> {
-    merchant
-        .require(&state.pool, Permission::DepositsRead)
-        .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["quote"])?;
     let id = ids::parse(ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
     let mut deposit = find_deposit(&state.pool, &state.routes, merchant.scope, id)
@@ -249,16 +245,15 @@ pub(crate) async fn get_deposit(
 pub(crate) async fn update_deposit(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateMetadataRequest>,
-) -> ApiResult<Json<Deposit>> {
-    merchant
-        .require(&state.pool, Permission::DepositsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
     let scope = merchant.scope;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     if !metadata::update(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         Object::Deposit,
         scope,
@@ -270,10 +265,10 @@ pub(crate) async fn update_deposit(
     {
         return Err(ApiError::not_found());
     }
-    find_deposit(&state.pool, &state.routes, scope, id)
+    let deposit = find_deposit(&mut *transaction, &state.routes, scope, id)
         .await?
-        .ok_or_else(ApiError::not_found)
-        .map(Json)
+        .ok_or_else(ApiError::not_found)?;
+    idempotent.commit(transaction, Json(deposit)).await
 }
 
 #[utoipa::path(
@@ -311,11 +306,9 @@ pub(crate) async fn update_deposit(
 pub(crate) async fn create_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<CreateRefundRequest>,
-) -> ApiResult<Json<Refund>> {
-    merchant
-        .require(&state.pool, Permission::RefundsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let deposit_id = ids::parse(ids::DEPOSIT, &request.deposit)
         .ok_or_else(|| ApiError::invalid_param("deposit", "deposit must be a dep_ id"))?;
     let destination = EvmAddress::from_str(&request.destination_address)
@@ -351,8 +344,10 @@ pub(crate) async fn create_refund(
             ));
         }
     }
+    // Screened first; the transaction checks the deposit and the amount again.
+    let mut transaction = idempotent.begin(&state.pool).await?;
     let refund_id = repository::request_refund(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         &NewRefund {
             scope: merchant.scope,
@@ -365,10 +360,10 @@ pub(crate) async fn create_refund(
         },
     )
     .await?;
-    let refund = find_refund(&state.pool, merchant.scope, refund_id)
+    let refund = find_refund(&mut *transaction, merchant.scope, refund_id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    Ok(Json(refund))
+    idempotent.commit(transaction, Json(refund)).await
 }
 
 const REFUND_STATUSES: [&str; 4] = ["pending", "succeeded", "failed", "canceled"];
@@ -397,9 +392,6 @@ pub(crate) async fn list_refunds(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<RefundList>> {
-    merchant
-        .require(&state.pool, Permission::RefundsRead)
-        .await?;
     let scope = merchant.scope;
     let mut builder = QueryBuilder::<Postgres>::new(
         "SELECT refund.id FROM refunds AS refund WHERE refund.account_id = ",
@@ -529,9 +521,6 @@ pub(crate) async fn get_refund(
     ApiPath(id): ApiPath<String>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Refund>> {
-    merchant
-        .require(&state.pool, Permission::RefundsRead)
-        .await?;
     let expand = expansions(&query_pairs(query.as_deref()), &["deposit"])?;
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
     let mut refund = find_refund(&state.pool, merchant.scope, id)
@@ -575,16 +564,15 @@ pub(crate) async fn get_refund(
 pub(crate) async fn update_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<UpdateMetadataRequest>,
-) -> ApiResult<Json<Refund>> {
-    merchant
-        .require(&state.pool, Permission::RefundsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
     let scope = merchant.scope;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     if !metadata::update(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         Object::Refund,
         scope,
@@ -596,10 +584,10 @@ pub(crate) async fn update_refund(
     {
         return Err(ApiError::not_found());
     }
-    find_refund(&state.pool, scope, id)
+    let refund = find_refund(&mut *transaction, scope, id)
         .await?
-        .ok_or_else(ApiError::not_found)
-        .map(Json)
+        .ok_or_else(ApiError::not_found)?;
+    idempotent.commit(transaction, Json(refund)).await
 }
 
 #[utoipa::path(
@@ -639,12 +627,10 @@ pub(crate) async fn update_refund(
 pub(crate) async fn mark_refund_paid(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
     ApiJson(request): ApiJson<MarkRefundPaidRequest>,
-) -> ApiResult<Json<Refund>> {
-    merchant
-        .require(&state.pool, Permission::RefundsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
     let tx_hash = B256::from_str(&request.transaction_hash)
         .ok()
@@ -655,8 +641,9 @@ pub(crate) async fn mark_refund_paid(
                 "transaction_hash must be 0x and 32 bytes of hex",
             )
         })?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     repository::mark_refund_paid(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         merchant.scope,
         id,
@@ -665,10 +652,10 @@ pub(crate) async fn mark_refund_paid(
         &merchant.actor(),
     )
     .await?;
-    let refund = find_refund(&state.pool, merchant.scope, id)
+    let refund = find_refund(&mut *transaction, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    Ok(Json(refund))
+    idempotent.commit(transaction, Json(refund)).await
 }
 
 #[utoipa::path(
@@ -705,24 +692,23 @@ pub(crate) async fn mark_refund_paid(
 pub(crate) async fn cancel_refund(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiPath(id): ApiPath<String>,
-) -> ApiResult<Json<Refund>> {
-    merchant
-        .require(&state.pool, Permission::RefundsWrite)
-        .await?;
+) -> ApiResult<Response> {
     let id = ids::parse(ids::REFUND, &id).ok_or_else(ApiError::not_found)?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     repository::cancel_refund(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         merchant.scope,
         id,
         &merchant.actor(),
     )
     .await?;
-    let refund = find_refund(&state.pool, merchant.scope, id)
+    let refund = find_refund(&mut *transaction, merchant.scope, id)
         .await?
         .ok_or_else(ApiError::internal)?;
-    Ok(Json(refund))
+    idempotent.commit(transaction, Json(refund)).await
 }
 
 /// The scope's deposit `id`, if it exists.

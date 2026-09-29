@@ -33,7 +33,7 @@ use std::sync::Arc;
 use crate::locks::QuoteProvider;
 use crate::refunds::DestinationScreener;
 use crate::routes::RouteSet;
-use crate::tenancy::Scope;
+use crate::tenancy::{Permission, Scope};
 use crate::treasuries::ContractSignatures;
 use axum::extract::{Extension, Request, State};
 use axum::http::{Method, StatusCode};
@@ -247,6 +247,136 @@ fn merchant_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(events::resend_event))
 }
 
+/// The permission each merchant route requires (design D13), as `(method, path, permission)`:
+/// [`auth::authorize`] checks it after authentication and before the idempotency layer. A route
+/// missing here is refused.
+const ROUTE_PERMISSIONS: &[(&str, &str, Permission)] = &[
+    ("GET", "/v1/config", Permission::AccountRead),
+    ("GET", "/v1/quotes", Permission::QuotesRead),
+    ("POST", "/v1/quotes", Permission::QuotesWrite),
+    ("GET", "/v1/quotes/{id}", Permission::QuotesRead),
+    ("POST", "/v1/quotes/{id}", Permission::QuotesWrite),
+    ("POST", "/v1/quotes/{id}/cancel", Permission::QuotesWrite),
+    (
+        "GET",
+        "/v1/deposit_addresses",
+        Permission::DepositAddressesRead,
+    ),
+    (
+        "POST",
+        "/v1/deposit_addresses",
+        Permission::DepositAddressesWrite,
+    ),
+    (
+        "GET",
+        "/v1/deposit_addresses/{id}",
+        Permission::DepositAddressesRead,
+    ),
+    (
+        "POST",
+        "/v1/deposit_addresses/{id}",
+        Permission::DepositAddressesWrite,
+    ),
+    (
+        "POST",
+        "/v1/deposit_addresses/{id}/rotate",
+        Permission::DepositAddressesWrite,
+    ),
+    ("GET", "/v1/deposits", Permission::DepositsRead),
+    ("GET", "/v1/deposits/{id}", Permission::DepositsRead),
+    ("POST", "/v1/deposits/{id}", Permission::DepositsWrite),
+    ("GET", "/v1/refunds", Permission::RefundsRead),
+    ("POST", "/v1/refunds", Permission::RefundsWrite),
+    ("GET", "/v1/refunds/{id}", Permission::RefundsRead),
+    ("POST", "/v1/refunds/{id}", Permission::RefundsWrite),
+    (
+        "POST",
+        "/v1/refunds/{id}/mark_paid",
+        Permission::RefundsWrite,
+    ),
+    ("POST", "/v1/refunds/{id}/cancel", Permission::RefundsWrite),
+    ("GET", "/v1/account", Permission::AccountRead),
+    ("POST", "/v1/account", Permission::AccountWrite),
+    ("POST", "/v1/account/pause", Permission::AccountWrite),
+    ("POST", "/v1/account/resume", Permission::AccountWrite),
+    (
+        "POST",
+        "/v1/account/webhook_keys/roll",
+        Permission::AccountWrite,
+    ),
+    ("GET", "/v1/attestation", Permission::AccountRead),
+    ("GET", "/v1/api_keys", Permission::ApiKeysRead),
+    ("POST", "/v1/api_keys", Permission::ApiKeysWrite),
+    ("GET", "/v1/api_keys/{id}", Permission::ApiKeysRead),
+    ("DELETE", "/v1/api_keys/{id}", Permission::ApiKeysWrite),
+    ("POST", "/v1/api_keys/{id}/roll", Permission::ApiKeysWrite),
+    (
+        "POST",
+        "/v1/treasuries/challenge",
+        Permission::TreasuryWrite,
+    ),
+    ("GET", "/v1/treasuries", Permission::TreasuryRead),
+    ("POST", "/v1/treasuries", Permission::TreasuryWrite),
+    ("GET", "/v1/treasuries/{id}", Permission::TreasuryRead),
+    (
+        "POST",
+        "/v1/treasuries/{id}/cancel",
+        Permission::TreasuryWrite,
+    ),
+    (
+        "POST",
+        "/v1/treasuries/{id}/pause",
+        Permission::TreasuryWrite,
+    ),
+    (
+        "POST",
+        "/v1/treasuries/{id}/resume",
+        Permission::TreasuryWrite,
+    ),
+    ("GET", "/v1/webhook_endpoints", Permission::EndpointsRead),
+    ("POST", "/v1/webhook_endpoints", Permission::EndpointsWrite),
+    (
+        "GET",
+        "/v1/webhook_endpoints/{id}",
+        Permission::EndpointsRead,
+    ),
+    (
+        "POST",
+        "/v1/webhook_endpoints/{id}",
+        Permission::EndpointsWrite,
+    ),
+    (
+        "DELETE",
+        "/v1/webhook_endpoints/{id}",
+        Permission::EndpointsWrite,
+    ),
+    (
+        "POST",
+        "/v1/webhook_endpoints/{id}/test",
+        Permission::EndpointsWrite,
+    ),
+    ("GET", "/v1/balance", Permission::SweepsRead),
+    ("GET", "/v1/sweeps", Permission::SweepsRead),
+    ("GET", "/v1/forwarders", Permission::ForwardersRead),
+    ("GET", "/v1/events", Permission::EventsRead),
+    ("GET", "/v1/events/{id}", Permission::EventsRead),
+    ("POST", "/v1/events/{id}/resend", Permission::EndpointsWrite),
+];
+
+/// The permission the merchant route `method` `path` requires; `path` is the route's template. A
+/// `HEAD` requires what its `GET` does, which serves it.
+fn required_permission(method: &Method, path: &str) -> Option<Permission> {
+    let method = if method == Method::HEAD {
+        Method::GET.as_str()
+    } else {
+        method.as_str()
+    };
+    ROUTE_PERMISSIONS
+        .iter()
+        .find(|(route_method, route_path, _)| *route_method == method && *route_path == path)
+        .map(|(_, _, permission)| *permission)
+}
+
 /// The routes a quote's or deposit address's `client_secret` also reads.
 fn client_secret_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -303,12 +433,14 @@ pub struct ApiDocs {
 
 /// Builds the Axum router, serving both OpenAPI documents, and the documents.
 pub fn router(state: AppState) -> (Router, ApiDocs) {
-    // Every merchant POST is idempotent by `Idempotency-Key`; authentication runs first.
+    // Every merchant POST is idempotent by `Idempotency-Key`; authentication and then
+    // authorization run first, so a replay needs the route's permission too.
     let merchant = merchant_routes()
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             idempotency::idempotent_post,
         ))
+        .route_layer(middleware::from_fn(auth::authorize))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
@@ -320,10 +452,12 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
             refuse_writes_while_frozen,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
-    let client_secret = client_secret_routes().route_layer(middleware::from_fn_with_state(
-        state.clone(),
-        auth::authenticate_merchant_or_client_secret,
-    ));
+    let client_secret = client_secret_routes()
+        .route_layer(middleware::from_fn(auth::authorize))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::authenticate_merchant_or_client_secret,
+        ));
     let admin = admin_routes().route_layer(middleware::from_fn_with_state(
         state.clone(),
         auth::authenticate_admin,
@@ -483,6 +617,37 @@ mod tests {
     use tower::ServiceExt as _;
 
     use super::{AppState, VerificationKey};
+
+    /// Every merchant route declares the permission it requires, and every declaration is a
+    /// route, so no route is left to a handler's own check.
+    #[test]
+    fn every_merchant_route_declares_its_permission() {
+        let (merchant, _) = super::documents();
+        let mut routes: Vec<(&str, String)> = merchant
+            .paths
+            .paths
+            .iter()
+            .flat_map(|(path, item)| {
+                [
+                    ("GET", item.get.is_some()),
+                    ("POST", item.post.is_some()),
+                    ("DELETE", item.delete.is_some()),
+                    ("PUT", item.put.is_some()),
+                    ("PATCH", item.patch.is_some()),
+                ]
+                .into_iter()
+                .filter(|(_, present)| *present)
+                .map(|(method, _)| (method, path.clone()))
+            })
+            .collect();
+        let mut declared: Vec<(&str, String)> = super::ROUTE_PERMISSIONS
+            .iter()
+            .map(|(method, path, _)| (*method, (*path).to_owned()))
+            .collect();
+        routes.sort();
+        declared.sort();
+        assert_eq!(routes, declared);
+    }
 
     #[tokio::test]
     async fn unknown_paths_are_not_found_with_a_request_id() {

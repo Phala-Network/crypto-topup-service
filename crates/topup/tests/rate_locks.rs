@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -10,10 +11,12 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, StatusCode};
+use axum::response::Response;
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 use sqlx::Row as _;
+use tokio::sync::Notify;
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::audit::Actor;
 use topup::db::{Account, Customer};
@@ -58,11 +61,12 @@ impl QuoteProvider for FixedQuote {
     }
 }
 
-/// A quote is created with its `client_secret` in one transaction, and a request that failed
-/// after creating it is replayed as it failed: a retry with the same `Idempotency-Key` never
-/// creates a second quote (Stripe saves the result of every executed request, including a `500`).
+/// A quote is created with its `client_secret` and its saved response in one transaction, so a
+/// request that failed while rendering its response created nothing, and is replayed as it
+/// failed: a retry with the same `Idempotency-Key` never creates a quote (Stripe saves the result
+/// of every executed request, including a `500`).
 #[tokio::test]
-async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote() -> Result<()> {
+async fn a_failure_before_the_response_is_saved_creates_no_quote_and_is_replayed() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
@@ -99,7 +103,7 @@ async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote()
                 "create-once",
             ))
         };
-        // Rendering the response fails after the quote is committed.
+        // Rendering the response fails after the quote is inserted.
         sqlx::query("REVOKE SELECT ON pending_transfers FROM topup_app")
             .execute(&database.owner_pool)
             .await?;
@@ -120,9 +124,269 @@ async fn a_failure_after_creation_is_replayed_and_never_creates_a_second_quote()
         .fetch_one(&database.app_pool)
         .await?;
         ensure!(
-            count == 1 && with_secret == 1,
+            count == 0 && with_secret == 0,
             "{count} quotes, {with_secret} with a secret"
         );
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Prices at [`FixedQuote`], the first call only once released.
+struct FirstQuoteWaits {
+    calls: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl QuoteProvider for FirstQuoteWaits {
+    async fn quote(&self, route: &RouteFile) -> Result<ValidatedQuote, Value> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        FixedQuote.quote(route).await
+    }
+}
+
+/// A quotes API whose first price fetch waits for the test, and the same quote request with the
+/// `Idempotency-Key` `slow`.
+struct SlowQuote {
+    app: axum::Router,
+    quotes: Arc<FirstQuoteWaits>,
+    account: Account,
+    key: String,
+}
+
+impl SlowQuote {
+    async fn new(database: &TestDatabase) -> Result<Self> {
+        let admin_key = SigningKey::from_bytes(&[45; 32]);
+        let (account, key) = seed_product(&database.app_pool, "phala-cloud").await?;
+        seed_account(&database.app_pool, account.id, "slow").await?;
+        let quotes = Arc::new(FirstQuoteWaits {
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let app = topup::api::router(AppState {
+            pool: database.app_pool.clone(),
+            routes: Arc::new(test_routes()),
+            admin_key: VerificationKey::from_base64(
+                ADMIN_KID.to_owned(),
+                &public_key_base64(&admin_key),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: quotes.clone(),
+            client_reads: Arc::default(),
+            rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        })
+        .0;
+        Ok(Self {
+            app,
+            quotes,
+            account,
+            key,
+        })
+    }
+
+    fn create(&self) -> Result<axum::http::Request<Body>> {
+        Ok(merchant_request_with_key(
+            Method::POST,
+            "/v1/quotes",
+            serde_json::to_vec(&json!({
+                "client_reference_id": "slow", "amount": 100, "currency": "usd",
+                "chain_id": 1, "asset": "pha"
+            }))?,
+            &self.key,
+            "slow",
+        ))
+    }
+
+    /// Starts the request; it waits in its price fetch, before its transaction, until
+    /// `quotes.release`.
+    async fn start(&self) -> Result<tokio::task::JoinHandle<Result<Response, Infallible>>> {
+        let request = tokio::spawn(self.app.clone().oneshot(self.create()?));
+        self.quotes.entered.notified().await;
+        Ok(request)
+    }
+
+    /// Makes the running request's key older than the takeover interval.
+    async fn age_key(&self, database: &TestDatabase) -> Result<()> {
+        sqlx::query(
+            "UPDATE idempotency_keys SET created_at = now() - interval '2 minutes' \
+             WHERE key = 'slow'",
+        )
+        .execute(&database.app_pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn quotes(&self, database: &TestDatabase) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM quotes WHERE account_id = $1")
+                .bind(self.account.id)
+                .fetch_one(&database.app_pool)
+                .await?,
+        )
+    }
+}
+
+/// Holds quote inserts inside their transaction until [`release`](Self::release): a trigger
+/// takes an advisory lock this connection holds.
+struct InsertGate(sqlx::pool::PoolConnection<sqlx::Postgres>);
+
+const INSERT_GATE: i64 = 704_300_001;
+
+impl InsertGate {
+    async fn close(database: &TestDatabase) -> Result<Self> {
+        for statement in [
+            "CREATE FUNCTION gate_quote_insert() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_advisory_xact_lock(704300001); RETURN NEW; END $$",
+            "CREATE TRIGGER gate_quote_insert BEFORE INSERT ON quotes FOR EACH ROW \
+             EXECUTE FUNCTION gate_quote_insert()",
+        ] {
+            sqlx::query(statement).execute(&database.owner_pool).await?;
+        }
+        let mut holder = database.owner_pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(INSERT_GATE)
+            .execute(&mut *holder)
+            .await?;
+        Ok(Self(holder))
+    }
+
+    async fn release(mut self) -> Result<()> {
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INSERT_GATE)
+            .execute(&mut *self.0)
+            .await?;
+        Ok(())
+    }
+}
+
+/// Waits until a backend of the test database waits on a lock of `kinds` (`pg_stat_activity`'s
+/// `wait_event`, such as `advisory` or `transactionid`).
+async fn wait_for_lock_wait(database: &TestDatabase, kinds: &[&str]) -> Result<()> {
+    let kinds: Vec<String> = kinds.iter().map(|kind| (*kind).to_owned()).collect();
+    for _ in 0..1_500 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event = ANY($1)",
+        )
+        .bind(&kinds)
+        .fetch_one(&database.owner_pool)
+        .await?;
+        if waiting > 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    anyhow::bail!("no backend waits on {kinds:?}")
+}
+
+/// A request slower than the takeover interval is fenced once a repeat takes its key over: the
+/// repeat creates the quote, and the slow request, resuming after its price fetch, can no longer
+/// commit, so one quote exists and every later repeat replays it.
+#[tokio::test]
+async fn a_takeover_fences_the_slow_request_it_replaced() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let slow = SlowQuote::new(&database).await?;
+        let first = slow.start().await?;
+        slow.age_key(&database).await?;
+        let repeat = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(repeat.status() == StatusCode::OK);
+        ensure!(repeat.headers().get("idempotent-replayed").is_none());
+        let created = response_json(repeat).await?;
+
+        slow.quotes.release.notify_one();
+        let fenced = first.await??;
+        ensure!(fenced.status() == StatusCode::CONFLICT);
+        ensure!(response_json(fenced).await?["error"]["code"] == "idempotency_key_in_use");
+        ensure!(slow.quotes(&database).await? == 1);
+        let replayed = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(replayed.headers()["idempotent-replayed"] == "true");
+        ensure!(response_json(replayed).await?["id"] == created["id"]);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// A repeat that arrives past the takeover interval while the first request is inside its
+/// transaction waits for the key's row lock, and finds the response the first request saved:
+/// one quote, and the repeat replays it.
+#[tokio::test]
+async fn a_repeat_during_the_transaction_waits_and_replays_it() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let slow = SlowQuote::new(&database).await?;
+        let gate = InsertGate::close(&database).await?;
+        let first = slow.start().await?;
+        slow.age_key(&database).await?;
+        slow.quotes.release.notify_one();
+        wait_for_lock_wait(&database, &["advisory"]).await?;
+
+        let repeat = tokio::spawn(slow.app.clone().oneshot(slow.create()?));
+        wait_for_lock_wait(&database, &["transactionid", "tuple"]).await?;
+        gate.release().await?;
+        let first = first.await??;
+        ensure!(first.status() == StatusCode::OK);
+        ensure!(first.headers().get("idempotent-replayed").is_none());
+        let created = response_json(first).await?;
+        let repeat = repeat.await??;
+        ensure!(repeat.status() == StatusCode::OK);
+        ensure!(repeat.headers()["idempotent-replayed"] == "true");
+        ensure!(response_json(repeat).await? == created);
+        ensure!(slow.quotes(&database).await? == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// A request dropped inside its transaction, as when its client disconnects, commits nothing: a
+/// repeat past the takeover interval waits for the transaction to roll back, takes the key over,
+/// and creates the one quote.
+#[tokio::test]
+async fn a_request_dropped_in_its_transaction_commits_nothing() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let slow = SlowQuote::new(&database).await?;
+        let gate = InsertGate::close(&database).await?;
+        let first = slow.start().await?;
+        slow.age_key(&database).await?;
+        slow.quotes.release.notify_one();
+        wait_for_lock_wait(&database, &["advisory"]).await?;
+        first.abort();
+        ensure!(first.await.is_err_and(|error| error.is_cancelled()));
+
+        let repeat = tokio::spawn(slow.app.clone().oneshot(slow.create()?));
+        wait_for_lock_wait(&database, &["transactionid", "tuple"]).await?;
+        gate.release().await?;
+        let repeat = repeat.await??;
+        ensure!(repeat.status() == StatusCode::OK);
+        ensure!(repeat.headers().get("idempotent-replayed").is_none());
+        let created = response_json(repeat).await?;
+        ensure!(slow.quotes(&database).await? == 1);
+        let replayed = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(replayed.headers()["idempotent-replayed"] == "true");
+        ensure!(response_json(replayed).await?["id"] == created["id"]);
         Ok(())
     }
     .await;

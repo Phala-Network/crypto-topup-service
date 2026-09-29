@@ -22,8 +22,11 @@ treasury, webhook endpoint, webhook key, or account setting changes.
 ## The merchant rolls the key
 
 A merchant that still holds a working key replaces a leaked one itself (design D7), without the
-operator: `POST /v1/api_keys/{id}/roll {"expires_in": 0}` returns a new key and revokes the old
-one at once, and `DELETE /v1/api_keys/{id}` revokes any other key. The service refuses to revoke
+operator: `POST /v1/api_keys/{id}/roll` returns a new key, and `DELETE /v1/api_keys/{id}` with
+the new key then revokes the old one at once. A key rolling itself must keep working for at least
+an hour (`{"expires_in": 3600}`): if the roll's response is lost, a retry with the same
+`Idempotency-Key` returns the new key's id without its secret, and rolling that key with the old
+one recovers. Another key rolls a leaked one with `{"expires_in": 0}` directly. The service refuses to revoke
 the mode's last key that is neither revoked nor expiring, so the account always keeps one.
 
 ## Recovery by the operator

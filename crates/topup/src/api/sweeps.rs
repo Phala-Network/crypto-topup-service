@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::ids;
 use crate::refunds::DestinationScreening;
 use crate::routes::RouteSet;
-use crate::tenancy::{Permission, Scope};
+use crate::tenancy::Scope;
 
 use super::AppState;
 use super::auth::Merchant;
@@ -90,9 +90,6 @@ pub(crate) async fn get_balance(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
 ) -> ApiResult<Json<Balance>> {
-    merchant
-        .require(&state.pool, Permission::SweepsRead)
-        .await?;
     let scope = merchant.scope;
     let mut builder = with_held(scope);
     builder.push(
@@ -152,9 +149,6 @@ pub(crate) async fn list_sweeps(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<SweepList>> {
-    merchant
-        .require(&state.pool, Permission::SweepsRead)
-        .await?;
     let scope = merchant.scope;
     let mut builder = QueryBuilder::<Postgres>::new(
         "SELECT flushed.id, address.id AS forwarder, address.livemode, flushed.chain_id, \
@@ -308,9 +302,6 @@ pub(crate) async fn list_forwarders(
     Extension(merchant): Extension<Merchant>,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<ForwarderList>> {
-    merchant
-        .require(&state.pool, Permission::ForwardersRead)
-        .await?;
     let scope = merchant.scope;
     let mut sweepable = None;
     let mut conditions = Vec::new();

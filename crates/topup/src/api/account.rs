@@ -5,17 +5,18 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Extension, State};
+use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, Utc};
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool, Postgres};
 use topup_core::route::Confirmations;
 use uuid::Uuid;
 
 use crate::audit::Actor;
 use crate::pause::PauseOwner;
 use crate::routes::RouteSet;
-use crate::tenancy::{Permission, Scope};
+use crate::tenancy::Scope;
 use crate::webhook_keys::{self, WebhookKeyError, WebhookKeys};
 
 use super::AppState;
@@ -23,6 +24,7 @@ use super::attestation::{AttestationError, AttestationRequest};
 use super::auth::Merchant;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiQuery};
+use super::idempotency::Idempotent;
 use super::models::{
     AccountObject, AccountSelfPauseRequest, AttestationQuery, AttestationResponse,
     ConfirmationPolicy, RollWebhookKeyRequest, UpdateAccountObjectRequest, WebhookKeyObject,
@@ -44,10 +46,12 @@ pub(crate) async fn get_account(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
 ) -> Result<Json<AccountObject>, ApiError> {
-    merchant
-        .require(&state.pool, Permission::AccountRead)
-        .await?;
-    current_account(&state, merchant.scope).await
+    current_account(
+        &mut *state.pool.acquire().await?,
+        &state.routes,
+        merchant.scope,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -78,15 +82,17 @@ pub(crate) async fn get_account(
 pub(crate) async fn update_account(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<UpdateAccountObjectRequest>,
-) -> Result<Json<AccountObject>, ApiError> {
-    merchant
-        .require(&state.pool, Permission::AccountWrite)
-        .await?;
-    if let Some(policies) = request.confirmation_policies {
-        let changes = validate_policies(&state.routes, merchant.scope, &policies)?;
+) -> Result<Response, ApiError> {
+    let changes = request
+        .confirmation_policies
+        .map(|policies| validate_policies(&state.routes, merchant.scope, &policies))
+        .transpose()?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
+    if let Some(changes) = changes {
         set_policies(
-            &state.pool,
+            &mut *transaction,
             &state.routes,
             merchant.scope,
             &changes,
@@ -94,7 +100,8 @@ pub(crate) async fn update_account(
         )
         .await?;
     }
-    current_account(&state, merchant.scope).await
+    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
+    idempotent.commit(transaction, account).await
 }
 
 #[utoipa::path(
@@ -123,9 +130,10 @@ pub(crate) async fn update_account(
 pub(crate) async fn pause_account(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<AccountSelfPauseRequest>,
-) -> Result<Json<AccountObject>, ApiError> {
-    self_pause(&state, &merchant, &request, true).await
+) -> Result<Response, ApiError> {
+    self_pause(&state, &merchant, &idempotent, &request, true).await
 }
 
 #[utoipa::path(
@@ -153,27 +161,26 @@ pub(crate) async fn pause_account(
 pub(crate) async fn resume_account(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<AccountSelfPauseRequest>,
-) -> Result<Json<AccountObject>, ApiError> {
-    self_pause(&state, &merchant, &request, false).await
+) -> Result<Response, ApiError> {
+    self_pause(&state, &merchant, &idempotent, &request, false).await
 }
 
 async fn self_pause(
     state: &AppState,
     merchant: &Merchant,
+    idempotent: &Idempotent,
     request: &AccountSelfPauseRequest,
     pause: bool,
-) -> Result<Json<AccountObject>, ApiError> {
-    merchant
-        .require(&state.pool, Permission::AccountWrite)
-        .await?;
+) -> Result<Response, ApiError> {
     if request.scopes.is_empty() || request.scopes.iter().any(|scope| scope != "quotes") {
         return Err(ApiError::invalid_param(
             "scopes",
             "scopes must be [\"quotes\"], the one scope an account pauses itself",
         ));
     }
-    let mut transaction = state.pool.begin().await?;
+    let mut transaction = idempotent.begin(&state.pool).await?;
     crate::pause::mutate_account_scopes_in(
         &mut transaction,
         &state.routes,
@@ -190,8 +197,8 @@ async fn self_pause(
     )
     .await?
     .ok_or_else(ApiError::internal)?;
-    transaction.commit().await?;
-    current_account(state, merchant.scope).await
+    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
+    idempotent.commit(transaction, account).await
 }
 
 /// Checks each policy against its chain's route floor: a chain of the key's mode, a value of
@@ -247,14 +254,14 @@ fn validate_policies(
 
 /// Writes the policy changes with an audit row and, when any changed, `account.updated` in the
 /// key's mode, whose chains they are.
-async fn set_policies(
-    pool: &PgPool,
+async fn set_policies<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     routes: &RouteSet,
     scope: Scope,
     changes: &BTreeMap<u64, Option<Confirmations>>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
-    let mut transaction = pool.begin().await?;
+    let mut transaction = db.begin().await?;
     let object = crate::db::EventObject::Account(scope.account_id());
     let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let mut changed = false;
@@ -369,13 +376,12 @@ pub(crate) async fn confirmation_policies<'e>(
 pub(crate) async fn roll_webhook_key(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
+    idempotent: Idempotent,
     ApiJson(request): ApiJson<RollWebhookKeyRequest>,
-) -> Result<Json<AccountObject>, ApiError> {
-    merchant
-        .require(&state.pool, Permission::AccountWrite)
-        .await?;
+) -> Result<Response, ApiError> {
+    let mut transaction = idempotent.begin(&state.pool).await?;
     webhook_keys::roll(
-        &state.pool,
+        &mut *transaction,
         &state.routes,
         merchant.scope,
         Duration::seconds(i64::from(request.expires_in)),
@@ -397,7 +403,8 @@ pub(crate) async fn roll_webhook_key(
         WebhookKeyError::NotFound | WebhookKeyError::VersionExhausted => ApiError::internal(),
         WebhookKeyError::Database(error) => error.into(),
     })?;
-    current_account(&state, merchant.scope).await
+    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
+    idempotent.commit(transaction, account).await
 }
 
 #[utoipa::path(
@@ -422,9 +429,6 @@ pub(crate) async fn get_attestation(
     Extension(merchant): Extension<Merchant>,
     ApiQuery(query): ApiQuery<AttestationQuery>,
 ) -> Result<Json<AttestationResponse>, ApiError> {
-    merchant
-        .require(&state.pool, Permission::AccountRead)
-        .await?;
     let nonce = decode_nonce(&query.nonce)?;
     let keys = active_keys(&state.pool, merchant.scope)
         .await?
@@ -486,9 +490,12 @@ async fn active_keys(pool: &PgPool, scope: Scope) -> Result<Option<WebhookKeys>,
 }
 
 /// The scope's account as `GET /v1/account` returns it.
-async fn current_account(state: &AppState, scope: Scope) -> Result<Json<AccountObject>, ApiError> {
-    let mut connection = state.pool.acquire().await?;
-    find_account(&mut connection, &state.routes, scope)
+async fn current_account(
+    connection: &mut sqlx::PgConnection,
+    routes: &RouteSet,
+    scope: Scope,
+) -> Result<Json<AccountObject>, ApiError> {
+    find_account(connection, routes, scope)
         .await?
         .map(Json)
         .ok_or_else(ApiError::internal)

@@ -1053,7 +1053,7 @@ pub struct CreateApiKeyRequest {
 #[serde(deny_unknown_fields)]
 pub struct RollApiKeyRequest {
     /// Seconds the old key keeps working, up to 604800 (7 days); 0, the default, revokes it at
-    /// once.
+    /// once. A key rolling itself needs at least 3600.
     #[serde(default)]
     pub expires_in: u32,
 }
