@@ -110,7 +110,8 @@ enum Reach {
     Reached,
     /// The endpoint failed it: an error status, a redirect, a timeout, or no connection.
     Failed,
-    /// The service failed before sending it.
+    /// Nothing about the endpoint as it is: the service failed before sending it, or it was a
+    /// notice to the endpoint's former URL.
     Unknown,
 }
 
@@ -436,14 +437,7 @@ where
         );
         let result = async {
             let outcome = self.send(&event).await?;
-            let reach = match &outcome {
-                Outcome::Delivered(_) => Reach::Reached,
-                Outcome::Failed {
-                    endpoint_fault: true,
-                    ..
-                } => Reach::Failed,
-                Outcome::Failed { .. } => Reach::Unknown,
-            };
+            let reach = reach(event.notice, &outcome);
             self.record(&event, outcome).await.map(|()| reach)
         }
         .instrument(span)
@@ -805,6 +799,22 @@ fn request_error_code(error: &reqwest::Error) -> &'static str {
     }
 }
 
+/// What an attempt says about its endpoint, which the worker's cooldowns track. A notice goes to
+/// the URL the endpoint had before a change: whatever it meets there says nothing about the
+/// endpoint as it is, so it neither cools the endpoint nor clears it. Otherwise a former URL that
+/// was taken down would hold the endpoint to probes that always pick the failing notice first.
+fn reach(notice: bool, outcome: &Outcome) -> Reach {
+    match outcome {
+        _ if notice => Reach::Unknown,
+        Outcome::Delivered(_) => Reach::Reached,
+        Outcome::Failed {
+            endpoint_fault: true,
+            ..
+        } => Reach::Failed,
+        Outcome::Failed { .. } => Reach::Unknown,
+    }
+}
+
 fn retry_delay(attempts: i32, entropy: &dyn JitterSource) -> Duration {
     let attempt = u32::try_from(attempts).unwrap_or(u32::MAX);
     backoff(attempt, entropy.next_u64())
@@ -837,6 +847,27 @@ mod tests {
                 .pop_front()
                 .expect("test supplied enough entropy")
         }
+    }
+
+    #[test]
+    fn a_notice_neither_cools_nor_clears_its_endpoint() {
+        let failed = |endpoint_fault| Outcome::Failed {
+            status: Some(404),
+            body: None,
+            error: "http_status",
+            endpoint_fault,
+        };
+        assert_eq!(
+            reach(false, &Outcome::Delivered(Value::Null)),
+            Reach::Reached
+        );
+        assert_eq!(reach(false, &failed(true)), Reach::Failed);
+        assert_eq!(reach(false, &failed(false)), Reach::Unknown);
+        assert_eq!(
+            reach(true, &Outcome::Delivered(Value::Null)),
+            Reach::Unknown
+        );
+        assert_eq!(reach(true, &failed(true)), Reach::Unknown);
     }
 
     #[test]

@@ -601,3 +601,8 @@ happens only from two-provider finalized data.
   endpoint's former URL: it is not a delivery to the endpoint as it is now, so a former URL that
   was taken down no longer makes the endpoint look unhealthy. The notice is still retried until
   delivered.
+- Webhook deliveries no longer stall behind a URL change's notice. The notice goes to the
+  endpoint's former URL, and its failures there counted as the endpoint's: once that URL was
+  taken down, the endpoint cooled down and every probe picked the failing notice first, so new
+  events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
+  the endpoint.
