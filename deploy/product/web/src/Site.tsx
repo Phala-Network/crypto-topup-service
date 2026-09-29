@@ -117,10 +117,11 @@ export function Hero() {
           {TAGLINE}
         </h1>
         <p className="max-w-2xl text-base text-pretty text-muted-foreground sm:text-lg">
-          {/* Each sentence a line where the paragraph is wide; on a phone, the no-break spaces keep its
-              wraps between clauses. */}
-          Credited at two confirmations, about 15&nbsp;s on&nbsp;Ethereum, in a TEE you can verify. Payment&nbsp;addresses
-          can only pay your treasury, behind a Stripe-shaped API.
+          {/* Each sentence a line where the paragraph is wide; on a phone, its phrases kept whole so
+              it wraps between them. */}
+          Credited at two confirmations, <span className="whitespace-nowrap">about 15&nbsp;s on Ethereum</span>,{" "}
+          <span className="whitespace-nowrap">in a TEE you can verify</span>. Payment addresses can only pay your
+          treasury, <span className="whitespace-nowrap">and the API follows Stripe's</span>.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-2">
           <Button asChild size="lg" className={HERO_BUTTON}>

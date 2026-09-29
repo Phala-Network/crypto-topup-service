@@ -18,7 +18,7 @@ import { useNetworks } from "./queries.js";
 
 // Each step's title, what it waits for, and the time it usually takes: the hints are expectations,
 // every time shown next to them is real (the chain's block time, the service's timestamps, or when
-// this console received a webhook).
+// your server received a webhook).
 // A step that usually takes a known time says so on its line until it happens (`usually`).
 const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string; usually?: string }> = {
   quote_created: {
@@ -31,12 +31,12 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     failed: "The quote expired without a payment.",
   },
   received: {
-    usually: "~12s",
+    usually: "~12 s",
     title: "Received by Phala Pay",
     hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
   },
   credited: {
-    usually: "~15s",
+    usually: "~15 s",
     title: "Credited",
     hint:
       "Usually about 15 s after sending: at 2 confirmations, once both RPC providers report the " +
@@ -44,11 +44,11 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     failed: "The deposit was rejected and will not be credited.",
   },
   webhook_received: {
-    title: "Webhook applied by this console",
+    title: "Webhook handled by your server",
     hint: "The signed deposit.credited moves the balance; its metadata arrives with it.",
   },
   final: {
-    usually: "~15m",
+    usually: "~15 min",
     title: "Final",
     hint:
       "About 15 minutes on Ethereum. Until then a reorg that drops the transaction reverses the " +
@@ -68,15 +68,12 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
 };
 
 // A step's line in columns: its time, its dot, its title with the opener, and the time since
-// sending, which ends on the card's right content edge. The time's column shows only once a
-// payment has times.
-const STEP_GRID =
-  "grid grid-cols-[4rem_1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:gap-x-3";
-const UNTIMED_STEP_GRID = "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:gap-x-3";
-// Where a step's opened details start: under its title (px-2, the columns before it, and their
-// gaps); on a phone, a timed step's under its time, to keep the details' width.
+// sending, which ends on the card's right content edge. The time's column is kept before a payment
+// has times, so the lines stay put when its first one arrives.
+const STEP_GRID = "grid grid-cols-[4rem_1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:gap-x-3";
+// Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
+// phone, under its time, to keep the details' width.
 const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
-const UNTIMED_STEP_INDENT = "pl-[calc(0.5rem+1rem+0.5rem)] sm:pl-[calc(0.5rem+1rem+0.75rem)]";
 
 // A quote's steps, shown before there is a payment to follow.
 const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "webhook_received", "final", "swept"];
@@ -103,13 +100,7 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
         </p>
         <ol className="flex flex-col" aria-label="The steps of a payment">
           {PREVIEW.map((key) => (
-            <StreamStep
-              key={key}
-              step={{ key, state: "upcoming", at: null, details: [] }}
-              sent={null}
-              token={token}
-              timed={false}
-            />
+            <StreamStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} token={token} />
           ))}
         </ol>
       </div>
@@ -142,7 +133,6 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
               : null
           }
           token={token}
-          timed
         />
       ))}
     </ol>
@@ -185,14 +175,11 @@ function StreamStep({
   sent,
   since = null,
   token,
-  timed,
 }: {
   step: Step;
   sent: number | null;
   since?: number | null;
   token: StepToken;
-  /** Whether the payment has times yet: until then the line leaves out the time's column. */
-  timed: boolean;
 }) {
   const copy = STEP_COPY[step.key];
   // Seconds since the payment was sent, for the steps after it.
@@ -207,36 +194,28 @@ function StreamStep({
       aria-current={step.state === "current" ? "step" : undefined}
     >
       {/* The rail between this step's dot and the next one's, through the dots' centres (px-2, the
-          time's column and a gap, half a dot); on a phone a timed step's opened details take its
-          place. */}
+          time's column, a gap, half a dot); on a phone the opened details take its place. */}
       <span
-        className={cn(
-          "absolute top-7 bottom-[-0.375rem] w-px bg-border group-last/step:hidden",
-          timed
-            ? "left-[calc(5.5rem-0.5px)] max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]"
-            : "left-[calc(1rem-0.5px)]",
-        )}
+        className="absolute top-7 bottom-[-0.375rem] left-[calc(5.5rem-0.5px)] w-px bg-border group-last/step:hidden max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]"
         aria-hidden="true"
       />
       <Collapsible>
         <CollapsibleTrigger
           className={cn(
-            timed ? STEP_GRID : UNTIMED_STEP_GRID,
+            STEP_GRID,
             "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
           )}
         >
           {/* A step yet to happen leaves its time blank. */}
-          {timed && (
-            <span className="font-mono text-xs text-muted-foreground tabular-nums">
-              {step.at !== null ? (
-                <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
-              ) : since !== null ? (
-                <time dateTime={new Date(since * 1000).toISOString()} title="Waiting since">
-                  {clock(since)}
-                </time>
-              ) : null}
-            </span>
-          )}
+          <span className="font-mono text-xs text-muted-foreground tabular-nums">
+            {step.at !== null ? (
+              <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
+            ) : since !== null ? (
+              <time dateTime={new Date(since * 1000).toISOString()} title="Waiting since">
+                {clock(since)}
+              </time>
+            ) : null}
+          </span>
           <StepDot state={step.state} />
           <span className="flex min-w-0 items-center gap-1.5">
             <span
@@ -255,7 +234,7 @@ function StreamStep({
               aria-hidden="true"
             />
           </span>
-          <span className="text-right font-mono text-xs text-muted-foreground tabular-nums">
+          <span className="text-right font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
             {elapsed !== null ? (
               `+${duration(elapsed)}`
             ) : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined ? (
@@ -267,12 +246,12 @@ function StreamStep({
           </span>
         </CollapsibleTrigger>
         {failed && (
-          <p className={cn("pb-1 text-xs text-pretty text-destructive", timed ? STEP_INDENT : UNTIMED_STEP_INDENT)}>
+          <p className={cn("pb-1 text-xs text-pretty text-destructive", STEP_INDENT)}>
             {copy.failed}
           </p>
         )}
         <CollapsibleContent
-          className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", timed ? STEP_INDENT : UNTIMED_STEP_INDENT)}
+          className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", STEP_INDENT)}
         >
           <p className="text-muted-foreground text-pretty">{copy.hint}</p>
           {step.at !== null && (
@@ -347,7 +326,7 @@ export function LedgerPanel({ ledger }: { ledger: LedgerView }) {
         <Detail label="Nets to" data-testid="nets-to">
           <strong>{dollars(ledger.nets_to)}</strong>
         </Detail>
-        <Detail label="This console's ledger" data-testid="console-net">
+        <Detail label="Your server's ledger" data-testid="console-net">
           {product === null || product.status === null
             ? "no order yet"
             : product.net === null

@@ -66,7 +66,7 @@ export function App() {
         <SiteHeader theme={theme} onThemeChange={setTheme} />
         <main id="top" className="flex-1">
           <Hero />
-          <section id="demo" aria-label="Live demo" className={`${CONTAINER} scroll-mt-20 pb-16 lg:pb-20`}>
+          <section id="demo" aria-label="Live demo" className={`${CONTAINER} scroll-mt-24 pb-16 lg:pb-20`}>
             {/* The product at a billing page's width, as a customer's browser shows it; its backend
                 takes the rest, so the backend's tables fit. */}
             <div className="grid items-start gap-x-8 gap-y-12 lg:grid-cols-[25rem_minmax(0,1fr)] xl:grid-cols-[27.5rem_minmax(0,1fr)] 2xl:gap-x-10">

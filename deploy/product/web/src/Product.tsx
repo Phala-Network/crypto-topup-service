@@ -41,7 +41,8 @@ const METHODS: { id: Method; label: string }[] = [
 ];
 
 /**
- * The product: the cloud console's billing page, as its customer sees it, with Phala Pay inside.
+ * The product: a made-up cloud provider's billing page (Acme Cloud, at acme.example), as its
+ * customer sees it in their browser, with Phala Pay inside.
  * Only customer-facing UI belongs here; what the backend sees is in ./Backend.
  */
 export function Product({
@@ -89,7 +90,7 @@ export function Product({
     />
   );
   return (
-    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24">
+    <div className="flex min-w-0 flex-col gap-3">
       <AreaLabel step={1} title="Your customer's view" text="Your app's billing page" />
       {/* An app in a browser window: the raised surface of the two. */}
       <section
@@ -102,9 +103,12 @@ export function Product({
             <span className="size-2.5 rounded-full bg-foreground/15" />
             <span className="size-2.5 rounded-full bg-foreground/15" />
           </span>
-          <span className="flex min-w-0 flex-1 items-center justify-center gap-1.5 text-xs text-muted-foreground" aria-hidden="true">
-            <Lock className="size-3 shrink-0" />
-            <span className="truncate">Cloud Console · Billing</span>
+          {/* The address bar: the app's page, as a browser shows it. */}
+          <span className="flex min-w-0 flex-1 justify-center" aria-hidden="true">
+            <span className="flex h-6 w-full max-w-56 min-w-0 items-center justify-center gap-1.5 rounded-md border bg-background px-2.5 text-xs text-muted-foreground">
+              <Lock className="size-3 shrink-0" />
+              <span className="truncate">acme.example/billing</span>
+            </span>
           </span>
           {(network?.testnet ?? true) && <TestnetBadge network={network?.name ?? "a"} />}
         </div>
@@ -112,7 +116,7 @@ export function Product({
           <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-1">
               <h2 id="product-title" className="sr-only">
-                Cloud Console · Billing
+                Acme Cloud · Billing
               </h2>
               <h3 id="balance-title" className="text-sm text-muted-foreground">
                 Account balance
@@ -186,10 +190,13 @@ export function Product({
   );
 }
 
-/** The caption above each of the demo's two areas, numbered as a guide's steps are. */
+/**
+ * The caption above each of the demo's two areas, numbered as a guide's steps are; on a phone its
+ * text on a line of its own.
+ */
 export function AreaLabel({ step, title, text }: { step: number; title: string; text: string }) {
   return (
-    <p className="flex min-h-5 items-center gap-2.5 px-1 text-sm">
+    <p className="flex min-h-5 items-start gap-2.5 px-1 text-sm">
       <span
         className="flex size-5 shrink-0 items-center justify-center rounded-full border font-mono text-xs text-muted-foreground"
         aria-hidden="true"
@@ -198,7 +205,10 @@ export function AreaLabel({ step, title, text }: { step: number; title: string; 
       </span>
       <span className="min-w-0">
         <span className="font-medium">{title}</span>
-        <span className="text-muted-foreground"> · {text}</span>
+        <span className="text-muted-foreground max-sm:block">
+          <span className="max-sm:hidden"> · </span>
+          {text}
+        </span>
       </span>
     </p>
   );
@@ -448,13 +458,13 @@ function AmountPicker({
         <Label id={`${id}-amount-label`} asChild>
           <span>Amount</span>
         </Label>
-        {/* Four across where they fit, else two by two. */}
+        {/* Four across where each has room for its label (a full-width product), else two by two. */}
         <div className="@container">
           <RadioGroup
             value={String(preset)}
             onValueChange={(value) => setPreset(value === "custom" ? "custom" : Number(value))}
             aria-labelledby={`${id}-amount-label`}
-            className="grid-cols-2 gap-2 @sm:grid-cols-4"
+            className="grid-cols-2 gap-2 @md:grid-cols-4"
           >
             {options.map((option) => (
               <FieldLabel key={option.value} htmlFor={`${id}-${option.value}`} className={CHOICE}>
