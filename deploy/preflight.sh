@@ -22,7 +22,7 @@
 # --source is the unrendered compose the rendered file must come from (default
 # deploy/docker-compose.yml of this checkout). --restore-check expects the compose rendered with
 # render-compose.sh --restore-check (deploy/RESTORE.md). --offline runs only the local checks (env
-# file, compose, route). --unsealed accepts empty owner-sealed secrets: Deploy provisions
+# file, compose, routes). --unsealed accepts empty owner-sealed secrets: Deploy provisions
 # with them empty and the owner seals them from their own machine; check that file without
 # --unsealed. PHALA selects the CLI command (default `npx --yes phala@1.1.22`). Every failure is
 # reported; the exit status is 1 if any.
@@ -40,7 +40,6 @@ source "$(dirname -- "$0")/preflight-phala.sh"
 root="$REPO_ROOT"
 example="$root/deploy/staging.env.example"
 networks="$DEPLOY_CONTRACTS_DIR/networks.json"
-route_config=topup_route_phala_cloud_sepolia_pha
 # May stay empty: an empty DSN turns Sentry reporting off, an empty RPC key means a keyless URL.
 optional_empty=" SENTRY_DSN TOPUP_RPC_PROVIDER_A_KEY TOPUP_RPC_PROVIDER_B_KEY "
 # The owner-approved OS image (deploy/README.md, "OS image"): production, dstack 0.5.9.
@@ -142,8 +141,13 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     cmp -s "$tmp/compose-variables" "$tmp/expected" ||
         fail "the compose reads other variables than staging.env.example:" \
             "$(diff "$tmp/expected" "$tmp/compose-variables" | grep '^[<>]' | tr '\n' ' ')"
-    jq -j --arg name "$route_config" '.configs[$name].content // empty' "$tmp/compose.json" \
-        >"$tmp/route.yaml"
+    # Every attested route: the inline configs named topup_route_*.
+    mkdir "$tmp/routes"
+    while IFS= read -r name; do
+        jq -j --arg name "$name" '.configs[$name].content' "$tmp/compose.json" \
+            >"$tmp/routes/$name.yaml"
+    done < <(jq -r '.configs // {} | keys[] | select(startswith("topup_route_"))' \
+        "$tmp/compose.json")
     # The public settings, from the attested compose.
     declare -A setting=()
     while IFS=$'\t' read -r name value; do
@@ -235,37 +239,50 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     fi
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
-    : >"$tmp/route.yaml"
     : >"$tmp/images"
 fi
 
-echo "== route"
+echo "== routes"
 route_value() {
-    sed -n "s/^[[:space:]]*$1:[[:space:]]*\"\{0,1\}\([^\"#[:space:]]*\)\"\{0,1\}.*/\1/p" \
-        "$tmp/route.yaml" | head -n 1
+    sed -n "s/^[[:space:]]*$2:[[:space:]]*\"\{0,1\}\([^\"#[:space:]]*\)\"\{0,1\}.*/\1/p" "$1" |
+        head -n 1
 }
+# route[NAME/KEY]: route NAME's value of KEY, for each name in route_names.
 declare -A route=()
-if [[ -s "$tmp/route.yaml" ]]; then
+route_names=()
+for file in "$tmp"/routes/*.yaml; do
+    [[ -s "$file" ]] || continue
+    name=$(route_value "$file" route)
+    if [[ -z "$name" ]]; then
+        fail "the attested $(basename "$file" .yaml) names no route"
+        continue
+    fi
+    route_names+=("$name")
+    route[$name/file]=$file
     # The file names only what differs per route; the implementation (the factory's first CREATE)
     # and, on chains with a Chainalysis oracle, the sanctions oracle are code defaults that the
     # online checks read from `topup route show`.
     for key in chain_id forwarder_factory contract sanctions_oracle decimals; do
-        route[$key]=$(route_value "$key")
+        route[$name/$key]=$(route_value "$file" "$key")
     done
     for key in forwarder_factory contract sanctions_oracle; do
-        address=${route[$key]}
+        address=${route[$name/$key]}
         if [[ "$key" == sanctions_oracle && -z "$address" ]]; then
             continue
         elif ! is_address "$address"; then
-            fail "route $key is not an address: '$address'"
+            fail "route $name $key is not an address: '$address'"
         elif placeholder_address "$address"; then
-            fail "route $key is the placeholder or zero address $address; deploy the contracts" \
-                "(deploy/CONTRACTS.md) and commit the real address"
+            fail "route $name $key is the placeholder or zero address $address; deploy the" \
+                "contracts (deploy/CONTRACTS.md) and commit the real address"
         fi
     done
-else
-    fail "the compose has no inline $route_config config"
-fi
+    # The compose has one pair of RPC providers, so every route is on one chain.
+    first=${route_names[0]}
+    [[ "${route[$name/chain_id]}" == "${route[$first/chain_id]}" ]] ||
+        fail "route $name is on chain ${route[$name/chain_id]} and route $first on chain" \
+            "${route[$first/chain_id]}; the compose's RPC providers serve one chain"
+done
+((${#route_names[@]})) || fail "the compose has no inline topup_route_* config"
 
 if ((failures)); then
     echo "preflight: $failures local check(s) failed; online checks not run" >&2
@@ -278,15 +295,18 @@ fi
 
 check_anonymous_pulls "$tmp/images"
 topup_image=$(jq -r '.services.topup.image' "$tmp/compose.json")
-if docker run --rm -i --pull never "$topup_image" topup route show /dev/stdin \
-    <"$tmp/route.yaml" \
-    >"$tmp/resolved.json" 2>"$tmp/validate.out"; then
-    ok "topup route show resolves the attested route"
-    route[implementation]=$(jq -r '.chain.implementation' "$tmp/resolved.json")
-    route[sanctions_oracle]=$(jq -r '.chain.sanctions_oracle' "$tmp/resolved.json")
-else
-    fail "topup route show rejected the route: $(tail -n 3 "$tmp/validate.out")"
-fi
+for name in "${route_names[@]}"; do
+    if docker run --rm -i --pull never "$topup_image" topup route show /dev/stdin \
+        <"${route[$name/file]}" \
+        >"$tmp/resolved.json" 2>"$tmp/validate.out"; then
+        ok "topup route show resolves the attested route $name"
+        route[$name/implementation]=$(jq -r '.chain.implementation' "$tmp/resolved.json")
+        route[$name/sanctions_oracle]=$(jq -r '.chain.sanctions_oracle' "$tmp/resolved.json")
+    else
+        fail "topup route show rejected the route $name: $(tail -n 3 "$tmp/validate.out")"
+    fi
+done
+chain_id=${route[${route_names[0]}/chain_id]}
 
 echo "== asset chain (RPC URLs are not printed)"
 if [[ "$rpc_a$rpc_b" == *"{key}"* ]]; then
@@ -316,14 +336,14 @@ else
     for label in a b; do
         [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
         id=$(rpc "$url" chain-id)
-        if [[ "$id" == "${route[chain_id]}" ]]; then
+        if [[ "$id" == "$chain_id" ]]; then
             ok "provider $label reports chain id $id"
         else
-            fail "provider $label reports chain id $id, the route needs ${route[chain_id]}"
+            fail "provider $label reports chain id $id, the routes need $chain_id"
             chain_ok=0
         fi
     done
-    network=$(jq -r --argjson id "${route[chain_id]}" \
+    network=$(jq -r --argjson id "$chain_id" \
         '.networks | to_entries[] | select(.value.chain_id == $id) | .key' "$networks")
     if ((chain_ok)) && [[ -n "$network" ]]; then
         if "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" --rpc "$network/a=$rpc_a" \
@@ -332,29 +352,33 @@ else
         else
             fail "verify-deployment.sh failed: $(redact "$(tail -n 3 "$tmp/verification.err")")"
         fi
-        if jq -e --arg factory "${route[forwarder_factory]}" \
-            --arg implementation "${route[implementation]}" \
-            '(.chains | length) == 2 and all(.chains[];
-                (.factory | ascii_downcase) == ($factory | ascii_downcase) and
-                (.implementation | ascii_downcase) == ($implementation | ascii_downcase))' \
-            "$tmp/verification.json" >/dev/null 2>&1; then
-            ok "route factory and implementation match the verified deployment"
-        else
-            fail "route contract addresses differ from the verified deployment"
-        fi
-        for label in a b; do
-            [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
-            for key in contract sanctions_oracle; do
-                code=$(rpc "$url" code "${route[$key]}")
-                [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
-                    fail "route $key ${route[$key]} has no code on provider $label (${code:0:300})"
+        for name in "${route_names[@]}"; do
+            if jq -e --arg factory "${route[$name/forwarder_factory]}" \
+                --arg implementation "${route[$name/implementation]-}" \
+                '(.chains | length) == 2 and all(.chains[];
+                    (.factory | ascii_downcase) == ($factory | ascii_downcase) and
+                    (.implementation | ascii_downcase) == ($implementation | ascii_downcase))' \
+                "$tmp/verification.json" >/dev/null 2>&1; then
+                ok "route $name factory and implementation match the verified deployment"
+            else
+                fail "route $name contract addresses differ from the verified deployment"
+            fi
+            for label in a b; do
+                [[ "$label" == a ]] && url=$rpc_a || url=$rpc_b
+                for key in contract sanctions_oracle; do
+                    code=$(rpc "$url" code "${route[$name/$key]}")
+                    [[ "$code" =~ ^0x[0-9a-fA-F]+$ && "$code" != 0x ]] ||
+                        fail "route $name $key ${route[$name/$key]} has no code on provider" \
+                            "$label (${code:0:300})"
+                done
             done
+            decimals=$(rpc "$rpc_a" call "${route[$name/contract]}" 'decimals()(uint8)')
+            [[ "$decimals" == "${route[$name/decimals]}" ]] ||
+                fail "route $name asset decimals() is $decimals, the route says" \
+                    "${route[$name/decimals]}"
         done
-        decimals=$(rpc "$rpc_a" call "${route[contract]}" 'decimals()(uint8)')
-        [[ "$decimals" == "${route[decimals]}" ]] ||
-            fail "asset decimals() is $decimals, the route says ${route[decimals]}"
     elif ((chain_ok)); then
-        fail "$networks names no network with chain id ${route[chain_id]}"
+        fail "$networks names no network with chain id $chain_id"
     fi
 fi
 

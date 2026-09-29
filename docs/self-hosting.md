@@ -100,10 +100,13 @@ A route is one chain and token that accounts quote on and are paid through, in o
 files are committed and attested: a new route is a pull request to your fork and a Deploy
 `upgrade`, never a runtime setting.
 
-- **The committed route** is `phala-cloud-sepolia-pha-usd`
-  ([deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)):
-  test mode on Sepolia, with a test token (`MockERC20`, public `mint`) any instance can use. Keep
-  it for a first instance in test mode.
+- **The committed routes** are in test mode on Sepolia, and any instance can use them; keep them
+  for a first instance in test mode:
+  `phala-cloud-sepolia-pha-usd`
+  ([deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)),
+  a test PHA token (`MockERC20`, public `mint`), and `phala-cloud-sepolia-usdc-usd`
+  ([deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)),
+  Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin.
 - **Your own routes.** The fields and their defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment), and
   [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A
@@ -111,7 +114,8 @@ files are committed and attested: a new route is a pull request to your fork and
   [deploy/docker-compose.yml](../deploy/docker-compose.yml), and its path in the `--route`
   arguments of the `topup` and `restore-check` services; [validate-compose.sh](../deploy/validate-compose.sh)
   checks the compose against the files and names the route paths it expects, so update it with
-  them. `cargo run --locked -p topup -- route validate FILE` checks a file and `route show FILE`
+  them, and [cvm-rehearsal.sh](../deploy/local/cvm-rehearsal.sh) names a local stand-in token for
+  each route. `cargo run --locked -p topup -- route validate FILE` checks a file and `route show FILE`
   prints it resolved. Deploy refuses a live route on a test network, a test route on a mainnet,
   any live route in `staging`, and a chain that [check-route-modes.sh](../deploy/check-route-modes.sh)
   does not list; add a chain there, and to

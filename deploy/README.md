@@ -19,7 +19,7 @@ a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md)
 | Staging reference-product CVM (Phala's demo; optional) | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
 | Object storage (S3-compatible; Phala's instance: Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | The operator's Sentry project (optional; Phala's: `phala-network/crypto-topup-service`) | errors, alerts, Crons and Uptime monitors | the service itself |
-| EVM chains of the routes (the committed route: Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
+| EVM chains of the routes (the committed routes: Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
 | GitHub Actions | [Release images](../.github/workflows/release-images.yml), [Deploy](../.github/workflows/deploy.yml), [Verify contracts](../.github/workflows/verify-contracts.yml) (daily, read-only), [Restore drill](../.github/workflows/restore-drill.yml) (weekly, local stack) | — |
 
 Production CVMs have no SSH, no logs, and no database access. Everything an operator sees comes
@@ -487,7 +487,7 @@ jq -e '.passed == true' sepolia-contract-verification.json
 
 The dry run must print the two addresses above; if the factory already has that code (anyone may
 deploy it), the broadcast sends nothing. Then run **Verify contracts** (Actions), which re-checks the
-deployment, the Safe of `contracts/safe-expectations.json` (Phala's), and the committed route daily,
+deployment, the Safe of `contracts/safe-expectations.json` (Phala's), and the committed routes daily,
 in the `staging` Environment. Mainnet repeats this after the security review
 ([CONTRACTS.md, "Mainnet"](CONTRACTS.md#mainnet)).
 
@@ -650,6 +650,24 @@ product whose API serves the live demo on Phala's website, [pay.phala.com](https
 This section records that setup; another operator needs none of it, and can run the reference
 product the same way for its own rehearsals.
 
+### Staging routes
+
+Staging serves two test-mode routes on Sepolia, both on the deterministic factory
+([Contracts](#contracts)) with `confirmations: 2`; any test key quotes on both, and
+`GET /v1/config` lists both assets:
+
+| Route | Token | Pricing | Test tokens |
+|---|---|---|---|
+| `phala-cloud-sepolia-pha-usd` ([file](config/routes/phala-cloud-sepolia-pha.yaml)) | test PHA `0x8F40e7E99678F44c88158f049E62817580ab113B` (`MockERC20`, 18 decimals) | spot: Coin Metrics `pha`, checked against Binance `PHAUSDT` | `mint(address,uint256)` is public |
+| `phala-cloud-sepolia-usdc-usd` ([file](config/routes/phala-cloud-sepolia-usdc.yaml)) | Circle's testnet USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | stablecoin: 1.00 while Coin Metrics' `usdc` rate is within 1% | [Circle's faucet](https://faucet.circle.com) (Ethereum Sepolia) |
+
+There is no USDT route: Tether publishes no testnet USDT, and a third-party token is not one.
+USDC moves about two transfers a block on Sepolia, so its route sets `backstop: addresses`, which
+puts the whole chain, PHA included, on transfer requests by recipient (architecture §8); the RPC
+cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
+usage](#measuring-rpc-usage)). Routes are attested config: adding or changing one is a PR and a
+Deploy `upgrade` of `topup`, never a reset.
+
 ### Staging reset (HUMAN-ONLY)
 
 The multi-tenant schema (design §14) replaced the migration history and migrates no data
@@ -683,8 +701,8 @@ them. In order:
    which waits for `/healthz` and verifies the attestation and the certificate evidence. The new
    app id derives new webhook keys for every account.
 7. **Verify** the attestation from your machine ([Attestation](#attestation-ingress-and-egress)) and
-   that `GET /v1/config` with any test key lists the Sepolia asset with `confirmations` 2 (the
-   route's version is in the attested compose Deploy `upgrade` verified).
+   that `GET /v1/config` with any test key lists the Sepolia assets with `confirmations` 2 (the
+   routes' versions are in the attested compose Deploy `upgrade` verified).
 8. **Onboard the staging accounts** ([Operator onboarding](#operator-onboarding), steps 1–3, with
    `charges_enabled: false`: Sepolia routes are test routes), first the reference product's, then
    each internal merchant's (Phala Cloud's staging backend), and send each contact its `acct_…` and

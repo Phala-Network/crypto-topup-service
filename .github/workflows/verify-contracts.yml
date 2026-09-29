@@ -1,7 +1,7 @@
 name: Verify contracts
 
 # Read-only: checks the approved Safe and the deployed factory on Sepolia through the two staging
-# RPC providers, and validates the committed staging route. No keys; the RPC URLs (which may carry
+# RPC providers, and validates the committed staging routes. No keys; the RPC URLs (which may carry
 # provider API keys) are Environment secrets and appear only as "sepolia/a" and "sepolia/b" in the
 # reports. The `staging` Environment admits only `main`, so this runs from `main`.
 
@@ -66,8 +66,11 @@ jobs:
           jq '{passed, chains: [.chains[] | {target, passed}]}' reports/*.json || true
           exit "$status"
 
-      - name: Validate the committed staging route
-        run: cargo run --locked -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
+      - name: Validate the committed staging routes
+        run: |
+          for route in deploy/config/routes/*.yaml; do
+            cargo run --locked -q -p topup -- route validate "$route"
+          done
 
       - name: Upload the reports
         if: always()

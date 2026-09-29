@@ -1,0 +1,35 @@
+# Staging route on Sepolia for Circle's testnet USDC (https://faucet.circle.com), beside the PHA
+# route: a test-mode route (`livemode: false`) any account can quote on and pay its own treasury
+# through. The token is the one Circle lists for Ethereum Sepolia
+# (https://developers.circle.com/stablecoins/usdc-contract-addresses): FiatTokenV2_2 behind
+# Circle's proxy, a plain ERC-20 with no transfer fee or rebasing. The chain section is the PHA
+# route's: one chain has one set of chain settings. Route files carry no treasury (design D10).
+# Every value not written here is a code default (docs/architecture.md §14); `topup route show` prints the resolved route.
+route: phala-cloud-sepolia-usdc-usd
+version: 1
+livemode: false
+
+chain:
+  chain_id: 11155111
+  forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+  confirmations: 2 # the floor and default (design D1); an account may require more, never less
+  sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
+
+asset:
+  symbol: usdc
+  contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+  decimals: 6
+  # About 2 transfers per block on Sepolia (4 280 in 2 000 blocks, up to 41 in one, Sep 2026):
+  # a token-wide 2 000-block backstop window would be 2.7 MB and near providers' 10 000-log
+  # response caps. Address mode puts the whole chain, PHA included, on requests by recipient
+  # (architecture §8).
+  backstop: addresses
+
+pricing:
+  mode: stablecoin # credited at 1.00 while Coin Metrics' USDC reference rate is within 1% of it
+  primary: { source: coinmetrics, asset: usdc }
+
+limits:
+  min_credit_minor: 100 # USD 1.00, as on the PHA route
+  max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
+  min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA

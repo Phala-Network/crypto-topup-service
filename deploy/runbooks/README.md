@@ -35,6 +35,7 @@ rotated ([deploy/README.md, "One-time setup"](../README.md#one-time-setup-human-
 
 ```sh
 export BASE_URL="https://$TOPUP_DOMAIN"
+# The affected route; staging also serves phala-cloud-sepolia-usdc-usd.
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x...
