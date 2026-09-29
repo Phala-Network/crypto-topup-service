@@ -57,6 +57,14 @@ class Integration:
     @classmethod
     def load(cls, path: str | Path) -> Integration:
         values = json.loads(Path(path).read_text(encoding="utf-8"))
+        # The sandbox config lists the product's chains; this example integrates on the first,
+        # with its first test token.
+        chain = values["chains"][0]
+        values |= {
+            "chain_id": chain["chain_id"],
+            "treasury": chain["treasury"],
+            "token_symbol": chain["test_tokens"][0]["symbol"],
+        }
         return cls(**{field.name: values[field.name] for field in fields(cls)})
 
     def livemode(self) -> bool:

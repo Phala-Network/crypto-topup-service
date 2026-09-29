@@ -11,8 +11,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { Account, Asset, DepositAddressResponse, Network } from "./api.js";
 import { BRAND_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
-import { dollars, price, statusLabel, tokenName, tokens } from "./format.js";
-import { useCreateDepositAddress } from "./queries.js";
+import { assetOf, networkOf } from "./chains.js";
+import { dollars, price, signedDollars, statusLabel, tokenName, tokens } from "./format.js";
+import { useCreateDepositAddress, useNetworks } from "./queries.js";
 
 const DepositAddress = lazy(() => loadSdk().then((sdk) => ({ default: sdk.DepositAddress })));
 
@@ -44,7 +45,7 @@ export function DepositAddressPanel({
 
   if (created === null || created.client_secret === undefined) {
     return (
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-6">
         {picker}
         <div className="flex flex-col gap-3">
           <Button
@@ -98,7 +99,6 @@ export function DepositAddressPanel({
       </Suspense>
       <TopUps account={account} />
       <PayFromWallet
-        account={account}
         network={network}
         asset={asset}
         to={
@@ -112,13 +112,16 @@ export function DepositAddressPanel({
   );
 }
 
-/** The address's recorded payments, each at the rate it was credited at (`deposit.exchange_rate`). */
+/**
+ * The address's recorded payments, each at the rate it was credited at (`deposit.exchange_rate`),
+ * with the demo merchant's bonus when it earned one.
+ */
 function TopUps({ account }: { account: Account }) {
+  const networks = useNetworks().data;
   const deposits = account.payments.filter((row) => row.kind === "address" && row.id.startsWith("dep_"));
   if (deposits.length === 0) {
     return null;
   }
-  const testnet = account.network.testnet;
   return (
     <section aria-labelledby="top-ups-title" className="flex flex-col gap-2">
       <h4 id="top-ups-title" className="text-[0.8125rem] font-medium">
@@ -126,13 +129,18 @@ function TopUps({ account }: { account: Account }) {
       </h4>
       <ul className="flex flex-col divide-y rounded-lg border text-xs" data-testid="top-ups">
         {deposits.map((row) => {
-          const symbol = (row.asset ?? account.token.symbol).toUpperCase();
+          const network = networkOf(networks, row.chain_id);
+          const token = assetOf(network, row.asset);
+          const symbol = (row.asset ?? "token").toUpperCase();
+          const testnet = network?.testnet ?? true;
           const reversed = row.status === "reversed" || row.status === "rejected";
           const valued = row.exchange_rate === null ? null : `${price(row.exchange_rate)} / ${symbol}`;
           return (
             <li key={row.id} data-testid="top-up" className="flex items-center justify-between gap-3 px-3 py-2.5">
               <span className="flex min-w-0 flex-col gap-0.5">
-                <span className="font-medium tabular-nums">{tokens(row.amount_atomic, tokenName(symbol, testnet))}</span>
+                <span className="font-medium tabular-nums">
+                  {tokens(row.amount_atomic, tokenName(symbol, testnet), token?.decimals)}
+                </span>
                 <span className="text-muted-foreground tabular-nums">
                   {row.status === "rejected"
                     ? statusLabel(row.status)
@@ -143,13 +151,20 @@ function TopUps({ account }: { account: Account }) {
                         : `Credited at ${valued}`}
                 </span>
               </span>
-              <span
-                className={cn(
-                  "shrink-0 text-sm font-medium tabular-nums",
-                  reversed ? "text-muted-foreground line-through" : "text-success",
+              <span className="flex shrink-0 flex-col items-end gap-0.5">
+                <span
+                  className={cn(
+                    "text-sm font-medium tabular-nums",
+                    reversed ? "text-muted-foreground line-through" : "text-success",
+                  )}
+                >
+                  {row.amount === null ? "—" : `+${dollars(row.amount)}`}
+                </span>
+                {row.bonus !== null && row.bonus > 0 && (
+                  <span className="text-muted-foreground tabular-nums" data-testid="top-up-bonus">
+                    {signedDollars(row.bonus)} bonus
+                  </span>
                 )}
-              >
-                {row.amount === null ? "—" : `+${dollars(row.amount)}`}
               </span>
             </li>
           );
@@ -160,12 +175,10 @@ function TopUps({ account }: { account: Account }) {
 }
 
 function PayFromWallet({
-  account,
   network,
   asset,
   to,
 }: {
-  account: Account;
   network: Network | undefined;
   asset: Asset | undefined;
   to: string;
@@ -173,16 +186,14 @@ function PayFromWallet({
   const [amount, setAmount] = useState("25");
   const [invalid, setInvalid] = useState<string | null>(null);
   const id = useId();
-  const symbol = asset?.symbol ?? account.token.symbol;
+  const symbol = asset?.symbol ?? "tokens";
   const send = useMutation({
     mutationFn: async (atomic: bigint) => {
+      if (network === undefined || asset === undefined) {
+        throw new Error("Choose a network and a token first.");
+      }
       const { transferTokens } = await wallet();
-      return transferTokens(
-        network?.chain_id ?? account.network.chain_id,
-        asset?.contract ?? account.token.address,
-        to,
-        atomic,
-      );
+      return transferTokens(network.chain_id, asset.contract, to, atomic);
     },
   });
   const submit = (event: FormEvent) => {
@@ -205,7 +216,7 @@ function PayFromWallet({
       aria-label="Pay to the deposit address from a browser wallet"
     >
       <FieldLabel htmlFor={id}>
-        Send from your browser wallet ({tokenName(symbol, network?.testnet ?? account.network.testnet)})
+        Send from your browser wallet ({tokenName(symbol, network?.testnet ?? true)})
       </FieldLabel>
       <div className="flex gap-2">
         <Input
@@ -224,7 +235,7 @@ function PayFromWallet({
           <>
             {send.isSuccess && (
               <>
-                Sent: <ExplorerLink account={account} kind="tx" value={send.data} />
+                Sent: <ExplorerLink chainId={network?.chain_id} kind="tx" value={send.data} />
               </>
             )}
             {send.isError && errorMessage(send.error, "The wallet did not send it.")}

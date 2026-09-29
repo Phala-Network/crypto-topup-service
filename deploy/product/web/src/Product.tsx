@@ -1,27 +1,28 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
-import { AppWindow, ArrowRight, CircleAlert, FlaskConical, Lock } from "lucide-react";
+import { AppWindow, Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Field, FieldContent, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
+import { Field, FieldLabel } from "@/components/ui/field";
 import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
+import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 import type { Account, Asset, CreatedQuote, DepositAddressResponse, Network } from "./api.js";
-import { BRAND_BUTTON, ExplorerLink, InfoTip, LINK, describe, errorMessage, loadSdk, wallet } from "./common.js";
+import { ChainIcon, TokenIcon, assetOf, networkOf, tokenFullName } from "./chains.js";
+import { BRAND_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
-import { dollars, price, tokenName } from "./format.js";
+import { dollars, percent, rate, signedDollars, tokenName } from "./format.js";
 import { useCreateQuote } from "./queries.js";
 
 const Checkout = lazy(() => loadSdk().then((sdk) => ({ default: sdk.Checkout })));
-
-// ethereum.org's list of Sepolia faucets: gas for the visitor's own wallet.
-const SEPOLIA_FAUCETS = "https://ethereum.org/en/developers/docs/networks/#sepolia";
 
 export type Method = "quote" | "address";
 
@@ -69,7 +70,6 @@ export function Product({
   });
   const network = networks?.find((each) => each.chain_id === choice.chainId) ?? networks?.[0];
   const asset = network?.assets.find((each) => each.asset === choice.asset) ?? network?.assets[0];
-  const testnet = account?.network.testnet ?? true;
   const picker = (
     <PaymentOptions
       networks={networks}
@@ -84,39 +84,36 @@ export function Product({
       <AreaLabel icon={<AppWindow />} title="Your product" text="What your customer sees" />
       <section
         aria-labelledby="product-title"
-        className="product-app overflow-hidden rounded-2xl border bg-card text-card-foreground shadow-[0_1px_2px_rgb(0_0_0/0.04),0_12px_40px_-12px_rgb(0_0_0/0.12)] dark:shadow-[0_1px_0_rgb(255_255_255/0.06)_inset,0_16px_48px_-16px_rgb(0_0_0/0.7)]"
+        className="product-app overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
       >
-        <div className="grid h-10 grid-cols-[4.75rem_minmax(0,1fr)_4.75rem] items-center gap-2 border-b bg-muted/50 px-3.5">
+        <div className="flex h-10 items-center gap-3 border-b bg-muted/40 px-4">
           <span className="flex gap-1.5" aria-hidden="true">
-            <span className="size-2.5 rounded-full bg-foreground/12" />
-            <span className="size-2.5 rounded-full bg-foreground/12" />
-            <span className="size-2.5 rounded-full bg-foreground/12" />
+            <span className="size-2.5 rounded-full bg-foreground/15" />
+            <span className="size-2.5 rounded-full bg-foreground/15" />
+            <span className="size-2.5 rounded-full bg-foreground/15" />
           </span>
-          <span
-            className="mx-auto flex min-w-0 items-center gap-1.5 rounded-md bg-background px-3 py-1 text-[0.6875rem] text-muted-foreground ring-1 ring-border"
-            aria-hidden="true"
-          >
-            <Lock className="size-2.5 shrink-0" />
+          <span className="flex min-w-0 flex-1 items-center justify-center gap-1.5 text-xs text-muted-foreground" aria-hidden="true">
+            <Lock className="size-3 shrink-0" />
             <span className="truncate">Cloud Console · Billing</span>
           </span>
-          {testnet && <TestnetBadge network={account?.network.name ?? "Sepolia"} />}
+          {(network?.testnet ?? true) && <TestnetBadge network={network?.name ?? "a"} />}
         </div>
-        <div className="flex flex-col gap-7 p-5 sm:p-7">
+        <div className="flex flex-col gap-6 p-5 sm:p-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex flex-col gap-1">
               <h2 id="product-title" className="sr-only">
                 Cloud Console · Billing
               </h2>
-              <h3 id="balance-title" className="text-[0.8125rem] text-muted-foreground">
+              <h3 id="balance-title" className="text-sm text-muted-foreground">
                 Account balance
               </h3>
               <div
-                className="text-4xl font-semibold tracking-[-0.03em] tabular-nums"
+                className="text-3xl font-semibold tracking-tight tabular-nums"
                 aria-live="polite"
                 aria-labelledby="balance-title"
                 data-testid="balance"
               >
-                {account === null ? <Skeleton className="h-10 w-36" /> : dollars(account.balance)}
+                {account === null ? <Skeleton className="h-9 w-32" /> : dollars(account.balance)}
               </div>
             </div>
             <Workspace account={account} />
@@ -127,19 +124,20 @@ export function Product({
               <AlertDescription>Could not load the account: {accountError}</AlertDescription>
             </Alert>
           )}
+          <Separator />
           <section aria-labelledby="pay-title" className="flex flex-col gap-4">
-            <h3 id="pay-title" className="text-[0.9375rem] font-medium">
+            <h3 id="pay-title" className="text-base font-semibold">
               Add credits
             </h3>
             <Tabs value={method} onValueChange={(value) => onMethodChange(value === "address" ? "address" : "quote")}>
-              <TabsList aria-label="Payment method" className="h-9! w-full">
+              <TabsList aria-label="Payment method" className="w-full">
                 {METHODS.map(({ id, label }) => (
                   <TabsTrigger key={id} value={id}>
                     {label}
                   </TabsTrigger>
                 ))}
               </TabsList>
-              <TabsContent value="quote" className="pt-5">
+              <TabsContent value="quote" className="pt-4">
                 {session === null || account === null ? (
                   <AmountPicker account={account} network={network} asset={asset} picker={picker} onQuote={onQuote} />
                 ) : (
@@ -147,14 +145,14 @@ export function Product({
                     key={session.quote}
                     session={session}
                     account={account}
-                    testnet={networks?.find((each) => each.chain_id === session.chain_id)?.testnet ?? testnet}
+                    network={networkOf(networks, session.chain_id)}
                     appearance={appearance}
                     onCredited={onCredited}
                     onNewTopUp={onNewTopUp}
                   />
                 )}
               </TabsContent>
-              <TabsContent value="address" className="pt-5">
+              <TabsContent value="address" className="pt-4">
                 {account === null ? (
                   <CheckoutSkeleton />
                 ) : (
@@ -173,7 +171,7 @@ export function Product({
           </section>
         </div>
       </section>
-      {testnet && account !== null && <TestTokens account={account} />}
+      {network?.testnet === true && asset !== undefined && <TestTokens network={network} asset={asset} />}
     </div>
   );
 }
@@ -181,10 +179,12 @@ export function Product({
 /** A small caption above each of the page's two areas. */
 export function AreaLabel({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
   return (
-    <p className="flex h-5 items-center gap-2 px-1 text-xs [&_svg]:size-3.5 [&_svg]:text-muted-foreground">
+    <p className="flex h-5 items-center gap-2 px-1 text-[0.8125rem] [&_svg]:size-4 [&_svg]:text-muted-foreground">
       {icon}
-      <span className="font-medium">{title}</span>
-      <span className="text-muted-foreground">· {text}</span>
+      <span>
+        <span className="font-medium">{title}</span>
+        <span className="text-muted-foreground"> · {text}</span>
+      </span>
     </p>
   );
 }
@@ -194,42 +194,55 @@ function TestnetBadge({ network }: { network: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button
-          type="button"
-          data-testid="testnet-badge"
-          className="flex items-center gap-1 justify-self-end rounded-full bg-amber-500/15 px-2 py-0.5 text-[0.6875rem] font-semibold text-amber-800 ring-1 ring-amber-600/25 outline-none ring-inset focus-visible:ring-2 focus-visible:ring-ring dark:text-amber-300 dark:ring-amber-400/25"
-        >
-          <FlaskConical className="size-3" aria-hidden="true" />
-          Testnet
+        <button type="button" data-testid="testnet-badge" className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <TestnetTag />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-xs leading-relaxed">
-        A demo on the {network} testnet: you pay with free test tokens, and no real money moves.
-      </TooltipContent>
+      <TooltipContent>A demo on {network}: you pay with free test tokens, and no real money moves.</TooltipContent>
     </Tooltip>
   );
 }
 
+/** The testnet marker, the same in the title bar and the network select. */
+function TestnetTag() {
+  return (
+    <Badge variant="outline" className="gap-1 border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+      <FlaskConical aria-hidden="true" />
+      Testnet
+    </Badge>
+  );
+}
+
+/** The demo workspace: its id, truncated, with a copy button. */
 function Workspace({ account }: { account: Account | null }) {
+  const [copied, setCopied] = useState(false);
   if (account === null) {
-    return <Skeleton className="h-6 w-28 rounded-full" />;
+    return <Skeleton className="h-7 w-32 rounded-full" />;
   }
+  const copy = () => {
+    navigator.clipboard.writeText(account.account_id).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => undefined,
+    );
+  };
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label={`Workspace ${account.account_id}`}
-          className="flex max-w-36 items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[0.6875rem] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={copy}
+          aria-label={`Workspace ${account.account_id}, copy`}
+          className="flex h-7 max-w-40 items-center gap-1.5 rounded-full border px-2.5 font-mono text-xs text-muted-foreground transition-colors outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
         >
           <span className="size-1.5 shrink-0 rounded-full bg-success" aria-hidden="true" />
           <span className="truncate">{account.account_id}</span>
+          {copied ? <Check className="size-3 shrink-0" aria-hidden="true" /> : <Copy className="size-3 shrink-0" aria-hidden="true" />}
         </button>
       </TooltipTrigger>
-      <TooltipContent>
-        Workspace <span className="font-mono">{account.account_id}</span>, a demo account kept in a cookie in this
-        browser.
-      </TooltipContent>
+      <TooltipContent align="end">{copied ? "Copied" : "Your demo account, kept in this browser's cookie."}</TooltipContent>
     </Tooltip>
   );
 }
@@ -246,9 +259,9 @@ function CheckoutSkeleton() {
 }
 
 /**
- * The network, then the token, the customer pays with, as radio cards: the networks the product
- * offers, and the chosen network's tokens. Shown even with one option each, so the customer sees
- * what they pay with (a test token, on a testnet) before paying.
+ * The network, then the token, as checkouts and wallets ask for them: a network select, and the
+ * network's tokens as a list with each one's price terms. Shown even with one option each, so
+ * the customer sees what they pay with (a test token, on a testnet) before paying.
  */
 function PaymentOptions({
   networks,
@@ -265,117 +278,107 @@ function PaymentOptions({
 }) {
   const id = useId();
   if (networks === undefined) {
-    return <Skeleton className="h-[4.75rem] w-full rounded-lg" />;
+    return (
+      <div className="space-y-6" aria-hidden="true">
+        <Skeleton className="h-10 w-full rounded-lg" />
+        <Skeleton className="h-16 w-full rounded-lg" />
+      </div>
+    );
   }
   if (network === undefined || asset === undefined) {
     return <p className="text-sm text-muted-foreground">No network accepts payments right now.</p>;
   }
   return (
-    <div className="grid gap-4 sm:grid-cols-2 sm:gap-2">
-      <Options legend="Network">
-        <RadioGroup
-          value={String(network.chain_id)}
-          onValueChange={(value) => onNetworkChange(Number(value))}
-          aria-label="Network"
-          className="gap-2"
-        >
-          {networks.map((each) => (
-            <Option
-              key={each.chain_id}
-              id={`${id}-network-${each.chain_id}`}
-              value={String(each.chain_id)}
-              testId="network-option"
-              mark={<NetworkMark name={each.name} />}
-              label={each.name}
-            />
-          ))}
-        </RadioGroup>
-      </Options>
-      <Options legend="Token">
+    <>
+      <div className="space-y-2">
+        <Label htmlFor={`${id}-network`}>Network</Label>
+        {/* In a form, Radix adds a hidden native select beside the trigger: kept out of the flow. */}
+        <div className="relative [&>select]:absolute">
+          <Select value={String(network.chain_id)} onValueChange={(value) => onNetworkChange(Number(value))}>
+            <SelectTrigger id={`${id}-network`} className="h-10! w-full" aria-label="Network" data-testid="network-select">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" align="start">
+              {networks.map((each) => (
+                <SelectItem key={each.chain_id} value={String(each.chain_id)} data-testid="network-option">
+                  <ChainIcon chainId={each.chain_id} />
+                  <span>{each.name.replace(/ testnet$/, "")}</span>
+                  {each.testnet && <TestnetTag />}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label id={`${id}-token`} asChild>
+          <span>Token</span>
+        </Label>
         {/* Keyed by network: each network lists its own tokens. */}
         <RadioGroup
           key={network.chain_id}
           value={asset.asset}
           onValueChange={onAssetChange}
           aria-label="Token"
-          className="gap-2"
+          className="@container gap-2"
         >
           {network.assets.map((each) => (
-            <Option
-              key={each.asset}
-              id={`${id}-token-${network.chain_id}-${each.asset}`}
-              value={each.asset}
-              testId="token-option"
-              mark={<TokenMark symbol={each.symbol} />}
-              label={tokenName(each.symbol, network.testnet)}
-            />
+            <TokenOption key={each.asset} id={`${id}-token-${network.chain_id}-${each.asset}`} asset={each} testnet={network.testnet} />
           ))}
         </RadioGroup>
-      </Options>
-    </div>
+      </div>
+    </>
   );
 }
 
-function Options({ legend, children }: { legend: string; children: ReactNode }) {
+/**
+ * A token row: its mark, symbol with the demo merchant's bonus, if any, and name; on the right its
+ * price terms; checked, a tick.
+ */
+function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet: boolean }) {
+  const bonus =
+    asset.bonus_bps > 0 ? (
+      <Badge className="shrink-0 bg-success/12 text-success" data-testid="token-bonus">
+        <Gift aria-hidden="true" />+{percent(asset.bonus_bps)} bonus
+      </Badge>
+    ) : null;
   return (
-    <FieldSet className="min-w-0 gap-2!">
-      <FieldLegend variant="label" className="mb-0 text-[0.8125rem] text-muted-foreground">
-        {legend}
-      </FieldLegend>
-      {children}
-    </FieldSet>
-  );
-}
-
-function Option({
-  id,
-  value,
-  testId,
-  mark,
-  label,
-}: {
-  id: string;
-  value: string;
-  testId: string;
-  mark: ReactNode;
-  label: string;
-}) {
-  return (
-    <FieldLabel htmlFor={id} data-testid={testId} className={CHOICE}>
-      <Field orientation="horizontal" className="items-center! gap-2.5 px-3! py-2.5!">
-        <RadioGroupItem value={value} id={id} />
-        {mark}
-        <FieldContent className="min-w-0">
-          <span className="truncate text-sm font-medium">{label}</span>
-        </FieldContent>
+    <FieldLabel
+      htmlFor={id}
+      data-testid="token-option"
+      className="w-full min-w-0 cursor-pointer has-data-checked:border-primary! dark:has-data-checked:border-primary/60!"
+    >
+      <Field orientation="horizontal" className="min-w-0 items-center! gap-3 px-3! py-2.5!">
+        {/* The row is the control: the radio itself stays for the keyboard and screen readers. */}
+        <RadioGroupItem
+          value={asset.asset}
+          id={id}
+          className="peer pointer-events-none absolute! opacity-0"
+          aria-label={tokenName(asset.symbol, testnet)}
+        />
+        <TokenIcon asset={asset.asset} />
+        <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+          <span className="flex items-center text-sm font-medium">
+            {asset.symbol}
+            {bonus !== null && <span className="ml-2 inline-flex">{bonus}</span>}
+          </span>
+          <span className="w-full truncate text-xs font-normal text-muted-foreground">
+            {testnet ? `Test ${tokenFullName(asset.asset)}` : tokenFullName(asset.asset)}
+          </span>
+        </span>
+        {/* A stablecoin is valued at $1.00; any other token at the market rate, which a quote
+            locks (the locked-rate line). */}
+        <span className="shrink-0 text-sm font-normal tabular-nums" data-testid="token-price">
+          {asset.pricing === "stablecoin" ? "$1.00" : "Market rate"}
+        </span>
+        <span
+          className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 peer-data-checked:opacity-100"
+          aria-hidden="true"
+        >
+          <Check className="size-3" />
+        </span>
       </Field>
     </FieldLabel>
-  );
-}
-
-/** A choice card's selected state: a quiet outline, not the primary fill. */
-const CHOICE =
-  "cursor-pointer transition-colors has-data-checked:border-foreground/70! has-data-checked:bg-transparent! has-data-checked:ring-1 has-data-checked:ring-foreground/70 dark:has-data-checked:bg-transparent!";
-
-function TokenMark({ symbol }: { symbol: string }) {
-  return (
-    <span
-      className="flex size-6 shrink-0 items-center justify-center rounded-full bg-foreground text-[0.5rem] font-bold tracking-tight text-background"
-      aria-hidden="true"
-    >
-      {symbol.slice(0, 3)}
-    </span>
-  );
-}
-
-function NetworkMark({ name }: { name: string }) {
-  return (
-    <span
-      className="flex size-6 shrink-0 items-center justify-center rounded-md border text-[0.6875rem] font-semibold text-muted-foreground"
-      aria-hidden="true"
-    >
-      {name.slice(0, 1)}
-    </span>
   );
 }
 
@@ -424,34 +427,38 @@ function AmountPicker({
   const minutes = Math.round((asset?.quote_ttl_seconds ?? 900) / 60);
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-5">
-      <FieldSet className="gap-2!">
-        <FieldLegend variant="label" className="mb-0 text-[0.8125rem] text-muted-foreground">
-          Amount
-        </FieldLegend>
+    <form onSubmit={submit} className="flex flex-col gap-6">
+      <div className="space-y-2">
+        <Label id={`${id}-amount-label`} asChild>
+          <span>Amount</span>
+        </Label>
         <RadioGroup
           value={String(preset)}
           onValueChange={(value) => setPreset(value === "custom" ? "custom" : Number(value))}
-          aria-label="Amount"
-          className="grid-cols-2 gap-2 sm:grid-cols-4"
+          aria-labelledby={`${id}-amount-label`}
+          className="grid-cols-4 gap-2"
         >
           {options.map((option) => (
-            <FieldLabel key={option.value} htmlFor={`${id}-${option.value}`} className={cn(CHOICE, "relative")}>
+            <FieldLabel
+              key={option.value}
+              htmlFor={`${id}-${option.value}`}
+              className="relative cursor-pointer has-data-checked:border-primary! dark:has-data-checked:border-primary/60!"
+            >
               <RadioGroupItem
                 value={option.value}
                 id={`${id}-${option.value}`}
                 className="pointer-events-none absolute! opacity-0"
               />
-              <Field orientation="horizontal" className="justify-center py-3!">
+              <Field orientation="horizontal" className="h-10 justify-center px-1! py-0!">
                 <span className="text-sm font-medium tabular-nums">{option.label}</span>
               </Field>
             </FieldLabel>
           ))}
         </RadioGroup>
-      </FieldSet>
+      </div>
       {preset === "custom" && (
-        <Field>
-          <FieldLabel htmlFor={`${id}-amount`}>Custom amount (USD)</FieldLabel>
+        <div className="space-y-2">
+          <Label htmlFor={`${id}-amount`}>Custom amount (USD)</Label>
           <InputGroup className="h-10">
             <InputGroupAddon>
               <InputGroupText>$</InputGroupText>
@@ -465,10 +472,10 @@ function AmountPicker({
               onChange={(event) => setCustom(event.target.value)}
             />
           </InputGroup>
-        </Field>
+        </div>
       )}
       {picker}
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2.5">
         <Button
           type="submit"
           size="lg"
@@ -480,8 +487,8 @@ function AmountPicker({
         <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
           Price locked for {minutes} minutes
           <InfoTip label="About paying for an exact amount">
-            A quote locks the price for {minutes} minutes for an exact amount. Pay from a browser wallet, by QR code,
-            or by sending the exact amount manually; another amount, or a late payment, is credited at the market rate
+            A quote locks the price for {minutes} minutes for an exact amount. Pay from a browser wallet, by QR code, or
+            by sending the exact amount manually; another amount, or a late payment, is credited at the market rate
             instead.
           </InfoTip>
         </p>
@@ -497,104 +504,192 @@ function AmountPicker({
 }
 
 // While a quote can still be paid at its locked price; the SDK's status line says what happened
-// after (credited, expired, …) and holds the one countdown.
+// after (expired, …) and holds the one countdown.
 const PAYABLE: ReadonlySet<CheckoutStatus> = new Set(["loading", "waiting", "seen", "confirming"]);
 
-/** The quote's checkout: the SDK's `<Checkout>`, with the locked rate above it while it applies. */
+/**
+ * The quote's checkout: the SDK's `<Checkout>`, with the locked rate above it while it applies;
+ * once credited, one confirmation of what the balance gained.
+ */
 function QuoteCheckout({
   session,
   account,
-  testnet,
+  network,
   appearance,
   onCredited,
   onNewTopUp,
 }: {
   session: CreatedQuote;
   account: Account;
-  testnet: boolean;
+  network: Network | undefined;
   appearance: Appearance;
   onCredited: () => void;
   onNewTopUp: () => void;
 }) {
   const [status, setStatus] = useState<CheckoutStatus>("loading");
+  const testnet = network?.testnet ?? true;
+  const bps = assetOf(network, session.asset)?.bonus_bps ?? 0;
+  const symbol = session.asset.toUpperCase();
   return (
-    <div className="flex flex-col gap-5">
-      {PAYABLE.has(status) && <LockedRate session={session} testnet={testnet} />}
-      <Suspense fallback={<CheckoutSkeleton />}>
-        <Checkout
-          clientSecret={session.client_secret}
-          expectedAddress={session.expected_address}
-          apiBase={account.api_base}
-          appearance={appearance}
-          onChange={(state) => setStatus(state.status)}
-          onSuccess={onCredited}
-        />
-      </Suspense>
-      <Button type="button" variant="ghost" className="self-center text-muted-foreground" onClick={onNewTopUp}>
+    <div className="flex flex-col gap-4">
+      {PAYABLE.has(status) && (
+        <div data-testid="locked-rate" className="flex items-center justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-3">
+          <span className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
+            <TokenIcon asset={session.asset} className="size-5" />
+            <span className="truncate">Locked rate · {tokenName(symbol, testnet)}</span>
+          </span>
+          <span className="shrink-0 text-sm font-semibold tabular-nums">{rate(symbol, session.exchange_rate)}</span>
+        </div>
+      )}
+      {PAYABLE.has(status) && bps > 0 && (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Gift className="size-3.5 text-success" aria-hidden="true" />
+          Paying in {symbol} earns a +{percent(bps)} bonus, this demo merchant's promotion.
+        </p>
+      )}
+      {status === "credited" ? (
+        <Credited session={session} account={account} bps={bps} />
+      ) : (
+        <Suspense fallback={<CheckoutSkeleton />}>
+          <Checkout
+            clientSecret={session.client_secret}
+            expectedAddress={session.expected_address}
+            apiBase={account.api_base}
+            appearance={appearance}
+            onChange={(state) => setStatus(state.status)}
+            onSuccess={onCredited}
+          />
+        </Suspense>
+      )}
+      <Button type="button" variant="outline" className="w-full" onClick={onNewTopUp}>
         Start a new top-up
       </Button>
     </div>
   );
 }
 
-/** The quote's locked price, from `quote.exchange_rate`. */
-function LockedRate({ session, testnet }: { session: CreatedQuote; testnet: boolean }) {
+/**
+ * The credited payment: the credit, the demo merchant's bonus on it, and the new total, with the
+ * paying transaction. The amounts come from the product's own ledger as it applies the webhook.
+ */
+function Credited({ session, account, bps }: { session: CreatedQuote; account: Account; bps: number }) {
+  const row = account.payments.find((each) => each.quote === session.quote && each.id.startsWith("dep_"));
+  const credit = session.amount ?? row?.amount ?? null;
+  const bonus = row?.bonus ?? 0;
   const symbol = session.asset.toUpperCase();
   return (
-    <div
-      data-testid="locked-rate"
-      className="flex items-baseline justify-between gap-4 rounded-lg border bg-muted/40 px-4 py-3"
-    >
-      <span className="text-xs text-muted-foreground">Locked rate · {tokenName(symbol, testnet)}</span>
-      <span className="text-[0.9375rem] font-semibold tabular-nums">
-        1 {symbol} = {price(session.exchange_rate)}
-      </span>
-    </div>
+    <Alert data-testid="payment-credited" role="status">
+      <CircleCheck className="text-success!" aria-hidden="true" />
+      <AlertTitle>Payment credited</AlertTitle>
+      <AlertDescription className="text-foreground">
+        <dl className="mt-1 grid w-full gap-1.5 tabular-nums">
+          <div className="flex justify-between gap-3">
+            <dt>Top-up</dt>
+            <dd>{credit === null ? "—" : dollars(credit)}</dd>
+          </div>
+          {bonus > 0 && (
+            <div className="flex justify-between gap-3" data-testid="bonus-credited">
+              <dt>
+                {symbol} bonus{bps > 0 ? ` +${percent(bps)}` : ""}
+              </dt>
+              <dd className="text-success">{signedDollars(bonus)}</dd>
+            </div>
+          )}
+          {bonus > 0 && credit !== null && (
+            <div className="flex justify-between gap-3 border-t pt-1.5 font-medium">
+              <dt>Total</dt>
+              <dd>{dollars(credit + bonus)}</dd>
+            </div>
+          )}
+          {row?.tx_hash != null && (
+            <div className="flex items-center justify-between gap-3">
+              <dt className="text-muted-foreground">Transaction</dt>
+              <dd>
+                <ExplorerLink chainId={session.chain_id} kind="tx" value={row.tx_hash} copy />
+              </dd>
+            </div>
+          )}
+        </dl>
+        {bonus > 0 && <p className="mt-1 text-xs text-muted-foreground">The bonus is this demo merchant's promotion.</p>}
+      </AlertDescription>
+    </Alert>
   );
 }
 
-/** Where to get test tokens: the test token's public mint, from the visitor's wallet, and gas. */
-function TestTokens({ account }: { account: Account }) {
-  const symbol = account.token.symbol;
+/**
+ * Where to get the selected token on the selected network: a mintable test token's public mint,
+ * from the visitor's wallet; another test token's issuer faucet; and the network's gas faucets.
+ */
+function TestTokens({ network, asset }: { network: Network; asset: Asset }) {
   const mint = useMutation({
     mutationFn: async () => {
       const { mintTestTokens } = await wallet();
-      return mintTestTokens(account.network.chain_id, account.token.address, "1000");
+      return mintTestTokens(network.chain_id, asset.contract, "1000", asset.decimals);
     },
   });
+  const chain = network.name.replace(/ testnet$/, "");
+  const row = "flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:px-6";
   return (
-    <div role="note" aria-label="Test tokens" className="flex flex-col gap-1 px-1 text-xs text-muted-foreground">
-      <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-        <span>Need test tokens?</span>
-        <button
-          type="button"
-          className="group/mint inline-flex items-center gap-1 rounded-sm font-medium text-foreground outline-none hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
-          onClick={() => mint.mutate()}
-          disabled={mint.isPending}
-        >
-          {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${symbol}`}
-          <ArrowRight
-            className="size-3 transition-transform group-hover/mint:translate-x-0.5 motion-reduce:transition-none"
-            aria-hidden="true"
-          />
-        </button>
-        <span className="flex items-center gap-1.5 whitespace-nowrap">
-          <span className="max-sm:hidden" aria-hidden="true">
-            ·
+    <div role="note" aria-label="Test tokens" className="rounded-xl border bg-card text-sm text-card-foreground shadow-sm">
+      <div className="flex items-center justify-between gap-2 border-b px-5 py-3 sm:px-6">
+        <span className="font-medium">Need test tokens?</span>
+        <InfoTip label="About test tokens" className="translate-y-0">
+          {asset.mintable
+            ? `Test ${asset.symbol} is free: its contract lets anyone mint it, so your own wallet mints it.`
+            : `Test ${asset.symbol} is free from its issuer's faucet.`}{" "}
+          Gas is {chain} ETH, also free, from a public faucet.
+        </InfoTip>
+      </div>
+      <ul className="divide-y">
+        <li className={row}>
+          <span className="flex min-w-0 flex-1 items-center gap-3">
+            <TokenIcon asset={asset.asset} className="size-6" />
+            <span className="flex min-w-0 flex-col">
+              <span className="font-medium">Test {asset.symbol}</span>
+              <span className="text-xs text-muted-foreground" data-testid={asset.mintable ? undefined : "faucet-hint"}>
+                {asset.mintable
+                  ? `Minted by your wallet on ${chain}`
+                  : asset.faucet !== null
+                    ? `On the faucet, pick ${chain} as the network.`
+                    : "Not available from a faucet"}
+              </span>
+            </span>
           </span>
-          <a className={LINK} href={SEPOLIA_FAUCETS} target="_blank" rel="noreferrer">
-            {account.network.name} ETH faucet
-          </a>
-          <InfoTip label="About test tokens" className="translate-y-0">
-            Test {symbol} is free: its contract lets anyone mint it, so your own wallet mints it. Gas is{" "}
-            {account.network.name} ETH, also free, from a public faucet.
-          </InfoTip>
-        </span>
-      </p>
-      <p aria-live="polite" className="empty:hidden">
+          {asset.mintable ? (
+            <Button type="button" size="sm" variant="outline" onClick={() => mint.mutate()} disabled={mint.isPending}>
+              {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${asset.symbol}`}
+            </Button>
+          ) : asset.faucet !== null ? (
+            <Button asChild size="sm" variant="outline">
+              <a href={asset.faucet} target="_blank" rel="noreferrer">
+                Get test {asset.symbol} from Circle
+                <ExternalLink aria-hidden="true" />
+              </a>
+            </Button>
+          ) : null}
+        </li>
+        {network.faucet !== null && (
+          <li className={row}>
+            <span className="flex min-w-0 flex-1 items-center gap-3">
+              <ChainIcon chainId={network.chain_id} className="size-6" />
+              <span className="flex min-w-0 flex-col">
+                <span className="font-medium">{chain} ETH</span>
+                <span className="text-xs text-muted-foreground">For gas, from a public faucet</span>
+              </span>
+            </span>
+            <Button asChild size="sm" variant="outline">
+              <a href={network.faucet} target="_blank" rel="noreferrer">
+                {chain} ETH faucets
+                <ExternalLink aria-hidden="true" />
+              </a>
+            </Button>
+          </li>
+        )}
+      </ul>
+      <p aria-live="polite" className="border-t px-5 py-3 text-xs text-muted-foreground empty:hidden sm:px-6">
         {mint.isSuccess && (
           <>
-            Minted: <ExplorerLink account={account} kind="tx" value={mint.data} />
+            Minted: <ExplorerLink chainId={network.chain_id} kind="tx" value={mint.data} copy />
           </>
         )}
         {mint.isError && <span className="text-destructive">{errorMessage(mint.error, "Minting failed.")}</span>}

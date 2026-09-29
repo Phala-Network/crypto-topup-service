@@ -156,14 +156,17 @@ Write a configuration file; the fields are those of `ProductConfig` in
   "service_url": "https://pay-api.example.com",
   "account": "acct_…",
   "api_key_file": "/home/me/acme-test.key",
-  "route": "<the test-mode route>",
-  "chain_id": 11155111,
-  "rpc_url": "https://your-sepolia-rpc.example",
   "factory": "0x...",
   "implementation": "0x...",
-  "treasury": "0x...",
-  "token": "0x...",
-  "token_symbol": "PHA",
+  "chains": [
+    {
+      "chain_id": 11155111,
+      "name": "Sepolia",
+      "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
+      "treasury": "0x...",
+      "test_tokens": [{"symbol": "PHA", "address": "0x..."}]
+    }
+  ],
   "unsupported_token": "0x...",
   "listen_host": "127.0.0.1",
   "listen_port": 8089,
@@ -174,7 +177,12 @@ Write a configuration file; the fields are those of `ProductConfig` in
 
 - `service_url` is the operator's service URL (`https://$TOPUP_DOMAIN`), `account` your `acct_…`
   id, and `api_key_file` holds your test key.
-- `treasury` is your account's test-mode treasury on Sepolia, which quotes need. Set it once
+- `chains` lists the networks the product takes payments on (the smoke example, the scenarios,
+  and the deposit driver use the first; the driver's `--chain-id` picks another): each with its
+  display `name`, a keyless public `rpc_url` (https; no key in the URL, since the product's
+  config is published), and its mintable `test_tokens` (symbol and address; the first is the one
+  paid with). `factory` and `implementation` are the same on every chain.
+- Each chain's `treasury` is your account's test-mode treasury on it, which quotes need. Set it once
   through the API with an EIP-4361 proof (design D10): from a test EOA key,
   `deploy/sandbox/set-treasury.sh --api https://pay-api.example.com --key-file
   ~/acme-test.key --chain-id 11155111 --private-key 0x…` requests the challenge, signs it,

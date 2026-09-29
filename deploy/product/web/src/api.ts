@@ -15,9 +15,6 @@ export interface Account {
   min_amount: number;
   max_amount: number;
   api_base: string;
-  network: { chain_id: number; name: string; explorer: string | null; testnet: boolean };
-  token: { symbol: string; address: string };
-  treasury: string;
   factory: string;
   deposit_address: string | null;
   payments: PaymentRow[];
@@ -25,13 +22,19 @@ export interface Account {
 
 /**
  * A network the customer can pay on, with its tokens: the service's `GET /v1/config` `assets` on
- * the chains the product has pins for.
+ * the chains the product has pins for (a chain appears once the service serves it).
  */
 export interface Network {
   chain_id: number;
   /** For display, for example `Sepolia testnet`. */
   name: string;
   testnet: boolean;
+  /** The block explorer's origin, for transaction and address links. */
+  explorer: string | null;
+  /** A public list of faucets for the network's gas, on a testnet. */
+  faucet: string | null;
+  /** The merchant's treasury on this network, which every address pays. */
+  treasury: string;
   assets: Asset[];
 }
 
@@ -45,14 +48,25 @@ export interface Asset {
   /** Cents. */
   min_amount: number;
   quote_ttl_seconds: number;
+  /** A test token whose `mint` is public: the visitor's own wallet mints it. */
+  mintable: boolean;
+  /** The token issuer's testnet faucet, for a test token that does not mint. */
+  faucet: string | null;
+  /** The demo merchant's own promotion on credits paid in this token, in basis points. */
+  bonus_bps: number;
 }
 
 export interface LedgerLine {
   deposit: string;
   amount: number;
-  /** `deposit.credited`, or the event that adjusted the credit (`deposit.refunded`, …). */
+  /**
+   * `deposit.credited`, or the event that adjusted the credit (`deposit.refunded`, …); for a bonus
+   * line, its grant (`PHA bonus +10%`) or the event that took it back.
+   */
   reason: string;
   at: number;
+  /** A credit and its claw-backs, or the demo merchant's own bonus. */
+  kind: "credit" | "bonus";
 }
 
 export interface PaymentRow {
@@ -63,6 +77,7 @@ export interface PaymentRow {
   created: number;
   amount: number | null;
   amount_atomic: string;
+  chain_id: number;
   /** `null` for a token without a route. */
   asset: string | null;
   /** USD per token: the quote's locked price, or the deposit's valuation. */
@@ -73,6 +88,8 @@ export interface PaymentRow {
   tx_hash: string | null;
   amount_refunded_atomic: string;
   net: number | null;
+  /** The demo merchant's bonus on the credit, net of claw-backs; `null` before it is credited. */
+  bonus: number | null;
 }
 
 export type StepKey =
@@ -88,7 +105,9 @@ export type StepKey =
 export interface Detail {
   label: string;
   value: string | number | null;
-  kind?: "address" | "tx" | "time" | "usd" | "usd_delta" | "atomic";
+  kind?: "address" | "tx" | "time" | "usd" | "usd_delta" | "atomic" | "rate";
+  /** A rate's token symbol: `1 PHA = $0.25`. */
+  unit?: string;
   mono?: boolean;
 }
 
@@ -124,6 +143,7 @@ export interface Deposit {
   swept: boolean;
   amount: number | null;
   amount_atomic: string;
+  chain_id: number;
   asset: string | null;
   /** USD per token the deposit was valued at, once valued. */
   exchange_rate: string | null;
@@ -164,6 +184,8 @@ export interface LedgerView {
     reason: string | null;
     credit: number | null;
     net: number | null;
+    /** The demo merchant's bonus on the credit, net of its claw-backs. */
+    bonus: number | null;
     adjustments: { amount: number; reason: string; at: number }[];
   } | null;
 }
@@ -173,6 +195,7 @@ export interface Timeline {
   quote: {
     id: string;
     status: string;
+    chain_id: number;
     asset: string;
     exchange_rate: string;
     expires_at: number;
@@ -207,6 +230,8 @@ export interface CreatedQuote {
   /** The quote's address as the product's SDK recomputed it from the pins. */
   expected_address: string;
   order_id: string;
+  /** Cents; absent from a product before it returned it. */
+  amount?: number;
   chain_id: number;
   asset: string;
   amount_atomic: string;
@@ -218,6 +243,8 @@ export interface CreatedQuote {
 
 export interface AddressPayment {
   status: string;
+  chain_id: number;
+  asset: string | null;
   tx_hash: string;
   amount_atomic: string;
   confirmations: number | null;
@@ -249,11 +276,15 @@ export interface FlushCall {
   value: string;
 }
 
-export interface Sweeps {
+/** One token's sweep on one network. */
+export interface SweepGroup {
   chain_id: number;
+  network: string;
+  asset: string;
+  symbol: string;
+  decimals: number;
   token: string;
   treasury: string;
-  factory: string;
   unswept_atomic: string;
   final_unswept_atomic: string;
   sweepable_forwarders: number;
@@ -261,6 +292,11 @@ export interface Sweeps {
   flush: FlushCall[];
   safe_batch: unknown;
   sweeps: { id: string; address: string; amount_atomic: string; tx_hash: string; created: number }[];
+}
+
+export interface Sweeps {
+  factory: string;
+  groups: SweepGroup[];
   api: ApiExchange[];
 }
 
@@ -299,12 +335,29 @@ function post(path: string, body: unknown): Promise<unknown> {
 
 export async function getAccount(): Promise<Account> {
   const body = await request("account");
-  return expect<Account>(body, ["account_id", "balance", "ledger", "payments", "network", "token"]);
+  return expect<Account>(body, ["account_id", "balance", "ledger", "payments"]);
 }
 
 export async function getNetworks(): Promise<Network[]> {
   const body = await request("assets");
-  return expect<{ networks: Network[] }>(body, ["networks"]).networks;
+  // A product from before networks carried their explorer, faucets, and bonuses (the page ships
+  // before the product upgrades) gets the neutral defaults.
+  return expect<{ networks: Partial<Network>[] }>(body, ["networks"]).networks.map((network) => ({
+    chain_id: network.chain_id ?? 0,
+    name: network.name ?? "",
+    testnet: network.testnet ?? true,
+    explorer: network.explorer ?? null,
+    faucet: network.faucet ?? null,
+    treasury: network.treasury ?? "",
+    assets: (network.assets ?? []).map(
+      (asset: Omit<Asset, "mintable" | "faucet" | "bonus_bps"> & Partial<Asset>) => ({
+        ...asset,
+        mintable: asset.mintable ?? false,
+        faucet: asset.faucet ?? null,
+        bonus_bps: asset.bonus_bps ?? 0,
+      }),
+    ),
+  }));
 }
 
 export async function createQuote({
@@ -376,7 +429,7 @@ export async function cancelRefund(refund: string): Promise<Refund> {
 
 export async function getSweeps(): Promise<Sweeps> {
   const body = await request("sweeps");
-  return expect<Sweeps>(body, ["unswept_atomic", "flush", "sweeps"]);
+  return expect<Sweeps>(body, ["groups", "api"]);
 }
 
 export async function getTrust(): Promise<Trust> {

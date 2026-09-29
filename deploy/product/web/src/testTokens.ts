@@ -13,8 +13,9 @@ import {
   type WalletClient,
 } from "viem";
 
-// Staging's test PHA is a MockERC20 whose `mint(address,uint256)` is public: the visitor's own
-// wallet mints, so the demo holds no faucet key. Gas is Sepolia ETH from any public faucet. The
+// Staging's test PHA, on each network, is a MockERC20 whose `mint(address,uint256)` is public: the
+// visitor's own wallet mints, so the demo holds no faucet key. Gas is the testnet's ETH from any
+// public faucet. The
 // same wallet pays to the deposit address, sends a sweep (a flush is permissionless), and may pay
 // a refund, which fails verification unless it comes from the treasury.
 const MINT_ABI = parseAbi(["function mint(address account, uint256 amount)"]);
@@ -65,7 +66,7 @@ async function connect(chainId: number): Promise<Connected> {
   return { client, account, chain };
 }
 
-export async function mintTestTokens(chainId: number, token: string, amount: string): Promise<Hash> {
+export async function mintTestTokens(chainId: number, token: string, amount: string, decimals = 18): Promise<Hash> {
   const { client, account, chain } = await connect(chainId);
   const to = typeof account === "string" ? account : account.address;
   return client.writeContract({
@@ -74,7 +75,7 @@ export async function mintTestTokens(chainId: number, token: string, amount: str
     address: getAddress(token),
     abi: MINT_ABI,
     functionName: "mint",
-    args: [to, parseUnits(amount, 18)],
+    args: [to, parseUnits(amount, decimals)],
   });
 }
 

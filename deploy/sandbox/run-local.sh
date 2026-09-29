@@ -126,15 +126,16 @@ curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H @"$tmp/
 
 # Addresses as seen from the product container on the compose network.
 jq -n \
-    --arg account "$account" --arg route "sandbox-$slug-tpha-usd" \
+    --arg account "$account" \
     --arg factory "$factory" --arg implementation "$implementation" \
     --arg token "$(jq -er .test_token "$tmp/contracts.json")" \
     --arg unsupported "$(jq -er .unsupported_token "$tmp/contracts.json")" \
     --arg public_url "$public_url" --arg payer "$owner" --arg topup "$project-topup-1" \
     '{service_url: "http://topup:8080", account: $account,
-      api_key_file: "/sandbox/product.key", route: $route, chain_id: 11155111,
-      rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
-      treasury: $payer, token: $token, token_symbol: "PHA", unsupported_token: $unsupported,
+      api_key_file: "/sandbox/product.key", factory: $factory, implementation: $implementation,
+      chains: [{chain_id: 11155111, name: "Sepolia", rpc_url: "http://anvil:8545",
+        treasury: $payer, test_tokens: [{symbol: "PHA", address: $token}]}],
+      unsupported_token: $unsupported,
       listen_host: "0.0.0.0", listen_port: 8089, public_url: $public_url, payer: $payer,
       restart_command: ["python", "/repo/deploy/sandbox/scenarios/docker_restart.py", $topup]}' \
     >"$tmp/sandbox.json"

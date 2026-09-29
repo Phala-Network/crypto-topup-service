@@ -5,29 +5,31 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createTestClient, http, publicActions, walletActions, type Address, type Hash, type Hex } from "viem";
-import { sepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
 import { build, preview, type PreviewServer } from "vite";
 
 const web = resolve(import.meta.dirname, "..");
 const root = resolve(web, "../../..");
-// The deterministic deployment (deploy/CONTRACTS.md) and staging's treasury, as the product pins them.
+// The deterministic deployment (deploy/CONTRACTS.md) and staging's treasury Safe, the same on every
+// chain, as the product pins them.
 const FACTORY = "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747";
 const IMPLEMENTATION = "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9";
-const TREASURY = "0x936c1991f8dA9a919fa11b557a3514719f5A4504";
+const TREASURY = "0x26430107887d4a691B340BdB887096B83E7a5844";
 const ACCOUNT = `acct_${"e2e0".repeat(8)}`;
 const DETERMINISTIC_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
 
 /**
- * Runs the whole demo locally: Anvil as Sepolia with the test token and the real forwarder
- * factory, deployed as deploy/CONTRACTS.md deploys it (through the deterministic deployment proxy
- * with the committed salt), so it lands at its pinned address; the fake top-up service
+ * Runs the whole demo locally: two Anvils, as Sepolia (test PHA and a 6-decimal test USDC) and as
+ * Base Sepolia (test PHA), each with the real forwarder factory, deployed as deploy/CONTRACTS.md
+ * deploys it (through the deterministic deployment proxy with the committed salt), so it lands at
+ * its pinned address on both; the fake top-up service
  * (e2e/fake_service.py), the reference product serving the demo's API, pinned to the fake
  * service's webhook key, and the page, built against that API and served from its own origin (as
  * Cloudflare serves pay.phala.com), under the CSP of public/_headers with the local origins: the
  * page calls the API cross-origin, with CORS and the demo account cookie. Tests read SITE_URL,
- * API_URL, SERVICE_URL, ANVIL_URL, PAYER_ADDRESS, TOKEN_ADDRESS, and TREASURY (which the tests
- * control on Anvil, as the merchant's finance team controls its treasury). Service logs go to
- * test-results/services.
+ * API_URL, SERVICE_URL, ANVIL_URL and BASE_ANVIL_URL, PAYER_ADDRESS, TOKEN_ADDRESS (Sepolia's test PHA),
+ * BASE_TOKEN_ADDRESS, USDC_ADDRESS, and TREASURY (which the tests control on Anvil, as the
+ * merchant's finance team controls its treasury). Service logs go to test-results/services.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const work = mkdtempSync(join(tmpdir(), "demo-e2e-"));
@@ -73,57 +75,77 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       readFileSync(join(root, "deploy/contracts/expected-codehashes.json"), "utf8"),
     ) as { factory_salt: Hex };
 
-    const [anvilPort, servicePort, productPort, sitePort] = [
+    const [sepoliaPort, basePort, servicePort, productPort, sitePort] = [
+      await freePort(),
       await freePort(),
       await freePort(),
       await freePort(),
       await freePort(),
     ];
-    children.push(
-      spawn(
-        process.env["ANVIL"] ?? "anvil",
-        ["--port", String(anvilPort), "--chain-id", String(sepolia.id), "--silent"],
-        { stdio: "ignore" },
-      ),
-    );
-    const anvil = `http://127.0.0.1:${anvilPort}`;
-    const chain = createTestClient({ mode: "anvil", chain: sepolia, transport: http(anvil) })
-      .extend(publicActions)
-      .extend(walletActions);
-    await waitFor(() => chain.getChainId());
-    const [payer] = await chain.getAddresses();
-    if (payer === undefined) {
-      throw new Error("anvil has no dev account");
-    }
-    const deployed = async (hash: Hash): Promise<Address> => {
-      const { contractAddress } = await chain.waitForTransactionReceipt({ hash });
-      if (contractAddress == null) {
-        throw new Error("contract deployment failed");
+    // One Anvil per chain, with its tokens and the factory at its pinned address.
+    const startChain = async (chainId: number, port: number, contracts: [string, string][]) => {
+      children.push(
+        spawn(process.env["ANVIL"] ?? "anvil", ["--port", String(port), "--chain-id", String(chainId), "--silent"], {
+          stdio: "ignore",
+        }),
+      );
+      const url = `http://127.0.0.1:${port}`;
+      const chain = createTestClient({
+        mode: "anvil",
+        chain: chainId === sepolia.id ? sepolia : baseSepolia,
+        transport: http(url),
+      })
+        .extend(publicActions)
+        .extend(walletActions);
+      await waitFor(() => chain.getChainId());
+      const [payer] = await chain.getAddresses();
+      if (payer === undefined) {
+        throw new Error("anvil has no dev account");
       }
-      return contractAddress;
+      const deployed = async (hash: Hash): Promise<Address> => {
+        const { contractAddress } = await chain.waitForTransactionReceipt({ hash });
+        if (contractAddress == null) {
+          throw new Error("contract deployment failed");
+        }
+        return contractAddress;
+      };
+      const tokens: Address[] = [];
+      for (const [file, name] of contracts) {
+        tokens.push(await deployed(await chain.deployContract({ account: payer, abi: [], bytecode: bytecode(file, name) })));
+      }
+      // Anvil carries the deterministic deployment proxy; its calldata is the salt, then the init
+      // code. The factory's constructor creates the implementation (its first CREATE).
+      await chain.waitForTransactionReceipt({
+        hash: await chain.sendTransaction({
+          account: payer,
+          to: DETERMINISTIC_PROXY,
+          data: `${factorySalt}${factoryInitCode.slice(2)}`,
+        }),
+      });
+      const implementation = await chain.readContract({
+        address: FACTORY,
+        abi: [
+          { type: "function", name: "implementation", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
+        ],
+        functionName: "implementation",
+      });
+      if (implementation.toLowerCase() !== IMPLEMENTATION.toLowerCase()) {
+        throw new Error(`the factory's implementation is ${implementation}, not the pinned ${IMPLEMENTATION}`);
+      }
+      return { url, payer, tokens };
     };
-    const token = await deployed(
-      await chain.deployContract({ account: payer, abi: [], bytecode: bytecode("TestPha.sol", "TestPha") }),
-    );
-    // Anvil carries the deterministic deployment proxy; its calldata is the salt, then the init
-    // code. The factory's constructor creates the implementation (its first CREATE).
-    await chain.waitForTransactionReceipt({
-      hash: await chain.sendTransaction({
-        account: payer,
-        to: DETERMINISTIC_PROXY,
-        data: `${factorySalt}${factoryInitCode.slice(2)}`,
-      }),
-    });
-    const implementation = await chain.readContract({
-      address: FACTORY,
-      abi: [
-        { type: "function", name: "implementation", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
-      ],
-      functionName: "implementation",
-    });
-    if (implementation.toLowerCase() !== IMPLEMENTATION.toLowerCase()) {
-      throw new Error(`the factory's implementation is ${implementation}, not the pinned ${IMPLEMENTATION}`);
+    const onSepolia = await startChain(sepolia.id, sepoliaPort, [
+      ["TestPha.sol", "TestPha"],
+      ["TestPha.sol", "TestUsdc"],
+    ]);
+    const onBase = await startChain(baseSepolia.id, basePort, [["TestPha.sol", "TestPha"]]);
+    const [token, usdc] = onSepolia.tokens;
+    const [baseToken] = onBase.tokens;
+    if (token === undefined || usdc === undefined || baseToken === undefined) {
+      throw new Error("the test tokens were not deployed");
     }
+    const anvil = onSepolia.url;
+    const payer = onSepolia.payer;
 
     const webhookSeed = randomBytes(32);
     // The stand-in service does not check the key; the product runs with a restricted key's form.
@@ -139,7 +161,25 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
         [
           ...uv,
           join(web, "e2e/fake_service.py"),
-          ...["--port", String(servicePort), "--rpc", anvil, "--token", token],
+          "--port",
+          String(servicePort),
+          "--chains",
+          JSON.stringify([
+            {
+              chain_id: sepolia.id,
+              rpc: anvil,
+              tokens: [
+                { asset: "pha", contract: token, decimals: 18, price: "0.25000000", pricing: "spot" },
+                { asset: "usdc", contract: usdc, decimals: 6, price: "1.00000000", pricing: "stablecoin" },
+              ],
+            },
+            {
+              // Staging's own PHA rate, to show it formatted: 1 PHA = $0.06041.
+              chain_id: baseSepolia.id,
+              rpc: onBase.url,
+              tokens: [{ asset: "pha", contract: baseToken, decimals: 18, price: "0.06041314", pricing: "spot" }],
+            },
+          ]),
           ...["--product-webhook", `${product}/webhooks`],
           ...["--webhook-seed", webhookSeed.toString("hex")],
           ...["--factory", FACTORY, "--implementation", IMPLEMENTATION],
@@ -152,14 +192,25 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       service_url: service,
       account: ACCOUNT,
       api_key_file: join(work, "product.key"),
-      route: "sandbox-acme-tpha-usd",
-      chain_id: sepolia.id,
-      rpc_url: anvil,
       factory: FACTORY,
       implementation: IMPLEMENTATION,
-      treasury: TREASURY,
-      token,
-      token_symbol: "PHA",
+      chains: [
+        {
+          chain_id: sepolia.id,
+          name: "Sepolia",
+          rpc_url: anvil,
+          treasury: TREASURY,
+          test_tokens: [{ symbol: "PHA", address: token }],
+        },
+        {
+          chain_id: baseSepolia.id,
+          name: "Base Sepolia",
+          rpc_url: onBase.url,
+          treasury: TREASURY,
+          test_tokens: [{ symbol: "PHA", address: baseToken }],
+        },
+      ],
+      bonus_bps: { pha: 1000 },
       public_url: product,
       listen_host: "127.0.0.1",
       listen_port: productPort,
@@ -205,8 +256,11 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       API_URL: product,
       SERVICE_URL: service,
       ANVIL_URL: anvil,
+      BASE_ANVIL_URL: onBase.url,
       PAYER_ADDRESS: payer,
       TOKEN_ADDRESS: token,
+      BASE_TOKEN_ADDRESS: baseToken,
+      USDC_ADDRESS: usdc,
       TREASURY,
     });
   } catch (error) {

@@ -1,13 +1,14 @@
 # Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
 # receiver with fulfillment, the account API, and the API of the live demo on the Phala Pay website
 # (https://pay.phala.com, `web_origin`, served by Cloudflare) at PRODUCT_PUBLIC_URL/api/ of
-# deploy/product/reference_product for the phala-cloud product on the Sepolia staging route, served
+# deploy/product/reference_product for the phala-cloud product on the staging routes, served
 # on its custom domain PRODUCT_DOMAIN (pay-demo-api.phala.com; PRODUCT_PUBLIC_URL is
 # https://PRODUCT_DOMAIN) by dstack-ingress, as topup's is. Deploy (target
 # `product`) renders this file with deploy/product/render-compose.sh: PRODUCT_IMAGE to a digest and
 # the public settings (TOPUP_ORIGIN, PRODUCT_PUBLIC_URL, PRODUCT_DOMAIN, PRODUCT_GATEWAY_DOMAIN,
-# PRODUCT_RPC_URL, PRODUCT_DRIVER_PUBLIC_KEY) inline, so they are attested and a change is a
-# compose upgrade. The only env value is PRODUCT_API_KEY, the
+# PRODUCT_DRIVER_PUBLIC_KEY) inline, so they are attested and a change is a compose upgrade. The
+# RPC URLs are committed below with the rest of the product config. The only env value is
+# PRODUCT_API_KEY, the
 # product's Phala Pay restricted test key (ppay_rk_test_…, with the permissions listed in
 # deploy/product/staging.env.example), sealed by the owner.
 services:
@@ -64,10 +65,18 @@ volumes:
 
 # `account` is the product's Phala Pay account id (`acct_…`, from POST /v1/admin/accounts): commit
 # it here before the product is deployed (the zero placeholder fails the online preflight). With the
-# factory, implementation (the deterministic #202 deployment, deploy/CONTRACTS.md), and the
-# account's own Sepolia treasury (the finance Safe), it pins every address the product shows.
-# The other addresses are the staging route's (deploy/config/routes/phala-cloud-sepolia-pha.yaml).
-# `web_origin` is the website's origin, the only origin the demo's API allows (CORS).
+# factory and implementation (the deterministic #202 deployment, deploy/CONTRACTS.md, the same on
+# every chain) and each chain's treasury (the staging Safe 0x2643…5844, the same address on both
+# chains), it pins every address the product shows. `chains` lists the networks the demo offers;
+# the page shows a chain only once the service serves assets there (GET /v1/config), so Base
+# Sepolia appears when its route does. Each `rpc_url` is a keyless public RPC, committed here and so
+# attested: the product seals no RPC key, and preflight checks each reports its chain. Both are
+# publicnode's, the operator of the service's Sepolia provider B; Base's own sepolia.base.org is
+# rate-limited and documented as not for production use. `test_tokens` are the staging test PHA
+# tokens (MockERC20, public `mint`) the page's faucet helper and the deposit driver mint.
+# `bonus_bps` is this demo merchant's own promotion, not a Phala Pay feature: +10% on credits paid
+# in PHA (reference_product.fulfillment). `web_origin` is the website's origin, the only origin the
+# demo's API allows (CORS).
 configs:
   product_config:
     content: |
@@ -75,14 +84,25 @@ configs:
         "service_url": "${TOPUP_ORIGIN:-}",
         "account": "acct_52daedc4c68d4ea1a1c18472506b85f4",
         "api_key_env": "PRODUCT_API_KEY",
-        "route": "phala-cloud-sepolia-pha-usd",
-        "chain_id": 11155111,
-        "rpc_url": "${PRODUCT_RPC_URL:-}",
         "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
         "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
-        "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
-        "token": "0x8F40e7E99678F44c88158f049E62817580ab113B",
-        "token_symbol": "PHA",
+        "chains": [
+          {
+            "chain_id": 11155111,
+            "name": "Sepolia",
+            "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
+            "treasury": "0x26430107887d4a691B340BdB887096B83E7a5844",
+            "test_tokens": [{"symbol": "PHA", "address": "0x8F40e7E99678F44c88158f049E62817580ab113B"}]
+          },
+          {
+            "chain_id": 84532,
+            "name": "Base Sepolia",
+            "rpc_url": "https://base-sepolia-rpc.publicnode.com",
+            "treasury": "0x26430107887d4a691B340BdB887096B83E7a5844",
+            "test_tokens": [{"symbol": "PHA", "address": "0x1a6F260377e42ead1418C7C1afDFD5DE371A9284"}]
+          }
+        ],
+        "bonus_bps": {"pha": 1000},
         "listen_host": "0.0.0.0",
         "listen_port": 8089,
         "public_url": "${PRODUCT_PUBLIC_URL:-}",

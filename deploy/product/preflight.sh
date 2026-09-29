@@ -2,16 +2,17 @@
 # Preflight for the staging reference-product CVM (deploy/README.md, "Staging reference product").
 # Read-only against remote systems, like deploy/preflight.sh: it reads the env file, the compose
 # rendered by deploy/product/render-compose.sh (which holds the public settings), the image in its
-# registry, the product's RPC, topup's attestation endpoint, and the Phala Cloud account the CLI is
-# logged in to.
+# registry, the product's RPC of each of its chains, topup's attestation endpoint, and the Phala
+# Cloud account the CLI is logged in to.
 #
 # Usage: deploy/product/preflight.sh --env FILE --compose FILE --workspace NAME --os-image NAME
 #          [--offline] [--unsealed]
 #
 # --offline runs only the local checks (env file and compose). --unsealed accepts an empty
 # PRODUCT_API_KEY: Deploy (target `product`) provisions without it and the owner seals it from their own
-# machine. PRODUCT_RPC_URL is published with the compose, so it must be keyless. Output never prints
-# an RPC URL. Every failure is reported; the exit status is 1 if any.
+# machine. Each chain's `rpc_url` is published with the compose, so it must be keyless; online, each
+# must report its chain, where the chain's treasury must be a contract (the Safe). Output never
+# prints an RPC URL. Every failure is reported; the exit status is 1 if any.
 set -euo pipefail
 source "$(dirname -- "$0")/../contracts/common.sh"
 source "$(dirname -- "$0")/../preflight-phala.sh"
@@ -107,14 +108,18 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     declare -A setting=()
     if jq -er '.configs.product_config.content' "$tmp/compose.json" >"$tmp/config.json" 2>/dev/null &&
         jq -e 'type == "object"' "$tmp/config.json" >/dev/null 2>&1; then
-        for pair in TOPUP_ORIGIN=service_url PRODUCT_PUBLIC_URL=public_url PRODUCT_RPC_URL=rpc_url \
+        for pair in TOPUP_ORIGIN=service_url PRODUCT_PUBLIC_URL=public_url \
             PRODUCT_DRIVER_PUBLIC_KEY=driver_public_key; do
             setting[${pair%%=*}]=$(jq -r --arg key "${pair#*=}" '.[$key] // "" | strings' "$tmp/config.json")
         done
         account=$(jq -r '.account // "" | strings' "$tmp/config.json")
+        # One line per chain: its id, treasury, and RPC URL.
+        jq -r '.chains // [] | .[] | [(.chain_id | tostring), (.treasury // ""), (.rpc_url // "")]
+            | @tsv' "$tmp/config.json" >"$tmp/chains.tsv" 2>/dev/null || : >"$tmp/chains.tsv"
         web_origin=$(jq -r '.web_origin // "" | strings' "$tmp/config.json")
     else
         fail "the compose's product_config is not a JSON object"
+        : >"$tmp/chains.tsv"
     fi
     # The custom domain (deploy/README.md, "Custom domain"): dstack-ingress terminates TLS for
     # PRODUCT_DOMAIN, the host of PRODUCT_PUBLIC_URL, and forwards to product:8089.
@@ -146,17 +151,23 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
     if [[ "${setting[INGRESS_GATEWAY_DOMAIN]}" == *.invalid ]]; then
         echo "note: PRODUCT_GATEWAY_DOMAIN is provisional; the CVM's gateway replaces it after provisioning"
     fi
-    rpc=${setting[PRODUCT_RPC_URL]-}
-    [[ "$rpc" == https://* ]] || fail "PRODUCT_RPC_URL must use https"
-    # The staging-only product has no sealed RPC key: its URL is published and must be keyless.
-    ! embeds_key "$rpc" ||
-        fail "PRODUCT_RPC_URL seems to embed an API key, which the compose publishes; use a keyless URL"
+    # The staging-only product has no sealed RPC key: each chain's URL is published and must be
+    # keyless.
+    [[ -s "$tmp/chains.tsv" ]] || fail "the product config names no chains"
+    [[ -z "$(cut -f1 "$tmp/chains.tsv" | sort | uniq -d)" ]] || fail "the product config repeats a chain"
+    while IFS=$'\t' read -r id treasury rpc; do
+        [[ "$id" =~ ^[1-9][0-9]*$ ]] || fail "a chain of the product config has no chain_id"
+        [[ "$treasury" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "chain $id's treasury is not an address"
+        [[ "$rpc" == https://* ]] || fail "chain $id's rpc_url must use https"
+        ! embeds_key "$rpc" ||
+            fail "chain $id's rpc_url seems to embed an API key, which the compose publishes; use a keyless URL"
+    done <"$tmp/chains.tsv"
     driver_key_bytes=$(base64 -d 2>/dev/null <<<"${setting[PRODUCT_DRIVER_PUBLIC_KEY]-}" | wc -c) ||
         driver_key_bytes=0
     [[ "$driver_key_bytes" == 32 ]] || fail "PRODUCT_DRIVER_PUBLIC_KEY must be standard base64 of 32 bytes"
     if env PRODUCT_IMAGE="$image" TOPUP_ORIGIN="${setting[TOPUP_ORIGIN]-}" \
         PRODUCT_PUBLIC_URL="${setting[PRODUCT_PUBLIC_URL]-}" PRODUCT_DOMAIN="${setting[INGRESS_DOMAIN]}" \
-        PRODUCT_GATEWAY_DOMAIN="${setting[INGRESS_GATEWAY_DOMAIN]}" PRODUCT_RPC_URL="$rpc" \
+        PRODUCT_GATEWAY_DOMAIN="${setting[INGRESS_GATEWAY_DOMAIN]}" \
         PRODUCT_DRIVER_PUBLIC_KEY="${setting[PRODUCT_DRIVER_PUBLIC_KEY]-}" \
         "$root/deploy/product/render-compose.sh" "$source_compose" >"$tmp/fresh.yml" 2>"$tmp/render.err"; then
         cmp -s "$tmp/fresh.yml" "$compose" ||
@@ -168,6 +179,7 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
 else
     fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
     : >"$tmp/images"
+    : >"$tmp/chains.tsv"
 fi
 
 if ((failures)); then
@@ -185,13 +197,24 @@ echo "== product account"
 [[ "$account" != acct_00000000000000000000000000000000 ]] ||
     fail "the product config's account is the placeholder; commit the product's acct_ id to $source_compose"
 
-echo "== product RPC and topup (no RPC URL is printed)"
+echo "== product RPCs and topup (no RPC URL is printed)"
 require_command cast
-if ! chain_id=$(ETH_RPC_URL=$rpc cast chain-id 2>"$tmp/cast.err"); then
-    error=$(tool_error "$tmp/cast.err")
-    chain_id="error: ${error//"$rpc"/PRODUCT_RPC_URL}"
-fi
-[[ "$chain_id" == 11155111 ]] || fail "PRODUCT_RPC_URL reports chain id $chain_id, not Sepolia"
+while IFS=$'\t' read -r id treasury rpc; do
+    if ! reported=$(ETH_RPC_URL=$rpc cast chain-id 2>"$tmp/cast.err"); then
+        error=$(tool_error "$tmp/cast.err")
+        reported="error: ${error//"$rpc"/rpc_url}"
+    fi
+    if [[ "$reported" != "$id" ]]; then
+        fail "chain $id's rpc_url reports chain id $reported"
+        continue
+    fi
+    # Every address the product shows pays this treasury: on staging, the finance Safe.
+    if code=$(ETH_RPC_URL=$rpc cast code "$treasury" 2>"$tmp/cast.err") && [[ "$code" != 0x ]]; then
+        ok "chain $id: its RPC reports the chain, and its treasury is a contract"
+    else
+        fail "chain $id's treasury $treasury has no contract code on the chain (expected the Safe)"
+    fi
+done <"$tmp/chains.tsv"
 # The product pins its account's webhook keys from this endpoint, fetched with its API key, and
 # checks their binding. Without the key sealed yet, the endpoint must refuse anonymous calls.
 nonce=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')

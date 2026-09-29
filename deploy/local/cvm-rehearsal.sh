@@ -487,16 +487,25 @@ echo "ok: topup attest reports the same webhook key and report_data"
 
 echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed key"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
-# The committed product compose with this chain's addresses, as for the route above.
+# The committed product compose with this network's addresses, as for the route above: its chains
+# are this one Anvil Sepolia, with its treasury and test token.
+chains=$(jq -cn --arg treasury "$treasury" --arg token "$token" \
+    '[{chain_id: 11155111, name: "Sepolia", rpc_url: "http://anvil:8545", treasury: $treasury,
+       test_tokens: [{symbol: "PHA", address: $token}]}]')
 sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
     -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
-    -e "s|^\(        \"treasury\": \).*|\1\"$treasury\",|" \
-    -e "s|^\(        \"token\": \).*|\1\"$token\",|" \
     -e "s|^\(        \"account\": \).*|\1\"$account\",|" \
-    "$root/deploy/product/docker-compose.yml" >"$tmp/product-source.yml"
+    "$root/deploy/product/docker-compose.yml" |
+    awk -v chains="$chains" '
+        /^        "chains": \[$/ { print "        \"chains\": " chains ","; skip = 1; next }
+        skip { if ($0 ~ /^        \],$/) skip = 0; next }
+        { print }
+    ' >"$tmp/product-source.yml"
+grep -Fq '"rpc_url": "http://anvil:8545"' "$tmp/product-source.yml" ||
+    die "the product compose's chains were not replaced with the rehearsal's"
 # render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
 render_product() {
-    TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 PRODUCT_RPC_URL=http://anvil:8545 \
+    TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 \
         PRODUCT_DOMAIN=pay-demo-api.phala.com PRODUCT_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
         PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
         "$root/deploy/product/render-compose.sh" "$tmp/product-source.yml" >"$tmp/product.yml"
@@ -544,9 +553,10 @@ wait_for "the product's /healthz after sealing" 90 product_healthy
 jq -n --arg factory "$factory" --arg implementation "$implementation" --arg token "$token" \
     --arg payer "$owner" --arg treasury "$treasury" --arg account "$account" \
     '{service_url: "http://topup:8080", account: $account,
-      route: "phala-cloud-sepolia-pha-usd", chain_id: 11155111,
-      rpc_url: "http://anvil:8545", factory: $factory, implementation: $implementation,
-      treasury: $treasury, token: $token, token_symbol: "PHA", public_url: "http://product:8089", payer: $payer}' |
+      factory: $factory, implementation: $implementation,
+      chains: [{chain_id: 11155111, name: "Sepolia", rpc_url: "http://anvil:8545",
+        treasury: $treasury, test_tokens: [{symbol: "PHA", address: $token}]}],
+      public_url: "http://product:8089", payer: $payer}' |
     docker exec -i "$client" sh -c 'cat >/opt/driver.json'
 product_python -m reference_product deposit --config /opt/driver.json \
     --driver-seed-file /opt/driver.seed --amount-minor 2500 --timeout 420

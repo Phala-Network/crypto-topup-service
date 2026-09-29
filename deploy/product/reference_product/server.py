@@ -153,8 +153,9 @@ class AccountApi:
     """The product's account API; the deposit driver uses it as a signed-in user would.
 
     - `POST /accounts` `{"account_id"}` registers a workspace (`register_team`);
-    - `POST /accounts/{id}/quotes` `{"amount_minor"}` creates a quote (`create_quote`) and returns
-      the service's quote;
+    - `POST /accounts/{id}/quotes` `{"amount_minor", "chain_id"?, "asset"?}` creates a quote
+      (`create_quote`) on a configured chain (the first by default) in an asset (that chain's
+      first test token by default) and returns the service's quote;
     - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"destination_address",
       "amount_atomic"}` requests a refund of one of the workspace's deposits (`create_refund`);
     - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
@@ -205,10 +206,22 @@ class AccountApi:
                 amount_minor = request.get("amount_minor")
                 if type(amount_minor) is not int or amount_minor <= 0:
                     raise ValueError("amount_minor must be a positive integer")
+                chain_id, asset = request.get("chain_id"), request.get("asset")
+                if chain_id is not None and type(chain_id) is not int:
+                    raise ValueError("chain_id must be an integer")
+                if asset is not None and not isinstance(asset, str):
+                    raise ValueError("asset must be a string")
+                chain = self.config.chain(chain_id)
                 if self.ledger.team_suspended(team) is None:
                     return Answer(HTTPStatus.NOT_FOUND)
                 quote = create_quote(
-                    self.config, self._service(), self.ledger, team, amount_minor=amount_minor
+                    self.config,
+                    self._service(),
+                    self.ledger,
+                    team,
+                    amount_minor=amount_minor,
+                    chain_id=chain.chain_id,
+                    asset=asset or chain.test_token.symbol.lower(),
                 )
                 return Answer(HTTPStatus.OK, quote.to_dict())
             if (
@@ -273,6 +286,10 @@ class AccountApi:
             "adjustments": [
                 {"provider_order_id": key, "amount_minor": amount, "reason": reason}
                 for key, amount, reason in self.ledger.adjustments_for(team)
+            ],
+            "bonuses": [
+                {"provider_order_id": key, "amount_minor": amount, "reason": reason}
+                for key, amount, reason in self.ledger.bonuses_for(team)
             ],
             "events": [
                 event
@@ -376,24 +393,31 @@ def create_quote(
     team: str,
     *,
     amount_minor: int,
+    chain_id: int | None = None,
+    asset: str | None = None,
 ) -> Quote:
-    """Creates a quote for the workspace and records its address.
+    """Creates a quote for the workspace on a configured chain (the first by default), in `asset`
+    (the chain's first test token by default), and records its address.
 
-    The client recomputes the address from the pinned forwarder and the quote id, and raises
-    before returning an address the product did not derive.
+    The client recomputes the address from the pinned forwarder, the chain's treasury, and the
+    quote id, and raises before returning an address the product did not derive.
     """
+    chain = config.chain(chain_id)
     quote = client.create_quote(
-        team, amount_minor, chain_id=config.chain_id, asset=config.token_symbol.lower()
+        team,
+        amount_minor,
+        chain_id=chain.chain_id,
+        asset=asset or chain.test_token.symbol.lower(),
     )
     ledger.record_quote_address(quote.address, team, quote.id)
     return quote
 
 
-def quote_address(config: ProductConfig, team: str, quote_id: str) -> str:
+def quote_address(config: ProductConfig, team: str, quote_id: str, chain_id: int) -> str:
     return forwarder_address(
         config.factory,
         config.implementation,
-        config.treasury,
+        config.chain(chain_id).treasury,
         quote_salt(config.account, team, quote_id),
     )
 

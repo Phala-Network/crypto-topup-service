@@ -1,10 +1,13 @@
-import { ChevronRight, Info } from "lucide-react";
-import type { ComponentProps, ReactNode } from "react";
+import { Check, ChevronRight, Copy, Info } from "lucide-react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { ApiError, type Account } from "./api.js";
+import { ApiError } from "./api.js";
+import { networkOf } from "./chains.js";
 import { short } from "./format.js";
+import githubMark from "./icons/github.svg";
+import { useNetworks } from "./queries.js";
 
 /** An inline text link, in the page's text colour. */
 export const LINK = "font-medium underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground";
@@ -26,17 +29,58 @@ export function loadSdk() {
 export const BRAND_BUTTON =
   "h-11 w-full rounded-lg bg-brand text-[0.9375rem] font-semibold text-brand-foreground shadow-[inset_0_-1px_0_rgb(0_0_0/0.12)] hover:bg-brand/85 dark:shadow-none";
 
+/** GitHub's mark (./icons/github.svg), in the text colour. */
+export function GitHubIcon({ className }: { className?: string }) {
+  const mask = `url("${githubMark}") center / contain no-repeat`;
+  return (
+    <span
+      aria-hidden="true"
+      className={cn("inline-block size-4 shrink-0 bg-current", className)}
+      style={{ mask, WebkitMask: mask }}
+    />
+  );
+}
+
+/** Copies `value`, confirming with a tick for a moment. */
+export function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={copied ? "Copied" : label}
+      className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={() => {
+        navigator.clipboard.writeText(value).then(
+          () => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          },
+          () => undefined,
+        );
+      }}
+    >
+      {copied ? <Check className="size-3" aria-hidden="true" /> : <Copy className="size-3" aria-hidden="true" />}
+    </button>
+  );
+}
+
+/**
+ * A transaction or address, middle-truncated (`short`), linked to its chain's explorer, with the
+ * full value in a tooltip; with `copy`, a copy button beside it.
+ */
 export function ExplorerLink({
-  account,
+  chainId,
   kind,
   value,
+  copy = false,
 }: {
-  account: Account | null;
+  chainId: number | undefined;
   kind: "address" | "tx";
   value: string;
+  copy?: boolean;
 }) {
-  const explorer = account?.network.explorer ?? null;
-  return (
+  const explorer = networkOf(useNetworks().data, chainId)?.explorer ?? null;
+  const link = (
     <Tooltip>
       <TooltipTrigger asChild>
         {explorer === null ? (
@@ -47,8 +91,16 @@ export function ExplorerLink({
           </a>
         )}
       </TooltipTrigger>
-      <TooltipContent className="max-w-sm font-mono break-all">{value}</TooltipContent>
+      <TooltipContent className="font-mono break-all">{value}</TooltipContent>
     </Tooltip>
+  );
+  return copy ? (
+    <span className="inline-flex items-center gap-1">
+      {link}
+      <CopyButton value={value} label={`Copy ${kind === "tx" ? "transaction hash" : "address"}`} />
+    </span>
+  ) : (
+    link
   );
 }
 
@@ -68,7 +120,7 @@ export function InfoTip({ label, children, className }: { label: string; childre
           <Info className="size-3.5" aria-hidden="true" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-sm leading-relaxed text-pretty">{children}</TooltipContent>
+      <TooltipContent>{children}</TooltipContent>
     </Tooltip>
   );
 }

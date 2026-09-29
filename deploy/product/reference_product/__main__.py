@@ -68,7 +68,12 @@ def main() -> int:
         action="store_true",
         help="pay the quoted amount after the quote window (credited at spot)",
     )
-    deposit.add_argument("--token", help="pay with this token instead of the route's")
+    deposit.add_argument("--token", help="pay with this token instead of the chain's test token")
+    deposit.add_argument(
+        "--chain-id",
+        type=int,
+        help="pay on this configured chain (default: the config's first chain)",
+    )
     deposit.add_argument("--refund-to", help="refund destination for --until refunded")
     args = parser.parse_args()
     if not args.config:
@@ -84,6 +89,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = ProductConfig.load(args.config)
+    if args.chain_id is not None and args.chain_id not in config.treasuries():
+        parser.error(f"--chain-id {args.chain_id} is not one of the config's chains")
     if args.mode == "serve":
         serve(config)
         return 0
@@ -99,6 +106,7 @@ def main() -> int:
             pay_after_expiry=args.pay_after_expiry,
             token=args.token,
             refund_to=args.refund_to,
+            chain_id=args.chain_id,
         )
     else:
         run_local(config)

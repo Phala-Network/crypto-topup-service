@@ -6,9 +6,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { Account, DepositAddressResponse, Network, Selection, Timeline, Trust } from "./api.js";
-import { Detail, Details, Empty, ExplorerLink, InfoTip, LINK, StatusBadge, Subsection } from "./common.js";
+import { CopyButton, Detail, Details, Empty, ExplorerLink, InfoTip, LINK, StatusBadge, Subsection } from "./common.js";
 import { AreaLabel } from "./Product.js";
 import { Refunds } from "./Refunds.js";
+import { assetOf, networkOf } from "./chains.js";
 import { day, dollars, price, short, signedDollars, statusLabel, time, tokenName, tokens } from "./format.js";
 import { Sweeps } from "./Sweeps.js";
 import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
@@ -18,6 +19,11 @@ import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
  * payments, refunds, sweeps, API requests, and the service's attestation. A console in either
  * theme, apart from the product's own surface.
  */
+// Every table of the panel: one cell padding, so their columns share a left edge.
+const TABLE = "text-xs [&_td]:px-3 [&_th]:h-9 [&_th]:px-3 [&_th]:text-muted-foreground";
+// The shown payment's row: highlighted, with an indicator on its left edge.
+const SELECTED_ROW = "data-[state=selected]:bg-muted data-[state=selected]:shadow-[inset_2px_0_0_var(--primary)]";
+
 export function Backend({
   account,
   selected,
@@ -43,37 +49,26 @@ export function Backend({
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"
-        className="dark console @container/console flex min-w-0 flex-col overflow-hidden rounded-2xl border shadow-[0_12px_40px_-12px_rgb(0_0_0/0.35)] dark:shadow-[inset_0_1px_12px_rgb(0_0_0/0.35)]"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
       >
-        <header className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-5 py-3.5">
-          <span className="flex items-center gap-2 font-mono text-[0.6875rem] tracking-wide uppercase">
+        <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
+          <h2 className="text-sm font-medium">Event stream</h2>
+          <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground" data-testid="stream-status">
             <span className="relative flex size-2" aria-hidden="true">
-              {live && <span className="absolute inset-0 rounded-full bg-brand/60 motion-safe:animate-ping" />}
-              <span className={cn("relative size-2 rounded-full", live ? "bg-brand" : "bg-muted-foreground/50")} />
+              {live && <span className="absolute inset-0 rounded-full bg-success/60 motion-safe:animate-ping" />}
+              <span className={cn("relative size-2 rounded-full", live ? "bg-success" : "bg-muted-foreground/50")} />
             </span>
             {selected === null ? "Idle" : live ? "Live" : "Done"}
-          </span>
-          <h2 className="text-[0.8125rem] font-medium">Event stream</h2>
+          </Badge>
           {selected !== null && (
-            <span className="ml-auto flex items-center gap-3 font-mono text-[0.6875rem] text-muted-foreground">
-              {order !== undefined && (
-                <span className="flex items-center gap-1.5">
-                  <span>
-                    Order <span className="text-foreground">{order}</span>
-                  </span>
-                  <InfoTip label="About the order id">
-                    The product's order id, in the quote's metadata; it arrives with the deposit.credited event. The
-                    checkout shows the quote only if the service's address is the one the product's SDK recomputed
-                    from its pins.
-                  </InfoTip>
-                </span>
-              )}
-              <span title={selected.id}>{short(selected.id)}</span>
-            </span>
+            <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs @2xl/console:ml-auto">
+              {order !== undefined && <MetaItem label="Order" value={order} testId="meta-order" />}
+              <MetaItem label={selected.kind === "quote" ? "Quote" : "Deposit"} value={selected.id} testId="meta-selected" />
+            </dl>
           )}
         </header>
         <div className="px-3 py-3" aria-live="off">
-          <EventStream timeline={timeline} loading={selected?.id ?? null} account={account} />
+          <EventStream timeline={timeline} loading={selected?.id ?? null} />
         </div>
         <Tabs defaultValue="payments" className="gap-0 border-t">
           <TabsList
@@ -113,12 +108,12 @@ export function Backend({
             ) : (
               <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
                 {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
-                <Refunds timeline={timeline} deposit={deposit} account={account} />
+                <Refunds timeline={timeline} deposit={deposit} />
               </div>
             )}
           </TabsContent>
           <TabsContent value="sweeps" className="p-5">
-            {account === null ? <p className="text-xs text-muted-foreground">Loading…</p> : <Sweeps account={account} />}
+            <Sweeps />
           </TabsContent>
           <TabsContent value="api" className="p-5">
             {timeline === null ? (
@@ -131,10 +126,23 @@ export function Backend({
             )}
           </TabsContent>
           <TabsContent value="trust" className="p-5">
-            <TrustDetails trust={trust} account={account} />
+            <TrustDetails trust={trust} networks={networks} />
           </TabsContent>
         </Tabs>
       </aside>
+    </div>
+  );
+}
+
+/** A key and its value in the stream's header, with a copy button. */
+function MetaItem({ label, value, testId }: { label: string; value: string; testId: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="flex items-center gap-1 font-mono" title={value} data-testid={testId}>
+        {short(value)}
+        <CopyButton value={value} label={`Copy ${label.toLowerCase()} id`} />
+      </dd>
     </div>
   );
 }
@@ -152,19 +160,19 @@ function Tab({ value, count, children }: { value: string; count?: number | undef
   );
 }
 
-/** Follows a payment in the event stream above. */
-function FollowButton({ selected, id, onClick }: { selected: boolean; id: string; onClick: () => void }) {
+/** Shows a payment in the event stream above; the shown one's row is highlighted. */
+function ViewButton({ selected, id, onClick }: { selected: boolean; id: string; onClick: () => void }) {
   return (
     <Button
       type="button"
-      variant={selected ? "secondary" : "ghost"}
+      variant="link"
       size="xs"
-      className="-my-0.5 w-[4.75rem]"
+      className="h-auto px-0 text-xs aria-pressed:text-muted-foreground aria-pressed:no-underline"
       onClick={onClick}
-      aria-label={`Follow ${id}`}
+      aria-label={`View ${id}`}
       aria-pressed={selected}
     >
-      {selected ? "Following" : "Follow"}
+      {selected ? "Viewing" : "View"}
     </Button>
   );
 }
@@ -188,12 +196,10 @@ function PaymentsTab({
         {account === null || account.payments.length === 0 ? (
           <Empty>No top-ups yet.</Empty>
         ) : (
-          <Table className="text-xs [&_td]:align-top [&_td]:leading-5 [&_th]:h-9 [&_th]:text-muted-foreground">
+          <Table className={cn(TABLE, "[&_td]:align-top [&_td]:leading-5")}>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead scope="col" className="pl-0">
-                  Payment
-                </TableHead>
+                <TableHead scope="col">Payment</TableHead>
                 <TableHead scope="col">Amount</TableHead>
                 <TableHead scope="col">Status</TableHead>
                 <TableHead scope="col" className="text-right">
@@ -202,7 +208,7 @@ function PaymentsTab({
                 <TableHead scope="col" className="text-right">
                   Nets to
                 </TableHead>
-                <TableHead scope="col" className="pr-0 text-right">
+                <TableHead scope="col" className="text-right">
                   Timeline
                 </TableHead>
               </TableRow>
@@ -213,7 +219,9 @@ function PaymentsTab({
                   ? { kind: "deposit", id: row.id }
                   : { kind: "quote", id: row.id };
                 const isSelected = selected?.id === row.id || selected?.id === row.quote;
-                const symbol = (row.asset ?? account.token.symbol).toUpperCase();
+                const network = networkOf(networks, row.chain_id);
+                const decimals = assetOf(network, row.asset)?.decimals;
+                const symbol = (row.asset ?? "token").toUpperCase();
                 return (
                   <TableRow
                     key={row.id}
@@ -221,15 +229,16 @@ function PaymentsTab({
                     data-kind={row.kind}
                     data-state={isSelected ? "selected" : undefined}
                     aria-selected={isSelected}
+                    className={SELECTED_ROW}
                   >
-                    <TableCell className="pl-0">
+                    <TableCell>
                       <div className="font-medium">{row.kind === "quote" ? "Quote" : "Deposit address"}</div>
                       <div className="text-muted-foreground" title={time(row.created)}>
                         {day(row.created)}
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div>{tokens(row.amount_atomic, symbol)}</div>
+                      <div>{tokens(row.amount_atomic, symbol, decimals)}</div>
                       <div className="text-muted-foreground">
                         {row.exchange_rate === null ? "—" : `at ${price(row.exchange_rate)} / ${symbol}`}
                       </div>
@@ -242,21 +251,26 @@ function PaymentsTab({
                       </div>
                       {row.tx_hash !== null && (
                         <div className="mt-1">
-                          <ExplorerLink account={account} kind="tx" value={row.tx_hash} />
+                          <ExplorerLink chainId={network?.chain_id} kind="tx" value={row.tx_hash} />
                         </div>
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      {row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}
+                      <div>{row.amount === null || row.tx_hash === null ? "—" : dollars(row.amount)}</div>
+                      {row.bonus !== null && row.bonus !== 0 && (
+                        <div className="text-muted-foreground">{signedDollars(row.bonus)} bonus</div>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="font-medium">{row.net === null ? "—" : dollars(row.net)}</div>
                       {row.amount_refunded_atomic !== "0" && (
-                        <div className="text-muted-foreground">−{tokens(row.amount_refunded_atomic, symbol)} refunded</div>
+                        <div className="text-muted-foreground">
+                          −{tokens(row.amount_refunded_atomic, symbol, decimals)} refunded
+                        </div>
                       )}
                     </TableCell>
-                    <TableCell className="pr-0 text-right">
-                      <FollowButton selected={isSelected} id={row.id} onClick={() => onSelect(selection)} />
+                    <TableCell className="text-right">
+                      <ViewButton selected={isSelected} id={row.id} onClick={() => onSelect(selection)} />
                     </TableCell>
                   </TableRow>
                 );
@@ -266,13 +280,22 @@ function PaymentsTab({
         )}
       </section>
       <div className={cn("grid gap-8", address !== null && "@4xl/console:grid-cols-2")}>
-        <Subsection title="How this balance adds up" id="balance-lines-title">
+        <Subsection
+          title="How this balance adds up"
+          id="balance-lines-title"
+          aside={
+            <InfoTip label="About the bonus lines">
+              A bonus is this demo merchant's own promotion, not a Phala Pay feature: its backend adds a line of its own
+              on deposit.credited, and takes the same share back when a refund or reversal nets the credit down.
+            </InfoTip>
+          }
+        >
           {account === null || account.ledger.length === 0 ? (
             <Empty>Nothing credited yet.</Empty>
           ) : (
-            <Table className="text-xs">
+            <Table className={TABLE}>
               <TableHeader>
-                <TableRow>
+                <TableRow className="hover:bg-transparent">
                   <TableHead scope="col">When</TableHead>
                   <TableHead scope="col">Deposit</TableHead>
                   <TableHead scope="col">Event</TableHead>
@@ -283,14 +306,26 @@ function PaymentsTab({
               </TableHeader>
               <TableBody className="tabular-nums">
                 {account.ledger.map((line) => (
-                  <TableRow key={`${line.deposit}-${line.reason}-${line.at}`} data-testid="ledger-line">
+                  <TableRow
+                    key={`${line.deposit}-${line.kind}-${line.reason}-${line.at}`}
+                    data-testid="ledger-line"
+                    data-kind={line.kind}
+                  >
                     <TableCell className="text-muted-foreground" title={time(line.at)}>
                       {day(line.at)}
                     </TableCell>
                     <TableCell className="font-mono" title={line.deposit}>
                       {short(line.deposit)}
                     </TableCell>
-                    <TableCell className="font-mono text-brand">{line.reason}</TableCell>
+                    <TableCell>
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        {line.kind === "bonus" && <Badge variant="outline">Bonus</Badge>}
+                        {/* Event names in mono; a bonus grant's label is prose. */}
+                        <span className={cn("text-muted-foreground", line.reason.startsWith("deposit.") && "font-mono")}>
+                          {line.reason}
+                        </span>
+                      </span>
+                    </TableCell>
                     <TableCell className={cn("text-right", line.amount < 0 ? "text-destructive" : "text-success")}>
                       {signedDollars(line.amount)}
                     </TableCell>
@@ -375,7 +410,7 @@ function AddressView({
               data-testid="deposit-address-network"
             >
               {network.assets
-                .map((asset) => tokenName(asset.asset.toUpperCase(), known?.testnet ?? account.network.testnet))
+                .map((asset) => tokenName(asset.asset.toUpperCase(), known?.testnet ?? true))
                 .join(", ")}
             </Detail>
           );
@@ -385,18 +420,26 @@ function AddressView({
         </Detail>
       </Details>
       {view.payments.length === 0 ? (
-        <Empty>No payments yet. Send any amount of {account.token.symbol} to the address.</Empty>
+        <Empty>No payments yet. Send any amount of a supported token to the address.</Empty>
       ) : (
         <ul className="flex flex-col divide-y rounded-lg border" aria-label="Payments the product sees" aria-live="polite">
           {view.payments.map((payment) => {
             // The deposit's valuation, once the service recorded it.
             const rate = account.payments.find((row) => row.id === payment.deposit)?.exchange_rate ?? null;
-            const symbol = account.token.symbol;
+            const token = assetOf(named(payment.chain_id), payment.asset);
+            const symbol = (payment.asset ?? "token").toUpperCase();
             return (
-              <li key={payment.deposit} data-testid="address-payment" className="flex items-center gap-3 px-3 py-2">
+              <li
+                key={payment.deposit}
+                data-testid="address-payment"
+                data-state={selected?.id === payment.deposit ? "selected" : undefined}
+                className={cn("flex items-center gap-3 px-3 py-2", SELECTED_ROW)}
+              >
                 <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
                   <span>
-                    <span className="font-medium tabular-nums">{tokens(payment.amount_atomic, symbol)}</span>{" "}
+                    <span className="font-medium tabular-nums">
+                      {tokens(payment.amount_atomic, symbol, token?.decimals)}
+                    </span>{" "}
                     <span className="text-muted-foreground">
                       {payment.status === "seen"
                         ? `received, ${payment.confirmations ?? 0} confirmation${payment.confirmations === 1 ? "" : "s"}`
@@ -405,9 +448,9 @@ function AddressView({
                           : `credited at ${price(rate)} / ${symbol}`}
                     </span>
                   </span>
-                  <ExplorerLink account={account} kind="tx" value={payment.tx_hash} />
+                  <ExplorerLink chainId={payment.chain_id} kind="tx" value={payment.tx_hash} />
                 </span>
-                <FollowButton
+                <ViewButton
                   selected={selected?.id === payment.deposit}
                   id={payment.deposit}
                   onClick={() => onSelect({ kind: "deposit", id: payment.deposit })}
@@ -421,7 +464,7 @@ function AddressView({
   );
 }
 
-function TrustDetails({ trust, account }: { trust: Trust | null; account: Account | null }) {
+function TrustDetails({ trust, networks }: { trust: Trust | null; networks: Network[] | undefined }) {
   const attestation = trust?.attestation;
   const evidence = trust?.tls_evidence;
   return (
@@ -484,7 +527,7 @@ function TrustDetails({ trust, account }: { trust: Trust | null; account: Accoun
             no transactions: the merchant sweeps and refunds itself.
           </p>
           <p className="text-muted-foreground">
-            Network: {account?.network.name ?? "Sepolia"} {account?.network.testnet === false ? "" : "testnet"}
+            {networks === undefined ? "Networks: loading…" : `Networks: ${networks.map((each) => each.name).join(", ")}`}
           </p>
         </TrustItem>
       </div>

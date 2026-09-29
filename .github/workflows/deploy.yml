@@ -94,8 +94,9 @@ jobs:
       # PRODUCT_PUBLIC_URL, and the gateway domain come from step "Resolve the public URLs". The
       # RPC URLs are published with the compose: a keyed provider's URL has `{key}` in place of the
       # key, which the owner seals as TOPUP_RPC_PROVIDER_<A|B>_KEY. SENTRY_ENVIRONMENT is the
-      # Environment's name; an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, TOPUP_ADMIN_KID, or
-      # PRODUCT_RPC_URL is derived in step "Check inputs and Environment settings".
+      # Environment's name; an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, or TOPUP_ADMIN_KID is
+      # derived in step "Check inputs and Environment settings". The product's RPC URLs, one per
+      # chain and keyless, are committed in deploy/product/docker-compose.yml, not settings.
       AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
@@ -107,7 +108,6 @@ jobs:
       TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
       TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
       SENTRY_ENVIRONMENT: ${{ inputs.environment }}
-      PRODUCT_RPC_URL: ${{ vars.PRODUCT_RPC_URL }}
       PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
     steps:
       # Fixes the target's files and settings for the later steps: DIR holds its compose,
@@ -123,8 +123,7 @@ jobs:
             AWS_REGION=${AWS_REGION:-auto} AWS_S3_FORCE_PATH_STYLE=${AWS_S3_FORCE_PATH_STYLE:-true}
           fi
           TOPUP_ADMIN_KID=${TOPUP_ADMIN_KID:-admin/$DEPLOY_ENVIRONMENT-v1}
-          PRODUCT_RPC_URL=${PRODUCT_RPC_URL:-$TOPUP_RPC_PROVIDER_B_URL}
-          for name in AWS_REGION AWS_S3_FORCE_PATH_STYLE TOPUP_ADMIN_KID PRODUCT_RPC_URL; do
+          for name in AWS_REGION AWS_S3_FORCE_PATH_STYLE TOPUP_ADMIN_KID; do
             echo "$name=${!name}" >>"$GITHUB_ENV"
           done
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
@@ -139,7 +138,7 @@ jobs:
               gateway_variable=TOPUP_GATEWAY_DOMAIN policy=""
               images="TOPUP_IMAGE POSTGRES_WALG_IMAGE" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
             product)
-              required="TOPUP_DOMAIN PRODUCT_DOMAIN PRODUCT_RPC_URL PRODUCT_DRIVER_PUBLIC_KEY"
+              required="TOPUP_DOMAIN PRODUCT_DOMAIN PRODUCT_DRIVER_PUBLIC_KEY"
               [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
                 { echo "::error::the reference product deploys to staging only"; status=1; }
               dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=phala-pay-staging-product
@@ -279,9 +278,9 @@ jobs:
             deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
           fi
 
-      # topup: both RPCs, the contracts, anonymous image pulls. product: its RPC's finality against
-      # topup's providers, topup's attestation, anonymous pull. Both: the Phala Cloud workspace and
-      # OS image.
+      # topup: both RPCs, the contracts, anonymous image pulls. product: each chain's RPC reports
+      # its chain and the chain's treasury is a contract, topup's attestation, anonymous pull. Both:
+      # the Phala Cloud workspace and OS image.
       - name: Preflight (read-only)
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}

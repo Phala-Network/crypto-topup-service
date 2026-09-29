@@ -1,6 +1,5 @@
 import { Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
 
 export type Theme = "light" | "dark";
 
@@ -25,11 +24,15 @@ export function useTheme(): [Theme, (theme: Theme) => void] {
   ];
 }
 
+/** The header's icon buttons: one hover and fill in either theme. */
+export const ICON_BUTTON =
+  "inline-flex size-10 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4";
+
 export function ThemeToggle({ theme, onChange }: { theme: Theme; onChange: (theme: Theme) => void }) {
   const next = theme === "dark" ? "light" : "dark";
   return (
-    <Button type="button" variant="ghost" size="icon" onClick={() => onChange(next)} aria-label={`Switch to ${next} theme`}>
+    <button type="button" className={ICON_BUTTON} onClick={() => onChange(next)} aria-label={`Switch to ${next} theme`}>
       {theme === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-    </Button>
+    </button>
   );
 }
