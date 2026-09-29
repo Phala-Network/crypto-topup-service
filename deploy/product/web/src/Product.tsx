@@ -320,7 +320,7 @@ function PaymentOptions({
           value={asset.asset}
           onValueChange={onAssetChange}
           aria-label="Token"
-          className="@container gap-2"
+          className="@container auto-rows-fr gap-2"
         >
           {network.assets.map((each) => (
             <TokenOption key={each.asset} id={`${id}-token-${network.chain_id}-${each.asset}`} asset={each} testnet={network.testnet} />
@@ -333,13 +333,16 @@ function PaymentOptions({
 
 /**
  * A token row: its mark, symbol with the demo merchant's bonus, if any, and name; on the right its
- * price terms; checked, a tick.
+ * price terms, which never shrink; checked, a tick. In a narrow list the bonus drops its word, so
+ * the rows keep two lines; narrower still, the name wraps, and every row takes the tallest's height.
  */
 function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet: boolean }) {
   const bonus =
     asset.bonus_bps > 0 ? (
       <Badge className="shrink-0 bg-success/12 text-success" data-testid="token-bonus">
-        <Gift aria-hidden="true" />+{percent(asset.bonus_bps)} bonus
+        <Gift aria-hidden="true" />+{percent(asset.bonus_bps)}{" "}
+        {/* "bonus" shows where the row has room for it; screen readers always hear it. */}
+        <span className="sr-only @min-[21rem]:not-sr-only">bonus</span>
       </Badge>
     ) : null;
   return (
@@ -358,11 +361,11 @@ function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet
         />
         <TokenIcon asset={asset.asset} />
         <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-          <span className="flex items-center text-sm font-medium">
+          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-medium">
             {asset.symbol}
-            {bonus !== null && <span className="ml-2 inline-flex">{bonus}</span>}
+            {bonus}
           </span>
-          <span className="w-full truncate text-xs font-normal text-muted-foreground">
+          <span className="w-full text-xs font-normal text-pretty text-muted-foreground">
             {testnet ? `Test ${tokenFullName(asset.asset)}` : tokenFullName(asset.asset)}
           </span>
         </span>
