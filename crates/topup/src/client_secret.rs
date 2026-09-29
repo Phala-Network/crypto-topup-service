@@ -4,9 +4,11 @@
 //! `nonce` 8 random bytes and the 8-byte owner tag, and `tag` the first 16 bytes of HMAC-SHA256,
 //! under the key derived from dstack at [`topup_core::CLIENT_SECRET_KEY_DOMAIN`] like the
 //! service's other keys, of everything before it; all are lowercase hex. The owner tag is the
-//! first 8 bytes of the same HMAC of the account's public id, the object's id, and the random
-//! bytes, so a secret also proves which account the service issued the object to
-//! ([`ClientSecretKey::verify_owner`]), which a restore's re-issue checks.
+//! first 8 bytes of HMAC-SHA256 of `owner:{account}:{id}:{random}` (the account's `acct_` id,
+//! the object's id, and the random bytes as they appear in the secret, lowercase hex) under the
+//! owner subkey, HMAC-SHA256 of [`OWNER_SUBKEY_LABEL`] under the key. So a secret also proves
+//! which account the service issued the object to ([`ClientSecretKey::verify_owner`]), which a
+//! restore's re-issue checks; quote and deposit-address secrets alike.
 //! The tag is checked in memory in constant time, so a forged or malformed secret is refused
 //! without touching the database. The database still stores each issued secret's SHA-256: a
 //! secret is valid only while its row is, which lets a deposit address retire its old secrets.
@@ -18,15 +20,20 @@ use sha2::Sha256;
 use topup_core::SecretKey32;
 
 const SEPARATOR: &str = "_secret_";
-/// Starts the owner tag's message, which no object id starts with.
-const OWNER_DOMAIN: &str = "owner:";
+/// Derives the owner tag's subkey from the key, so owner tags and tags never share a key.
+pub const OWNER_SUBKEY_LABEL: &str = "client-secret/owner/v1";
+/// Labels the owner tag's message.
+const OWNER_PREFIX: &str = "owner:";
 const RANDOM_BYTES: usize = 8;
 const OWNER_TAG_BYTES: usize = 8;
 const NONCE_BYTES: usize = RANDOM_BYTES + OWNER_TAG_BYTES;
 const TAG_BYTES: usize = 16;
 
-/// The key that tags and checks client secrets.
-pub struct ClientSecretKey(SecretKey32);
+/// The key that tags and checks client secrets, and its owner subkey.
+pub struct ClientSecretKey {
+    key: SecretKey32,
+    owner: SecretKey32,
+}
 
 impl std::fmt::Debug for ClientSecretKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,8 +49,14 @@ pub struct EntropyUnavailable;
 impl ClientSecretKey {
     /// A key from its 32 bytes, as derived at [`topup_core::CLIENT_SECRET_KEY_DOMAIN`].
     #[must_use]
-    pub const fn new(key: SecretKey32) -> Self {
-        Self(key)
+    pub fn new(key: SecretKey32) -> Self {
+        let owner = SecretKey32::from_slice(
+            &keyed(key.expose_secret(), OWNER_SUBKEY_LABEL)
+                .finalize()
+                .into_bytes(),
+        )
+        .expect("HMAC-SHA256 is 32 bytes");
+        Self { key, owner }
     }
 
     /// A random key of this process alone, for tests: secrets it issues die with the process.
@@ -57,7 +70,7 @@ impl ClientSecretKey {
         SysRng
             .try_fill_bytes(&mut key)
             .expect("the OS RNG provides a client-secret key");
-        Self(SecretKey32::new(key))
+        Self::new(SecretKey32::new(key))
     }
 
     /// Issues a new secret of the object whose public id is `id`, of the account whose public id
@@ -115,16 +128,24 @@ impl ClientSecretKey {
         Some(&rest[..2 * NONCE_BYTES])
     }
 
+    /// The owner tag's HMAC under the owner subkey; `random` is the hex of the random bytes.
     fn owner_mac(&self, account: &str, id: &str, random: &str) -> Hmac<Sha256> {
-        self.mac(&format!("{OWNER_DOMAIN}{account}:{id}:{random}"))
+        keyed(
+            self.owner.expose_secret(),
+            &format!("{OWNER_PREFIX}{account}:{id}:{random}"),
+        )
     }
 
     fn mac(&self, message: &str) -> Hmac<Sha256> {
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(self.0.expose_secret())
-            .expect("HMAC takes a key of any length");
-        mac.update(message.as_bytes());
-        mac
+        keyed(self.key.expose_secret(), message)
     }
+}
+
+fn keyed(key: &[u8], message: &str) -> Hmac<Sha256> {
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(message.as_bytes());
+    mac
 }
 
 #[cfg(test)]
@@ -159,6 +180,16 @@ mod tests {
         assert!(key(1).verify_owner(ACCOUNT, ID, &secret));
         assert!(!key(1).verify_owner("acct_fedcba9876543210fedcba9876543210", ID, &secret));
         assert!(!key(2).verify_owner(ACCOUNT, ID, &secret));
+        // The owner tag as architecture §12 and the restore drill compute it.
+        let nonce = &secret[ID.len() + SEPARATOR.len()..][..2 * NONCE_BYTES];
+        let (random, owner) = nonce.split_at(2 * RANDOM_BYTES);
+        let subkey = keyed(&[1; 32], "client-secret/owner/v1")
+            .finalize()
+            .into_bytes();
+        let expected = keyed(&subkey, &format!("owner:{ACCOUNT}:{ID}:{random}"))
+            .finalize()
+            .into_bytes();
+        assert_eq!(owner, hex::encode(&expected[..OWNER_TAG_BYTES]));
         // A secret with a random nonce, as issued before owner tags, verifies but proves no owner.
         let signed = format!("{ID}{SEPARATOR}{}", "7".repeat(2 * NONCE_BYTES));
         let tag = key(1).mac(&signed).finalize().into_bytes();

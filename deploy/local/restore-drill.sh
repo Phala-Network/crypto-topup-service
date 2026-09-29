@@ -276,8 +276,9 @@ delivered_delivery=
 # What the simulator derives at a dstack path, as the service derives its keys (the 32 key bytes
 # of GetKey): `pem PATH` prints them as an ed25519 private key (a webhook key is the seed itself),
 # and `secret PATH ACCOUNT ID` issues a client secret of object ID of ACCOUNT under them,
-# `{id}_secret_{nonce}{tag}` with the nonce 8 random bytes and the first 8 bytes of the HMAC-SHA256
-# of ACCOUNT, ID, and them, and the tag the first 16 bytes of HMAC-SHA256
+# `{id}_secret_{nonce}{tag}` with the nonce 8 random bytes and their owner tag, the first 8 bytes
+# of HMAC-SHA256 of `owner:ACCOUNT:ID:{random hex}` under the subkey HMAC-SHA256 of
+# `client-secret/owner/v1`, and the tag the first 16 bytes of HMAC-SHA256
 # (crates/topup/src/client_secret.rs).
 dstack_key() {
     dc exec -T mock-product python3 -c '
@@ -305,9 +306,10 @@ if sys.argv[1] == "pem":
     print("-----END PRIVATE KEY-----")
 else:
     account, object_id, random = sys.argv[3], sys.argv[4], secrets.token_hex(8)
+    subkey = hmac.new(key, b"client-secret/owner/v1", hashlib.sha256).digest()
     owner = "owner:%s:%s:%s" % (account, object_id, random)
     signed = object_id + "_secret_" + random + hmac.new(
-        key, owner.encode(), hashlib.sha256).hexdigest()[:16]
+        subkey, owner.encode(), hashlib.sha256).hexdigest()[:16]
     print(signed + hmac.new(key, signed.encode(), hashlib.sha256).hexdigest()[:32])
 ' "$@" </dev/null
 }

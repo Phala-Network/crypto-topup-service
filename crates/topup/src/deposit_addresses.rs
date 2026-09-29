@@ -417,10 +417,13 @@ pub struct ReissueTarget {
 /// treasury is unchanged. Versions between the restored latest one and `target` are issued retired,
 /// as the rotations that issued them left them; the active one is retired. Each new network is
 /// backfilled from the chain's cursor in `backfill_from` (the restored cursor), so the rescan
-/// finds payments made to it since. `id` keeps the `da_` id the merchant holds.
+/// finds payments made to it since. `id` keeps the `da_` id the merchant holds, and
+/// `client_secret_hash` the SHA-256 of a client secret of it the caller checked, so the payer's
+/// page reads the address again.
 ///
-/// A version the customer already has is returned as it is, with `false`. The account's cap,
-/// pauses, and the rotation limit do not apply: nothing new is given out.
+/// A version the customer already has is returned as it is, with `false`, and takes the secret
+/// too. The account's cap, pauses, and the rotation limit do not apply: nothing new is given
+/// out.
 #[allow(clippy::too_many_arguments)]
 pub async fn reissue(
     pool: &PgPool,
@@ -430,6 +433,7 @@ pub async fn reissue(
     chains: &[ChainContracts],
     target: ReissueTarget,
     id: Option<Uuid>,
+    client_secret_hash: Option<&[u8; 32]>,
     backfill_from: &BTreeMap<u64, u64>,
     actor: &Actor,
     reason: &str,
@@ -532,6 +536,17 @@ pub async fn reissue(
         let address = get_in(&mut transaction, scope, existing)
             .await?
             .ok_or(DepositAddressError::DatabaseInvariant)?;
+        if let Some(secret_hash) = client_secret_hash {
+            restore_client_secret(
+                &mut transaction,
+                scope,
+                existing,
+                secret_hash,
+                actor,
+                reason,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         return Ok((address, false));
     }
@@ -607,11 +622,57 @@ pub async fn reissue(
         },
     )
     .await?;
+    if let Some(secret_hash) = client_secret_hash {
+        restore_client_secret(
+            &mut transaction,
+            scope,
+            reissued,
+            secret_hash,
+            actor,
+            reason,
+        )
+        .await?;
+    }
     let address = get_in(&mut transaction, scope, reissued)
         .await?
         .ok_or(DepositAddressError::DatabaseInvariant)?;
     transaction.commit().await?;
     Ok((address, true))
+}
+
+/// Keeps a client secret of the re-issued address `id` the merchant holds, audited once added.
+async fn restore_client_secret(
+    transaction: &mut Transaction<'_, Postgres>,
+    scope: Scope,
+    id: Uuid,
+    secret_hash: &[u8; 32],
+    actor: &Actor,
+    reason: &str,
+) -> Result<(), DepositAddressError> {
+    let added = sqlx::query(
+        "INSERT INTO deposit_address_client_secrets (secret_hash, deposit_address_id) \
+         VALUES ($1, $2) ON CONFLICT (secret_hash) DO NOTHING",
+    )
+    .bind(secret_hash.as_slice())
+    .bind(id)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected()
+        > 0;
+    if added {
+        audit::insert(
+            &mut **transaction,
+            &audit::Entry {
+                account_id: Some(scope.account_id()),
+                actor,
+                action: "deposit_address.client_secret_restore",
+                subject: &format!("deposit_address:{}", public_id(id)),
+                reason,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// The public id of a deposit address, `da_` and the hex of its id.

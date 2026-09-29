@@ -470,22 +470,13 @@ pub(crate) async fn reissue_deposit_address(
         &chains,
         target,
         id,
+        client_secret_hash.as_ref(),
         &restore.restored_cursors,
         &actor,
         &request.reason,
     )
     .await
     .map_err(super::deposit_addresses::map_error)?;
-    if let Some(secret_hash) = client_secret_hash {
-        sqlx::query(
-            "INSERT INTO deposit_address_client_secrets (secret_hash, deposit_address_id) \
-             VALUES ($1, $2) ON CONFLICT (secret_hash) DO NOTHING",
-        )
-        .bind(secret_hash.as_slice())
-        .bind(reissued.id)
-        .execute(&state.pool)
-        .await?;
-    }
     Ok(Json(RestoreDepositAddressResponse {
         reissued: issued,
         deposit_address: super::deposit_addresses::deposit_address_object(

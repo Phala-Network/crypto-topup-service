@@ -1070,12 +1070,19 @@ A seen transfer can disappear in a reorg; only deposits and `deposit.credited` r
 scopes, and while a chain is frozen (§13) it stops updating.
 
 **Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{nonce}{tag}`,
-for the payer's checkout page: `nonce` is 8 random bytes and the first 8 bytes of HMAC-SHA256 of
-the account's `acct_` id, the quote id, and them (the owner tag), and `tag` the first 16 bytes of
-HMAC-SHA256 of everything before it, all as lowercase hex, under `get_key("client-secret/v1")`,
-derived like the service's other keys (§14), so every release and CVM checks the same secrets.
-A read checks `tag` alone, in memory; a restore's re-issue (§14) also checks the owner tag, so a
-secret proves which account the service issued its id to. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
+for the payer's checkout page, all lowercase hex after `_secret_`. Under the key
+`k = get_key("client-secret/v1")`, derived like the service's other keys (§14) so every release
+and CVM checks the same secrets:
+
+- `nonce` is `{random}{owner}`: 8 random bytes, then the owner tag, the first 8 bytes of
+  `HMAC-SHA256(k_owner, "owner:{acct}:{id}:{random}")`, where `acct` is the account's `acct_` id,
+  `id` the quote's `qt_` id, `random` the 16 hex digits as they appear in the secret, and the
+  subkey `k_owner = HMAC-SHA256(k, "client-secret/owner/v1")`;
+- `tag` is the first 16 bytes of `HMAC-SHA256(k, "{id}_secret_{nonce}")`.
+
+A read checks `tag` alone, in memory, so a forged secret costs no database work; a restore's
+re-issue (§14) also checks the owner tag, so a secret proves which account the service issued its
+id to. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
 secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, livemode, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
 payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
@@ -1111,7 +1118,8 @@ set, naming what the receiving address belongs to. Routes, versions, and valuati
 
 **Deposit address payments and client secret.** A deposit address carries `payments`, its payments
 of the last 24 hours in the quote's `payment` shape (`matches_quote` is `null`). Each create or
-rotation returns a new `client_secret`, `da_…_secret_…`; the newest 10 per address stay valid
+rotation returns a new `client_secret`, `da_…_secret_…`, built and checked as a quote's with the
+`da_` id; the newest 10 per address stay valid
 (`deposit_address_client_secrets`, SHA-256 only), as several pages of one customer may be open.
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
 `ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each payment
