@@ -1084,11 +1084,11 @@ impl ChainReader for UnreachableReader {
         _from_block: u64,
         _to_block: u64,
     ) -> Result<Vec<topup_adapters::chain::evm::FactoryLog>, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 
     async fn transfer_logs_to(
@@ -1097,14 +1097,14 @@ impl ChainReader for UnreachableReader {
         _from_block: u64,
         _to_block: u64,
     ) -> Result<Vec<TransferLog>, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 
     async fn confirmation_heads(
         &self,
         _confirmations: topup_core::route::Confirmations,
     ) -> Result<topup_core::route::ChainHeads, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 
     async fn receipt_transfer(
@@ -1112,11 +1112,11 @@ impl ChainReader for UnreachableReader {
         _tx_hash: B256,
         _receipt_log_index: u64,
     ) -> Result<topup_adapters::chain::evm::ReceiptLookup, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 
     async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
-        Err(ChainError::ProviderUnhealthy)
+        Err(ChainError::Rpc("unreachable"))
     }
 }
 

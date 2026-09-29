@@ -622,9 +622,7 @@ async fn confirmed_evidence(
 fn chain_result_code<T>(result: &Result<T, ChainError>) -> &'static str {
     match result {
         Ok(_) => "ok",
-        Err(ChainError::FinalizedHeadRegressed { .. } | ChainError::ProviderUnhealthy) => {
-            "provider_unhealthy"
-        }
+        Err(ChainError::FinalizedHeadRegressed { .. }) => "finalized_regression",
         Err(_) => "rpc_error",
     }
 }

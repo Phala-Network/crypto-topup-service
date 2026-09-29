@@ -76,7 +76,8 @@ pub enum ScannerError {
     /// A database operation failed.
     #[error("{0}")]
     Database(#[from] sqlx::Error),
-    /// The provider finalized head is behind the durable cursor.
+    /// The provider finalized head is behind the durable cursor: a node that has not caught up,
+    /// such as a load-balanced gateway's after a restart; the pass is retried.
     #[error("provider finalized head {finalized} is behind durable cursor {cursor}")]
     FinalizedBehindCursor {
         /// Durable fully scanned block.
@@ -93,10 +94,14 @@ pub enum ScannerError {
 }
 
 impl ScannerError {
+    /// Whether the pass may succeed on a later attempt. A provider answering a finalized head below
+    /// one it answered before, or below the durable cursor, is a node that has not caught up: the
+    /// pass waits for it, with the scanner's monitor unhealthy meanwhile.
     fn is_retryable(&self) -> bool {
         matches!(
             self,
             Self::Database(_)
+                | Self::FinalizedBehindCursor { .. }
                 | Self::Chain(
                     ChainError::Rpc(_)
                         | ChainError::Transport(_)
@@ -104,6 +109,7 @@ impl ScannerError {
                         | ChainError::InvalidTimestamp(_)
                         | ChainError::InvalidTransfer(_)
                         | ChainError::Reorganized(_)
+                        | ChainError::FinalizedHeadRegressed { .. }
                 )
         )
     }
@@ -112,7 +118,6 @@ impl ScannerError {
         match self {
             Self::Configuration(_) => "configuration",
             Self::Chain(ChainError::FinalizedHeadRegressed { .. }) => "finalized_regression",
-            Self::Chain(ChainError::ProviderUnhealthy) => "provider_unhealthy",
             Self::Chain(_) => "chain_read",
             Self::Database(_) => "database",
             Self::FinalizedBehindCursor { .. } => "finalized_behind_cursor",
@@ -393,6 +398,7 @@ pub async fn run(
     finalized_heads: FinalizedHeads,
     cancellation: CancellationToken,
 ) -> Result<(), ScannerError> {
+    let scanners = cancellation.child_token();
     let mut tasks = JoinSet::new();
     for routes in chain_routes(route_set) {
         let chain_id = routes.chain.chain_id;
@@ -401,10 +407,10 @@ pub async fn run(
             .map_err(|error| ScannerError::Configuration(error.to_string()))?;
         let reader = FinalizedReader::new(Arc::clone(client));
         let chain_pool = pool.clone();
-        let chain_cancellation = cancellation.child_token();
+        let chain_cancellation = scanners.child_token();
         let chain_heads = finalized_heads.clone();
         tasks.spawn(async move {
-            run_chain(
+            let result = run_chain(
                 chain_pool,
                 reader,
                 routes,
@@ -412,7 +418,8 @@ pub async fn run(
                 chain_heads,
                 chain_cancellation,
             )
-            .await
+            .await;
+            (chain_id, result)
         });
     }
 
@@ -421,44 +428,37 @@ pub async fn run(
             "no chain scanners were configured".to_owned(),
         ));
     }
-    let mut first_error = None;
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Err(error)) => {
-                tracing::error!(
-                    error_category = error.category(),
-                    "chain scanner task stopped"
-                );
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Err(error) => {
-                tracing::error!(error = %error, "chain scanner task failed to join");
-                if first_error.is_none() {
-                    first_error = Some(ScannerError::Task(error.to_string()));
-                }
-            }
-            Ok(Ok(())) if cancellation.is_cancelled() => {}
-            Ok(Ok(())) => {
-                tracing::error!("chain scanner task exited unexpectedly");
-                if first_error.is_none() {
-                    first_error = Some(ScannerError::Task(
-                        "chain scanner exited unexpectedly".to_owned(),
-                    ));
-                }
-            }
-        }
+    supervise(tasks, &scanners).await
+}
+
+/// Waits for the chain tasks until `scanners` is cancelled. The first chain to stop before then
+/// stops every other chain and returns its error, so the scanner's service task fails and the
+/// process exits to be restarted, instead of reporting healthy while one chain is not scanned.
+async fn supervise(
+    mut tasks: JoinSet<(u64, Result<(), ScannerError>)>,
+    scanners: &CancellationToken,
+) -> Result<(), ScannerError> {
+    let mut failure = None;
+    while let Some(joined) = tasks.join_next().await {
+        let (chain_id, error) = match joined {
+            Ok((_, Ok(()))) if scanners.is_cancelled() => continue,
+            Ok((chain_id, Ok(()))) => (
+                Some(chain_id),
+                ScannerError::Task("chain scanner exited unexpectedly".to_owned()),
+            ),
+            Ok((chain_id, Err(error))) => (Some(chain_id), error),
+            Err(error) => (None, ScannerError::Task(error.to_string())),
+        };
+        tracing::error!(
+            chain_id,
+            error_category = error.category(),
+            %error,
+            "chain scanner task stopped; stopping every chain scanner"
+        );
+        scanners.cancel();
+        failure.get_or_insert(error);
     }
-    if let Some(error) = first_error {
-        Err(error)
-    } else if cancellation.is_cancelled() {
-        Ok(())
-    } else {
-        Err(ScannerError::Task(
-            "all chain scanner tasks stopped".to_owned(),
-        ))
-    }
+    failure.map_or(Ok(()), Err)
 }
 
 /// Runs one chain's head loop and finalized backstop on provider A's `reader` until
@@ -719,9 +719,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_loop_recovers_after_a_transient_failure() {
+    async fn scan_loop_retries_transient_failures_and_a_stale_finalized_head() {
         let results = Mutex::new(VecDeque::from([
             Err(ScannerError::Database(sqlx::Error::PoolTimedOut)),
+            // A gateway node behind the one answered before, then behind the committed cursor
+            // after a restart: the Base Sepolia incident of 2026-09-29.
+            Err(ScannerError::Chain(ChainError::FinalizedHeadRegressed {
+                previous: 47_446_696,
+                current: 47_446_540,
+            })),
+            Err(ScannerError::FinalizedBehindCursor {
+                cursor: 47_446_696,
+                finalized: 47_446_540,
+            }),
             Ok(ScanStats {
                 inserted: 1,
                 cursor: 2,
@@ -729,9 +739,10 @@ mod tests {
                 backfilled_addresses: 0,
                 factory: db::FactoryCommit::default(),
             }),
-            Err(ScannerError::Chain(ChainError::ProviderUnhealthy)),
+            Err(ScannerError::UnknownRecipient(Address::ZERO)),
         ]));
         let sleeps = Mutex::new(Vec::new());
+        let health = Mutex::new(Vec::new());
 
         let healthy = AtomicBool::new(true);
         let error = run_scan_loop(
@@ -739,6 +750,10 @@ mod tests {
             &healthy,
             CancellationToken::new(),
             || {
+                health
+                    .lock()
+                    .expect("health lock")
+                    .push(healthy.load(Ordering::Relaxed));
                 future::ready(
                     results
                         .lock()
@@ -754,18 +769,63 @@ mod tests {
             || u64::MAX,
         )
         .await
-        .expect_err("provider health violation must stop the loop");
+        .expect_err("a non-retryable failure stops the loop");
 
-        assert!(matches!(
-            error,
-            ScannerError::Chain(ChainError::ProviderUnhealthy)
-        ));
+        assert!(matches!(error, ScannerError::UnknownRecipient(_)));
         assert_eq!(
             *sleeps.lock().expect("sleeps lock"),
-            vec![Duration::ZERO, BACKSTOP_FALLBACK_INTERVAL]
+            vec![
+                backoff(0, u64::MAX),
+                backoff(1, u64::MAX),
+                backoff(2, u64::MAX),
+                BACKSTOP_FALLBACK_INTERVAL
+            ]
+        );
+        // Unhealthy for the monitor while retrying, healthy again after the pass that succeeded.
+        assert_eq!(
+            *health.lock().expect("health lock"),
+            vec![true, false, false, false, true]
         );
         assert!(!healthy.load(Ordering::Relaxed));
         assert!(results.lock().expect("results lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_stopped_chain_stops_every_chain_and_fails_the_scanner() {
+        let scanners = CancellationToken::new();
+        let mut tasks = JoinSet::new();
+        let healthy = scanners.child_token();
+        tasks.spawn(async move {
+            healthy.cancelled().await;
+            (11_155_111, Ok(()))
+        });
+        tasks.spawn(async { (84_532, Err(ScannerError::UnknownRecipient(Address::ZERO))) });
+
+        let error = tokio::time::timeout(Duration::from_secs(5), supervise(tasks, &scanners))
+            .await
+            .expect("the healthy chain is stopped instead of keeping the scanner alive")
+            .expect_err("a stopped chain fails the scanner");
+
+        assert!(matches!(error, ScannerError::UnknownRecipient(_)));
+        assert!(scanners.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn chains_stopped_by_shutdown_end_the_scanner_cleanly() {
+        let scanners = CancellationToken::new();
+        let mut tasks = JoinSet::new();
+        for chain_id in [1, 84_532] {
+            let chain = scanners.child_token();
+            tasks.spawn(async move {
+                chain.cancelled().await;
+                (chain_id, Ok(()))
+            });
+        }
+        scanners.cancel();
+
+        supervise(tasks, &scanners)
+            .await
+            .expect("shutdown is not a failure");
     }
 
     #[test]

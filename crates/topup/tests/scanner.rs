@@ -445,20 +445,15 @@ async fn run_scenario(database: &TestDatabase, anvil: &Anvil) -> Result<()> {
     let previous = reader.finalized_head().await?;
     ensure!(previous.number > 0);
     anvil.reset()?;
-    ensure!(
-        matches!(
-            reader.finalized_head().await,
-            Err(ChainError::FinalizedHeadRegressed { current: 0, .. })
-        ),
-        "provider reset must be detected as a finalized regression"
-    );
-    ensure!(
-        matches!(
-            reader.finalized_head().await,
-            Err(ChainError::ProviderUnhealthy)
-        ),
-        "provider must remain unhealthy after regression"
-    );
+    for _ in 0..2 {
+        ensure!(
+            matches!(
+                reader.finalized_head().await,
+                Err(ChainError::FinalizedHeadRegressed { current: 0, .. })
+            ),
+            "a finalized head below the highest read is refused on every read"
+        );
+    }
     Ok(())
 }
 
