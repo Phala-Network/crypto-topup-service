@@ -1,6 +1,7 @@
 """A stand-in for the Phala Pay service in the demo's end-to-end test.
 
-It answers the merchant API the demo uses, in the shapes of crates/topup/openapi.json: quotes and
+It answers the merchant API the demo uses, in the shapes of crates/topup/openapi.json: the config
+(test PHA on Sepolia), quotes and
 their public view, deposit addresses and their public view, deposits, refunds (`mark_paid`
 verified on chain), forwarders, the balance, sweeps, attestation, and the TLS evidence. It follows
 real payments on Anvil the way the service does, compressed in time (one block a second):
@@ -707,6 +708,33 @@ class FakeTopup:
         ]
         return {"object": "balance", "livemode": False, "unswept": amounts if total else []}
 
+    def config(self) -> dict[str, Any]:
+        pha = {
+            "asset": "pha",
+            "chain_id": CHAIN_ID,
+            "confirmations": str(CREDIT_DEPTH),
+            "contract": self.token,
+            "decimals": 18,
+            "max_deposit_atomic": str(10**24),
+            "min_amount": 100,
+            "min_refund_atomic": str(MIN_REFUND_ATOMIC),
+            "pricing": "spot",
+            "quote_spread_bps": 0,
+            "quote_tolerance_bps": 0,
+            "quote_ttl_seconds": 900,
+            "typical_credit_seconds": CREDIT_DEPTH,
+            "typical_finality_seconds": FINAL_DEPTH,
+        }
+        return {
+            "object": "config",
+            "livemode": False,
+            "currency": "usd",
+            "assets": [pha],
+            "max_open_amount_per_account": 1_000_000,
+            "max_open_amount_per_customer": 500_000,
+            "max_open_quotes": 100,
+        }
+
     def list_forwarders(self, query: dict[str, str]) -> list[dict[str, Any]]:
         with self.lock:
             forwarders = list(self.forwarders.values())[::-1]
@@ -836,6 +864,8 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
                 self.send(HTTPStatus.OK, _page(path, data))
             elif parts[:2] == ["v1", "refunds"] and len(parts) == 3:
                 self.send(HTTPStatus.OK, fake.refund(parts[2]))
+            elif path == "/v1/config":
+                self.send(HTTPStatus.OK, fake.config())
             elif path == "/v1/balance":
                 self.send(HTTPStatus.OK, fake.balance())
             elif path == "/v1/forwarders":

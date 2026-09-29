@@ -1,5 +1,5 @@
 import { ChevronRight, Info } from "lucide-react";
-import { useEffect, type ComponentProps, type ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -168,18 +168,6 @@ export function describe(error: unknown): string {
 export function errorMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message.split("\n")[0] : undefined;
   return message ?? fallback;
-}
-
-/** Calls `callback` now and every `interval` ms while `enabled`. */
-export function usePolling(callback: () => void, interval: number, enabled = true): void {
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    callback();
-    const timer = setInterval(callback, interval);
-    return () => clearInterval(timer);
-  }, [callback, interval, enabled]);
 }
 
 /** Triggers a download of `value` as a JSON file (a Blob URL: no request leaves the page). */

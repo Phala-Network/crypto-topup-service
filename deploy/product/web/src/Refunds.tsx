@@ -1,21 +1,15 @@
+import { useMutation } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
-import { isAddress, parseUnits } from "viem";
+import { isAddress, isHash, parseUnits } from "viem";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  cancelRefund,
-  createRefund,
-  markRefundPaid,
-  type Account,
-  type Deposit,
-  type Refund,
-  type Timeline,
-} from "./api.js";
+import type { Account, Deposit, Refund, Timeline } from "./api.js";
 import { Detail, Details, ExplorerLink, InfoTip, StatusBadge, Subsection, describe, errorMessage, wallet } from "./common.js";
 import { statusLabel, tokens } from "./format.js";
+import { useCancelRefund, useCreateRefund, useMarkRefundPaid } from "./queries.js";
 
 /**
  * The refund flow (design D5): declare the refund, pay it from the treasury the deposit's address
@@ -23,17 +17,7 @@ import { statusLabel, tokens } from "./format.js";
  * no keys and the treasury is Phala's finance Safe, so the visitor plays the merchant's finance
  * team: a payment from the treasury succeeds, and one from any other wallet fails verification.
  */
-export function Refunds({
-  timeline,
-  deposit,
-  account,
-  onChanged,
-}: {
-  timeline: Timeline;
-  deposit: Deposit;
-  account: Account;
-  onChanged: () => void;
-}) {
+export function Refunds({ timeline, deposit, account }: { timeline: Timeline; deposit: Deposit; account: Account }) {
   const symbol = account.token.symbol;
   const refundable = deposit.final && (deposit.status === "credited" || deposit.status === "rejected");
   return (
@@ -55,7 +39,7 @@ export function Refunds({
         <code>sender_mismatch</code>, which is exactly what should happen.
       </p>
       {refundable ? (
-        <RefundForm deposit={deposit} symbol={symbol} onCreated={onChanged} />
+        <RefundForm deposit={deposit} symbol={symbol} />
       ) : (
         <p data-testid="refund-unavailable" className="text-muted-foreground">
           {deposit.status === "reversed"
@@ -66,7 +50,7 @@ export function Refunds({
       {timeline.refunds.length > 0 && (
         <ul className="flex flex-col gap-3" aria-label="Refunds of this deposit">
           {timeline.refunds.map((refund) => (
-            <RefundItem key={refund.id} refund={refund} account={account} onChanged={onChanged} />
+            <RefundItem key={refund.id} refund={refund} account={account} />
           ))}
         </ul>
       )}
@@ -74,11 +58,12 @@ export function Refunds({
   );
 }
 
-function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: string; onCreated: () => void }) {
+function RefundForm({ deposit, symbol }: { deposit: Deposit; symbol: string }) {
   const remaining = BigInt(deposit.amount_atomic) - BigInt(deposit.amount_refunded_atomic);
   const [amount, setAmount] = useState("");
   const [destination, setDestination] = useState(deposit.from_address);
-  const [state, setState] = useState<{ pending: boolean; error: string | null }>({ pending: false, error: null });
+  const [invalid, setInvalid] = useState<string | null>(null);
+  const create = useCreateRefund();
   const amountId = useId();
   const destinationId = useId();
   const submit = (event: FormEvent) => {
@@ -87,27 +72,24 @@ function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: 
     try {
       atomic = parseUnits(amount.trim(), 18);
     } catch {
-      setState({ pending: false, error: `Enter an amount of ${symbol}.` });
+      setInvalid(`Enter an amount of ${symbol}.`);
       return;
     }
     if (atomic <= 0n || atomic > remaining) {
-      setState({ pending: false, error: `Enter at most ${tokens(remaining.toString(), symbol)}.` });
+      setInvalid(`Enter at most ${tokens(remaining.toString(), symbol)}.`);
       return;
     }
     if (!isAddress(destination)) {
-      setState({ pending: false, error: "Enter a 0x address for the destination." });
+      setInvalid("Enter a 0x address for the destination.");
       return;
     }
-    setState({ pending: true, error: null });
-    createRefund(deposit.id, atomic.toString(), destination).then(
-      () => {
-        setState({ pending: false, error: null });
-        setAmount("");
-        onCreated();
-      },
-      (error: unknown) => setState({ pending: false, error: `Could not declare the refund: ${describe(error)}.` }),
+    setInvalid(null);
+    create.mutate(
+      { deposit: deposit.id, amountAtomic: atomic.toString(), destinationAddress: destination },
+      { onSuccess: () => setAmount("") },
     );
   };
+  const error = invalid ?? (create.error === null ? null : `Could not declare the refund: ${describe(create.error)}.`);
   return (
     <form className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]" onSubmit={submit} aria-label="Declare a refund">
       <Field>
@@ -132,49 +114,54 @@ function RefundForm({ deposit, symbol, onCreated }: { deposit: Deposit; symbol: 
           onChange={(event) => setDestination(event.target.value)}
         />
       </Field>
-      <Button type="submit" variant="outline" className="self-start sm:col-span-2" disabled={state.pending}>
-        {state.pending ? "Declaring…" : "Declare refund"}
+      <Button type="submit" variant="outline" className="justify-self-start sm:col-span-2" disabled={create.isPending}>
+        {create.isPending ? "Declaring…" : "Declare refund"}
       </Button>
-      {state.error !== null && (
+      {error !== null && (
         <div className="sm:col-span-2">
-          <ErrorAlert text={state.error} />
+          <ErrorAlert text={error} />
         </div>
       )}
     </form>
   );
 }
 
-function RefundItem({ refund, account, onChanged }: { refund: Refund; account: Account; onChanged: () => void }) {
+function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
   const symbol = account.token.symbol;
   const [hash, setHash] = useState("");
   const [logIndex, setLogIndex] = useState("");
-  const [state, setState] = useState<{ pending: string | null; error: string | null }>({ pending: null, error: null });
+  const [invalid, setInvalid] = useState<string | null>(null);
+  const mark = useMarkRefundPaid();
+  const cancel = useCancelRefund();
+  // "Pay it from my wallet instead": the visitor's own wallet pays the transfer, whose hash is
+  // then attached like the treasury's would be.
+  const pay = useMutation({
+    mutationFn: async (transfer: NonNullable<Refund["transfer"]>) => {
+      const { transferTokens } = await wallet();
+      return transferTokens(account.network.chain_id, transfer.token, transfer.to, BigInt(transfer.amount_atomic));
+    },
+    onSuccess: setHash,
+  });
   const hashId = useId();
   const indexId = useId();
-  const run = (label: string, action: () => Promise<unknown>) => {
-    setState({ pending: label, error: null });
-    action().then(
-      () => {
-        setState({ pending: null, error: null });
-        onChanged();
-      },
-      (error: unknown) => setState({ pending: null, error: describe(error) }),
-    );
-  };
   const markPaid = (event: FormEvent) => {
     event.preventDefault();
     const trimmed = hash.trim();
-    if (!/^0x[0-9a-fA-F]{64}$/.test(trimmed)) {
-      setState({ pending: null, error: "Enter the 0x transaction hash of the payment." });
+    if (!isHash(trimmed)) {
+      setInvalid("Enter the 0x transaction hash of the payment.");
       return;
     }
     const index = logIndex.trim() === "" ? null : Number(logIndex);
     if (index !== null && !(Number.isSafeInteger(index) && index >= 0)) {
-      setState({ pending: null, error: "The receipt log index is a whole number." });
+      setInvalid("The receipt log index is a whole number.");
       return;
     }
-    run("mark", () => markRefundPaid(refund.id, trimmed, index));
+    setInvalid(null);
+    mark.mutate({ refund: refund.id, transactionHash: trimmed, receiptLogIndex: index });
   };
+  const pending = mark.isPending || cancel.isPending || pay.isPending;
+  const failed = mark.error ?? cancel.error;
+  const error = invalid ?? (failed === null ? null : describe(failed));
   const transfer = refund.transfer;
   return (
     <li
@@ -241,16 +228,11 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
               />
             </Field>
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" variant="outline" disabled={state.pending !== null}>
-                {state.pending === "mark" ? "Submitting…" : "Mark paid"}
+              <Button type="submit" variant="outline" disabled={pending}>
+                {mark.isPending ? "Submitting…" : "Mark paid"}
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={state.pending !== null}
-                onClick={() => run("cancel", () => cancelRefund(refund.id))}
-              >
-                {state.pending === "cancel" ? "Canceling…" : "Cancel refund"}
+              <Button type="button" variant="ghost" disabled={pending} onClick={() => cancel.mutate(refund.id)}>
+                {cancel.isPending ? "Canceling…" : "Cancel refund"}
               </Button>
             </div>
           </form>
@@ -260,24 +242,10 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
               type="button"
               variant="link"
               className="h-auto p-0 text-xs text-foreground underline"
-              disabled={state.pending !== null}
-              onClick={() => {
-                setState({ pending: "wallet", error: null });
-                wallet()
-                  .then(({ transferTokens }) =>
-                    transferTokens(account.network.chain_id, transfer.token, transfer.to, BigInt(transfer.amount_atomic)),
-                  )
-                  .then(
-                    (sent) => {
-                      setHash(sent);
-                      setState({ pending: null, error: null });
-                    },
-                    (error: unknown) =>
-                      setState({ pending: null, error: errorMessage(error, "The wallet did not send it.") }),
-                  );
-              }}
+              disabled={pending}
+              onClick={() => pay.mutate(transfer)}
             >
-              {state.pending === "wallet" ? "Confirm in your wallet…" : "Pay it from my wallet instead"}
+              {pay.isPending ? "Confirm in your wallet…" : "Pay it from my wallet instead"}
             </Button>{" "}
             and mark that transaction paid to see verification fail.
           </p>
@@ -302,7 +270,8 @@ function RefundItem({ refund, account, onChanged }: { refund: Refund; account: A
         </p>
       )}
       {refund.status === "canceled" && <p className="text-muted-foreground">Canceled before any payment was attached.</p>}
-      {state.error !== null && <ErrorAlert text={state.error} />}
+      {error !== null && <ErrorAlert text={error} />}
+      {pay.isError && <ErrorAlert text={errorMessage(pay.error, "The wallet did not send it.")} />}
     </li>
   );
 }

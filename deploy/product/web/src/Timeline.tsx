@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useId, useState } from "react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type {
@@ -62,6 +62,14 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
   },
 };
 
+// A step's line in columns: its time, its dot, its title, the time since sending, and the opener;
+// the title's column is capped so the durations stay next to the titles on a wide console.
+const STEP_GRID =
+  "grid grid-cols-[3.5rem_1rem_minmax(0,17rem)_2.75rem_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,17rem)_3.5rem_0.875rem] sm:gap-x-3";
+// Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
+// phone, under its time, to keep the details' width.
+const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
+
 // A quote's steps, shown before there is a payment to follow.
 const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "webhook_received", "final", "swept"];
 
@@ -94,7 +102,7 @@ export function EventStream({
     return (
       <ol className="flex flex-col" aria-label={`Loading ${short(loading)}`} aria-busy="true">
         {PREVIEW.map((key) => (
-          <li key={key} className="grid h-9 grid-cols-[4rem_1rem_minmax(0,1fr)] items-center gap-3 px-2">
+          <li key={key} className={cn(STEP_GRID, "h-9 px-2")}>
             <span className="h-2 w-12 rounded-full bg-muted motion-safe:animate-pulse" />
             <span className="size-2.5 justify-self-center rounded-full bg-muted motion-safe:animate-pulse" />
             <span className="h-2.5 w-40 rounded-full bg-muted motion-safe:animate-pulse" />
@@ -138,8 +146,6 @@ function StepDot({ state }: { state: Step["state"] }) {
 }
 
 function StreamStep({ step, sent, account }: { step: Step; sent: number | null; account: Account | null }) {
-  const [open, setOpen] = useState(false);
-  const id = useId();
   const copy = STEP_COPY[step.key];
   // Seconds since the payment was sent, for the steps after it.
   const elapsed =
@@ -152,29 +158,29 @@ function StreamStep({ step, sent, account }: { step: Step; sent: number | null; 
       data-state={step.state}
       aria-current={step.state === "current" ? "step" : undefined}
     >
-      {/* The rail between this step's dot and the next one's. */}
+      {/* The rail between this step's dot and the next one's, through the dots' centres (px-2, the
+          time's column, a gap, half a dot); on a phone the opened details take its place. */}
       <span
-        className="absolute top-7 bottom-[-0.375rem] left-[calc(5.5rem-0.5px)] w-px bg-border group-last/step:hidden"
+        className="absolute top-7 bottom-[-0.375rem] left-[calc(5rem-0.5px)] w-px bg-border group-last/step:hidden max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]"
         aria-hidden="true"
       />
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={id}
-        onClick={() => setOpen(!open)}
-        className="relative grid min-h-9 w-full grid-cols-[4rem_1rem_minmax(0,1fr)] items-center gap-3 rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
-      >
-        <span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
-          {step.at !== null ? (
-            <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
-          ) : (
-            <span className="text-muted-foreground/40" aria-hidden="true">
-              --:--:--
-            </span>
+      <Collapsible>
+        <CollapsibleTrigger
+          className={cn(
+            STEP_GRID,
+            "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
           )}
-        </span>
-        <StepDot state={step.state} />
-        <span className="flex min-w-0 items-center gap-2.5">
+        >
+          <span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+            {step.at !== null ? (
+              <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
+            ) : (
+              <span className="text-muted-foreground/40" aria-hidden="true">
+                --:--:--
+              </span>
+            )}
+          </span>
+          <StepDot state={step.state} />
           <span
             className={cn(
               "min-w-0 text-[0.8125rem] text-pretty",
@@ -186,39 +192,34 @@ function StreamStep({ step, sent, account }: { step: Step; sent: number | null; 
             {copy.title}
             <span className="sr-only">, {stateLabel(step.state)}</span>
           </span>
-          {elapsed !== null && (
-            <span className="shrink-0 font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
-              +{duration(elapsed)}
-            </span>
-          )}
+          <span className="text-right font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+            {elapsed !== null && `+${duration(elapsed)}`}
+          </span>
           <ChevronDown
-            className={cn(
-              "size-3.5 shrink-0 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 motion-reduce:transition-none",
-              open && "rotate-180 opacity-100",
-            )}
+            className="size-3.5 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 group-data-[state=open]/trigger:rotate-180 group-data-[state=open]/trigger:opacity-100 motion-reduce:transition-none"
             aria-hidden="true"
           />
-        </span>
-      </button>
-      {failed && <p className="pb-1 pl-[6.75rem] text-xs text-destructive">{copy.failed}</p>}
-      <div id={id} hidden={!open} className="flex flex-col gap-2 pr-2 pb-3 pl-[6.75rem] text-xs">
-        <p className="text-muted-foreground text-pretty">{copy.hint}</p>
-        {step.at !== null && (
-          <p className="font-mono text-[0.6875rem]" data-testid="step-time">
-            {time(step.at)}
-            {elapsed !== null && <span className="text-muted-foreground"> · {duration(elapsed)} after sending</span>}
-          </p>
-        )}
-        {step.details.length > 0 && (
-          <Details>
-            {step.details.map((detail) => (
-              <Detail key={detail.label} label={detail.label}>
-                <DetailValue detail={detail} account={account} />
-              </Detail>
-            ))}
-          </Details>
-        )}
-      </div>
+        </CollapsibleTrigger>
+        {failed && <p className={cn("pb-1 text-xs text-destructive", STEP_INDENT)}>{copy.failed}</p>}
+        <CollapsibleContent className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", STEP_INDENT)}>
+          <p className="text-muted-foreground text-pretty">{copy.hint}</p>
+          {step.at !== null && (
+            <p className="font-mono text-[0.6875rem]" data-testid="step-time">
+              {time(step.at)}
+              {elapsed !== null && <span className="text-muted-foreground"> · {duration(elapsed)} after sending</span>}
+            </p>
+          )}
+          {step.details.length > 0 && (
+            <Details>
+              {step.details.map((detail) => (
+                <Detail key={detail.label} label={detail.label}>
+                  <DetailValue detail={detail} account={account} />
+                </Detail>
+              ))}
+            </Details>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
     </li>
   );
 }
