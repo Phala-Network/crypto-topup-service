@@ -201,6 +201,39 @@ async function watchConsole(page: Page): Promise<string[]> {
   return problems;
 }
 
+/**
+ * The page's metadata for search results and link previews, and the files it links, served from
+ * the page's origin.
+ */
+async function expectMetadata(page: Page, headline: string): Promise<void> {
+  const origin = "https://pay.phala.com/";
+  const head = page.locator("head");
+  const content = (selector: string) => head.locator(selector).getAttribute("content");
+  await expect(page).toHaveTitle(`Phala Pay — ${headline}`);
+  const description = await content('meta[name="description"]');
+  expect(description?.length).toBeLessThanOrEqual(160);
+  await expect(head.locator('link[rel="canonical"]')).toHaveAttribute("href", origin);
+  expect(await head.locator('meta[name="theme-color"]').evaluateAll((tags) => tags.map((tag) => tag.getAttribute("media")))).toEqual([
+    "(prefers-color-scheme: light)",
+    "(prefers-color-scheme: dark)",
+  ]);
+  expect(await content('meta[property="og:title"]')).toBe(`Phala Pay — ${headline}`);
+  expect(await content('meta[property="og:description"]')).toBe(description);
+  expect(await content('meta[property="og:url"]')).toBe(origin);
+  expect(await content('meta[property="og:image"]')).toBe(`${origin}og-image.png`);
+  expect(await content('meta[property="og:image:width"]')).toBe("1200");
+  expect(await content('meta[property="og:image:height"]')).toBe("630");
+  expect(await content('meta[name="twitter:card"]')).toBe("summary_large_image");
+  const structured = await head.locator('script[type="application/ld+json"]').textContent();
+  expect(JSON.parse(structured ?? "null")).toMatchObject({ "@type": "WebSite", url: origin });
+  const links = await head
+    .locator('link[rel="icon"], link[rel="apple-touch-icon"], link[rel="manifest"]')
+    .evaluateAll((tags) => tags.map((tag) => (tag instanceof HTMLLinkElement ? tag.href : "")));
+  for (const url of [...links, new URL("og-image.png", page.url()).href, new URL("robots.txt", page.url()).href]) {
+    expect((await page.request.get(url)).status(), url).toBe(200);
+  }
+}
+
 function step(timeline: Locator, key: string): Locator {
   return timeline.locator(`[data-step="${key}"]`);
 }
@@ -254,15 +287,24 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const response = await page.goto(env("SITE_URL"));
   expect(response?.headers()["content-security-policy"]).toContain("default-src 'none'");
 
-  // The headline, the product (marked as a testnet demo) beside its backend (the attestation in
-  // the backend's Trust tab), and a fresh demo account.
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
-    "Non-custodial crypto payments with a Stripe-shaped API",
+  // The headline, its call to deploy, the product (marked as a testnet demo) beside its backend
+  // (the attestation in the backend's Trust tab), and a fresh demo account.
+  const headline = "Fast, secure, non-custodial crypto payments";
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(headline);
+  const hero = page.getByRole("region", { name: headline });
+  await expect(hero.getByRole("link", { name: "Deploy on Phala Cloud" })).toHaveAttribute(
+    "href",
+    "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md#1-prerequisites",
+  );
+  await expect(hero.getByRole("link", { name: "Docs" })).toHaveAttribute(
+    "href",
+    "https://github.com/Phala-Network/phala-pay/blob/main/docs/integration.md",
   );
   await expect(page.getByRole("navigation", { name: "Site" }).getByRole("link", { name: "Self-hosting" })).toHaveAttribute(
     "href",
     "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md",
   );
+  await expectMetadata(page, headline);
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
   await expect(product.getByTestId("testnet-badge")).toHaveText("Testnet");
   const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
@@ -287,7 +329,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 
   // $20 at the fake service's 0.25 USD per PHA: exactly 80 PHA, with an order id in its metadata.
   // The quote is for the chosen network and token.
-  await product.getByText("$20.00", { exact: true }).click();
+  await product.getByText("$20", { exact: true }).click();
   const quoteRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
   expect((await quoteRequest).postDataJSON()).toEqual({ amount: 2000, chain_id: sepolia.id, asset: "pha" });
@@ -399,7 +441,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(api).not.toContainText("AAAAAAAA");
 
   // The history row and the ledger lines behind the balance.
-  await openTab(scenes, "Payments");
+  await openTab(scenes, "Credits");
   const row = scenes.getByTestId("payment").first();
   await expect(row).toContainText("Quote");
   await expect(row).toContainText("80 PHA");
@@ -428,8 +470,8 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
     ["cancel", "This quote was canceled"],
   ] as const) {
     const before = await followed.getAttribute("title");
-    await product.getByRole("button", { name: "Start a new top-up" }).click();
-    await product.getByText("$5.00", { exact: true }).click();
+    await product.getByRole("button", { name: "Add more credits" }).click();
+    await product.getByText("$5", { exact: true }).click();
     await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
     await expect(rate).toContainText("1 PHA = $0.25");
     await expect(followed).not.toHaveAttribute("title", before ?? "");
@@ -516,9 +558,9 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(scenes.getByTestId("webhook-event").filter({ hasText: "deposit.reversed" })).toBeVisible();
   await expect(product.locator(".pp-payments")).toContainText("25 PHA");
   // The customer sees each payment at the rate it was credited at.
-  await expect(product.getByTestId("top-up").first()).toContainText("25 Test PHA");
-  await expect(product.getByTestId("top-up").first()).toContainText("Credited at $0.25 / PHA, then reversed");
-  await openTab(scenes, "Payments");
+  await expect(product.getByTestId("credit").first()).toContainText("25 Test PHA");
+  await expect(product.getByTestId("credit").first()).toContainText("Credited at $0.25 / PHA, then reversed");
+  await openTab(scenes, "Credits");
   const lines = scenes.getByTestId("ledger-line");
   await expect(lines.filter({ hasText: "deposit.credited" })).toContainText("+$6.25");
   // A reversal takes the whole bonus back with the credit.
@@ -550,16 +592,16 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
     "https://ethereum.org/en/developers/docs/networks/#sepolia",
   );
 
-  // Test USDC: Circle's faucet, on the network chosen there; no bonus, at $1.00.
+  // Test USDC: Circle's faucet, on the network chosen there; no bonus, at $1.00. The helper stays
+  // the same whatever token is chosen.
+  const circle = helper.getByRole("link", { name: /^Circle USDC faucet/ });
+  await expect(circle).toHaveAttribute("href", "https://faucet.circle.com");
+  await expect(circle).toHaveAttribute("title", "On the faucet, pick Sepolia as the network.");
   await product.getByRole("radio", { name: "Test USDC", exact: true }).check({ force: true });
-  await expect(helper.getByRole("button", { name: /^Mint/ })).toHaveCount(0);
-  await expect(helper.getByRole("link", { name: /^Get test USDC from Circle/ })).toHaveAttribute(
-    "href",
-    "https://faucet.circle.com",
-  );
-  await expect(helper.getByTestId("faucet-hint")).toHaveText("On the faucet, pick Sepolia as the network.");
+  await expect(helper.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
+  await expect(circle).toBeVisible();
   await mintUsdc(env("PAYER_ADDRESS"), parseUnits("100", 6));
-  await product.getByText("$5.00", { exact: true }).click();
+  await product.getByText("$5", { exact: true }).click();
   const usdcRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
   expect((await usdcRequest).postDataJSON()).toEqual({ amount: 500, chain_id: sepolia.id, asset: "usdc" });
@@ -572,17 +614,18 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await expect(product.getByTestId("balance")).toHaveText("$5.00", { timeout: 10_000 });
   await expect(product.getByTestId("bonus-credited")).toHaveCount(0);
   expect(await tokenBalance(env("PAYER_ADDRESS"), { token: env("USDC_ADDRESS") })).toBe(parseUnits("95", 6));
-  await openTab(scenes, "Payments");
+  await openTab(scenes, "Credits");
   await expect(scenes.getByTestId("payment").first()).toContainText("5 USDC");
   await expect(scenes.getByTestId("payment").first()).toContainText("at $1.00 / USDC");
 
   // Base Sepolia: its own token list and faucets; test PHA mints there, from the wallet on that
   // network, and a PHA quote there earns the bonus, at staging's rate, formatted.
-  await product.getByRole("button", { name: "Start a new top-up" }).click();
+  await product.getByRole("button", { name: "Add more credits" }).click();
   await chooseNetwork(page, product, "Base Sepolia");
   const tokens = product.getByRole("radiogroup", { name: "Token" });
   await expect(tokens.getByRole("radio")).toHaveCount(1);
   await expect(tokens.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
+  await expect(circle).toHaveCount(0);
   await expect(helper.getByRole("link", { name: /^Base Sepolia ETH faucets/ })).toHaveAttribute(
     "href",
     "https://docs.base.org/get-started/get-funds#testnet-base-sepolia",

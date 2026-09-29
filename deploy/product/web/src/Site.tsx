@@ -1,7 +1,8 @@
-import { BookOpen, Braces, Cpu, Menu, Server, Wallet, type LucideIcon } from "lucide-react";
+import { BookOpen, Braces, Cpu, Menu, Rocket, Server, Wallet, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { GitHubIcon } from "./common.js";
+import phaMark from "./icons/pha.svg";
 import { ICON_BUTTON, ThemeToggle, type Theme } from "./theme.js";
 
 const REPO = "https://github.com/Phala-Network/phala-pay";
@@ -9,6 +10,8 @@ const LINKS = {
   repo: REPO,
   docs: `${REPO}/blob/main/docs/integration.md`,
   selfHosting: `${REPO}/blob/main/docs/self-hosting.md`,
+  // The guide's first step: fork the repository and deploy it to your own Phala Cloud workspace.
+  deploy: `${REPO}/blob/main/docs/self-hosting.md#1-prerequisites`,
   reference: "https://phala-network.github.io/phala-pay/",
   npm: "https://www.npmjs.com/package/@phala/pay",
   license: `${REPO}/blob/main/LICENSE`,
@@ -18,12 +21,8 @@ const LINKS = {
 /** The page's width. */
 export const CONTAINER = "mx-auto w-full max-w-[84rem] px-5 sm:px-8 2xl:max-w-[92rem]";
 
-// The README's opening, in one line.
-const TAGLINE = (
-  <>
-    Non-custodial crypto payments with a <span className="whitespace-nowrap">Stripe-shaped</span> API
-  </>
-);
+// The headline, as index.html's title, description, and link preview (brand/og-image.svg) carry it.
+const TAGLINE = "Fast, secure, non-custodial crypto payments";
 
 // README.md; docs/self-hosting.md; docs/architecture.md §1; docs/integration.md §5.
 const PROPERTIES: { icon: LucideIcon; title: string; text: string }[] = [
@@ -63,7 +62,7 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
           <Logo />
           Phala Pay
         </a>
-        <nav aria-label="Site" className="flex items-center gap-1 text-muted-foreground">
+        <nav aria-label="Site" className="-mr-3 flex items-center gap-1 text-muted-foreground">
           {NAV.map(({ href, label }) => (
             <Button key={label} variant="ghost" asChild className="hidden hover:text-foreground md:inline-flex">
               <a href={href}>{label}</a>
@@ -100,18 +99,16 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
   );
 }
 
+/** Phala's "P" mark (./icons/pha.svg), the Phala Pay logo, as in the favicon and link preview. */
 function Logo() {
-  return (
-    <span
-      className="flex size-6 items-center justify-center rounded-md bg-neutral-950 ring-1 ring-white/15 ring-inset"
-      aria-hidden="true"
-    >
-      <span className="size-2.5 rounded-[3px] bg-brand" />
-    </span>
-  );
+  return <img src={phaMark} alt="" className="size-6 rounded-md ring-1 ring-foreground/10" />;
 }
 
-// README.md's opening: what the product is. How it is run is in the navigation and the footer.
+// The hero's two calls to action: one height, whatever their variant.
+const HERO_BUTTON = "h-10 px-4";
+
+// The headline, with the fact behind each of its words (docs/architecture.md §8, the typical credit
+// at depth 2; README.md), and the way to run it: self-hosting on Phala Cloud.
 export function Hero() {
   return (
     <section aria-labelledby="hero-title">
@@ -119,20 +116,21 @@ export function Hero() {
         <h1 id="hero-title" className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl">
           {TAGLINE}
         </h1>
-        <p className="max-w-4xl text-base text-pretty text-muted-foreground sm:text-lg">
-          Quotes, deposit addresses, refunds, and signed webhooks, where every address can only pay your treasury.
+        <p className="max-w-2xl text-base text-balance text-muted-foreground sm:text-lg">
+          Credited at two confirmations, about 15&nbsp;s on Ethereum. Runs in a TEE you can verify. Addresses can only
+          pay your treasury. Stripe-shaped API.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-2">
-          <Button asChild size="lg">
-            <a href={LINKS.docs}>
-              <BookOpen aria-hidden="true" />
-              Read the docs
+          <Button asChild size="lg" className={HERO_BUTTON}>
+            <a href={LINKS.deploy}>
+              <Rocket aria-hidden="true" />
+              Deploy on Phala Cloud
             </a>
           </Button>
-          <Button asChild size="lg" variant="outline">
-            <a href={LINKS.repo}>
-              <GitHubIcon />
-              GitHub
+          <Button asChild size="lg" variant="outline" className={HERO_BUTTON}>
+            <a href={LINKS.docs}>
+              <BookOpen aria-hidden="true" />
+              Docs
             </a>
           </Button>
         </div>
@@ -202,7 +200,7 @@ export function SiteFooter() {
             <Logo />
             Phala Pay
           </span>
-          <p className="mt-3 max-w-xs leading-6 text-muted-foreground">{TAGLINE}.</p>
+          <p className="mt-3 max-w-xs leading-6 text-muted-foreground">{TAGLINE}</p>
         </div>
         {FOOTER.map((column) => (
           <nav key={column.title} aria-label={column.title}>

@@ -62,7 +62,7 @@ function SweepSection({ group }: { group: SweepGroup }) {
       data-testid="sweep-group"
       className="flex flex-col gap-4 rounded-lg border p-4"
     >
-      <h3 className="flex items-center gap-2 text-[0.8125rem] font-medium">
+      <h3 className="flex items-center gap-2 text-sm font-medium">
         <TokenIcon asset={group.asset} className="size-5" />
         {symbol}
         <span className="flex items-center gap-1.5 font-normal text-muted-foreground">
@@ -89,7 +89,7 @@ function SweepSection({ group }: { group: SweepGroup }) {
           ) : (
             <div className="flex flex-col gap-3">
               <Disclosure summary={`The flush the SDK built (${group.flush.length} call${group.flush.length === 1 ? "" : "s"})`}>
-                <pre className="max-h-60 overflow-auto rounded-lg bg-muted p-3 font-mono text-[0.6875rem] leading-relaxed">
+                <pre className="max-h-60 overflow-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
                   {JSON.stringify(group.flush, null, 2)}
                 </pre>
               </Disclosure>
@@ -112,37 +112,36 @@ function SweepSection({ group }: { group: SweepGroup }) {
             </div>
           )}
         </div>
-        <div className="flex min-w-0 flex-col gap-3">
-          <h4 className="text-[0.8125rem] font-medium">Finalized sweeps</h4>
-          {group.sweeps.length === 0 ? (
-            <Empty>None yet.</Empty>
-          ) : (
+        {/* Shown once there is one: the panel keeps a single empty state of its own. */}
+        {group.sweeps.length > 0 && (
+          <div className="flex min-w-0 flex-col gap-3">
+            <h4 className="text-sm font-medium">Finalized sweeps</h4>
             <Table className="text-xs">
-              <TableHeader>
-                <TableRow>
-                  <TableHead scope="col">Indexed</TableHead>
-                  <TableHead scope="col">Forwarder</TableHead>
-                  <TableHead scope="col">Amount</TableHead>
-                  <TableHead scope="col">Flush transaction</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {group.sweeps.map((sweep) => (
-                  <TableRow key={sweep.id} data-testid="sweep">
-                    <TableCell>{time(sweep.created)}</TableCell>
-                    <TableCell>
-                      <ExplorerLink chainId={group.chain_id} kind="address" value={sweep.address} />
-                    </TableCell>
-                    <TableCell>{tokens(sweep.amount_atomic, symbol, decimals)}</TableCell>
-                    <TableCell>
-                      <ExplorerLink chainId={group.chain_id} kind="tx" value={sweep.tx_hash} />
-                    </TableCell>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead scope="col">Indexed</TableHead>
+                    <TableHead scope="col">Forwarder</TableHead>
+                    <TableHead scope="col">Amount</TableHead>
+                    <TableHead scope="col">Flush transaction</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
+                </TableHeader>
+                <TableBody>
+                  {group.sweeps.map((sweep) => (
+                    <TableRow key={sweep.id} data-testid="sweep">
+                      <TableCell>{time(sweep.created)}</TableCell>
+                      <TableCell>
+                        <ExplorerLink chainId={group.chain_id} kind="address" value={sweep.address} />
+                      </TableCell>
+                      <TableCell>{tokens(sweep.amount_atomic, symbol, decimals)}</TableCell>
+                      <TableCell>
+                        <ExplorerLink chainId={group.chain_id} kind="tx" value={sweep.tx_hash} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
             </Table>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </section>
   );

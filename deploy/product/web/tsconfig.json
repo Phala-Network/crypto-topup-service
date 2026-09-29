@@ -15,5 +15,5 @@
     "noEmit": true,
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src", "e2e", "*.config.ts"]
+  "include": ["src", "e2e", "brand", "*.config.ts"]
 }

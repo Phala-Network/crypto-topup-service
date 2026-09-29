@@ -40,13 +40,13 @@ export function App() {
     }
   }, [current.data]);
 
-  // The SDK's components take the page's theme tokens (src/index.css); their primary action is
-  // the page's accent.
+  // The SDK's components take the page's theme tokens (src/index.css), their primary action the
+  // page's one primary.
   const appearance: Appearance = {
     theme,
     variables: {
-      colorPrimary: "var(--brand)",
-      accessibleColorOnColorPrimary: "var(--brand-foreground)",
+      colorPrimary: "var(--primary)",
+      accessibleColorOnColorPrimary: "var(--primary-foreground)",
       colorBackground: "var(--card)",
       colorText: "var(--card-foreground)",
       colorTextSecondary: "var(--muted-foreground)",
@@ -67,7 +67,7 @@ export function App() {
         <main id="top" className="flex-1">
           <Hero />
           <section id="demo" aria-label="Live demo" className={`${CONTAINER} scroll-mt-20 pb-16 lg:pb-20`}>
-            <div className="grid items-start gap-x-8 gap-y-12 lg:grid-cols-[minmax(0,26rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] 2xl:gap-x-10">
+            <div className="grid items-start gap-x-8 gap-y-12 lg:grid-cols-[minmax(0,9fr)_minmax(0,11fr)] 2xl:gap-x-10">
               <Product
                 account={account.data ?? null}
                 accountError={account.error === null ? null : describe(account.error)}

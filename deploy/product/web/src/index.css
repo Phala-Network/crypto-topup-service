@@ -4,6 +4,13 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* One type scale for both cards: body text is 14px (text-sm), secondary text 13px (text-xs); nothing
+   smaller. */
+@theme {
+    --text-xs: 0.8125rem;
+    --text-xs--line-height: calc(1.125 / 0.8125);
+}
+
 @theme inline {
     --font-heading: var(--font-sans);
     /* Geist, bundled with the page's assets (the CSP's font-src 'self'). */
@@ -166,6 +173,11 @@
 /* Its test-mode note reads as the line around it. */
 .product-app .pp-badge {
   font-weight: inherit;
+}
+/* Its field labels and copy buttons take the page's secondary size. */
+.product-app .pp-field dt,
+.product-app .pp-copy {
+  font-size: var(--text-xs);
 }
 .product-app .pp-root button:focus-visible,
 .product-app .pp-root a:focus-visible {

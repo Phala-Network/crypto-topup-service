@@ -6,6 +6,11 @@ export function dollars(cents: number): string {
   return usd.format(cents / 100);
 }
 
+/** A round amount without its cents, for a preset: `$20`; any other amount as `dollars`. */
+export function presetDollars(cents: number): string {
+  return cents % 100 === 0 ? usd.format(cents / 100).replace(/\.00$/, "") : dollars(cents);
+}
+
 /** `+$20.00` or `−$2.50`. */
 export function signedDollars(cents: number): string {
   return `${cents < 0 ? "−" : "+"}${usd.format(Math.abs(cents) / 100)}`;

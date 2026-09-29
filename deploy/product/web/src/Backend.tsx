@@ -1,7 +1,15 @@
-import { Cpu, ShieldCheck, Terminal, Wallet } from "lucide-react";
+import { Cpu, ReceiptText, ShieldCheck, Terminal, Wallet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Empty as EmptyState,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -45,13 +53,16 @@ export function Backend({
   const order = timeline?.quote?.metadata["order_id"];
   const deposit = timeline?.deposit ?? null;
   return (
-    <div className="flex min-w-0 flex-col gap-3">
+    // At lg and up, a live log beside the product: pinned below the site header at the viewport's
+    // height, its header fixed and the stream with its tabs scrolling inside. Below lg, its natural
+    // height in the page's flow.
+    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24 lg:h-[calc(100svh-7rem)] lg:self-start">
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"
-        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm lg:min-h-0 lg:flex-1"
       >
-        <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
           <h2 className="text-sm font-medium">Event stream</h2>
           <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground" data-testid="stream-status">
             <span className="relative flex size-2" aria-hidden="true">
@@ -67,68 +78,68 @@ export function Backend({
             </dl>
           )}
         </header>
-        <div className="px-3 py-3" aria-live="off">
-          <EventStream timeline={timeline} loading={selected?.id ?? null} />
-        </div>
-        <Tabs defaultValue="payments" className="gap-0 border-t">
-          <TabsList
-            variant="line"
-            aria-label="Backend"
-            className="h-11! w-full justify-start gap-2 overflow-x-auto rounded-none border-b px-3.5 py-0 sm:gap-5 sm:px-5"
-          >
-            <Tab value="payments" count={account?.payments.length}>
-              Payments
-            </Tab>
-            <Tab value="refunds" count={timeline?.refunds.length}>
-              Refunds
-            </Tab>
-            <Tab value="sweeps">Sweeps</Tab>
-            <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
-              API
-            </Tab>
-            <Tab value="trust">
-              Trust
-              {trust?.attestation.binding_verified === true && (
-                <ShieldCheck className="size-3.5 text-success" aria-label="attestation verified" />
+        {/* Radix's viewport wraps its content in a table-display box, which would let wide tables
+            widen the console: a flex column instead keeps the content at the card's width and at
+            least its height, so an empty tab centres its message in the space left. */}
+        <ScrollArea className="lg:min-h-0 lg:flex-1 [&_[data-slot=scroll-area-viewport]>div]:flex! [&_[data-slot=scroll-area-viewport]>div]:min-h-full [&_[data-slot=scroll-area-viewport]>div]:flex-col">
+          <div className="px-3 py-3" aria-live="off">
+            <EventStream timeline={timeline} loading={selected?.id ?? null} />
+          </div>
+          <Tabs defaultValue="credits" className="flex-1 gap-0 border-t">
+            <TabsList
+              variant="line"
+              aria-label="Backend"
+              className="h-11! w-full justify-start gap-4 overflow-x-auto rounded-none border-b px-5 py-0 sm:gap-5"
+            >
+              <Tab value="credits" count={account?.payments.length}>
+                Credits
+              </Tab>
+              <Tab value="refunds" count={timeline?.refunds.length}>
+                Refunds
+              </Tab>
+              <Tab value="sweeps">Sweeps</Tab>
+              <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
+                API
+              </Tab>
+              <Tab value="trust">Trust</Tab>
+            </TabsList>
+            <TabsContent value="credits" className="flex flex-col p-5">
+              <CreditsTab
+                account={account}
+                selected={selected}
+                address={address}
+                networks={networks}
+                onSelect={onSelect}
+              />
+            </TabsContent>
+            <TabsContent value="refunds" className="p-5">
+              {timeline === null || deposit === null || account === null ? (
+                <Empty>Follow a payment with a deposit to see its ledger and refunds.</Empty>
+              ) : (
+                <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
+                  {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
+                  <Refunds timeline={timeline} deposit={deposit} />
+                </div>
               )}
-            </Tab>
-          </TabsList>
-          <TabsContent value="payments" className="p-5">
-            <PaymentsTab
-              account={account}
-              selected={selected}
-              address={address}
-              networks={networks}
-              onSelect={onSelect}
-            />
-          </TabsContent>
-          <TabsContent value="refunds" className="p-5">
-            {timeline === null || deposit === null || account === null ? (
-              <Empty>Follow a payment with a deposit to see its ledger and refunds.</Empty>
-            ) : (
-              <div className="grid gap-8 @4xl/console:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-                {timeline.ledger !== null && <LedgerPanel ledger={timeline.ledger} />}
-                <Refunds timeline={timeline} deposit={deposit} />
-              </div>
-            )}
-          </TabsContent>
-          <TabsContent value="sweeps" className="p-5">
-            <Sweeps />
-          </TabsContent>
-          <TabsContent value="api" className="p-5">
-            {timeline === null ? (
-              <Empty>Follow a payment to see its webhooks and the product's API requests.</Empty>
-            ) : (
-              <div className="flex flex-col gap-8">
-                <EventsLog events={timeline.events} />
-                <Requests exchanges={timeline.api} title="API requests" id="api-title" />
-              </div>
-            )}
-          </TabsContent>
-          <TabsContent value="trust" className="p-5">
-            <TrustDetails trust={trust} networks={networks} />
-          </TabsContent>
-        </Tabs>
+            </TabsContent>
+            <TabsContent value="sweeps" className="p-5">
+              <Sweeps />
+            </TabsContent>
+            <TabsContent value="api" className="p-5">
+              {timeline === null ? (
+                <Empty>Follow a payment to see its webhooks and the product's API requests.</Empty>
+              ) : (
+                <div className="flex flex-col gap-8">
+                  <EventsLog events={timeline.events} />
+                  <Requests exchanges={timeline.api} title="API requests" id="api-title" />
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="trust" className="p-5">
+              <TrustDetails trust={trust} networks={networks} />
+            </TabsContent>
+          </Tabs>
+        </ScrollArea>
       </aside>
     </div>
   );
@@ -149,10 +160,10 @@ function MetaItem({ label, value, testId }: { label: string; value: string; test
 
 function Tab({ value, count, children }: { value: string; count?: number | undefined; children: ReactNode }) {
   return (
-    <TabsTrigger value={value} className="h-full flex-none px-0 text-[0.8125rem] after:bottom-[-1px]!">
+    <TabsTrigger value={value} className="h-full flex-none px-0 text-sm after:bottom-[-1px]!">
       {children}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-muted px-1.5 font-mono text-[0.625rem] text-muted-foreground tabular-nums">
+        <span className="rounded-full bg-muted px-1.5 font-mono text-xs text-muted-foreground tabular-nums">
           {count}
         </span>
       )}
@@ -177,7 +188,7 @@ function ViewButton({ selected, id, onClick }: { selected: boolean; id: string; 
   );
 }
 
-function PaymentsTab({
+function CreditsTab({
   account,
   selected,
   address,
@@ -190,12 +201,24 @@ function PaymentsTab({
   networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
+  // One empty state for the panel until the first payment, centred in the space the panel has.
+  if (account === null || (account.payments.length === 0 && account.ledger.length === 0 && address === null)) {
+    return (
+      <EmptyState className="p-4">
+        <EmptyHeader>
+          <EmptyMedia variant="icon" className="text-muted-foreground">
+            <ReceiptText aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>No credits yet</EmptyTitle>
+          <EmptyDescription>Pay with crypto in the product to follow a payment here.</EmptyDescription>
+        </EmptyHeader>
+      </EmptyState>
+    );
+  }
   return (
     <div className="flex flex-col gap-8">
-      <section aria-label="Payments" className="flex min-w-0 flex-col text-xs">
-        {account === null || account.payments.length === 0 ? (
-          <Empty>No top-ups yet.</Empty>
-        ) : (
+      {account.payments.length > 0 && (
+        <section aria-label="Credits" className="flex min-w-0 flex-col text-xs">
           <Table className={cn(TABLE, "[&_td]:align-top [&_td]:leading-5")}>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -277,22 +300,20 @@ function PaymentsTab({
               })}
             </TableBody>
           </Table>
-        )}
-      </section>
+        </section>
+      )}
       <div className={cn("grid gap-8", address !== null && "@4xl/console:grid-cols-2")}>
-        <Subsection
-          title="How this balance adds up"
-          id="balance-lines-title"
-          aside={
-            <InfoTip label="About the bonus lines">
-              A bonus is this demo merchant's own promotion, not a Phala Pay feature: its backend adds a line of its own
-              on deposit.credited, and takes the same share back when a refund or reversal nets the credit down.
-            </InfoTip>
-          }
-        >
-          {account === null || account.ledger.length === 0 ? (
-            <Empty>Nothing credited yet.</Empty>
-          ) : (
+        {account.ledger.length > 0 && (
+          <Subsection
+            title="How this balance adds up"
+            id="balance-lines-title"
+            aside={
+              <InfoTip label="About the bonus lines">
+                A bonus is this demo merchant's own promotion, not a Phala Pay feature: its backend adds a line of its own
+                on deposit.credited, and takes the same share back when a refund or reversal nets the credit down.
+              </InfoTip>
+            }
+          >
             <Table className={TABLE}>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -333,9 +354,9 @@ function PaymentsTab({
                 ))}
               </TableBody>
             </Table>
-          )}
-        </Subsection>
-        {account !== null && address !== null && (
+          </Subsection>
+        )}
+        {address !== null && (
           <AddressView
             account={account}
             address={address}
@@ -375,7 +396,7 @@ function AddressView({
           <Badge className="bg-success/15 text-success" data-testid="deposit-address-verified">
             <ShieldCheck aria-hidden="true" />
             Verified
-            <InfoTip label="About the address check" className="translate-y-0 text-success">
+            <InfoTip label="About the address check" className="text-success">
               The product's SDK recomputed {view.address === null ? "every network's address" : "this address"} from
               its pinned account, factory, implementation, and treasury before showing it.
             </InfoTip>
@@ -470,7 +491,7 @@ function TrustDetails({ trust, networks }: { trust: Trust | null; networks: Netw
   return (
     <div className="flex flex-col gap-6 text-xs">
       <div className="flex flex-wrap items-center gap-3">
-        <h3 className="text-[0.8125rem] font-medium">Why you can trust Phala Pay</h3>
+        <h3 className="text-sm font-medium">Why you can trust Phala Pay</h3>
         {attestation?.binding_verified === true && (
           <Badge className="bg-success/15 text-success">Attestation verified</Badge>
         )}
@@ -538,7 +559,7 @@ function TrustDetails({ trust, networks }: { trust: Trust | null; networks: Netw
 function TrustItem({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-2 rounded-lg bg-card p-4" aria-label={title}>
-      <h4 className="flex items-center gap-2 text-[0.8125rem] font-medium [&_svg]:size-4 [&_svg]:text-muted-foreground">
+      <h4 className="flex items-center gap-2 text-sm font-medium [&_svg]:size-4 [&_svg]:text-muted-foreground">
         {icon}
         {title}
       </h4>

@@ -1,6 +1,7 @@
 import { Check, ChevronRight, Copy, Info } from "lucide-react";
 import { useState, type ComponentProps, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { ApiError } from "./api.js";
@@ -25,9 +26,11 @@ export function loadSdk() {
   return import("@phala/pay/react");
 }
 
-/** The primary action: Phala's lime, used for this and little else. */
-export const BRAND_BUTTON =
-  "h-11 w-full rounded-lg bg-brand text-[0.9375rem] font-semibold text-brand-foreground shadow-[inset_0_-1px_0_rgb(0_0_0/0.12)] hover:bg-brand/85 dark:shadow-none";
+/**
+ * A form's main action: the page's one primary (`bg-primary`), full width. Phala's lime is only an
+ * accent: the current step, focus, and highlights.
+ */
+export const PRIMARY_BUTTON = "h-11 w-full rounded-lg font-semibold";
 
 /** GitHub's mark (./icons/github.svg), in the text colour. */
 export function GitHubIcon({ className }: { className?: string }) {
@@ -104,24 +107,29 @@ export function ExplorerLink({
   );
 }
 
-/** An explanation behind a small info icon: the page shows one short line, the tooltip the rest. */
+/**
+ * An explanation behind a small info icon: the page shows one short line, the popover the rest. It
+ * opens on a click or a tap, so touch screens reach it too.
+ */
 export function InfoTip({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
+    <Popover>
+      <PopoverTrigger asChild>
         <button
           type="button"
           aria-label={label}
           className={cn(
-            "inline-flex size-4 shrink-0 translate-y-[0.1875rem] items-center justify-center rounded-full align-baseline text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+            "inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:text-foreground",
             className,
           )}
         >
           <Info className="size-3.5" aria-hidden="true" />
         </button>
-      </TooltipTrigger>
-      <TooltipContent>{children}</TooltipContent>
-    </Tooltip>
+      </PopoverTrigger>
+      <PopoverContent side="bottom" collisionPadding={12} className="w-72 p-3 text-xs leading-relaxed text-pretty text-muted-foreground">
+        {children}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -156,7 +164,7 @@ export function Subsection({
   return (
     <section className={cn("flex min-w-0 flex-col gap-3 text-xs", className)} aria-labelledby={id}>
       <div className="flex items-center gap-2">
-        <h3 id={id} className="text-[0.8125rem] font-medium">
+        <h3 id={id} className="text-sm font-medium">
           {title}
         </h3>
         {aside}
@@ -170,7 +178,7 @@ export function Subsection({
 export function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
   return (
     <details className="group/disclosure text-xs">
-      <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded-sm text-[0.8125rem] font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded-sm text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
         <ChevronRight
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open/disclosure:rotate-90 motion-reduce:transition-none"
           aria-hidden="true"
@@ -182,9 +190,9 @@ export function Disclosure({ summary, children }: { summary: ReactNode; children
   );
 }
 
-/** A panel's message while it has nothing to show. */
+/** A panel's message while it has nothing to show: one line of text, one per panel. */
 export function Empty({ children }: { children: ReactNode }) {
-  return <p className="rounded-lg bg-muted px-4 py-5 text-xs text-muted-foreground">{children}</p>;
+  return <p className="text-sm text-pretty text-muted-foreground">{children}</p>;
 }
 
 const TONES: Record<string, "success" | "danger"> = {

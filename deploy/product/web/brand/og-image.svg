@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <!-- A very faint neutral light behind the headline. -->
+    <radialGradient id="light" cx="360" cy="260" r="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0a0a0a"/>
+  <rect width="1200" height="630" fill="url(#light)"/>
+
+  <g font-family="Geist Variable">
+    <!-- The wordmark: Phala's "P" mark (public/favicon.svg) and the name. -->
+    <g transform="translate(80 72) scale(2.5)">
+      <rect width="24" height="24" rx="5" fill="#000"/>
+      <rect x="0.5" y="0.5" width="23" height="23" rx="4.5" fill="none" stroke="#fff" stroke-opacity="0.15"/>
+      <path fill="#D1FF52" fill-rule="evenodd" d="M4 4h12.571v3.429H20V12h-3.429V7.429H7.43V12H4zm3.429 11.429h9.142V12H7.43zm0 0V20H4v-4.571z" clip-rule="evenodd"/>
+    </g>
+    <text x="156" y="115" font-size="40" font-weight="600" letter-spacing="-0.8" fill="#fafafa">Phala Pay</text>
+
+    <!-- The hero's headline. -->
+    <text font-size="84" font-weight="600" letter-spacing="-2.8" fill="#fafafa">
+      <tspan x="76" y="300">Fast, secure, non-custodial</tspan>
+      <tspan x="76" y="394">crypto payments</tspan>
+    </text>
+
+    <!-- One supporting line (zinc-300, 13:1), and the address (zinc-400, 7.8:1). -->
+    <text x="80" y="466" font-size="34" font-weight="450" fill="#d4d4d8">Runs in a TEE. Stripe-shaped API.</text>
+    <text x="80" y="558" font-size="30" font-weight="450" fill="#a1a1aa">pay.phala.com</text>
+  </g>
+</svg>

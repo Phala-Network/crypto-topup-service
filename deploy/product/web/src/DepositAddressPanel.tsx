@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { Account, Asset, DepositAddressResponse, Network } from "./api.js";
-import { BRAND_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
+import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
 import { assetOf, networkOf } from "./chains.js";
 import { dollars, price, signedDollars, statusLabel, tokenName, tokens } from "./format.js";
 import { useCreateDepositAddress, useNetworks } from "./queries.js";
@@ -51,7 +51,7 @@ export function DepositAddressPanel({
           <Button
             type="button"
             size="lg"
-            className={BRAND_BUTTON}
+            className={PRIMARY_BUTTON}
             onClick={() => {
               loadSdk().catch(() => undefined);
               show.mutate(undefined, { onSuccess: onCreated });
@@ -63,7 +63,7 @@ export function DepositAddressPanel({
           <p className="flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground">
             Any amount, any time, at the market rate
             <InfoTip label="About the deposit address">
-              Your workspace's own address for top-ups of any amount, at any time: one address for every supported
+              Your workspace's own address for adding credits of any amount, at any time: one address for every supported
               token on every supported network, reusable, and credited at the market rate when a payment arrives. Use
               it when you pay from an exchange or cannot hit an exact amount.
             </InfoTip>
@@ -97,7 +97,7 @@ export function DepositAddressPanel({
           {...(network === undefined || asset === undefined ? {} : { chainId: network.chain_id, asset: asset.asset })}
         />
       </Suspense>
-      <TopUps account={account} />
+      <Credits account={account} />
       <PayFromWallet
         network={network}
         asset={asset}
@@ -116,18 +116,18 @@ export function DepositAddressPanel({
  * The address's recorded payments, each at the rate it was credited at (`deposit.exchange_rate`),
  * with the demo merchant's bonus when it earned one.
  */
-function TopUps({ account }: { account: Account }) {
+function Credits({ account }: { account: Account }) {
   const networks = useNetworks().data;
   const deposits = account.payments.filter((row) => row.kind === "address" && row.id.startsWith("dep_"));
   if (deposits.length === 0) {
     return null;
   }
   return (
-    <section aria-labelledby="top-ups-title" className="flex flex-col gap-2">
-      <h4 id="top-ups-title" className="text-[0.8125rem] font-medium">
-        Your top-ups
+    <section aria-labelledby="credits-title" className="flex flex-col gap-2">
+      <h4 id="credits-title" className="text-sm font-medium">
+        Your credits
       </h4>
-      <ul className="flex flex-col divide-y rounded-lg border text-xs" data-testid="top-ups">
+      <ul className="flex flex-col divide-y rounded-lg border text-xs" data-testid="credits">
         {deposits.map((row) => {
           const network = networkOf(networks, row.chain_id);
           const token = assetOf(network, row.asset);
@@ -136,7 +136,7 @@ function TopUps({ account }: { account: Account }) {
           const reversed = row.status === "reversed" || row.status === "rejected";
           const valued = row.exchange_rate === null ? null : `${price(row.exchange_rate)} / ${symbol}`;
           return (
-            <li key={row.id} data-testid="top-up" className="flex items-center justify-between gap-3 px-3 py-2.5">
+            <li key={row.id} data-testid="credit" className="flex items-center justify-between gap-3 px-3 py-2.5">
               <span className="flex min-w-0 flex-col gap-0.5">
                 <span className="font-medium tabular-nums">
                   {tokens(row.amount_atomic, tokenName(symbol, testnet), token?.decimals)}
@@ -161,7 +161,7 @@ function TopUps({ account }: { account: Account }) {
                   {row.amount === null ? "—" : `+${dollars(row.amount)}`}
                 </span>
                 {row.bonus !== null && row.bonus > 0 && (
-                  <span className="text-muted-foreground tabular-nums" data-testid="top-up-bonus">
+                  <span className="text-muted-foreground tabular-nums" data-testid="credit-bonus">
                     {signedDollars(row.bonus)} bonus
                   </span>
                 )}
