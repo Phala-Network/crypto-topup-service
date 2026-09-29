@@ -239,7 +239,8 @@ SQL
 # account whose key revocation, deposit address rotation, and delivered deposit.credited happen
 # after the last archived WAL, so the restore loses them. The addresses are the deposit address
 # formula's for this account, customer, route factory, and treasury (docs/design/multi-tenant.md
-# §5a); the ids are the deterministic deposit and event ids of the transfer.
+# §5a); the ids are the deterministic deposit and event ids of the transfer (chain 11155111,
+# transaction 0x5a…5a, receipt position 0).
 consistency_account=66666666-6666-6666-6666-666666666666
 consistency_account_id=acct_66666666666666666666666666666666
 consistency_treasury=0x0000000000000000000000000000000000007ea6
@@ -257,11 +258,56 @@ delivered_event=$(jq -cn --arg address "$consistency_address_v2" '{
         id: "dep_e2facb389b5c57c69f7501e57d34b8d5", object: "deposit", livemode: false,
         client_reference_id: "restore-drill-da",
         deposit_address: "da_99999999999999999999999999999992", status: "credited",
-        chain_id: 11155111, address: $address, amount_atomic: "1000000000000000000",
-        amount: 25, currency: "usd"}}}')
+        chain_id: 11155111, address: $address,
+        tx_hash: "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        asset_contract: "0x8f40e7e99678f44c88158f049e62817580ab113b",
+        from_address: "0x00000000000000000000000000000000000000f7",
+        amount_atomic: "1000000000000000000", amount: 25, currency: "usd",
+        exchange_rate: "0.25000000", price_source: "spot", valued_at: 1790000000}}}')
 kept_key=
 lost_key=
 public_origin=
+delivered_delivery=
+
+# The delivery of the event on stdin as the merchant's receiver records it (Standard Webhooks
+# headers and the raw body), signed `v1a` with the account's test-mode webhook key version 1,
+# which the simulator derives at the service's dstack path (crates/core/src/signer.rs) and which is
+# the ed25519 seed itself.
+sign_delivery() {
+    local body id timestamp=1790000031
+    body=$(jq -c .)
+    id=$(jq -r .id <<<"$body")
+    dc exec -T mock-product python3 -c '
+import base64, http.client, json, socket, sys
+
+class Dstack(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect("/run/dstack/dstack.sock")
+
+connection = Dstack("dstack")
+connection.request("POST", "/GetKey", json.dumps(
+    {"path": sys.argv[1], "purpose": "", "algorithm": "secp256k1"}),
+    {"Content-Type": "application/json"})
+response = connection.getresponse()
+if response.status != 200:
+    sys.exit("GetKey answered %d" % response.status)
+seed = bytes.fromhex(json.loads(response.read())["key"])
+if len(seed) != 32:
+    sys.exit("the derived key is not 32 bytes")
+der = bytes.fromhex("302e020100300506032b657004220420") + seed
+print("-----BEGIN PRIVATE KEY-----")
+print(base64.b64encode(der).decode())
+print("-----END PRIVATE KEY-----")
+' "settlement/$consistency_account_id/test/v1" >"$admin_dir/webhook.pem"
+    printf '%s.%s.%s' "$id" "$timestamp" "$body" >"$admin_dir/webhook-content"
+    jq -cn --arg id "$id" --arg timestamp "$timestamp" --arg body "$body" \
+        --arg signature "v1a,$(openssl pkeyutl -sign -rawin -inkey "$admin_dir/webhook.pem" \
+            -in "$admin_dir/webhook-content" | openssl base64 -A)" \
+        '{webhook_id: $id, webhook_timestamp: $timestamp, webhook_signature: $signature,
+          body: $body}'
+    rm -f "$admin_dir/webhook.pem" "$admin_dir/webhook-content"
+}
 
 # A well-formed test-mode secret key (crates/topup/src/api_keys.rs): 43 random base62 characters
 # and the base62 CRC-32 of everything before the checksum.
@@ -313,8 +359,10 @@ SQL
 }
 
 # After the last archived WAL: the merchant revokes a key, rotates the customer's deposit address,
-# and receives deposit.credited. None of it reaches object storage.
+# and receives deposit.credited, whose delivery its receiver records. None of it reaches object
+# storage.
 lose_consistency_changes() {
+    delivered_delivery=$(sign_delivery <<<"$delivered_event")
     dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
         -v account="$consistency_account" -v treasury="$consistency_treasury" \
         -v salt="$consistency_salt_v2" -v address="$consistency_address_v2" \
@@ -388,7 +436,7 @@ expect_call() {
 # The replacement is frozen; the operator's reconciliation brings back the lost security change
 # and deposit address, and keeps the delivered event as delivered (deploy/runbooks/restore.md).
 check_consistency_after_restore() {
-    local answer
+    local answer key
     public_origin=$(dc config --format json | jq -er '.services.topup.environment.TOPUP_PUBLIC_ORIGIN')
     answer=$(admin_call GET /v1/admin/restore)
     expect_call 200 "$answer"
@@ -400,19 +448,26 @@ check_consistency_after_restore() {
     test "$(call_retry_after "$answer")" = 300
     call_body "$answer" | jq -e '.error.code == "service_restoring"' >/dev/null
 
-    # The key revoked after the backup works again until it is revoked again, by prefix.
-    expect_call 200 "$(merchant_call GET /v1/account "$lost_key" </dev/null)" || {
+    # The restore made the key revoked after the backup valid again, but while frozen no key
+    # authenticates, reads included; it is revoked again, by prefix, before the unfreeze.
+    local lost_revoked="SELECT revoked_at IS NOT NULL FROM api_keys \
+        WHERE id = '77777777-7777-7777-7777-777777777772'"
+    test "$(psql_value "$lost_revoked")" = f || {
         echo "the key revocation was not lost: the segment holding it was archived" >&2
         return 1
     }
+    for key in "$lost_key" "$kept_key"; do
+        answer=$(merchant_call GET /v1/account "$key" </dev/null)
+        expect_call 503 "$answer"
+        call_body "$answer" | jq -e '.error.code == "service_restoring"' >/dev/null
+    done
     answer=$(admin_call POST /v1/admin/restore/api_keys/revoke "$(jq -cn \
         --arg account "$consistency_account_id" --arg last4 "${lost_key: -4}" \
         '{account: $account, prefix: "ppay_sk_test_", last4: $last4,
           reason: "restore drill: revoked after the backup"}')")
     expect_call 200 "$answer"
     call_body "$answer" | jq -e '.status == "revoked"' >/dev/null
-    expect_call 401 "$(merchant_call GET /v1/account "$lost_key" </dev/null)"
-    expect_call 200 "$(merchant_call GET /v1/account "$kept_key" </dev/null)"
+    test "$(psql_value "$lost_revoked")" = t
 
     # The address given out after the backup is re-issued identically from the merchant's record.
     test "$(psql_value "SELECT count(*) FROM deposit_addresses WHERE version = 2")" = 0
@@ -428,19 +483,20 @@ check_consistency_after_restore() {
          and .deposit_address.address == $address and .deposit_address.status == "active"' \
         >/dev/null
 
-    # The event delivered after the backup is imported as delivered and never sent again; another
-    # body for it is a mismatch that changes nothing.
+    # The event delivered after the backup is imported from its signed delivery, as delivered, and
+    # never sent again; a body changed after signing is refused and changes nothing.
     test "$(psql_value "SELECT count(*) FROM events WHERE id = '$consistency_event'")" = 0
     answer=$(admin_call POST /v1/admin/restore/events \
-        "$(jq -c '{events: [.], reason: "restore drill: delivered after the backup"}' \
-            <<<"$delivered_event")")
+        "$(jq -c '{deliveries: [.], reason: "restore drill: delivered after the backup"}' \
+            <<<"$delivered_delivery")")
     expect_call 200 "$answer"
     call_body "$answer" | jq -e '.data == [{id: "evt_c371cbc544c45e44a7956242ab4606d9",
         result: "imported"}]' >/dev/null
     answer=$(admin_call POST /v1/admin/restore/events \
-        "$(jq -c '.data.object.amount = 26 | {events: [.], reason: "restore drill: re-valued"}' \
-            <<<"$delivered_event")")
-    call_body "$answer" | jq -e '.data[0].result == "mismatch"' >/dev/null
+        "$(jq -c '.body |= (fromjson | .data.object.amount = 26 | tojson)
+            | {deliveries: [.], reason: "restore drill: re-valued"}' <<<"$delivered_delivery")")
+    expect_call 400 "$answer"
+    call_body "$answer" | jq -e '.error.param == "deliveries"' >/dev/null
     test "$(psql_value "SELECT (data = '$(jq -c .data <<<"$delivered_event")'::jsonb)::text \
         || ':' || (SELECT count(*) FROM webhook_deliveries WHERE event_id = '$consistency_event') \
         FROM events WHERE id = '$consistency_event'")" = 'true:0'
@@ -758,7 +814,8 @@ test "$(printf '%s\n' "$restore_report" | jq -er '.status')" = ok || {
     exit 1
 }
 test "$(topup_status POST /v1/admin/accounts)" = 503
-test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 401
+# Frozen by restore-check: no merchant request is authenticated, reads included.
+test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 503
 
 # restore-check logged in as the owner, and the application login works too: the restored roles
 # carry the source's derived passwords, which the replacement derived again.
@@ -817,6 +874,6 @@ printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 if [ "$mode" = controlled ]; then
-    echo 'restore_mode=frozen; lost key revoked again; lost deposit address re-issued identically; delivered event kept as delivered'
+    echo 'restore_mode=frozen, merchant reads refused; lost key revoked again; lost deposit address re-issued identically; signed delivered event kept as delivered'
 fi
 echo "restore drill $mode passed"

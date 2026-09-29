@@ -153,27 +153,9 @@ impl DstackAttestor {
             return Err(AttestationError::InvalidRequest);
         }
         let client = DstackClient::new(self.endpoint.as_deref());
-        let mut webhook_keys = Vec::with_capacity(versions.len());
-        for &version in versions {
-            let id = WebhookKeyId::new(account, livemode, version)
-                .ok_or(AttestationError::InvalidRequest)?;
-            let mut key_response = timeout(self.timeout, client.get_key(Some(id.domain()), None))
-                .await
-                .map_err(|_| AttestationError::DstackUnavailable)?
-                .map_err(|_| AttestationError::DstackUnavailable)?;
-            let key = key_response.decode_key();
-            key_response.key.zeroize();
-            let key = key
-                .map_err(|_| AttestationError::InvalidWebhookKey)
-                .and_then(|key| {
-                    DerivedKey::from_bytes(key, KeyAlgorithm::Ed25519)
-                        .map_err(|_| AttestationError::InvalidWebhookKey)
-                })?;
-            webhook_keys.push(AttestedWebhookKey {
-                version,
-                public_key: ed25519_public_key(&key.secret),
-            });
-        }
+        let webhook_keys = self
+            .derive_webhook_keys(&client, account, livemode, versions)
+            .await?;
 
         let report_data = report_data(nonce, account, livemode, &webhook_keys)
             .ok_or(AttestationError::InvalidRequest)?;
@@ -203,6 +185,50 @@ impl DstackAttestor {
                 app_compose: (!app_compose.is_empty()).then_some(app_compose),
             },
         })
+    }
+
+    /// Derives the public webhook keys of `account` in the given mode at `versions`, in order,
+    /// without attesting them: the keys that verify the account's deliveries.
+    pub async fn webhook_keys(
+        &self,
+        account: &str,
+        livemode: bool,
+        versions: &[u32],
+    ) -> Result<Vec<AttestedWebhookKey>, AttestationError> {
+        let client = DstackClient::new(self.endpoint.as_deref());
+        self.derive_webhook_keys(&client, account, livemode, versions)
+            .await
+    }
+
+    async fn derive_webhook_keys(
+        &self,
+        client: &DstackClient,
+        account: &str,
+        livemode: bool,
+        versions: &[u32],
+    ) -> Result<Vec<AttestedWebhookKey>, AttestationError> {
+        let mut webhook_keys = Vec::with_capacity(versions.len());
+        for &version in versions {
+            let id = WebhookKeyId::new(account, livemode, version)
+                .ok_or(AttestationError::InvalidRequest)?;
+            let mut key_response = timeout(self.timeout, client.get_key(Some(id.domain()), None))
+                .await
+                .map_err(|_| AttestationError::DstackUnavailable)?
+                .map_err(|_| AttestationError::DstackUnavailable)?;
+            let key = key_response.decode_key();
+            key_response.key.zeroize();
+            let key = key
+                .map_err(|_| AttestationError::InvalidWebhookKey)
+                .and_then(|key| {
+                    DerivedKey::from_bytes(key, KeyAlgorithm::Ed25519)
+                        .map_err(|_| AttestationError::InvalidWebhookKey)
+                })?;
+            webhook_keys.push(AttestedWebhookKey {
+                version,
+                public_key: ed25519_public_key(&key.secret),
+            });
+        }
+        Ok(webhook_keys)
     }
 }
 

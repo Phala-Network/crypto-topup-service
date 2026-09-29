@@ -1,8 +1,8 @@
 # Reconciliation after a restore
 
 **Trigger:** the database was restored from backup ([RESTORE.md](../RESTORE.md)); merchants get
-`503 service_restoring` with `Retry-After` on every write; `admin GET /v1/admin/restore` shows
-`"frozen": true`.
+`503 service_restoring` with `Retry-After` on every request with an API key, reads included;
+`admin GET /v1/admin/restore` shows `"frozen": true`.
 
 **Why:** a restore brings back the database as of its **restore point** (the newest heartbeat in
 it, at most the RPO before the loss), not the business as it was. Everything after the restore
@@ -13,12 +13,17 @@ point is lost, and some of it matters beyond the database:
 - a treasury whose crediting the merchant paused credits again (or a resume is undone);
 - a webhook endpoint the merchant deleted receives events again;
 - a deposit address given to a customer is unknown, so payments to it are not credited;
-- an event the merchant received is gone: re-derived from the chain, a spot-priced deposit is
-  re-valued and its `deposit.credited` would carry the same event id with another `amount`.
+- a quote given to a customer is unknown (its address derives from its random id), so a payment
+  to it is not found;
+- an event the merchant received is gone: re-derived from the chain, a spot-priced deposit would
+  be re-valued, and its `deposit.credited` carries the same event id with another `amount`, and
+  its refunds and reversal would reference the re-valued amount.
 
-So the service starts **frozen** after a restore (architecture §14): reads, `/healthz`, the
-scanner, and the reconciler run; merchant writes answer `503 service_restoring`; nothing credits,
-settles, expires a quote, applies a treasury change, verifies a refund, or delivers an event. The
+So the service starts **frozen** after a restore (architecture §14): the admin API, `/healthz`, the
+scanner, and the reconciler run; every merchant request with an API key answers
+`503 service_restoring`, reads included, since a key revoked after the restore point is valid in
+the restored database; nothing credits, settles, expires a quote, applies a treasury change,
+verifies a refund, or delivers an event. The
 freeze is a database row, so it holds from the restore-check instance through the upgrade to the
 service compose, and a restore that booted straight into the service compose freezes it too (its
 PostgreSQL timeline is new). Only `POST /v1/admin/restore/unfreeze` lifts it, once every chain is
@@ -27,7 +32,8 @@ rescanned.
 Work through the steps in order, with the runbook environment of the [README](README.md#environment)
 and `BASE_URL` set to the instance's origin: `$RESTORE_URL` on the restore-check instance (after
 [Restore](../RESTORE.md#restore) step 5), `https://$TOPUP_DOMAIN` once resumed. Every write below
-needs the freeze (`400 restore_not_frozen` otherwise) and writes `audit`. Steps 2 to 5 can run on
+but the discard of step 6 needs the freeze (`400 restore_not_frozen` otherwise), and each writes
+`audit`. Steps 2 to 5 can run on
 the restore-check instance, before the service resumes; do the security steps as early as possible.
 
 ## 1. Read the freeze and the restore point
@@ -52,8 +58,20 @@ receiver's store, its database, or an `export_account` taken before the loss):
 3. webhook endpoints it deleted (`we_…`);
 4. deposit addresses it received: `client_reference_id`, `address`, and `id` (`da_…`) or
    `version`;
-5. every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event it received, as
-   delivered (the JSON body).
+5. quotes it created: the quote object (`id`, `client_reference_id`, `chain_id`, `asset`,
+   `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`);
+6. the delivery of every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event it
+   received, as its receiver got it: the raw body, byte for byte, with its `webhook-id`,
+   `webhook-timestamp`, and `webhook-signature` headers. Only a delivery the service signed is
+   imported, so a re-serialized body or a missing header cannot be used.
+
+Tell it what it cannot produce is lost: a quote it has no record of is not found, so a payment to
+it is not credited (the chain cannot name it: its address derives from its random id); a spot
+deposit whose delivery it has no record of is re-valued, and its refunds and reversal reference the
+re-valued amount; a quote whose `deposit.credited` it has no record of is credited at spot, since
+its own record of the quote's price is not proof the service issued it
+([design §13](../../docs/design/multi-tenant.md#13-operations)). Its API keys answer `503` until the unfreeze
+(step 7).
 
 Refunds it created or marked paid after the restore point are gone too: after the unfreeze it
 creates them again and marks them paid with the same transaction. Their `deposit.refunded` carries
@@ -67,7 +85,9 @@ unfreeze (a merchant left without a working key gets a recovery key,
 
 ## 3. Re-apply the security changes
 
-Revoke again every key the merchant revoked or rolled:
+**Required before the unfreeze.** While frozen no API key authenticates; the unfreeze lets every
+key the restored database holds as valid read and write again, including one the merchant revoked
+after the restore point. Revoke again every key the merchant revoked or rolled:
 
 ```sh
 admin POST /v1/admin/restore/api_keys/revoke \
@@ -75,9 +95,11 @@ admin POST /v1/admin/restore/api_keys/revoke \
 ```
 
 or with `"id":"key_…"` instead of `prefix` and `last4`. The answer is the key with
-`"status": "revoked"`; a request with it answers `401`. `400` names several keys with the same
-prefix and last four (send the `id`), or `last_api_key` (issue a recovery key with
-`revoke_existing`).
+`"status": "revoked"`; after the unfreeze a request with it answers `401`. `400` names several keys
+with the same prefix and last four (send the `id`), or `last_api_key` (issue a recovery key with
+`revoke_existing`). A merchant that has not answered keeps every restored key valid at the
+unfreeze: revoke on its behalf any key it reported compromised through other channels, or leave
+the account paused until it answers.
 
 Compare the treasuries with what the merchant received, cancel again what it canceled, and pause
 or resume crediting again as it last did:
@@ -129,17 +151,44 @@ returns version 1 identically, and each `POST /v1/deposit_addresses/{id}/rotate`
 Payments made to it meanwhile are credited once it is registered, but only from the chain's cursor
 at that time; re-issue here so nothing is missed.
 
+Re-issue every quote the merchant created after the restore point the same way. Its address salt
+is derived from the account, `client_reference_id`, and `qt_` id ([architecture
+§9](../../docs/architecture.md#9-quotes)), so only the quote's own address over the chain's current
+treasury is accepted:
+
+```sh
+admin POST /v1/admin/restore/quotes \
+  '{"account":"acct_…","livemode":true,"id":"qt_…","client_reference_id":"team-42","chain_id":1,"asset":"pha","amount":1000,"amount_atomic":"…","exchange_rate":"0.10000000","address":"0x…","created":1790000000,"expires_at":1790000900,"reason":"INC-…"}' | jq
+```
+
+The answer's `quote` has the merchant's terms; `reissued` is `false` when it exists already with
+them. Its address is backfilled from the restored cursor, so the rescan finds a payment made to it.
+`400` means the address is not the quote's over the current treasury (check the treasury, then the
+record), no current route has the chain and asset, the terms are not ones the route issues (the
+`amount_atomic` for `amount` at `exchange_rate`, the bounds, a window of at most the route's), or
+the quote exists with other terms. The locked price is the merchant's record, not the service's:
+a payment to the quote is credited at spot, unless the merchant's delivered `deposit.credited` for
+it (step 5) carries the quote's credit. A quote nobody reports stays lost.
+
 ## 5. Import the events the merchant received
 
 ```sh
-admin POST /v1/admin/restore/events '{"events":[{"id":"evt_…","object":"event","type":"deposit.credited","data":{"object":{…}},…}],"reason":"INC-…"}' | jq
+admin POST /v1/admin/restore/events '{"deliveries":[{"webhook_id":"evt_…","webhook_timestamp":"1790000005","webhook_signature":"v1a,…","body":"{\"id\":\"evt_…\",…}"}],"reason":"INC-…"}' | jq
 ```
 
-Up to 100 events per request, exactly as delivered. Each is stored as the event it is, with no
-delivery: when the rescan re-derives its deposit, the event is recorded already and nothing is
-sent again with another body. `imported`; `matches` (recorded already, same body); `mismatch`
-(recorded already with another body, which is kept; record it). `400` names an event that is not
-a re-derived deposit event or whose id is not the one its type and deposit derive.
+Up to 100 deliveries per request, each as the merchant's receiver got it: `body` is the raw
+request body as a string, byte for byte. Only what the service signed is imported: the
+`webhook_signature` must verify over `webhook_id`, `webhook_timestamp`, and `body` with one of the
+account's webhook keys in the event's mode (every version up to the restored current one, and the
+next, for a roll lost with the restore). Each event is stored as the event it is, with no delivery:
+when the rescan re-derives its deposit, the event is recorded already and nothing is sent again
+with another body. The credit a `deposit.credited` or `deposit.reversed` carries is kept, and the
+deposit is valued at it (amount, exchange rate, price source, valuation time), not re-valued, so its
+refunds and reversal reference what the merchant was told. `imported`; `matches` (recorded
+already, same body); `mismatch` (recorded already with another body, which is kept; record it).
+`400` names a delivery whose signature does not verify, whose event is not a re-derived deposit
+event, or whose id is not the one its type and deposit derive; nothing of that request is
+imported. `503` means the webhook keys cannot be derived; retry.
 
 ## 6. Resume and wait for the rescan
 
@@ -155,9 +204,30 @@ A chain is `complete` once it finalized past the moment the restore was detected
 issued address backfilled. A chain `blocked` by reconciliation is left out: it credits nothing
 until its block is lifted ([Chain frozen](chain-frozen.md)).
 
+Once the rescan has recorded the deposits, check the imported events against them:
+
+```sh
+admin GET /v1/admin/restore | jq '.delivered_events.findings[] | select(.status == "contradicted")'
+```
+
+A `contradicted` finding is a deposit whose recorded transfer (account, mode, chain, transaction,
+recipient, token, sender, or amount) is not the one the signed delivery names. The service never
+delivers such an event, so escalate: the deposit is held, not valued or credited, and its confirm
+step retries as an invariant violation until the operator decides. Once the chain is confirmed
+right, discard the delivered credit, audited; the deposit is then valued from the chain as any
+other, and the difference is settled with the merchant:
+
+```sh
+admin POST /v1/admin/restore/delivered_credits/discard '{"deposit":"dep_…","reason":"INC-…: chain shows …; settled with the merchant"}'
+```
+
+It works frozen or not, since the confirm step can also find a contradiction after the unfreeze.
+
 ## 7. Unfreeze
 
-Only when steps 3 to 5 are done for every account that answered, and every chain is `complete`:
+Only when steps 3 to 5 are done for every account that answered, every key a merchant revoked or
+rolled after the restore point is revoked again (step 3), and every chain is `complete`. The
+unfreeze is when merchant keys authenticate again:
 
 ```sh
 admin POST /v1/admin/restore/unfreeze \
@@ -166,7 +236,8 @@ admin POST /v1/admin/restore/unfreeze \
 
 `400 restore_rescan_incomplete` means a chain is not rescanned yet. The reason and checklist are
 recorded in the restore and in `audit`; crediting, settlement, quote expiry, treasury changes,
-refund verification, and event delivery resume, and merchants can write again.
+refund verification, and event delivery resume, and merchants' API keys work again, reads and
+writes (`deposit_addresses_reissued` covers the quotes of step 4).
 
 ## 8. After the unfreeze
 
@@ -175,8 +246,10 @@ admin GET /v1/admin/restore | jq '.delivered_events'
 ```
 
 Each finding is an imported event whose deposit the ledger does not hold as delivered:
-`pending` until the rescan re-derives and values it, `mismatch` when the ledger's token amount or
-credit differs from what the merchant received (a spot deposit re-valued). The merchant keeps its
+`pending` until the rescan re-derives and values it; `contradicted` while its recorded transfer is
+not the delivered one (step 6); `mismatch` when the ledger's token amount or credit differs from
+what the merchant received. A delivered credit is carried into the ledger, so a `mismatch` follows
+only a discarded contradiction or an event that carries no credit. The merchant keeps its
 delivered credit and is never sent another; record each mismatch, both amounts, and the deposit in
 the incident and settle it with the merchant. A `pending` finding that stays after the rescan is a
 deposit the chain does not show: escalate. One exception: a deposit the finality watch reversed
@@ -191,5 +264,6 @@ quote is not handed over: link the two by their transaction hash.)
 ## Done when
 
 `frozen` is `false`, every chain was `complete` at the unfreeze, no `delivered_events` finding is
-`pending`, each `mismatch` is recorded and settled, and every merchant confirmed that its keys,
-treasuries, endpoints, and deposit addresses are as it left them.
+`pending` or `contradicted`, each `mismatch` and discarded credit is recorded and settled, and
+every merchant confirmed that its keys, treasuries, endpoints, deposit addresses, and quotes are as
+it left them.

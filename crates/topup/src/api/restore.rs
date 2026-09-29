@@ -1,23 +1,29 @@
 //! The operator's reconciliation after a restore from backup (`crate::restore_mode`,
 //! `deploy/RESTORE.md`): the freeze's status, re-applying the security changes made after the
-//! restore point, re-issuing deposit addresses given out after it, importing the events the
-//! merchant received after it, and unfreezing. Every write needs an active freeze and is audited.
+//! restore point, re-issuing deposit addresses and quotes given out after it, importing the events
+//! the merchant received after it, and unfreezing. Every write needs an active freeze, except
+//! discarding a delivered credit the chain contradicts, and is audited.
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr as _;
 
-use alloy_primitives::Address as EvmAddress;
+use alloy_primitives::{Address as EvmAddress, B256, U256};
 use axum::Json;
 use axum::extract::State;
 use chrono::DateTime;
 use serde_json::Value;
+use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
+use topup_core::valuation::ValuationSource;
 use uuid::Uuid;
 
 use crate::api_keys;
 use crate::audit::{self, Actor};
 use crate::deposit_addresses::{self, ChainContracts, ReissueTarget};
 use crate::ids;
-use crate::restore_mode::{self, DeliveredEvent, Restore};
+use crate::locks::{self, ReissuedTerms};
+use crate::outbox::SignedWebhook;
+use crate::restore_mode::{self, DeliveredCredit, DeliveredEvent, Restore};
 use crate::tenancy::Scope;
 use crate::treasuries::{self, Status as TreasuryStatus};
 
@@ -28,10 +34,11 @@ use super::extract::ApiJson;
 use super::handlers::{parse_account_id, validate_client_reference_id, validate_reason};
 use super::models::{
     self, ApiKeyObject, DeletedWebhookEndpoint, EventImport, RestoreApiKeyRevokeRequest,
+    RestoreDeliveredCreditDiscardRequest, RestoreDeliveredCreditDiscardResponse,
     RestoreDepositAddressRequest, RestoreDepositAddressResponse, RestoreEventsImportRequest,
-    RestoreEventsImportResponse, RestoreObject, RestoreStatus, RestoreTreasuryVerifyRequest,
-    RestoreTreasuryVerifyResponse, RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest,
-    TreasuryVerification,
+    RestoreEventsImportResponse, RestoreObject, RestoreQuoteRequest, RestoreQuoteResponse,
+    RestoreStatus, RestoreTreasuryVerifyRequest, RestoreTreasuryVerifyResponse,
+    RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest, TreasuryVerification,
 };
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -465,54 +472,174 @@ pub(crate) async fn reissue_deposit_address(
 
 #[utoipa::path(
     post,
-    path = "/v1/admin/restore/events",
-    request_body = RestoreEventsImportRequest,
+    path = "/v1/admin/restore/quotes",
+    request_body = RestoreQuoteRequest,
     responses(
-        (status = 200, description = "OK", body = RestoreEventsImportResponse),
-        (status = 400, description = "Bad Request: an event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 200, description = "OK: re-issued, or the quote exists already with these terms", body = RestoreQuoteResponse),
+        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), no current route has the chain and asset, the terms are not the route's, the quote exists with other terms, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not Found: no account has an event's `account`", body = ErrorResponse)
+        (status = 404, description = "Not Found", body = ErrorResponse)
     ),
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-/// Imports the deposit events a merchant received after the restore point, exactly as delivered:
-/// each is stored as the event it is, with no delivery, so when the rescan re-derives the deposit
-/// its event is recorded already and nothing is sent again with another body. An event recorded
-/// already keeps its stored snapshot; a different delivered body is reported as `mismatch`.
-/// Audited.
+/// Re-issues a quote the merchant created after the restore point, from its record of the quote
+/// object: the address salt is derived from the account, customer, and `qt_` id, so only the
+/// quote's own address is accepted, backfilled from the restored cursor so the rescan finds a
+/// payment made to it since. The locked price is the merchant's record, not the service's: a
+/// payment to the quote is credited at spot unless an imported `deposit.credited` for it, which the
+/// service signed, carries its credit. Audited.
+pub(crate) async fn reissue_quote(
+    State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
+    ApiJson(request): ApiJson<RestoreQuoteRequest>,
+) -> ApiResult<Json<RestoreQuoteResponse>> {
+    validate_reason(&request.reason)?;
+    validate_client_reference_id(&request.client_reference_id)?;
+    let restore = frozen(&state).await?;
+    let account_id = parse_account_id(&request.account)?;
+    let account = crate::db::get_account(&state.pool, account_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let id = ids::parse(ids::QUOTE, &request.id)
+        .ok_or_else(|| ApiError::invalid_param("id", "id must be a qt_ id"))?;
+    let address = EvmAddress::from_str(&request.address)
+        .map_err(|_| ApiError::invalid_param("address", "address must be an address"))?;
+    let amount_atomic = decimal_u256(&request.amount_atomic).ok_or_else(|| {
+        ApiError::invalid_param("amount_atomic", "amount_atomic must be a decimal integer")
+    })?;
+    let price = super::quotes::parse_decimal(&request.exchange_rate)
+        .and_then(|price| ScaledPrice::new(price, PRICE_SCALE).ok())
+        .ok_or_else(|| {
+            ApiError::invalid_param("exchange_rate", "exchange_rate must have 8 decimal places")
+        })?;
+    let timestamp = |param: &'static str, seconds: i64| {
+        DateTime::from_timestamp(seconds, 0)
+            .ok_or_else(|| ApiError::invalid_param(param, format!("{param} must be Unix seconds")))
+    };
+    let terms = ReissuedTerms {
+        id,
+        address,
+        amount_atomic: AtomicAmount::new(amount_atomic),
+        price,
+        credit_minor: MinorAmount::new(request.amount),
+        created_at: timestamp("created", request.created)?,
+        expires_at: timestamp("expires_at", request.expires_at)?,
+    };
+    // The current route of the mode with the quote's chain and asset, paused or not: nothing new
+    // is given out, the quote was issued already.
+    let route = state
+        .routes
+        .current_in(request.livemode)
+        .find(|route| {
+            route.chain.chain_id == request.chain_id && route.asset.symbol == request.asset
+        })
+        .ok_or_else(|| {
+            ApiError::invalid_param("asset", "no current route has the chain and asset")
+        })?;
+    let scope = Scope::new(account_id, request.livemode);
+    let customer =
+        super::repository::ensure_customer(&state.pool, scope, &request.client_reference_id)
+            .await?;
+    let (lock, issued) = locks::reissue(
+        &state.pool,
+        &account,
+        &customer,
+        route,
+        terms,
+        restore.id,
+        &restore.restored_cursors,
+        &actor,
+        &request.reason,
+    )
+    .await
+    .map_err(super::quotes::map_error)?;
+    let mut connection = state.pool.acquire().await?;
+    Ok(Json(RestoreQuoteResponse {
+        reissued: issued,
+        quote: super::quotes::quote_object(&mut connection, &state.routes, lock).await?,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/events",
+    request_body = RestoreEventsImportRequest,
+    responses(
+        (status = 200, description = "OK", body = RestoreEventsImportResponse),
+        (status = 400, description = "Bad Request: a delivery's signature does not verify with its account's webhook keys, or its event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no account has an event's `account`", body = ErrorResponse),
+        (status = 503, description = "Service Unavailable: the webhook keys cannot be derived", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Imports the deposit events a merchant received after the restore point, from its webhook
+/// receiver's record of each delivery. Only a delivery the service signed is imported: its
+/// `webhook-signature` must verify over its id, timestamp, and raw body with one of its account's
+/// webhook keys in its mode. Each event is stored as delivered, with no delivery, so when the rescan
+/// re-derives the deposit its event is recorded already and nothing is sent again with another
+/// body; the credit a `deposit.credited` or `deposit.reversed` carries is kept, so the deposit is
+/// valued at it, not re-valued. An event recorded already keeps its stored snapshot; a different
+/// delivered body is reported as `mismatch`. Audited.
 pub(crate) async fn import_events(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
     ApiJson(request): ApiJson<RestoreEventsImportRequest>,
 ) -> ApiResult<Json<RestoreEventsImportResponse>> {
     validate_reason(&request.reason)?;
-    if request.events.is_empty() || request.events.len() > MAX_ITEMS {
+    if request.deliveries.is_empty() || request.deliveries.len() > MAX_ITEMS {
         return Err(ApiError::invalid_param(
-            "events",
-            "events must hold 1 to 100 event objects",
+            "deliveries",
+            "deliveries must hold 1 to 100 deliveries",
         ));
     }
     let restore = frozen(&state).await?;
     let events = request
-        .events
+        .deliveries
         .iter()
-        .map(delivered_event)
+        .map(|delivery| {
+            let body: Value = serde_json::from_str(&delivery.body).map_err(|_| {
+                ApiError::invalid_param("deliveries", "a delivery's body is not an event object")
+            })?;
+            let event = delivered_event(&body)?;
+            if delivery.webhook_id != ids::format(ids::EVENT, event.id) {
+                return Err(ApiError::invalid_param(
+                    "deliveries",
+                    "a delivery's webhook_id is not its event's id",
+                ));
+            }
+            Ok((delivery, event))
+        })
         .collect::<ApiResult<Vec<_>>>()?;
-    for account_id in events
-        .iter()
-        .map(|event| event.account_id)
-        .collect::<BTreeSet<_>>()
-    {
-        if crate::db::get_account(&state.pool, account_id)
-            .await?
-            .is_none()
-        {
-            return Err(ApiError::not_found().with_param("events"));
+    let mut keys = BTreeMap::new();
+    for (delivery, event) in &events {
+        let scope = (event.account_id, event.livemode);
+        if let Entry::Vacant(entry) = keys.entry(scope) {
+            entry.insert(webhook_public_keys(&state, Scope::new(scope.0, scope.1)).await?);
+        }
+        let verified = keys.get(&scope).is_some_and(|keys| {
+            SignedWebhook::verifies(
+                keys,
+                &delivery.webhook_id,
+                &delivery.webhook_timestamp,
+                delivery.body.as_bytes(),
+                &delivery.webhook_signature,
+            )
+        });
+        if !verified {
+            return Err(ApiError::invalid_param(
+                "deliveries",
+                format!(
+                    "the signature of {} does not verify with its account's webhook keys",
+                    delivery.webhook_id
+                ),
+            ));
         }
     }
     let mut data = Vec::new();
-    for event in &events {
+    for (_, event) in &events {
         let outcome =
             restore_mode::import_delivered_event(&state.pool, &restore, event, &actor).await?;
         data.push(EventImport {
@@ -523,6 +650,68 @@ pub(crate) async fn import_events(
     Ok(Json(RestoreEventsImportResponse {
         object: "list".to_owned(),
         data,
+    }))
+}
+
+/// The public webhook keys that may have signed a delivery of `scope`: every version up to the
+/// restored current one, and the next, since a roll after the restore point is lost with it. An
+/// account that does not exist is `404`.
+async fn webhook_public_keys(
+    state: &AppState,
+    scope: Scope,
+) -> ApiResult<Vec<topup_core::Ed25519PublicKey>> {
+    let mut connection = state.pool.acquire().await?;
+    let keys = crate::webhook_keys::active(&mut connection, scope)
+        .await?
+        .ok_or_else(|| ApiError::not_found().with_param("deliveries"))?;
+    let current = keys
+        .versions
+        .first()
+        .map(|key| key.version)
+        .ok_or_else(ApiError::internal)?;
+    let versions: Vec<u32> = (1..=current.saturating_add(1)).collect();
+    let derived = state
+        .attestor
+        .webhook_keys(&keys.account, scope.livemode(), &versions)
+        .await
+        .map_err(|_| ApiError::service_unavailable("the webhook keys cannot be derived"))?;
+    Ok(derived.into_iter().map(|key| key.public_key).collect())
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/restore/delivered_credits/discard",
+    request_body = RestoreDeliveredCreditDiscardRequest,
+    responses(
+        (status = 200, description = "OK: discarded, or discarded already", body = RestoreDeliveredCreditDiscardResponse),
+        (status = 400, description = "Bad Request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no delivered credit was imported for the deposit", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Discards the delivered credit of a deposit whose recorded transfer contradicts it (a finding
+/// `contradicted` of `GET /v1/admin/restore`): the deposit, held until now, is valued from the
+/// chain as any other, and the operator settles the difference with the merchant. Works frozen or
+/// not, since the confirm step can find a contradiction after the unfreeze. Audited.
+pub(crate) async fn discard_delivered_credit(
+    State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
+    ApiJson(request): ApiJson<RestoreDeliveredCreditDiscardRequest>,
+) -> ApiResult<Json<RestoreDeliveredCreditDiscardResponse>> {
+    validate_reason(&request.reason)?;
+    let deposit = ids::parse(ids::DEPOSIT, &request.deposit)
+        .ok_or_else(|| ApiError::invalid_param("deposit", "deposit must be a dep_ id"))?;
+    restore_mode::discard_credit(&state.pool, deposit, &actor, &request.reason)
+        .await
+        .map_err(|error| match error {
+            restore_mode::DiscardError::NotFound => ApiError::not_found().with_param("deposit"),
+            restore_mode::DiscardError::Database(error) => ApiError::from(error),
+        })?;
+    Ok(Json(RestoreDeliveredCreditDiscardResponse {
+        deposit: ids::format(ids::DEPOSIT, deposit),
+        discarded: true,
     }))
 }
 
@@ -540,8 +729,8 @@ pub(crate) async fn import_events(
 )]
 /// Lifts the freeze after a restore once every chain is rescanned and the operator confirms the
 /// checklist: crediting, settlement, quote expiry, treasury changes, refund verification, and
-/// event delivery resume, and merchants can write again. The reason and checklist are recorded
-/// in the restore and in `audit`.
+/// event delivery resume, and merchants' API keys authenticate again. The reason and checklist are
+/// recorded in the restore and in `audit`.
 pub(crate) async fn unfreeze(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -688,6 +877,14 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
         .get("actor")
         .and_then(Value::as_str)
         .unwrap_or(crate::db::SYSTEM_ACTOR);
+    let credit = restore_mode::CREDITED_EVENT_TYPES
+        .contains(&event_type)
+        .then(|| {
+            delivered_credit(object).ok_or_else(|| {
+                invalid("a credited or reversed event's deposit needs its transfer and valuation")
+            })
+        })
+        .transpose()?;
     Ok(DeliveredEvent {
         id,
         account_id,
@@ -697,7 +894,43 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
         created,
         actor: actor.to_owned(),
         data: data.clone(),
+        credit,
     })
+}
+
+/// The transfer and valuation of a credited deposit's snapshot, as the deposit object renders
+/// them.
+fn delivered_credit(object: &Value) -> Option<DeliveredCredit> {
+    let text = |field: &str| object.get(field).and_then(Value::as_str);
+    let address = |field: &str| text(field).and_then(|value| EvmAddress::from_str(value).ok());
+    Some(DeliveredCredit {
+        chain_id: object.get("chain_id").and_then(Value::as_u64)?,
+        tx_hash: text("tx_hash").and_then(|value| B256::from_str(value).ok())?,
+        address: address("address")?,
+        asset_contract: address("asset_contract")?,
+        from_address: address("from_address")?,
+        amount_atomic: AtomicAmount::new(text("amount_atomic").and_then(decimal_u256)?),
+        price: text("exchange_rate")
+            .and_then(super::quotes::parse_decimal)
+            .and_then(|price| ScaledPrice::new(price, PRICE_SCALE).ok())?,
+        source: match text("price_source")? {
+            "quote" => ValuationSource::Lock,
+            "spot" => ValuationSource::Spot,
+            _ => return None,
+        },
+        credit_minor: MinorAmount::new(object.get("amount").and_then(Value::as_u64)?),
+        valuation_at: object
+            .get("valued_at")
+            .and_then(Value::as_i64)
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))?,
+    })
+}
+
+/// A non-negative decimal integer, digits only.
+fn decimal_u256(text: &str) -> Option<U256> {
+    (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| U256::from_str_radix(text, 10).ok())
+        .flatten()
 }
 
 fn restore_object(restore: &Restore) -> RestoreObject {
@@ -747,12 +980,25 @@ mod tests {
             "type": "deposit.credited",
             "created": 1_790_000_000,
             "actor": "system",
-            "data": {"object": {"id": ids::format(ids::DEPOSIT, deposit), "livemode": false}},
+            "data": {"object": {
+                "id": ids::format(ids::DEPOSIT, deposit),
+                "livemode": false,
+                "chain_id": 1,
+                "tx_hash": format!("{:#x}", B256::repeat_byte(0x5a)),
+                "address": format!("{:#x}", EvmAddress::repeat_byte(3)),
+                "asset_contract": format!("{:#x}", EvmAddress::repeat_byte(4)),
+                "from_address": format!("{:#x}", EvmAddress::repeat_byte(5)),
+                "amount_atomic": "1000",
+                "amount": 250,
+                "exchange_rate": "0.25000000",
+                "price_source": "quote",
+                "valued_at": 1_790_000_000,
+            }},
         })
     }
 
     #[test]
-    fn a_delivered_event_is_read_with_its_derived_identity() {
+    fn a_delivered_event_is_read_with_its_derived_identity_and_credit() {
         let deposit = Uuid::from_u128(7);
         let event = delivered_event(&credited(deposit)).unwrap();
         assert_eq!(event.id, event_id("deposit.credited", deposit));
@@ -760,6 +1006,26 @@ mod tests {
         assert_eq!(event.account_id, Uuid::from_u128(1));
         assert!(!event.livemode);
         assert_eq!(event.data, credited(deposit)["data"]);
+        let credit = event.credit.unwrap();
+        assert_eq!(credit.tx_hash, B256::repeat_byte(0x5a));
+        assert_eq!(credit.address, EvmAddress::repeat_byte(3));
+        assert_eq!(credit.amount_atomic, AtomicAmount::new(U256::from(1000)));
+        assert_eq!(credit.price.value(), 25_000_000);
+        assert_eq!(credit.source, ValuationSource::Lock);
+        assert_eq!(credit.credit_minor, MinorAmount::new(250));
+        assert_eq!(credit.valuation_at.timestamp(), 1_790_000_000);
+
+        // A rejected event carries no credit; a credited one without its valuation is refused.
+        let mut rejected = credited(deposit);
+        rejected["type"] = json!("deposit.rejected");
+        rejected["id"] = json!(ids::format(
+            ids::EVENT,
+            event_id("deposit.rejected", deposit)
+        ));
+        assert!(delivered_event(&rejected).unwrap().credit.is_none());
+        let mut unvalued = credited(deposit);
+        unvalued["data"]["object"]["exchange_rate"] = Value::Null;
+        assert!(delivered_event(&unvalued).is_err());
     }
 
     #[test]

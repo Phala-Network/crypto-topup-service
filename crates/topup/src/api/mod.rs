@@ -49,6 +49,7 @@ use utoipa_axum::routes;
 
 pub use attestation::{
     AttestationError, AttestationEvidence, AttestationFuture, AttestationRequest, Attestor,
+    WebhookKeysFuture,
 };
 pub use auth::VerificationKey;
 pub use client_limit::ClientReadLimiter;
@@ -408,7 +409,9 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(restore::verify_treasuries))
         .routes(routes!(restore::delete_webhook_endpoint))
         .routes(routes!(restore::reissue_deposit_address))
+        .routes(routes!(restore::reissue_quote))
         .routes(routes!(restore::import_events))
+        .routes(routes!(restore::discard_delivered_credit))
         .routes(routes!(restore::unfreeze))
 }
 
@@ -496,7 +499,8 @@ fn restoring() -> Response {
 }
 
 /// Refuses every merchant write while the service is frozen after a restore
-/// (`crate::restore_mode`); reads pass.
+/// (`crate::restore_mode`), before authentication; reads are refused by authentication
+/// (`auth::authenticate_merchant`).
 async fn refuse_writes_while_frozen(
     State(state): State<AppState>,
     request: Request,

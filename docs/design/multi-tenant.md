@@ -811,22 +811,25 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
   tags. Per-account conditions are merchant events; the daily platform report lists live accounts
   left without an enabled endpoint so the operator can contact them.
 - **Disaster recovery.** `ForwarderCreated` and `Flushed` carry the treasury, so swept status and
-  clone arguments are rebuilt from the chain; quotes issued within the RPO window are lost, as
-  today. Restoring the database is not restoring the business: within the window a restore can
-  undo key revocations (the keys work again), treasury cancellations, and endpoint changes, lose
-  deposit addresses given to customers, and lose delivered events, whose deposits are re-derived
-  from the chain and, at spot, re-valued. So a restored service starts in **restore mode**
-  (amendment of 2026-09-28, after a design review), the smallest standard mechanism, a
-  maintenance freeze with operator reconciliation:
+  clone arguments are rebuilt from the chain. Restoring the database is not restoring the
+  business: within the window a restore can undo key revocations (the keys work again), treasury
+  cancellations, and endpoint changes, lose deposit addresses and quotes given to customers (a
+  quote's salt includes its random id, and the scanner watches only issued addresses, so nothing
+  finds a payment to a lost quote), and lose delivered events, whose deposits are re-derived from
+  the chain and, at spot, would be re-valued. So a restored service starts in **restore mode**
+  (amendment of 2026-09-28, after a design review; restore correctness amendment of 2026-09-29),
+  the smallest standard mechanism, a maintenance freeze with operator reconciliation:
   - **Frozen.** The restore is known from the restore step (`restore-check`, run only after a
     restore on boot, records it) or from PostgreSQL itself (every promotion out of archive recovery
     starts a new timeline, so `topup run` freezes on a timeline newer than the acknowledged one).
     The freeze is a row of the database, so it survives the upgrade from the restore-check variant
-    to the service. While frozen, reads and health stay up; every merchant write answers
-    `503 service_restoring` with `Retry-After` (key creation, restricted ones included, key and
-    webhook key rolls, treasury proofs, cancellations, and crediting pauses and resumes, endpoint,
-    quote, deposit address, and refund changes alike); nothing credits, settles, expires a quote, applies a treasury
-    change, verifies a refund, or delivers an event. The scanner and the reconciler run: the
+    to the service. While frozen, the admin API and health stay up; every merchant request with an
+    API key answers `503 service_restoring` with `Retry-After`, reads included, because the
+    restored `api_keys` can hold a key revoked after the restore point as valid (writes are
+    refused before authentication: key creation, restricted ones included, key and webhook key
+    rolls, treasury proofs, cancellations, and crediting pauses and resumes, endpoint, quote,
+    deposit address, and refund changes alike); nothing credits, settles, expires a quote, applies
+    a treasury change, verifies a refund, or delivers an event. The scanner and the reconciler run: the
     rescan from the restored cursor re-derives every deposit, deduplicated by its deterministic id.
   - **Reconciliation, operator-driven and audited** (`/v1/admin/restore/…`, runbook
     `deploy/runbooks/restore.md`): the operator sends every contact the restore point and, from
@@ -836,15 +839,27 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     again as the merchant last did (the per-treasury crediting pause of the launch hardening; the
     operator re-applies its own pauses), deletes again the endpoints it deleted, re-issues the deposit
     addresses it gave out (the salt formula of §5a gives the same address, backfilled from the
-    restored cursor), and imports the deposit events it received as delivered: the delivered
-    snapshot is the event, so a re-derived deposit never re-emits it with another body, and a
-    re-valued amount that differs is flagged for the operator to settle. The chain alone cannot
-    name the customers of lost addresses (a salt is a hash of the `client_reference_id`), so the
-    merchant's records, or its own re-registration (create returns version 1, rotation the next
-    ones), are the source.
+    restored cursor) and the quotes it created (the quote salt gives the same address from the
+    `qt_` id; only that address over the current treasury, with terms the route issues, is
+    accepted, backfilled from the restored cursor), and imports the deposit events it received
+    from their deliveries, only those whose `v1a` signature verifies with the account's webhook
+    keys: the delivered snapshot is the event, so a re-derived deposit never re-emits it with
+    another body. A settled amount is immutable, so the credit a delivered `deposit.credited` or
+    `deposit.reversed` carries (amount, exchange rate, price source, valuation time) is the
+    re-derived deposit's valuation, not spot, and its refunds and reversal reference it; a
+    deposit whose transfer on chain contradicts the delivered one is held, not credited, until the
+    operator discards the delivered credit and settles the difference. A re-issued quote's locked
+    price is the merchant's record, which the service never signed (no event carries a quote as
+    created), so it never applies: a payment to the quote is valued at a delivered credit, which
+    is the service's signed evidence of the quote's price, or at spot. The chain alone cannot name
+    the customers of lost addresses (a salt is a hash of the `client_reference_id`) or lost quotes
+    (a salt includes the random quote id), so the merchant's records, or for an address its own
+    re-registration (create returns version 1, rotation the next ones), are the source; a quote no
+    merchant reports stays lost.
   - **Unfreeze** through the admin API once every chain has finalized past the moment the restore
-    was detected with every issued address backfilled, with the operator's checklist; the reason
-    and checklist are recorded in the restore and in `audit`.
+    was detected with every issued address backfilled, with the operator's checklist (the key
+    revocations re-applied first: the unfreeze is when merchant keys authenticate again); the
+    reason and checklist are recorded in the restore and in `audit`.
 - **Admin API** (RFC 9421 admin key): account creation and live access (D8, D12),
   restrict/pause/resume, first or recovery keys and revocation (D7), platform limits, route pause,
   reconciliation block lift, deposit nudge, support views, daily report, and the reconciliation

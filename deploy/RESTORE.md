@@ -6,10 +6,12 @@ the API and processing stop for every route.
 
 Restoring the database does not restore the business: the changes after the restore point are
 lost, among them key revocations, treasury cancellations, endpoint deletions, deposit addresses
-given to customers, and events merchants received. So a restored service starts **frozen**:
-reads and `/healthz` work, merchant writes answer `503 service_restoring` with `Retry-After`, and
-nothing credits, settles, or delivers an event until the operator has sent every merchant's
-recorded contact the restore point, re-applied what each reports, and unfrozen it
+and quotes given to customers, and events merchants received. So a restored service starts
+**frozen**: the admin API and `/healthz` work, every merchant request with an API key answers
+`503 service_restoring` with `Retry-After`, reads included (a key revoked after the restore point
+is valid in the restored database), and nothing credits, settles, or delivers an event until the
+operator has sent every merchant's recorded contact the restore point, re-applied what each
+reports (the key revocations first: the unfreeze is when keys authenticate again), and unfrozen it
 ([Reconciliation after a restore](runbooks/restore.md)).
 
 A restore is a bootstrap from backup (the pattern of CloudNativePG's `bootstrap.recovery`): a new
@@ -65,7 +67,8 @@ differences, so a verification instance has its own compose hash:
 - `TOPUP_RESTORE_FROM_BACKUP=on`: a base backup is required (an empty prefix fails), archiving is
   off, and `backup` idles, so nothing writes to or deletes from the prefix.
 - `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET`, `HEAD`, and the operator's
-  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`), runs
+  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`; while
+  frozen, a merchant's API key is refused on reads too), runs
   no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
   `heartbeat` exits.
 - No `dstack-ingress`: `topup` is published on 8081 instead
@@ -91,14 +94,17 @@ reconciliation findings and `failed_checks` are reported but do not gate resume.
 
 **Changes inside the RPO window.** A deposit credited in the last minute before the loss is
 rebuilt from the chain by the rescan and credited again after the unfreeze, with the same deposit
-id and `deposit.credited` event id; a lock-priced deposit gets the same amount, a spot-priced one
-is re-valued. Before the unfreeze the operator imports the events each merchant received after the
-restore point, as delivered: the rebuilt deposit then finds its event recorded and nothing is sent
-again with another body, and `GET /v1/admin/restore` flags a re-valued amount that differs from
-the delivered one. The same reconciliation revokes again the keys, cancels again the treasury
-changes, pauses or resumes treasury crediting again, and deletes again the endpoints that the
-restore brought back, and re-issues the deposit
-addresses given out after the restore point, identically ([runbook](runbooks/restore.md)).
+id and `deposit.credited` event id. Before the unfreeze the operator imports the deliveries of the
+events each merchant received after the restore point, and only those the service signed: the
+rebuilt deposit then finds its event recorded and nothing is sent again with another body, and it
+is valued at the credit the merchant was told, not re-valued, so its refunds and reversal reference
+that credit. A deposit whose recorded transfer contradicts its delivered event is held until the
+operator discards the delivered credit. A spot deposit whose delivery no merchant produces is
+re-valued. The same reconciliation revokes again the keys, cancels again the treasury changes,
+pauses or resumes treasury crediting again, and deletes again the endpoints that the restore
+brought back, and re-issues the deposit addresses and quotes given out after the restore point,
+identically; a re-issued quote's payment is credited at spot unless a signed delivery carries its
+credit, and a quote no merchant reports stays lost ([runbook](runbooks/restore.md)).
 
 A service that booted straight from backup into the service compose (an empty volume, so the
 PostgreSQL entrypoint restored it, without the restore-check variant) is frozen as well: every
@@ -256,10 +262,12 @@ certificate; update a CAA record that pins the old ACME account. Require:
   cannot be restored);
 - a verified attestation and an `ok` check-in of `topup-backup`. Only then unmute the monitors.
 
-The service comes up frozen: merchant writes answer `503 service_restoring`, and the scanner
-rescans each chain from its restored cursor while nothing is credited or delivered. Finish the
-[reconciliation](runbooks/restore.md) (steps 6 to 8): wait for the rescan, unfreeze with the
-admin API (audited); merchants write again once it is lifted. Tell every contact when the
+The service comes up frozen: merchant requests with an API key answer `503 service_restoring`,
+reads included, and the scanner rescans each chain from its restored cursor while nothing is
+credited or delivered. Finish the [reconciliation](runbooks/restore.md) (steps 6 to 8): wait for
+the rescan, check the delivered events against it, and unfreeze with the admin API (audited) only
+once every key revoked after the restore point is revoked again; merchants' keys work again once it
+is lifted. Tell every contact when the
 service is back and confirm each merchant's keys, treasuries, endpoints, and deposit addresses are
 as it left them.
 
@@ -304,11 +312,12 @@ unchanged object listing. `controlled` also runs the business-consistency scenar
 archived WAL, and before PostgreSQL is killed (a clean shutdown would archive them), the source
 revokes an API key, rotates a customer's deposit address, and records a
 delivered `deposit.credited`, and those writes are lost with the source. The drill requires that
-the replacement is frozen (merchant writes `503 service_restoring`, `GET /v1/admin/restore`
-`frozen`), that the lost key works until the operator revokes it again by prefix and then answers
-`401`, that the lost address is re-issued with the same address and `da_` id, that the delivered
-event is imported exactly as delivered with no delivery while a different body is refused as a
-`mismatch` and changes nothing, and that the unfreeze is refused while no chain is rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
+the replacement is frozen (merchant writes and reads `503 service_restoring`, `GET /v1/admin/restore`
+`frozen`), that the lost key is refused like every key while frozen and is revoked again by prefix,
+that the lost address is re-issued with the same address and `da_` id, that the delivered event's
+signed delivery is imported exactly as delivered with no delivery while a body changed after
+signing is refused and changes nothing, and that the unfreeze is refused while no chain is
+rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
 it every Monday at 03:17 UTC and on demand; the CI `deployment` job runs the bounded WAL-G and
 bootstrap tests on pull requests and pushes to `main`.
 

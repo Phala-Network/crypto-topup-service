@@ -1387,6 +1387,23 @@ impl Attestor for TestAttestor {
             })
         })
     }
+
+    fn webhook_keys<'a>(
+        &'a self,
+        account: &'a str,
+        livemode: bool,
+        versions: &'a [u32],
+    ) -> topup::api::WebhookKeysFuture<'a> {
+        Box::pin(async move {
+            Ok(versions
+                .iter()
+                .map(|&version| AttestedWebhookKey {
+                    version,
+                    public_key: Self::public_key(self.0, account, livemode, version),
+                })
+                .collect())
+        })
+    }
 }
 
 fn assert_query_parameters(document: &Value) -> Result<()> {

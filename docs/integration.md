@@ -757,7 +757,7 @@ first amount and report it (obligation 5).
 | 2 | Credit at most once per deposit id (`dep_…`): the credit and its record in one transaction under a unique index; concurrent deliveries credit once. | Delivery is at least once and may be concurrent. |
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
-| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit ([architecture §14](architecture.md#14-configuration-and-deployment)); the events you give the operator after a restore are kept as delivered and not sent again (§5.12). |
+| 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit, and only one whose delivery you did not give the operator ([architecture §14](architecture.md#14-configuration-and-deployment)); the deliveries you give the operator after a restore are kept as delivered, their credit stands, and they are not sent again (§5.12). |
 | 6 | Apply `deposit.refunded` and `deposit.reversed` by the balance rule below, from the snapshot, per deposit, serially (a held credit was never applied, so nothing is taken back from it). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. A partial refund takes back its share of the credit. |
 
 #### The balance rule and event ordering
@@ -1442,7 +1442,7 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 | 429 | `rate_limit` | Requests per account and mode (§5.5), or reads of one quote's or deposit address's public view by its `client_secret`; retry after `Retry-After`. |
 | 429 | `customer_rate_limit` | The customer's quotes per minute (the route's limit) or deposit address rotations per hour (10); retry after `Retry-After`, or tell the customer to wait. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
-| 503 | `service_restoring` | Every write while the service is frozen after a restore from backup; reads work. Retry after `Retry-After` (§5.12). |
+| 503 | `service_restoring` | Every request with an API key, reads included, while the service is frozen after a restore from backup. Retry after `Retry-After` (§5.12). |
 | 500 | `internal_error` | Retry with the same `Idempotency-Key`: it replays this failure, so the request never runs twice (§5.6). |
 
 ### 5.9 Versioning and deprecation
@@ -1547,9 +1547,10 @@ You manage your receivers with your secret key, per mode, as Stripe's
 ### 5.12 After a service restore
 
 If the service's database is lost it is restored from backup, which loses at most the last minute
-before the loss (the **restore point**). The service then starts frozen: reads work, and every
-write answers `503 service_restoring` with `Retry-After` until the operator has reconciled it with
-you. Nothing is credited or delivered meanwhile; payments keep arriving at your addresses and are
+before the loss (the **restore point**). The service then starts frozen: every request with an API
+key, reads included, answers `503 service_restoring` with `Retry-After` until the operator has
+reconciled it with you (a key you revoked after the restore point would otherwise work again).
+Nothing is credited or delivered meanwhile; payments keep arriving at your addresses and are
 credited after the freeze. The operator sends your contact the restore point and asks, from your
 own records since then, for:
 
@@ -1563,12 +1564,23 @@ own records since then, for:
 - the deposit addresses you received (`client_reference_id`, `address`, and `id` or `version`):
   the address is derived from your account, mode, customer, and version, so the operator issues
   the same address again, and payments made to it since are credited;
-- every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event you received, as
-  delivered: each is kept as the event, so when the deposit is rebuilt from the chain it is not
-  sent again, not even with a re-valued `amount`.
+- the quotes you created (the quote object: `id`, `client_reference_id`, `chain_id`, `asset`,
+  `amount`, `amount_atomic`, `exchange_rate`, `address`, `created`, `expires_at`): the address is
+  derived from the quote id, so the operator issues the same quote again, and a payment made to it
+  since is credited. Your record of its locked price is not proof the service issued it, so the
+  payment is credited at spot, unless you also hold its `deposit.credited`, which carries the
+  quote's credit;
+- the delivery of every `deposit.credited`, `deposit.rejected`, and `deposit.reversed` event you
+  received, as your receiver got it: the raw body and its `webhook-id`, `webhook-timestamp`, and
+  `webhook-signature` headers. The operator imports only what the service signed. Each is kept as
+  the event, so when the deposit is rebuilt from the chain it is not sent again, and the credit a
+  `deposit.credited` told you stands: the deposit keeps its `amount`, and its refunds and reversal
+  are computed from it, not from a re-valued amount.
 
-Keep these records (the webhook bodies you store for obligation 2 of §2.3, and your keys'
-prefixes and last four characters). Keys and endpoints you created after the restore point are
+Keep these records (the raw deliveries you verify for obligation 1 of §2.3, your quotes, and your
+keys' prefixes and last four characters). A quote or a delivered credit you cannot produce is lost
+with the restore: a payment to a lost quote's address is not found, and a spot deposit whose
+`deposit.credited` you cannot produce is re-valued. Keys and endpoints you created after the restore point are
 gone: create them again after the freeze lifts. So are refunds you created or marked paid after
 it: create them again and mark them paid with the same transaction; the deposit's cumulative
 `amount_refunded` keeps the balance rule (§2.3) from taking anything back twice. You can also register a lost deposit address

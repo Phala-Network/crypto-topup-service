@@ -284,7 +284,7 @@ customers     id, account_id, livemode, client_reference_id, paused_scopes text[
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
 quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
               credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
-              metadata jsonb
+              metadata jsonb, restore_id   -- restore_id: re-issued after a restore, lock never applied
 deposit_addresses  id (da_ + hex), account_id, livemode, customer_id, version,
               status (active|retired), created_at, retired_at, metadata jsonb
               -- one active per customer; versions count from 1 (§9)
@@ -347,6 +347,11 @@ audit         id, account_id, actor_type (api_key|admin|system), actor_id, actio
 restores      id, detected_at, detected_by (restore_check|timeline), timeline_id, restore_point,
               restored_cursors jsonb, unfrozen_at, unfrozen_by, unfreeze_reason
               -- at most one not unfrozen: the restore freeze (§14)
+restore_delivered_credits  deposit_id, event_id, restore_id, account_id, livemode, chain_id,
+              tx_hash, address, asset_contract, from_address, amount_atomic, price_scaled,
+              price_source, credit_minor, valuation_at, discarded_at, discarded_by, discard_reason
+              -- the credit of a signed delivered deposit.credited or .reversed imported after a
+              -- restore: the re-derived deposit's valuation, unless discarded (§14)
 ```
 
 `metadata` on quotes, deposit addresses, deposits, and refunds is Stripe's (§12, Metadata): `NOT NULL DEFAULT '{}'`
@@ -1000,7 +1005,9 @@ POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   
 POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply, reason}   cancellations and crediting pauses again
 POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
 POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, reason}   re-issue identically
-POST   /v1/admin/restore/events {events, reason}   import delivered deposit events as delivered
+POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, reason}   re-issue identically; the lock never applies
+POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands
+POST   /v1/admin/restore/delivered_credits/discard {deposit, reason}   release a deposit whose transfer contradicts its delivered event
 POST   /v1/admin/restore/unfreeze {reason, checklist}   once every chain is rescanned; audited
 ```
 
@@ -1146,7 +1153,7 @@ destination is `400 destination_sanctioned`. A reversed deposit is not refundabl
 | 401 | `invalid_request_error` | `signature_replayed` (admin: the signature was already used) |
 | 409 | `idempotency_error` | `idempotency_key_in_use` (a request with the key still runs; retry); the only `409` |
 | 429 | `invalid_request_error` | `rate_limit` (requests per account and mode; reads of a public view by `client_secret`), `customer_rate_limit` (quote creations per minute and deposit address rotations per hour of one customer); each with `Retry-After` |
-| 503 | `api_error` | `unavailable` (no fresh price, database unavailable), `service_restoring` (every merchant write while the service is frozen after a restore, §14; with `Retry-After`) |
+| 503 | `api_error` | `unavailable` (no fresh price, database unavailable), `service_restoring` (every merchant request with an API key, reads included, while the service is frozen after a restore, §14; with `Retry-After`) |
 | 400 | `invalid_request_error` | admin only: `restore_not_frozen`, `restore_rescan_incomplete` (§14) |
 | 500 | `api_error` | `internal_error` |
 
@@ -1424,26 +1431,37 @@ state within it, so a restored service starts in **restore mode** (design §13):
 records the restore, and `topup run` also freezes on a PostgreSQL timeline newer than the one it
 acknowledged (every promotion out of archive recovery starts one), so a restore that booted
 straight into the service compose is caught too. The freeze is a `restores` row. While frozen,
-reads and `/healthz` stay up, every merchant write answers `503 service_restoring` with
-`Retry-After`, and the pumps, finality watch, refund verification, quote expiry, treasury
-time-lock, and webhook delivery wait; the scanner rescans from the restored cursor and the
-reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
+the admin API and `/healthz` stay up, every merchant request with an API key answers
+`503 service_restoring` with `Retry-After`, reads included (the restored `api_keys` can hold a key
+revoked after the restore point as valid, so no key authenticates until the operator has revoked
+such keys again and unfrozen), and the pumps, finality watch, refund verification, quote expiry,
+treasury time-lock, and webhook delivery wait; the scanner rescans from the restored cursor and
+the reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
 action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations, the
-merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses given out after the restore point re-issued
-identically from their deterministic salts (backfilled from the restored cursor), and the events
-merchants received imported as delivered, so a deposit rebuilt from the chain keeps its
-`deposit.credited` event id and delivered body and is never re-emitted with a re-valued amount; a
-differing amount is flagged. `POST /v1/admin/restore/unfreeze` lifts the freeze once every chain
-has finalized past the restore's detection with every address backfilled, recording the reason
-and checklist in `audit`. The unfinalized-credit cap and a deposit's `amount_refunded` and
-`amount_reversed` are computed from ledger rows, so they hold after a restore: a deposit credited in
-the window is credited again within the cap, and the finality watch settles every restored
-credited deposit that is not final. A deposit not imported is credited again with the same event id, so the
-merchant ignores the repeat and keeps its first credit (§11). When the backup lacks a deposit that
+merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses and
+quotes given out after the restore point re-issued identically from their deterministic salts
+(backfilled from the restored cursor), and the events merchants received imported from their
+signed deliveries (the `v1a` signature verified with the account's webhook keys), so a deposit
+rebuilt from the chain keeps its `deposit.credited` event id and delivered body and is never
+re-emitted. A settled amount is immutable: the confirm step values a rebuilt deposit at the credit
+its imported `deposit.credited` or `deposit.reversed` carries (`restore_delivered_credits`), not at
+spot, so its `amount_refunded` and `amount_reversed` reference what the merchant was told; a
+deposit whose transfer contradicts its delivered event is held, not credited, until the operator
+discards the delivered credit. A re-issued quote's locked price is the merchant's record, not the
+service's, so it never applies: its payment is credited at a delivered credit or at spot. A quote
+no merchant reports is lost: the scanner watches only issued addresses and its salt derives from
+its random id. `POST /v1/admin/restore/unfreeze` lifts the freeze once every chain has finalized
+past the restore's detection with every address backfilled, recording the reason and checklist in
+`audit`. The unfinalized-credit cap and a deposit's `amount_refunded` and `amount_reversed` are
+computed from ledger rows, so they hold after a restore: a deposit credited in the window is
+credited again within the cap, and the finality watch settles every restored credited deposit that
+is not final. A deposit whose delivery is not imported is credited again with the same event id,
+so the merchant ignores the repeat and keeps its first credit (§11). When the backup lacks a deposit that
 was reversed because another transfer took its position (§7), the rescan finds only the final
 transfer and records it at revision 0, under the reversed deposit's id, not its successor's: the
-reversed deposit's imported events then show as `mismatch` when the amounts differ, and the
-successor's stay `pending`, and the operator settles them with the merchant as one incident. The
+reversed deposit's imported credit then contradicts the transfer it holds, so that deposit is held
+as `contradicted` until the operator discards the credit, the successor's events stay `pending`,
+and the operator settles them with the merchant as one incident. The
 reversal and its successor commit in one transaction, so a backup holding the reversed deposit
 holds its successor too; should one ever lack it, the rescan records the final transfer at
 revision 1 with `replaces` `null`, and the quote the reversed deposit completed is not handed over

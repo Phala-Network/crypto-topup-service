@@ -40,11 +40,24 @@ pub struct AttestationEvidence {
     pub quote: Vec<u8>,
 }
 
+/// Boxed derivation of an account's public webhook keys.
+pub type WebhookKeysFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<AttestedWebhookKey>, AttestationError>> + Send + 'a>>;
+
 /// Runtime source of nonce-bound webhook-key evidence.
 pub trait Attestor: Send + Sync {
     /// Derives the requested keys and collects evidence binding them, the account, the mode, and
     /// the nonce.
     fn attest<'a>(&'a self, request: AttestationRequest<'a>) -> AttestationFuture<'a>;
+
+    /// Derives the public keys of `account` in the given mode at `versions`, in order, without
+    /// evidence: the keys an attestation binds, which verify the account's deliveries.
+    fn webhook_keys<'a>(
+        &'a self,
+        account: &'a str,
+        livemode: bool,
+        versions: &'a [u32],
+    ) -> WebhookKeysFuture<'a>;
 }
 
 impl Attestor for DstackAttestor {
@@ -64,6 +77,19 @@ impl Attestor for DstackAttestor {
                 report_data: evidence.report_data,
                 quote: evidence.quote,
             })
+        })
+    }
+
+    fn webhook_keys<'a>(
+        &'a self,
+        account: &'a str,
+        livemode: bool,
+        versions: &'a [u32],
+    ) -> WebhookKeysFuture<'a> {
+        Box::pin(async move {
+            DstackAttestor::webhook_keys(self, account, livemode, versions)
+                .await
+                .map_err(|_| AttestationError::Unavailable)
         })
     }
 }

@@ -250,7 +250,7 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
     (
         "service_restoring",
         503,
-        "The service was restored from backup and is frozen until the operator has reconciled it with you: reads work, every write is refused, and nothing is credited or delivered meanwhile. Retry after `Retry-After` seconds; the operator contacts you for your records since the restore point.",
+        "The service was restored from backup and is frozen until the operator has reconciled it with you: every request with an API key is refused, reads too, and nothing is credited or delivered meanwhile. Retry after `Retry-After` seconds; the operator contacts you for your records since the restore point.",
     ),
     (
         "restore_not_frozen",
@@ -818,7 +818,7 @@ impl ApiError {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "service_restoring",
-            "the service was restored from backup and is being reconciled: reads work, writes are \
+            "the service was restored from backup and is being reconciled: API requests are \
              paused; retry after Retry-After seconds",
         )
         .with_retry_after(retry_after)

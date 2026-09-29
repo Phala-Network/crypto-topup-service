@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use topup_core::{Signer, SignerError, WebhookKeyId};
+use ed25519_dalek::{Signature, VerifyingKey};
+use topup_core::{Ed25519PublicKey, Signer, SignerError, WebhookKeyId};
 
 /// Standard Webhooks metadata and asymmetric `v1a` signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,12 +27,7 @@ impl SignedWebhook {
     ) -> Result<Self, SignerError> {
         let id = event_id.to_owned();
         let timestamp = timestamp.to_string();
-        let mut content = Vec::with_capacity(id.len() + timestamp.len() + body.len() + 2);
-        content.extend_from_slice(id.as_bytes());
-        content.push(b'.');
-        content.extend_from_slice(timestamp.as_bytes());
-        content.push(b'.');
-        content.extend_from_slice(body);
+        let content = signed_content(&id, &timestamp, body);
         if keys.is_empty() {
             return Err(SignerError::KeyUnavailable);
         }
@@ -47,6 +43,45 @@ impl SignedWebhook {
             signature: entries.join(" "),
         })
     }
+
+    /// Whether an entry of `signature`, a `webhook-signature` header, verifies
+    /// `{id}.{timestamp}.{body}` with one of `keys`: the check a receiver makes (Standard
+    /// Webhooks), without its timestamp tolerance, so a delivery kept in a merchant's records
+    /// still verifies later.
+    #[must_use]
+    pub fn verifies(
+        keys: &[Ed25519PublicKey],
+        id: &str,
+        timestamp: &str,
+        body: &[u8],
+        signature: &str,
+    ) -> bool {
+        let content = signed_content(id, timestamp, body);
+        let keys: Vec<VerifyingKey> = keys
+            .iter()
+            .filter_map(|key| VerifyingKey::from_bytes(&key.0).ok())
+            .collect();
+        signature
+            .split(' ')
+            .filter_map(|entry| entry.strip_prefix("v1a,"))
+            .filter_map(|encoded| STANDARD.decode(encoded).ok())
+            .filter_map(|bytes| Signature::from_slice(&bytes).ok())
+            .any(|signature| {
+                keys.iter()
+                    .any(|key| key.verify_strict(&content, &signature).is_ok())
+            })
+    }
+}
+
+/// `{id}.{timestamp}.{body}`, the signed content.
+fn signed_content(id: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+    let mut content = Vec::with_capacity(id.len() + timestamp.len() + body.len() + 2);
+    content.extend_from_slice(id.as_bytes());
+    content.push(b'.');
+    content.extend_from_slice(timestamp.as_bytes());
+    content.push(b'.');
+    content.extend_from_slice(body);
+    content
 }
 
 #[cfg(test)]
@@ -132,5 +167,31 @@ mod tests {
             SignedWebhook::new(&signer, &[], "evt_1", 1, b"{}").await,
             Err(SignerError::KeyUnavailable)
         );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_verifies_with_any_key_that_signed_it_and_only_as_signed() {
+        let signer = FixedSigner;
+        let public =
+            |version| Ed25519PublicKey(FixedSigner::key(&key(version)).verifying_key().to_bytes());
+        let signed = SignedWebhook::new(&signer, &[key(2), key(1)], "evt_1", 7, b"{}")
+            .await
+            .expect("fixed signer should sign");
+        let verifies = |keys: &[Ed25519PublicKey], id: &str, timestamp: &str, body: &[u8]| {
+            SignedWebhook::verifies(keys, id, timestamp, body, &signed.signature)
+        };
+        assert!(verifies(&[public(1)], "evt_1", "7", b"{}"));
+        assert!(verifies(&[public(2)], "evt_1", "7", b"{}"));
+        assert!(!verifies(&[public(1)], "evt_2", "7", b"{}"));
+        assert!(!verifies(&[public(1)], "evt_1", "8", b"{}"));
+        assert!(!verifies(&[public(1)], "evt_1", "7", b"{ }"));
+        assert!(!verifies(&[], "evt_1", "7", b"{}"));
+        assert!(!SignedWebhook::verifies(
+            &[public(1)],
+            "evt_1",
+            "7",
+            b"{}",
+            "v1,abc"
+        ));
     }
 }

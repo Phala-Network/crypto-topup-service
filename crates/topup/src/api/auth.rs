@@ -74,11 +74,21 @@ impl Merchant {
 /// are refused. A live key of an account the operator has not enabled for live mode is `403
 /// testmode_charges_only`. The account and mode's rate limit applies to every authenticated
 /// request.
+///
+/// While the service is frozen after a restore (`crate::restore_mode`) no key authenticates,
+/// reads included: `503 service_restoring`. The restored database may hold a key the merchant
+/// revoked after the restore point as valid; keys work again once the operator has revoked such
+/// keys again and unfrozen the service.
 pub async fn authenticate_merchant(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    match crate::restore_mode::is_frozen(&state.pool).await {
+        Ok(false) => {}
+        Ok(true) => return super::restoring(),
+        Err(error) => return ApiError::from(error).into_response(),
+    }
     let presented = match bearer_key(request.headers()) {
         Ok(presented) => presented,
         Err(error) => return unauthorized(error),

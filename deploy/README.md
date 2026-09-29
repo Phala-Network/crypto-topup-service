@@ -660,16 +660,19 @@ factory's 200 000 gas per transfer cannot be swept and is never enabled in a rou
 
 ## After a restore: the merchant notice
 
-A restored service starts frozen in restore mode (design §13): reads work, every merchant write
-answers `503 service_restoring` with `Retry-After`, and nothing credits or delivers until the
-operator's reconciliation and unfreeze ([Reconciliation after a restore](runbooks/restore.md)).
+A restored service starts frozen in restore mode (design §13): every merchant request with an API
+key, reads included, answers `503 service_restoring` with `Retry-After`, and nothing credits or
+delivers until the operator's reconciliation and unfreeze
+([Reconciliation after a restore](runbooks/restore.md)).
 **HUMAN-ONLY, operator**: before reconciling, send every account's recorded contact the notice:
-the restore point (the backup time) and the time the restore was detected; that writes answer `503`
-until further notice, so retry with the same `Idempotency-Key`; and the records the operator needs
-from the merchant, received after the restore point: key revocations (id, or prefix and last four),
-treasury cancellations and crediting pauses, deleted endpoints, deposit addresses given to
-customers, and delivered deposit events. After the unfreeze, send a second notice: service resumed,
-any re-valued deposit flagged, and events after the restore point delivered again. The runbook
+the restore point (the backup time) and the time the restore was detected; that API requests,
+reads included, answer `503` until further notice, so retry with the same `Idempotency-Key`; and
+the records the operator needs from the merchant, received after the restore point: key
+revocations (id, or prefix and last four), treasury cancellations and crediting pauses, deleted
+endpoints, deposit addresses and quotes given to customers, and the raw deliveries of deposit
+events with their webhook headers; a quote or delivery it cannot produce is lost (a payment to the
+quote is not found; the deposit is re-valued). After the unfreeze, send a second notice: service
+resumed, any re-valued deposit flagged, and events after the restore point delivered again. The runbook
 [Incident communication](runbooks/incident-communication.md) has the channels.
 
 ## Local verification

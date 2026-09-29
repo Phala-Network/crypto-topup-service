@@ -1802,7 +1802,8 @@ pub struct DeliveredEvents {
     pub findings: Vec<DeliveredEventFinding>,
 }
 
-/// An imported event whose deposit is not re-derived yet, or whose amounts differ.
+/// An imported event whose deposit is not re-derived yet, contradicts it, or whose amounts
+/// differ.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct DeliveredEventFinding {
     /// Event id, `evt_…`.
@@ -1812,9 +1813,11 @@ pub struct DeliveredEventFinding {
     pub event_type: String,
     /// The deposit, `dep_…`.
     pub deposit: String,
-    /// `pending` (the rescan has not re-derived or valued the deposit yet) or `mismatch` (the
-    /// ledger's token amount or credit differs from what the merchant received; the delivered
-    /// event is kept and never sent again).
+    /// `pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the
+    /// recorded transfer is not the one the delivered event names: the deposit is held, not
+    /// credited, until the operator discards the delivered credit), or `mismatch` (the ledger's
+    /// token amount or credit differs from what the merchant received; the delivered event is
+    /// kept and never sent again).
     pub status: String,
     /// Delivered `amount_atomic`.
     pub delivered_amount_atomic: Option<String>,
@@ -1961,16 +1964,31 @@ pub struct RestoreDepositAddressResponse {
     pub deposit_address: DepositAddress,
 }
 
-/// `POST /v1/admin/restore/events` body: `deposit.credited`, `deposit.rejected`, and
-/// `deposit.reversed` events the merchant received after the restore point, as delivered.
+/// `POST /v1/admin/restore/events` body: the deliveries of the `deposit.credited`,
+/// `deposit.rejected`, and `deposit.reversed` events the merchant received after the restore
+/// point, as its webhook receiver got them.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreEventsImportRequest {
-    /// Up to 100 event objects exactly as delivered.
-    #[schema(value_type = Vec<Object>)]
-    pub events: Vec<serde_json::Value>,
+    /// Up to 100 deliveries exactly as received.
+    pub deliveries: Vec<DeliveredWebhook>,
     /// Why, 1 to 1024 bytes.
     pub reason: String,
+}
+
+/// One webhook delivery as the merchant's receiver got it: its Standard Webhooks headers and its
+/// raw body, which the service signed.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveredWebhook {
+    /// The `webhook-id` header, the event's `evt_` id.
+    pub webhook_id: String,
+    /// The `webhook-timestamp` header, Unix seconds.
+    pub webhook_timestamp: String,
+    /// The `webhook-signature` header: one or more `v1a,<base64>` signatures.
+    pub webhook_signature: String,
+    /// The request body exactly as received, byte for byte: the event object.
+    pub body: String,
 }
 
 /// `POST /v1/admin/restore/events` response.
@@ -1992,6 +2010,68 @@ pub struct EventImport {
     pub result: String,
 }
 
+/// `POST /v1/admin/restore/delivered_credits/discard` body.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreDeliveredCreditDiscardRequest {
+    /// The deposit, `dep_…`, of a `contradicted` finding.
+    pub deposit: String,
+    /// Why, 1 to 1024 bytes: the incident and how the difference is settled with the merchant.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/delivered_credits/discard` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreDeliveredCreditDiscardResponse {
+    /// The deposit, `dep_…`.
+    pub deposit: String,
+    /// Always `true`: the deposit is valued from the chain as any other.
+    pub discarded: bool,
+}
+
+/// `POST /v1/admin/restore/quotes` body: a quote the merchant created after the restore point, as
+/// its records hold the quote object.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreQuoteRequest {
+    /// Account id, `acct_…`.
+    pub account: String,
+    /// The mode.
+    pub livemode: bool,
+    /// The quote's `qt_` id: its address salt is derived from it.
+    pub id: String,
+    /// The quote's `client_reference_id`.
+    pub client_reference_id: String,
+    /// The quote's `chain_id`.
+    pub chain_id: u64,
+    /// The quote's `asset`.
+    pub asset: String,
+    /// The quote's `amount`, the credit in minor units.
+    pub amount: u64,
+    /// The quote's `amount_atomic`.
+    pub amount_atomic: String,
+    /// The quote's `exchange_rate`.
+    pub exchange_rate: String,
+    /// The quote's `address`.
+    pub address: String,
+    /// The quote's `created`, Unix seconds.
+    pub created: i64,
+    /// The quote's `expires_at`, Unix seconds.
+    pub expires_at: i64,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/quotes` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreQuoteResponse {
+    /// Whether the quote was issued now; `false` when it exists already with these terms.
+    pub reissued: bool,
+    /// The quote. Its locked price is the merchant's record, not the service's, so a payment to it
+    /// is credited at spot unless an imported `deposit.credited` for it carries its credit.
+    pub quote: Quote,
+}
+
 /// `POST /v1/admin/restore/unfreeze` body: the operator's reason and checklist.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -2001,7 +2081,8 @@ pub struct RestoreUnfreezeRequest {
     /// Every contact confirmed the key revocations, treasury cancellations, and endpoint
     /// deletions made after the restore point, and each was applied again; must be `true`.
     pub security_changes_reapplied: bool,
-    /// Every deposit address given out after the restore point was re-issued; must be `true`.
+    /// Every deposit address and quote given out after the restore point was re-issued; must be
+    /// `true`.
     pub deposit_addresses_reissued: bool,
     /// Every event delivered after the restore point was imported; must be `true`.
     pub delivered_events_imported: bool,
