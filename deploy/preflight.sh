@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Preflight for a staging deploy (deploy/README.md, "First staging deploy checklist"). It is
+# Preflight for a staging deploy (deploy/README.md, "Deploy" and "Sealing the secrets"). It is
 # read-only against remote systems: it never pushes, deploys, updates, or sends a transaction. It
 # reads the env file (the owner-sealed secrets), the rendered compose (which holds the public
 # settings, deploy/README.md "Attested settings"), the images in their registry, each route's

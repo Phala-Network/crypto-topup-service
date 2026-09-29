@@ -201,7 +201,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
   password (read as a password file, as Foundry does). `payer` (an unlocked address) is only for
   Anvil.
 - Without a mode the reference product runs the product (`serve`) and one deposit (`deposit`) in
-  one process; the two modes also run separately, as for staging (deploy/README.md, "Staging
+  one process; the two modes also run separately, as for staging (deploy/phala.md, "Staging
   reference product").
 - Set `webhook_public_keys` (hex, current first) after verifying the attestation quote; otherwise
   the product fetches `GET /v1/attestation` with its API key, checks only its binding to the
@@ -223,4 +223,4 @@ the route's quote window (`quote_ttl_seconds`; 120 seconds on the sandbox route)
 
 Phala's staging credits its own reference-product CVM and stays internal, so the scenarios do not
 run there; the deposit driver's options play their payments through that product instead
-(deploy/README.md, "Abnormal paths").
+(deploy/phala.md, "Abnormal paths").

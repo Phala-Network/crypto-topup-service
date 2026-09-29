@@ -171,7 +171,7 @@ jobs:
       - name: Typecheck, lint, and build the page
         working-directory: deploy/product/web
         run: pnpm run check
-      # What Workers Builds deploys (deploy/README.md, "Website"): the config and the asset upload.
+      # What Workers Builds deploys (deploy/phala.md, "Website"): the config and the asset upload.
       - name: Check the Cloudflare config without deploying
         working-directory: deploy/product/web
         env:

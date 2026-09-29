@@ -43,7 +43,7 @@ commits to its fork, so they are part of the attested deployment; further mercha
 not configuration.
 
 The repository's committed routes are test routes on Sepolia and Base Sepolia, for a test PHA
-token and Circle's testnet USDC ([deploy/README.md, "Staging routes"](../deploy/README.md#staging-routes)).
+token and Circle's testnet USDC ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
 Phala's first live route will be Ethereum Mainnet PHA for Phala Cloud's account
 ([examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml)); it is not deployed yet.
 

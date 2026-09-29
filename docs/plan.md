@@ -31,15 +31,16 @@ read [self-hosting.md](self-hosting.md), [deploy/README.md](../deploy/README.md)
 - **Contracts**: the permissionless factory is deterministic: `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain
   ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Deployed and verified on Sepolia and Base
-  Sepolia; not yet on mainnet. The staging finance Safe has its `CompatibilityFallbackHandler` set and passes
-  `verify-safe.sh`.
+  Sepolia; not yet on mainnet. The staging finance Safe has its `CompatibilityFallbackHandler` set
+  and passes `verify-safe.sh`.
 - **Staging** (`https://pay-api-staging.phala.com`) was reset for the multi-tenant schema
-  ([deploy/README.md, "Staging reset"](../deploy/README.md#staging-reset-human-only); the
+  ([deploy/phala.md, "Staging reset"](../deploy/phala.md#staging-reset-human-only); the
   reference product's account, #208). It serves four test-mode routes, test PHA and Circle's
   testnet USDC on Sepolia and Base Sepolia (#222, #225), and runs the reference product behind
-  the demo on [pay.phala.com](https://pay.phala.com/). The paths verified there on 2026-09-27
-  (exact payment, underpayment, late payment, unsupported token, refunds, the demo checkout)
-  predate the reset.
+  the demo on [pay.phala.com](https://pay.phala.com/). After the reset the staging paths passed
+  again on Sepolia and Base Sepolia: quote, underpayment, late payment, persistent deposit
+  address, unsupported token, refund success and failure, sweep, USDC, and the PHA bonus; a real
+  Base Sepolia deposit (`dep_254a40d3…`) was credited on 2026-09-29.
 - **SDKs**: `@phala/pay` 0.2.0 on npm and `phala-pay` 0.2.0 on PyPI (#226), both for the
   multi-tenant API, published with trusted publishing.
 
@@ -51,14 +52,14 @@ read [self-hosting.md](self-hosting.md), [deploy/README.md](../deploy/README.md)
       ([deploy/CONTRACTS.md](../deploy/CONTRACTS.md)). Owner: deployer.
 - [x] Set the staging finance Safe's fallback handler to the `CompatibilityFallbackHandler`
       (Sepolia transaction `0xc63baf59…0812`). Owner: Safe owners.
-- [x] Reset staging ([deploy/README.md, "Staging reset"](../deploy/README.md#staging-reset-human-only))
+- [x] Reset staging ([deploy/phala.md, "Staging reset"](../deploy/phala.md#staging-reset-human-only))
       and re-create the staging accounts (#208). Owner: staging owner.
-- [ ] Run the staging paths again on the multi-tenant service
-      ([deploy/README.md, "Abnormal paths"](../deploy/README.md#abnormal-paths)). Owner: staging
+- [x] Run the staging paths again on the multi-tenant service, on Sepolia and Base Sepolia
+      ([deploy/phala.md, "Abnormal paths"](../deploy/phala.md#abnormal-paths)). Owner: staging
       owner.
 - [x] Base Sepolia (84532) beside Sepolia on staging, as configuration: the factory there, its
-      routes, and two RPC providers of its own ([deploy/README.md, "Staging
-      routes"](../deploy/README.md#staging-routes); #223, #225). Owner: staging owner.
+      routes, and two RPC providers of its own ([deploy/phala.md, "Staging
+      routes"](../deploy/phala.md#staging-routes); #223, #225). Owner: staging owner.
 
 ### Phala Cloud
 

@@ -22,11 +22,12 @@ For the operator who runs an instance, onboards merchants, and handles incidents
 | Document | What it covers |
 |---|---|
 | [Self-hosting guide](self-hosting.md) | The steps, in order, from a fork to a credited test deposit, and on to going live. |
-| [Deployment reference](../deploy/README.md) | GitHub setup, releases and deploys, sealed secrets, attested settings, RPC providers, the custom domain, Sentry, attestation, onboarding, and Phala's own instance. |
+| [Deployment reference](../deploy/README.md) | GitHub setup, releases and deploys, sealed secrets, attested settings, RPC providers, the custom domain, Sentry, attestation, onboarding, and merchant setup. |
 | [Service configuration](configuration.md) | The `topup` commands, flags, and environment. |
 | [Contract deployment](../deploy/CONTRACTS.md) | Deploying and verifying the deterministic forwarder factory on a chain. |
 | [Backup and restore](../deploy/RESTORE.md) | WAL-G backups, the restore-check variant, restores, and drills. |
 | [Runbooks](../deploy/runbooks/README.md) | One runbook per alert or incident, and the alert index. |
+| [Phala's instance](../deploy/phala.md) | Phala's own deployment, as a worked example: its staging routes, the reference product behind the demo, the website, and its onboarding policy. |
 
 ## Reference
 

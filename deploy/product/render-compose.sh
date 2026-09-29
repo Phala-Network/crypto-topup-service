@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Renders the reference-product compose for a CVM (deploy/README.md, "Staging reference product")
+# Renders the reference-product compose for a CVM (deploy/phala.md, "Staging reference product")
 # with deploy/render-compose.sh: PRODUCT_IMAGE to a digest, the public settings (TOPUP_ORIGIN,
 # PRODUCT_PUBLIC_URL, PRODUCT_DOMAIN, PRODUCT_GATEWAY_DOMAIN, PRODUCT_DRIVER_PUBLIC_KEY) inline
 # from the environment (each chain's keyless RPC URL is committed in the source), and

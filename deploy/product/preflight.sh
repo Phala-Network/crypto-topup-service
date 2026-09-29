@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Preflight for the staging reference-product CVM (deploy/README.md, "Staging reference product").
+# Preflight for the staging reference-product CVM (deploy/phala.md, "Staging reference product").
 # Read-only against remote systems, like deploy/preflight.sh: it reads the env file, the compose
 # rendered by deploy/product/render-compose.sh (which holds the public settings), the image in its
 # registry, the product's RPC of each of its chains, topup's attestation endpoint, and the Phala
@@ -145,7 +145,7 @@ if docker compose -f "$compose" config --no-interpolate --format json >"$tmp/com
         [[ "${setting[$name]-}" =~ $origin_pattern ]] ||
             fail "$name must be https://HOST[:PORT] in lowercase with no path"
     done
-    # The website's origin, the only one the demo's API allows (deploy/README.md, "Website").
+    # The website's origin, the only one the demo's API allows (deploy/phala.md, "Website").
     [[ "${web_origin-}" =~ $origin_pattern && "$web_origin" != "${setting[PRODUCT_PUBLIC_URL]-}" ]] ||
         fail "the product config's web_origin must be the website's https://HOST, not PRODUCT_PUBLIC_URL"
     if [[ "${setting[INGRESS_GATEWAY_DOMAIN]}" == *.invalid ]]; then

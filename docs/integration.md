@@ -346,7 +346,7 @@ it moved its forwarder's balance to your treasury (§1.7). Nothing is reported a
 the route's confirmation (two blocks on Ethereum)
 ([architecture §7](architecture.md#7-states-and-pump)).
 Phala's staging deposit driver asserts these outcomes on Sepolia
-([deploy/README.md](../deploy/README.md#abnormal-paths)); the sandbox scenarios assert them
+([deploy/README.md](../deploy/phala.md#abnormal-paths)); the sandbox scenarios assert them
 locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 
 | Payment | Outcome visible to you |
@@ -1062,7 +1062,7 @@ set your own on each chain first (§1.6).
 For example, Phala's own instance, which serves only Phala Cloud's account: production
 `https://pay-api.phala.com` (live: Ethereum Mainnet; test: Sepolia; not deployed yet) and staging
 `https://pay-api-staging.phala.com` (test: Sepolia and Base Sepolia; internal pre-production,
-[deploy/README.md, "Phala's instance"](../deploy/README.md#phalas-instance)).
+[deploy/phala.md, "Phala's instance"](../deploy/phala.md)).
 
 ### 4.2 Testing your receiver
 

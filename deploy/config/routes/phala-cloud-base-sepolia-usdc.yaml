@@ -16,7 +16,7 @@ chain:
   # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
   # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
   confirmations: safe
-  rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/README.md, "Staging routes")
+  rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
   sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
 asset:

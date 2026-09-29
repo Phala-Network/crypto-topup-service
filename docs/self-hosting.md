@@ -87,7 +87,7 @@ the merchant's steps with the account's keys, never with the admin key.
    [deploy/README.md, "One-time setup"](../deploy/README.md#one-time-setup-human-only-repository-owner)
    and ["Attested settings"](../deploy/README.md#attested-settings). The reference product's
    variables (`STAGING_PRODUCT_CVM_ID`, `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`) are for
-   Phala's demo and not needed.
+   Phala's demo ([Phala's instance](../deploy/phala.md)) and not needed.
 6. **The other workflows a fork inherits.** CI runs on pull requests and needs no settings.
    [Restore drill](../.github/workflows/restore-drill.yml) runs weekly on a local stack, with no
    secrets. [Verify contracts](../.github/workflows/verify-contracts.yml) runs daily in the
@@ -111,7 +111,7 @@ files are committed and attested: a new route is a pull request to your fork and
   Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin; and the
   same two tokens on Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and
   `phala-cloud-base-sepolia-usdc-usd`, credited at the OP-stack `safe` head, with providers of
-  their own ([deploy/README.md, "Staging routes"](../deploy/README.md#staging-routes)).
+  their own ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
 - **Your own routes.** The fields and their defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment), and
   [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A

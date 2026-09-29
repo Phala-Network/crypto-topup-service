@@ -1,4 +1,4 @@
-# Staging reference product CVM (deploy/README.md, "Staging reference product"): the webhook
+# Staging reference product CVM (deploy/phala.md, "Staging reference product"): the webhook
 # receiver with fulfillment, the account API, and the API of the live demo on the Phala Pay website
 # (https://pay.phala.com, `web_origin`, served by Cloudflare) at PRODUCT_PUBLIC_URL/api/ of
 # deploy/product/reference_product for the phala-cloud product on the staging routes, served

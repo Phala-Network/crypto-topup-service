@@ -87,7 +87,7 @@ Each migration, in the order it applies.
 docs/architecture.md §6. The pre-tenancy history (`20260922000000_initial_schema` through
 `20261003000000_fast_credit`) was squashed into it without a data migration, because no
 environment holding that history is kept: Phala's staging was reset for it
-([deploy/README.md, "Staging reset"](../../../deploy/README.md#staging-reset-human-only)) and
+([deploy/phala.md, "Staging reset"](../../../deploy/phala.md#staging-reset-human-only)) and
 production was never deployed. It runs only on an empty database; on a database that still holds the old history the
 migrator refuses to start, because the applied versions are missing from the binary.
 

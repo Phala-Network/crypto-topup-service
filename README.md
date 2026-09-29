@@ -51,7 +51,7 @@ To see it running, [pay.phala.com](https://pay.phala.com/) has a live demo: a cl
 billing page that takes test PHA and test USDC on Sepolia and Base Sepolia. The site is static, on
 Cloudflare Workers; its demo calls an API-only reference merchant backend at
 `pay-demo-api.phala.com`, an ordinary merchant account of Phala's staging instance
-([staging reference product](deploy/README.md#staging-reference-product)).
+([staging reference product](deploy/phala.md#staging-reference-product)).
 
 ## Features
 

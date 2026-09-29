@@ -2,7 +2,7 @@
 
 `serve` runs the product service (reference_product.server); `deposit` drives one deposit through
 a running product (reference_product.driver); with no mode, both run in one process
-(deploy/sandbox/run-local.sh). See deploy/README.md, "Staging reference product":
+(deploy/sandbox/run-local.sh). See deploy/phala.md, "Staging reference product":
 
     PYTHONPATH=deploy/product uv run --locked --project sdk/python \\
         python -m reference_product [MODE] --config FILE

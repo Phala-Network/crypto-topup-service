@@ -6,7 +6,7 @@ pays the exact locked amount with the chain's test token, polls until the deposi
 credited, and checks that the product ledger credited the locked amount exactly once and received
 the verified `deposit.credited` webhook. Its options drive the abnormal paths instead: a different
 amount, a payment after the quote window, another token, and
-a refund request for a rejected deposit (deploy/README.md, "Abnormal paths").
+a refund request for a rejected deposit (deploy/phala.md, "Abnormal paths").
 """
 
 from __future__ import annotations
