@@ -45,7 +45,8 @@ export function Backend({
   const order = timeline?.quote?.metadata["order_id"];
   const deposit = timeline?.deposit ?? null;
   return (
-    <div className="flex min-w-0 flex-col gap-3">
+    // At lg and up the console follows the scroll beside the product, whichever is taller.
+    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:self-start">
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"

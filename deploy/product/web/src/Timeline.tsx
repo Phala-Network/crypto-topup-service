@@ -67,12 +67,13 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
   },
 };
 
-// A step's line in columns: its time, its dot, its title, the time since sending (right-aligned),
-// and the opener. On a phone the time's column shows only once a payment has times.
+// A step's line in columns: its time, its dot, its title with the opener, and the time since
+// sending, which ends on the card's right content edge. On a phone the time's column shows only
+// once a payment has times.
 const STEP_GRID =
-  "grid grid-cols-[3.5rem_1rem_minmax(0,1fr)_auto_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto_0.875rem] sm:gap-x-3";
+  "grid grid-cols-[3.5rem_1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto] sm:gap-x-3";
 const UNTIMED_STEP_GRID =
-  "grid grid-cols-[1rem_minmax(0,1fr)_auto_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto_0.875rem] sm:gap-x-3";
+  "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto] sm:gap-x-3";
 // Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
 // phone, under its time, to keep the details' width.
 const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
@@ -97,8 +98,8 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
   if (loading === null) {
     return (
       <div className="flex flex-col gap-3">
-        <p className="px-2 text-xs text-pretty text-muted-foreground">
-          Start a payment to follow it here, live, with real data only.
+        <p className="px-2 text-sm text-pretty text-muted-foreground">
+          Each step of a payment, as your backend receives it, with real times from the chain and the service.
         </p>
         <ol className="flex flex-col" aria-label="The steps of a payment">
           {PREVIEW.map((key) => (
@@ -235,28 +236,30 @@ function StreamStep({
             )}
           </span>
           <StepDot state={step.state} />
-          <span
-            className={cn(
-              "min-w-0 text-sm text-pretty",
-              step.state === "upcoming" && "text-muted-foreground",
-              step.state === "current" && "font-medium",
-              step.state === "failed" && "text-destructive",
-            )}
-          >
-            {copy.title}
-            <span className="sr-only">, {stateLabel(step.state)}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span
+              className={cn(
+                "min-w-0 text-sm text-pretty",
+                step.state === "upcoming" && "text-muted-foreground",
+                step.state === "current" && "font-medium",
+                step.state === "failed" && "text-destructive",
+              )}
+            >
+              {copy.title}
+              <span className="sr-only">, {stateLabel(step.state)}</span>
+            </span>
+            <ChevronDown
+              className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 group-data-[state=open]/trigger:rotate-180 group-data-[state=open]/trigger:opacity-100 motion-reduce:transition-none"
+              aria-hidden="true"
+            />
           </span>
-          <span className="ml-auto text-right font-mono text-xs text-muted-foreground tabular-nums">
-            {elapsed !== null
-              ? `+${duration(elapsed)}`
-              : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined
-                ? <span className="font-sans">usually {copy.usually}</span>
-                : null}
+          <span className="text-right font-mono text-xs text-muted-foreground tabular-nums">
+            {elapsed !== null ? (
+              `+${duration(elapsed)}`
+            ) : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined ? (
+              <span className="font-sans">usually {copy.usually}</span>
+            ) : null}
           </span>
-          <ChevronDown
-            className="size-3.5 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 group-data-[state=open]/trigger:rotate-180 group-data-[state=open]/trigger:opacity-100 motion-reduce:transition-none"
-            aria-hidden="true"
-          />
         </CollapsibleTrigger>
         {failed && <p className={cn("pb-1 text-xs text-pretty text-destructive", STEP_INDENT)}>{copy.failed}</p>}
         <CollapsibleContent className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", STEP_INDENT)}>

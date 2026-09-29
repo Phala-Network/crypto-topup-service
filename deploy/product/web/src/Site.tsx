@@ -2,6 +2,7 @@ import { BookOpen, Braces, Cpu, Menu, Rocket, Server, Wallet, type LucideIcon } 
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { GitHubIcon } from "./common.js";
+import phaMark from "./icons/pha.svg";
 import { ICON_BUTTON, ThemeToggle, type Theme } from "./theme.js";
 
 const REPO = "https://github.com/Phala-Network/phala-pay";
@@ -98,15 +99,9 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
   );
 }
 
+/** Phala's "P" mark (./icons/pha.svg), the Phala Pay logo, as in the favicon and link preview. */
 function Logo() {
-  return (
-    <span
-      className="flex size-6 items-center justify-center rounded-md bg-neutral-950 ring-1 ring-white/15 ring-inset"
-      aria-hidden="true"
-    >
-      <span className="size-2.5 rounded-[3px] bg-brand" />
-    </span>
-  );
+  return <img src={phaMark} alt="" className="size-6 rounded-md ring-1 ring-foreground/10" />;
 }
 
 // The hero's two calls to action: one height, whatever their variant.

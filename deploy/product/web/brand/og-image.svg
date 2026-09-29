@@ -10,11 +10,11 @@
   <rect width="1200" height="630" fill="url(#light)"/>
 
   <g font-family="Geist Variable">
-    <!-- The wordmark: the favicon's mark (public/favicon.svg) and the name. -->
+    <!-- The wordmark: Phala's "P" mark (public/favicon.svg) and the name. -->
     <g transform="translate(80 72) scale(2.5)">
-      <rect width="24" height="24" rx="6" fill="#0a0a0a"/>
-      <rect x="0.5" y="0.5" width="23" height="23" rx="5.5" fill="none" stroke="#fff" stroke-opacity="0.15"/>
-      <rect x="7" y="7" width="10" height="10" rx="3" fill="#cefc5d"/>
+      <rect width="24" height="24" rx="5" fill="#000"/>
+      <rect x="0.5" y="0.5" width="23" height="23" rx="4.5" fill="none" stroke="#fff" stroke-opacity="0.15"/>
+      <path fill="#D1FF52" fill-rule="evenodd" d="M4 4h12.571v3.429H20V12h-3.429V7.429H7.43V12H4zm3.429 11.429h9.142V12H7.43zm0 0V20H4v-4.571z" clip-rule="evenodd"/>
     </g>
     <text x="156" y="115" font-size="40" font-weight="600" letter-spacing="-0.8" fill="#fafafa">Phala Pay</text>
 
