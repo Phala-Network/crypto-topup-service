@@ -19,7 +19,8 @@ export default defineConfig(({ isPreview }) => ({
     ...(isPreview ? {} : { domains: ["pay.phala.com"] }),
     // The site is served only on its custom domain: no second copy at *.workers.dev.
     workersDev: false,
-    // Each uploaded version keeps a public preview URL on workers.dev.
-    previewUrls: true,
+    // Nor at a workers.dev URL per version. A branch's Preview has its own workers.dev URLs, which cf
+    // turns on for Previews whatever this says.
+    previewUrls: false,
   },
 }));
