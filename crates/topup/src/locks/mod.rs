@@ -790,11 +790,21 @@ pub async fn cancel<'c>(
     id: Uuid,
 ) -> Result<RateLock, RateLockError> {
     let mut transaction = db.begin().await?;
-    let row = get_in(&mut transaction, scope, id)
+    let result = cancel_in(&mut transaction, routes, scope, actor, id).await;
+    crate::db::settle(transaction, result).await
+}
+
+async fn cancel_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    routes: &RouteSet,
+    scope: Scope,
+    actor: &Actor,
+    id: Uuid,
+) -> Result<RateLock, RateLockError> {
+    let row = get_in(transaction, scope, id)
         .await?
         .ok_or(RateLockError::NotFound)?;
     if row.status == RateLockStatus::Cancelled {
-        transaction.commit().await?;
         return Ok(row);
     }
     if row.status != RateLockStatus::Open {
@@ -810,13 +820,13 @@ pub async fn cancel<'c>(
     // until this cancellation commits.
     sqlx::query("SELECT 1 FROM addresses WHERE id = $1 FOR UPDATE")
         .bind(row.address_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
     let paid: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM deposits WHERE address_id = $1 AND state <> 'reversed')",
     )
     .bind(row.address_id)
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut **transaction)
     .await?;
     if paid {
         return Err(RateLockError::PendingPayment);
@@ -829,10 +839,10 @@ pub async fn cancel<'c>(
         "#,
     )
     .bind(row.id)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     audit::insert(
-        &mut *transaction,
+        &mut **transaction,
         &audit::Entry {
             account_id: Some(scope.account_id()),
             actor,
@@ -848,8 +858,7 @@ pub async fn cancel<'c>(
         crate::db::EventObject::Quote(row.id),
         actor,
     );
-    crate::db::enqueue_in(&mut transaction, routes, &event, None).await?;
-    transaction.commit().await?;
+    crate::db::enqueue_in(transaction, routes, &event, None).await?;
     Ok(RateLock {
         status: RateLockStatus::Cancelled,
         ..row

@@ -91,3 +91,22 @@ pub(crate) fn parse_reason(
         })
         .transpose()
 }
+
+/// Commits `transaction` after a success and rolls it back after an error, before the caller
+/// answers. Dropping it instead only queues the rollback until its connection is next used, so its
+/// row locks would outlive the answer, and a worker that skips locked rows would pass them over.
+pub async fn settle<T, E: From<sqlx::Error>>(
+    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    match result {
+        Ok(value) => {
+            transaction.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            transaction.rollback().await?;
+            Err(error)
+        }
+    }
+}

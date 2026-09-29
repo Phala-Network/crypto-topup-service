@@ -420,6 +420,15 @@ pub async fn request_refund<'c>(
     refund: &NewRefund<'_>,
 ) -> Result<Uuid, ApiError> {
     let mut transaction = db.begin().await?;
+    let result = request_refund_in(&mut transaction, routes, refund).await;
+    crate::db::settle(transaction, result).await
+}
+
+async fn request_refund_in(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    routes: &RouteSet,
+    refund: &NewRefund<'_>,
+) -> Result<Uuid, ApiError> {
     let row = sqlx::query(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
@@ -439,7 +448,7 @@ pub async fn request_refund<'c>(
     .bind(refund.scope.account_id())
     .bind(refund.scope.livemode())
     .bind(&refund.route.route)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await?
     .ok_or_else(|| ApiError::not_found().with_param("deposit"))?;
 
@@ -470,7 +479,7 @@ pub async fn request_refund<'c>(
         "#,
     )
     .bind(refund.deposit_id)
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut **transaction)
     .await?;
     let remaining = deposit_amount
         .checked_sub(parse_atomic(reserved)?)
@@ -506,10 +515,10 @@ pub async fn request_refund<'c>(
     .bind(amount.to_string())
     .bind(format!("{:#x}", refund.destination))
     .bind(sqlx::types::Json(refund.metadata))
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     insert_audit_tx(
-        &mut transaction,
+        transaction,
         Some(refund.scope.account_id()),
         refund.actor,
         "refund.create",
@@ -522,8 +531,7 @@ pub async fn request_refund<'c>(
         crate::db::EventObject::Refund(refund_id),
         refund.actor,
     );
-    crate::db::enqueue_in(&mut transaction, routes, &event, None).await?;
-    transaction.commit().await?;
+    crate::db::enqueue_in(transaction, routes, &event, None).await?;
     Ok(refund_id)
 }
 
@@ -548,7 +556,29 @@ pub async fn mark_refund_paid<'c>(
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = db.begin().await?;
-    let (status, current_hash, current_log) = locked_refund(&mut transaction, scope, refund_id)
+    let result = mark_refund_paid_in(
+        &mut transaction,
+        routes,
+        scope,
+        refund_id,
+        tx_hash,
+        receipt_log_index,
+        actor,
+    )
+    .await;
+    crate::db::settle(transaction, result).await
+}
+
+async fn mark_refund_paid_in(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    routes: &RouteSet,
+    scope: Scope,
+    refund_id: Uuid,
+    tx_hash: B256,
+    receipt_log_index: Option<u64>,
+    actor: &Actor,
+) -> Result<(), ApiError> {
+    let (status, current_hash, current_log) = locked_refund(transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let tx_hash = format!("{tx_hash:#x}");
@@ -575,7 +605,7 @@ pub async fn mark_refund_paid<'c>(
         return Err(ApiError::refund_unexpected_state(status));
     }
     let object = crate::db::EventObject::Refund(refund_id);
-    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
+    let before = crate::db::render(transaction, routes, scope, object).await?;
     let updated = sqlx::query(
         r#"
         UPDATE refunds
@@ -587,7 +617,7 @@ pub async fn mark_refund_paid<'c>(
     .bind(refund_id)
     .bind(&tx_hash)
     .bind(receipt_log_index)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await;
     match updated {
         Ok(_) => {}
@@ -599,7 +629,7 @@ pub async fn mark_refund_paid<'c>(
         Err(error) => return Err(error.into()),
     }
     insert_audit_tx_with_reason(
-        &mut transaction,
+        transaction,
         Some(scope.account_id()),
         actor,
         "refund.mark_paid",
@@ -608,8 +638,7 @@ pub async fn mark_refund_paid<'c>(
     )
     .await?;
     let event = crate::db::NewOutboxEvent::new("refund.updated", scope, object, actor);
-    crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
-    transaction.commit().await?;
+    crate::db::enqueue_in(transaction, routes, &event, Some(&before)).await?;
     Ok(())
 }
 
@@ -625,7 +654,18 @@ pub async fn cancel_refund<'c>(
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = db.begin().await?;
-    let (status, tx_hash, _) = locked_refund(&mut transaction, scope, refund_id)
+    let result = cancel_refund_in(&mut transaction, routes, scope, refund_id, actor).await;
+    crate::db::settle(transaction, result).await
+}
+
+async fn cancel_refund_in(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    routes: &RouteSet,
+    scope: Scope,
+    refund_id: Uuid,
+    actor: &Actor,
+) -> Result<(), ApiError> {
+    let (status, tx_hash, _) = locked_refund(transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     match status.as_str() {
@@ -639,13 +679,13 @@ pub async fn cancel_refund<'c>(
         _ => return Err(ApiError::refund_unexpected_state(status)),
     }
     let object = crate::db::EventObject::Refund(refund_id);
-    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
+    let before = crate::db::render(transaction, routes, scope, object).await?;
     sqlx::query("UPDATE refunds SET status = 'canceled', updated_at = now() WHERE id = $1")
         .bind(refund_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
     insert_audit_tx(
-        &mut transaction,
+        transaction,
         Some(scope.account_id()),
         actor,
         "refund.cancel",
@@ -653,8 +693,7 @@ pub async fn cancel_refund<'c>(
     )
     .await?;
     let event = crate::db::NewOutboxEvent::new("refund.updated", scope, object, actor);
-    crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
-    transaction.commit().await?;
+    crate::db::enqueue_in(transaction, routes, &event, Some(&before)).await?;
     Ok(())
 }
 
@@ -764,6 +803,8 @@ pub async fn nudge_deposit(
         .await?
         .ok_or_else(ApiError::not_found)?;
     if !matches!(state.as_str(), "detected" | "confirmed") {
+        // Awaited, so the deposit is unlocked before the refusal is answered.
+        transaction.rollback().await?;
         return Err(ApiError::deposit_unexpected_state(&state));
     }
     let (next_attempt_at, account_id) = sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(

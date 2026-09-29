@@ -1,7 +1,7 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
-import { AppWindow, Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
+import { Check, CircleAlert, Cloud, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -41,7 +41,8 @@ const METHODS: { id: Method; label: string }[] = [
 ];
 
 /**
- * The product: the cloud console's billing page, as its customer sees it, with Phala Pay inside.
+ * The product: a made-up cloud provider's billing page (Acme Cloud, at acme.example), as its
+ * customer sees it in their browser, with Phala Pay inside.
  * Only customer-facing UI belongs here; what the backend sees is in ./Backend.
  */
 export function Product({
@@ -89,11 +90,12 @@ export function Product({
     />
   );
   return (
-    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24">
-      <AreaLabel icon={<AppWindow />} title="Your product" text="What your customer sees" />
+    <div className="flex min-w-0 flex-col gap-3">
+      <AreaLabel step={1} title="Your customer's view" text="Your app's billing page" />
+      {/* An app in a browser window: the raised surface of the two. */}
       <section
         aria-labelledby="product-title"
-        className="product-app overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
+        className="product-app overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg shadow-black/5 dark:shadow-black/40"
       >
         <div className="flex h-10 items-center gap-3 border-b bg-muted/40 px-4">
           <span className="flex gap-1.5" aria-hidden="true">
@@ -101,18 +103,33 @@ export function Product({
             <span className="size-2.5 rounded-full bg-foreground/15" />
             <span className="size-2.5 rounded-full bg-foreground/15" />
           </span>
-          <span className="flex min-w-0 flex-1 items-center justify-center gap-1.5 text-xs text-muted-foreground" aria-hidden="true">
-            <Lock className="size-3 shrink-0" />
-            <span className="truncate">Cloud Console · Billing</span>
+          {/* The address bar: the app's page, as a browser shows it. */}
+          <span className="flex min-w-0 flex-1 justify-center" aria-hidden="true">
+            <span className="flex h-6 w-full max-w-56 min-w-0 items-center justify-center gap-1.5 rounded-md border bg-background px-2.5 text-xs text-muted-foreground">
+              <Lock className="size-3 shrink-0" />
+              <span className="truncate">acme.example/billing</span>
+            </span>
           </span>
           {(network?.testnet ?? true) && <TestnetBadge network={network?.name ?? "a"} />}
         </div>
         <div className="flex flex-col gap-6 p-5 sm:p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex flex-col gap-1">
-              <h2 id="product-title" className="sr-only">
-                Cloud Console · Billing
+          <div className="flex flex-col gap-5">
+            {/* The app's own header: its name and page, and the signed-in workspace. */}
+            <div className="flex items-center justify-between gap-4">
+              <h2 id="product-title" className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                <span
+                  className="flex size-5 shrink-0 items-center justify-center rounded-md bg-foreground text-background"
+                  aria-hidden="true"
+                >
+                  <Cloud className="size-3" />
+                </span>
+                <span className="truncate">
+                  Acme Cloud<span className="font-normal text-muted-foreground"> · Billing</span>
+                </span>
               </h2>
+              <Workspace account={account} />
+            </div>
+            <div className="flex flex-col gap-1">
               <h3 id="balance-title" className="text-sm text-muted-foreground">
                 Account balance
               </h3>
@@ -125,7 +142,6 @@ export function Product({
                 {account === null ? <Skeleton className="h-9 w-32" /> : dollars(account.balance)}
               </div>
             </div>
-            <Workspace account={account} />
           </div>
           {accountError !== null && (
             <Alert variant="destructive">
@@ -185,14 +201,25 @@ export function Product({
   );
 }
 
-/** A small caption above each of the page's two areas. */
-export function AreaLabel({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
+/**
+ * The caption above each of the demo's two areas, numbered as a guide's steps are; on a phone its
+ * text on a line of its own.
+ */
+export function AreaLabel({ step, title, text }: { step: number; title: string; text: string }) {
   return (
-    <p className="flex h-5 items-center gap-2 px-1 text-sm [&_svg]:size-4 [&_svg]:text-muted-foreground">
-      {icon}
-      <span>
+    <p className="flex min-h-5 items-start gap-2.5 px-1 text-sm">
+      <span
+        className="flex size-5 shrink-0 items-center justify-center rounded-full border font-mono text-xs text-muted-foreground"
+        aria-hidden="true"
+      >
+        {step}
+      </span>
+      <span className="min-w-0">
         <span className="font-medium">{title}</span>
-        <span className="text-muted-foreground"> · {text}</span>
+        <span className="text-muted-foreground max-sm:block">
+          <span className="max-sm:hidden"> · </span>
+          {text}
+        </span>
       </span>
     </p>
   );
@@ -442,13 +469,13 @@ function AmountPicker({
         <Label id={`${id}-amount-label`} asChild>
           <span>Amount</span>
         </Label>
-        {/* Four across where they fit, else two by two. */}
+        {/* Four across where each has room for its label (a full-width product), else two by two. */}
         <div className="@container">
           <RadioGroup
             value={String(preset)}
             onValueChange={(value) => setPreset(value === "custom" ? "custom" : Number(value))}
             aria-labelledby={`${id}-amount-label`}
-            className="grid-cols-2 gap-2 @sm:grid-cols-4"
+            className="grid-cols-2 gap-2 @md:grid-cols-4"
           >
             {options.map((option) => (
               <FieldLabel key={option.value} htmlFor={`${id}-${option.value}`} className={CHOICE}>
@@ -640,7 +667,7 @@ function TestTokens({ network, className }: { network: Network; className?: stri
     <div
       role="note"
       aria-label="Test tokens"
-      className={cn("rounded-xl border bg-card text-sm text-card-foreground shadow-sm", className)}
+      className={cn("rounded-xl border border-dashed text-sm", className)}
     >
       <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
         <span className="font-medium">Need test tokens?</span>
