@@ -105,7 +105,8 @@ impl ReconciliationChain for FinalizedReader {
     }
 }
 
-/// Bounds one finalized-log read, which the reader leaves to its caller, by the request timeout.
+/// Bounds one reader call as a whole by the request timeout: a window's logs and the reads that
+/// complete them, each of which the reader also bounds.
 async fn bounded<T>(
     reader: &FinalizedReader,
     operation: &'static str,
