@@ -1,7 +1,14 @@
-import { Cpu, ShieldCheck, Terminal, Wallet } from "lucide-react";
+import { Cpu, ReceiptText, ShieldCheck, Terminal, Wallet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Empty as EmptyState,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -49,7 +56,7 @@ export function Backend({
     // At lg and up, a live log beside the product: pinned below the site header at the viewport's
     // height, its header fixed and the stream with its tabs scrolling inside. Below lg, its natural
     // height in the page's flow.
-    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20 lg:h-[calc(100svh-6rem)] lg:self-start">
+    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24 lg:h-[calc(100svh-7rem)] lg:self-start">
       <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
       <aside
         aria-label="Behind the scenes"
@@ -72,12 +79,13 @@ export function Backend({
           )}
         </header>
         {/* Radix's viewport wraps its content in a table-display box, which would let wide tables
-            widen the console: a block box keeps the content at the card's width. */}
-        <ScrollArea className="lg:min-h-0 lg:flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+            widen the console: a flex column instead keeps the content at the card's width and at
+            least its height, so an empty tab centres its message in the space left. */}
+        <ScrollArea className="lg:min-h-0 lg:flex-1 [&_[data-slot=scroll-area-viewport]>div]:flex! [&_[data-slot=scroll-area-viewport]>div]:min-h-full [&_[data-slot=scroll-area-viewport]>div]:flex-col">
           <div className="px-3 py-3" aria-live="off">
             <EventStream timeline={timeline} loading={selected?.id ?? null} />
           </div>
-          <Tabs defaultValue="credits" className="gap-0 border-t">
+          <Tabs defaultValue="credits" className="flex-1 gap-0 border-t">
             <TabsList
               variant="line"
               aria-label="Backend"
@@ -95,7 +103,7 @@ export function Backend({
               </Tab>
               <Tab value="trust">Trust</Tab>
             </TabsList>
-            <TabsContent value="credits" className="p-5">
+            <TabsContent value="credits" className="flex flex-col p-5">
               <CreditsTab
                 account={account}
                 selected={selected}
@@ -193,9 +201,19 @@ function CreditsTab({
   networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
-  // One empty state for the panel until the first payment.
+  // One empty state for the panel until the first payment, centred in the space the panel has.
   if (account === null || (account.payments.length === 0 && account.ledger.length === 0 && address === null)) {
-    return <Empty>No credits yet. Pay with crypto in the product to follow a payment here.</Empty>;
+    return (
+      <EmptyState className="p-4">
+        <EmptyHeader>
+          <EmptyMedia variant="icon" className="text-muted-foreground">
+            <ReceiptText aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle>No credits yet</EmptyTitle>
+          <EmptyDescription>Pay with crypto in the product to follow a payment here.</EmptyDescription>
+        </EmptyHeader>
+      </EmptyState>
+    );
   }
   return (
     <div className="flex flex-col gap-8">

@@ -89,7 +89,7 @@ export function Product({
     />
   );
   return (
-    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-20">
+    <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24">
       <AreaLabel icon={<AppWindow />} title="Your product" text="What your customer sees" />
       <section
         aria-labelledby="product-title"
