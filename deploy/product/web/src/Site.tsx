@@ -57,7 +57,7 @@ const NAV = [
 
 export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChange: (theme: Theme) => void }) {
   return (
-    <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+    <header className="sticky top-0 z-50 border-b bg-background">
       <div className={`${CONTAINER} flex h-14 items-center justify-between gap-4`}>
         <a href="#top" className="flex items-center gap-2 rounded-md text-[0.9375rem] font-semibold tracking-tight">
           <Logo />

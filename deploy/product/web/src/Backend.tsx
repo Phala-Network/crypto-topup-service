@@ -209,7 +209,7 @@ function PaymentsTab({
                   Nets to
                 </TableHead>
                 <TableHead scope="col" className="text-right">
-                  <span className="sr-only">Timeline</span>
+                  Timeline
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -320,7 +320,10 @@ function PaymentsTab({
                     <TableCell>
                       <span className="flex flex-wrap items-center gap-1.5">
                         {line.kind === "bonus" && <Badge variant="outline">Bonus</Badge>}
-                        <span className="font-mono text-muted-foreground">{line.reason}</span>
+                        {/* Event names in mono; a bonus grant's label is prose. */}
+                        <span className={cn("text-muted-foreground", line.reason.startsWith("deposit.") && "font-mono")}>
+                          {line.reason}
+                        </span>
                       </span>
                     </TableCell>
                     <TableCell className={cn("text-right", line.amount < 0 ? "text-destructive" : "text-success")}>

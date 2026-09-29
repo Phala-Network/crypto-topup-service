@@ -242,7 +242,7 @@ function Workspace({ account }: { account: Account | null }) {
           {copied ? <Check className="size-3 shrink-0" aria-hidden="true" /> : <Copy className="size-3 shrink-0" aria-hidden="true" />}
         </button>
       </TooltipTrigger>
-      <TooltipContent>{copied ? "Copied" : "Your demo account, kept in this browser's cookie."}</TooltipContent>
+      <TooltipContent align="end">{copied ? "Copied" : "Your demo account, kept in this browser's cookie."}</TooltipContent>
     </Tooltip>
   );
 }
@@ -332,8 +332,8 @@ function PaymentOptions({
 }
 
 /**
- * A token row: its mark, symbol, and name; on the right the demo merchant's bonus, if any, and its
- * price terms; checked, a tick. In a narrow list the bonus moves under the name.
+ * A token row: its mark, symbol with the demo merchant's bonus, if any, and name; on the right its
+ * price terms; checked, a tick.
  */
 function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet: boolean }) {
   const bonus =
@@ -358,21 +358,18 @@ function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet
         />
         <TokenIcon asset={asset.asset} />
         <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-          <span className="text-sm font-medium">{asset.symbol}</span>
+          <span className="flex items-center text-sm font-medium">
+            {asset.symbol}
+            {bonus !== null && <span className="ml-2 inline-flex">{bonus}</span>}
+          </span>
           <span className="w-full truncate text-xs font-normal text-muted-foreground">
             {testnet ? `Test ${tokenFullName(asset.asset)}` : tokenFullName(asset.asset)}
           </span>
-          {bonus !== null && <span className="@md:hidden">{bonus}</span>}
         </span>
-        {bonus !== null && <span className="hidden @md:inline-flex">{bonus}</span>}
-        {/* A stablecoin is valued at $1.00; any other token's rate is known only once a quote
-            locks it (the locked-rate line). */}
+        {/* A stablecoin is valued at $1.00; any other token at the market rate, which a quote
+            locks (the locked-rate line). */}
         <span className="shrink-0 text-sm font-normal tabular-nums" data-testid="token-price">
-          {asset.pricing === "stablecoin" ? (
-            "$1.00"
-          ) : (
-            <span className="text-xs text-muted-foreground">Price locked at checkout</span>
-          )}
+          {asset.pricing === "stablecoin" ? "$1.00" : "Market rate"}
         </span>
         <span
           className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 peer-data-checked:opacity-100"
@@ -588,13 +585,12 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
         <dl className="mt-1 grid w-full gap-1.5 tabular-nums">
           <div className="flex justify-between gap-3">
             <dt>Top-up</dt>
-            <dd className="text-success">{credit === null ? "—" : dollars(credit)}</dd>
+            <dd>{credit === null ? "—" : dollars(credit)}</dd>
           </div>
           {bonus > 0 && (
             <div className="flex justify-between gap-3" data-testid="bonus-credited">
               <dt>
                 {symbol} bonus{bps > 0 ? ` +${percent(bps)}` : ""}
-                <span className="text-muted-foreground"> · this demo merchant's promotion</span>
               </dt>
               <dd className="text-success">{signedDollars(bonus)}</dd>
             </div>
@@ -602,7 +598,7 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
           {bonus > 0 && credit !== null && (
             <div className="flex justify-between gap-3 border-t pt-1.5 font-medium">
               <dt>Total</dt>
-              <dd className="text-success">{dollars(credit + bonus)}</dd>
+              <dd>{dollars(credit + bonus)}</dd>
             </div>
           )}
           {row?.tx_hash != null && (
@@ -614,6 +610,7 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
             </div>
           )}
         </dl>
+        {bonus > 0 && <p className="mt-1 text-xs text-muted-foreground">The bonus is this demo merchant's promotion.</p>}
       </AlertDescription>
     </Alert>
   );
