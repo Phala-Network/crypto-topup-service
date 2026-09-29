@@ -791,6 +791,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_that_never_answers_is_retried_instead_of_stalling_the_chain() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let node = axum::Router::new().route("/", axum::routing::post(future::pending::<String>));
+        let server = tokio::spawn(async move { axum::serve(listener, node).await });
+        let reader = FinalizedReader::new(Arc::new(
+            topup_adapters::chain::evm::EvmClient::with_timeout(
+                &format!("http://{address}/"),
+                Duration::from_millis(100),
+            )
+            .expect("local URL")
+            .with_provider("provider-a"),
+        ));
+        let healthy = AtomicBool::new(true);
+        let cancellation = CancellationToken::new();
+        let sleeps = Mutex::new(Vec::new());
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_scan_loop(
+                84_532,
+                &healthy,
+                cancellation.clone(),
+                || async {
+                    reader.finalized_head().await?;
+                    Ok(ScanStats::default())
+                },
+                |duration| {
+                    sleeps.lock().expect("sleeps lock").push(duration);
+                    cancellation.cancel();
+                    future::ready(())
+                },
+                || u64::MAX,
+            ),
+        )
+        .await;
+        server.abort();
+
+        result
+            .expect("the backstop's read is bounded")
+            .expect("a timed-out read is retried, not fatal");
+        assert_eq!(
+            *sleeps.lock().expect("sleeps lock"),
+            vec![backoff(0, u64::MAX)]
+        );
+        assert!(!healthy.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
     async fn one_stopped_chain_stops_every_chain_and_fails_the_scanner() {
         let scanners = CancellationToken::new();
         let mut tasks = JoinSet::new();

@@ -16,6 +16,7 @@ use crate::chain::flush::{
 };
 use crate::redaction::{Redacted, RedactedTransportError};
 use alloy::eips::{BlockId, BlockNumberOrTag};
+use alloy::network::{AnyNetwork, AnyTransactionReceipt, ReceiptResponse as _};
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::{CallItem, MULTICALL3_ADDRESS, MulticallError, Provider, RootProvider};
 use alloy::rpc::client::ClientBuilder;
@@ -358,12 +359,15 @@ pub const MULTICALL_CHUNK: usize = 200;
 
 /// Alloy HTTP client for one RPC provider of one chain, shared by every consumer.
 ///
-/// Errors carry the provider label, never the URL. Methods used by the reconciler, refunds,
-/// sanctions screening and startup checks are bounded by the request timeout; the
-/// finalized-log reads behind [`FinalizedReader`] are not, as the scanner and confirm step
-/// bound them themselves.
+/// Errors carry the provider label, never the URL. Every request is bounded by the request
+/// timeout, those of the [`FinalizedReader`]s built on it included, and a request that outlasts
+/// it fails as a transport error, which every caller retries.
 pub struct EvmClient {
     provider: RootProvider,
+    /// The same transport read with alloy's catch-all network, for receipts: its receipt envelope
+    /// takes any EIP-2718 type, such as an OP-stack deposit's (`0x7e`), which the Ethereum
+    /// network's refuses.
+    receipts: RootProvider<AnyNetwork>,
     endpoint: Redacted,
     request_timeout: Duration,
     labels: CallLabels,
@@ -380,13 +384,16 @@ impl fmt::Debug for EvmClient {
     }
 }
 
-/// An HTTP provider whose every request is counted under `labels` ([`metrics`]).
-fn counted_provider(endpoint: &Redacted, labels: &CallLabels) -> RootProvider {
-    RootProvider::new(
-        ClientBuilder::default()
-            .layer(CountingLayer::new(labels.clone()))
-            .http(endpoint.expose().clone()),
-    )
+/// Ethereum and catch-all providers on one HTTP client whose every request is counted under
+/// `labels` ([`metrics`]).
+fn counted_providers(
+    endpoint: &Redacted,
+    labels: &CallLabels,
+) -> (RootProvider, RootProvider<AnyNetwork>) {
+    let client = ClientBuilder::default()
+        .layer(CountingLayer::new(labels.clone()))
+        .http(endpoint.expose().clone());
+    (RootProvider::new(client.clone()), RootProvider::new(client))
 }
 
 impl EvmClient {
@@ -399,8 +406,10 @@ impl EvmClient {
     pub fn with_timeout(rpc_url: &str, request_timeout: Duration) -> Result<Self, ChainError> {
         let endpoint = Redacted::parse(rpc_url).map_err(|_| ChainError::InvalidUrl)?;
         let labels = CallLabels::default();
+        let (provider, receipts) = counted_providers(&endpoint, &labels);
         Ok(Self {
-            provider: counted_provider(&endpoint, &labels),
+            provider,
+            receipts,
             endpoint,
             request_timeout,
             labels,
@@ -414,7 +423,7 @@ impl EvmClient {
         let provider = provider.into();
         self.labels.provider.clone_from(&provider);
         self.endpoint = self.endpoint.with_provider(provider);
-        self.provider = counted_provider(&self.endpoint, &self.labels);
+        (self.provider, self.receipts) = counted_providers(&self.endpoint, &self.labels);
         self
     }
 
@@ -422,7 +431,7 @@ impl EvmClient {
     #[must_use]
     pub fn with_chain_id(mut self, chain_id: u64) -> Self {
         self.labels.chain_id = Some(chain_id);
-        self.provider = counted_provider(&self.endpoint, &self.labels);
+        (self.provider, self.receipts) = counted_providers(&self.endpoint, &self.labels);
         self
     }
 
@@ -670,13 +679,10 @@ impl EvmClient {
         .await
     }
 
-    /// Returns the provider's current `latest` block number. Used only by the display-only head
-    /// scan; nothing that affects money reads above `finalized`.
+    /// Returns the provider's current `latest` block number, which the head loop polls.
     pub async fn latest_head(&self) -> Result<u64, ChainError> {
-        self.provider
-            .get_block_number()
+        self.bounded("latest head fetch", self.provider.get_block_number())
             .await
-            .map_err(|error| self.transport("latest head fetch", &error))
     }
 }
 
@@ -684,15 +690,56 @@ impl EvmClient {
 ///
 /// Each consumer keeps its own finalized-head regression guard and caches, so one consumer's
 /// observations never change what another consumer reads. Every transfer it returns carries its
-/// receipt position and its transaction's sender and nonce, read once per transaction.
+/// receipt position and its transaction's sender and nonce, read once per transaction. Each
+/// request is bounded by the client's request timeout, so a provider that never answers fails the
+/// read with a transport error instead of stalling its caller.
 pub struct FinalizedReader {
     client: Arc<EvmClient>,
     finalized_guard: Mutex<FinalizedGuard>,
     block_times: Mutex<BlockTimes>,
-    /// Block-wide log indexes of a receipt's logs, in receipt order, by `(tx_hash, block_hash)`.
-    receipt_logs: Mutex<FifoCache<(B256, B256), Vec<u64>>>,
+    /// What a receipt says about its transaction, by `(tx_hash, block_hash)`.
+    receipt_facts: Mutex<FifoCache<(B256, B256), ReceiptFacts>>,
     /// A transaction's sender and nonce, which its hash commits to.
     origins: Mutex<FifoCache<B256, (Address, u64)>>,
+}
+
+/// EIP-2718 type of an OP-stack deposit transaction (specs.optimism.io, "Deposits").
+const DEPOSIT_TX_TYPE: u8 = 0x7e;
+
+/// What the reader keeps of one receipt.
+#[derive(Clone, Debug)]
+struct ReceiptFacts {
+    /// Block-wide log indexes of the receipt's logs, in receipt order.
+    log_indexes: Vec<u64>,
+    /// The transaction's sender and nonce when the receipt alone reports them: an OP-stack
+    /// deposit's ([`deposit_origin`]).
+    deposit_origin: Option<(Address, u64)>,
+}
+
+/// The sender and nonce of an OP-stack deposit transaction, from its receipt; `None` for any
+/// other transaction type.
+///
+/// A deposit (type `0x7e`, specs.optimism.io, "Deposits") is derived from an L1 event and carries
+/// no signature and no nonce. Its `from` is the L1 caller of `OptimismPortal.depositTransaction`,
+/// aliased by adding `0x1111000000000000000000000000000000001111` when that caller is a contract,
+/// as for every L1-to-L2 message and bridge mint; the node reports it as the receipt's `from`.
+/// "Despite the lack of signature validation, we still increment the nonce of the from account",
+/// and the receipt's `depositNonce` is "the nonce value of the from sender as registered before
+/// the EVM processing", present on every deposit receipt since Canyon. So `(from, depositNonce)`
+/// is the nonce the deposit consumed, as for a signed transaction: once the transaction is out of
+/// the chain and `from`'s nonce is past it, it cannot return, since a deposit re-derived after an
+/// L1 reorganization has a new source hash, so a new transaction hash, and is scanned as a new
+/// transfer. A deposit receipt without `depositNonce` is refused rather than given a nonce.
+fn deposit_origin(receipt: &AnyTransactionReceipt) -> Result<Option<(Address, u64)>, ChainError> {
+    if receipt.inner.inner.r#type != DEPOSIT_TX_TYPE {
+        return Ok(None);
+    }
+    let nonce = receipt
+        .other
+        .get_deserialized::<alloy::primitives::U64>("depositNonce")
+        .ok_or(ChainError::MissingField("receipt.depositNonce"))?
+        .map_err(|error| ChainError::InvalidResponse(format!("receipt.depositNonce: {error}")))?;
+    Ok(Some((receipt.from(), nonce.to())))
 }
 
 impl fmt::Debug for FinalizedReader {
@@ -757,7 +804,7 @@ impl FinalizedReader {
             client,
             finalized_guard: Mutex::new(FinalizedGuard::default()),
             block_times: Mutex::new(BlockTimes::default()),
-            receipt_logs: Mutex::new(FifoCache::default()),
+            receipt_facts: Mutex::new(FifoCache::default()),
             origins: Mutex::new(FifoCache::default()),
         }
     }
@@ -790,10 +837,11 @@ impl FinalizedReader {
         }
         let block = self
             .client
-            .provider
-            .get_block_by_hash(block_hash)
-            .await
-            .map_err(|error| self.client.transport("block timestamp fetch", &error))?
+            .bounded(
+                "block timestamp fetch",
+                self.client.provider.get_block_by_hash(block_hash),
+            )
+            .await?
             .ok_or(ChainError::MissingField("block"))?;
         let time = utc_timestamp(block.header.inner.timestamp)?;
         self.block_times
@@ -803,15 +851,18 @@ impl FinalizedReader {
         Ok(time)
     }
 
-    async fn receipt(&self, tx_hash: B256) -> Result<Option<TransactionReceipt>, ChainError> {
+    /// Reads a receipt of any transaction type, an OP-stack deposit's included.
+    async fn receipt(&self, tx_hash: B256) -> Result<Option<AnyTransactionReceipt>, ChainError> {
         self.client
-            .provider
-            .get_transaction_receipt(tx_hash)
+            .bounded(
+                "transaction receipt fetch",
+                self.client.receipts.get_transaction_receipt(tx_hash),
+            )
             .await
-            .map_err(|error| self.client.transport("transaction receipt fetch", &error))
     }
 
-    /// The transaction's sender and nonce. A transaction the provider no longer knows was
+    /// The sender and nonce of a signed transaction, read from the transaction; a deposit's come
+    /// from its receipt ([`deposit_origin`]). A transaction the provider no longer knows was
     /// reorganized away between the reads.
     async fn origin(&self, tx_hash: B256) -> Result<(Address, u64), ChainError> {
         use alloy::consensus::Transaction as _;
@@ -827,10 +878,11 @@ impl FinalizedReader {
         }
         let transaction = self
             .client
-            .provider
-            .get_transaction_by_hash(tx_hash)
-            .await
-            .map_err(|error| self.client.transport("transaction fetch", &error))?
+            .bounded(
+                "transaction fetch",
+                self.client.provider.get_transaction_by_hash(tx_hash),
+            )
+            .await?
             .ok_or(ChainError::Reorganized("transaction fetch"))?;
         let origin = (transaction.from(), transaction.nonce());
         self.origins
@@ -841,20 +893,20 @@ impl FinalizedReader {
     }
 
     /// The position of the log with block-wide index `log_index` in its transaction's receipt,
-    /// which must be in `block_hash`.
+    /// which must be in `block_hash`, and the transaction's origin when the receipt reports it.
     async fn receipt_position(
         &self,
         tx_hash: B256,
         block_hash: B256,
         log_index: u64,
-    ) -> Result<u64, ChainError> {
+    ) -> Result<(u64, Option<(Address, u64)>), ChainError> {
         let cached = self
-            .receipt_logs
+            .receipt_facts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&(tx_hash, block_hash));
-        let indexes = match cached {
-            Some(indexes) => indexes,
+        let facts = match cached {
+            Some(facts) => facts,
             None => {
                 let receipt = self
                     .receipt(tx_hash)
@@ -863,7 +915,7 @@ impl FinalizedReader {
                 if receipt.block_hash != Some(block_hash) {
                     return Err(ChainError::Reorganized("receipt fetch"));
                 }
-                let indexes = receipt
+                let log_indexes = receipt
                     .logs()
                     .iter()
                     .map(|log| {
@@ -871,26 +923,36 @@ impl FinalizedReader {
                             .ok_or(ChainError::MissingField("log.log_index"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                self.receipt_logs
+                let facts = ReceiptFacts {
+                    log_indexes,
+                    deposit_origin: deposit_origin(&receipt)?,
+                };
+                self.receipt_facts
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert((tx_hash, block_hash), indexes.clone());
-                indexes
+                    .insert((tx_hash, block_hash), facts.clone());
+                facts
             }
         };
-        let position = indexes
+        let position = facts
+            .log_indexes
             .iter()
             .position(|index| *index == log_index)
             .ok_or(ChainError::MissingField("receipt log"))?;
-        u64::try_from(position).map_err(|_| ChainError::MissingField("receipt log position"))
+        let position = u64::try_from(position)
+            .map_err(|_| ChainError::MissingField("receipt log position"))?;
+        Ok((position, facts.deposit_origin))
     }
 
     async fn complete(&self, decoded: DecodedTransfer) -> Result<TransferLog, ChainError> {
         let block_time = self.block_time(decoded.block_hash).await?;
-        let position = self
+        let (position, deposit_origin) = self
             .receipt_position(decoded.tx_hash, decoded.block_hash, decoded.log_index)
             .await?;
-        let origin = self.origin(decoded.tx_hash).await?;
+        let origin = match deposit_origin {
+            Some(origin) => origin,
+            None => self.origin(decoded.tx_hash).await?,
+        };
         Ok(decoded.complete(position, block_time, origin))
     }
 
@@ -918,10 +980,8 @@ impl FinalizedReader {
         }
         let logs = self
             .client
-            .provider
-            .get_logs(&filter)
-            .await
-            .map_err(|error| self.client.transport("transfer log fetch", &error))?;
+            .bounded("transfer log fetch", self.client.provider.get_logs(&filter))
+            .await?;
         let mut transfers = Vec::new();
         for log in logs {
             let Some(decoded) = decode_transfer_log(&log)? else {
@@ -993,10 +1053,8 @@ impl FinalizedReader {
             .event_signature(factory_event_signatures().to_vec());
         let logs = self
             .client
-            .provider
-            .get_logs(&filter)
-            .await
-            .map_err(|error| self.client.transport("factory log fetch", &error))?;
+            .bounded("factory log fetch", self.client.provider.get_logs(&filter))
+            .await?;
         let mut kept = Vec::new();
         for log in &logs {
             let decoded = decode_factory_log(log)?;
@@ -1014,10 +1072,8 @@ impl FinalizedReader {
     ) -> Result<u64, ChainError> {
         Ok(self
             .client
-            .provider
-            .get_block_by_number(tag)
-            .await
-            .map_err(|error| self.client.transport(operation, &error))?
+            .bounded(operation, self.client.provider.get_block_by_number(tag))
+            .await?
             .ok_or(ChainError::MissingField("tagged block"))?
             .header
             .inner
@@ -1106,10 +1162,13 @@ impl ChainReader for FinalizedReader {
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         let block = self
             .client
-            .provider
-            .get_block_by_number(BlockNumberOrTag::Finalized)
-            .await
-            .map_err(|error| self.client.transport("finalized head fetch", &error))?
+            .bounded(
+                "finalized head fetch",
+                self.client
+                    .provider
+                    .get_block_by_number(BlockNumberOrTag::Finalized),
+            )
+            .await?
             .ok_or(ChainError::MissingField("finalized block"))?;
         let current = block.header.inner.number;
         let time = utc_timestamp(block.header.inner.timestamp)?;
@@ -1225,11 +1284,14 @@ impl ChainReader for FinalizedReader {
 
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
         self.client
-            .provider
-            .get_transaction_count(account)
-            .block_id(BlockId::number(block))
+            .bounded(
+                "nonce fetch",
+                self.client
+                    .provider
+                    .get_transaction_count(account)
+                    .block_id(BlockId::number(block)),
+            )
             .await
-            .map_err(|error| self.client.transport("nonce fetch", &error))
     }
 }
 
@@ -1270,11 +1332,12 @@ impl FinalizedReader {
                     Some(known) if known.block_hash == block_hash => known.block_time,
                     _ => self.block_time(block_hash).await?,
                 };
-                let nonce = match known {
-                    Some(known) => known.tx_nonce,
-                    None => self.origin(tx_hash).await?.1,
+                let nonce = match (known, deposit_origin(&receipt)?) {
+                    (Some(known), _) => known.tx_nonce,
+                    (None, Some((_, nonce))) => nonce,
+                    (None, None) => self.origin(tx_hash).await?.1,
                 };
-                let origin = (receipt.from, nonce);
+                let origin = (receipt.from(), nonce);
                 Some(Box::new(decoded.complete(
                     receipt_log_index,
                     block_time,
@@ -1350,8 +1413,20 @@ mod tests {
     /// Answers recorded from Base Sepolia's provider A (the Tenderly gateway) on 2026-09-29.
     fn base_sepolia(name: &str) -> Value {
         let json = match name {
+            "block-47297199" => {
+                include_str!("../../../tests/fixtures/base-sepolia/block-47297199.json")
+            }
             "block-47445875" => {
                 include_str!("../../../tests/fixtures/base-sepolia/block-47445875.json")
+            }
+            "bridge-mint-logs" => {
+                include_str!("../../../tests/fixtures/base-sepolia/bridge-mint-logs.json")
+            }
+            "bridge-mint-receipt" => {
+                include_str!("../../../tests/fixtures/base-sepolia/bridge-mint-receipt.json")
+            }
+            "l1-attributes-receipt" => {
+                include_str!("../../../tests/fixtures/base-sepolia/l1-attributes-receipt.json")
             }
             "finalized-47446540" => {
                 include_str!("../../../tests/fixtures/base-sepolia/finalized-47446540.json")
@@ -1411,6 +1486,180 @@ mod tests {
             .expect("production adapter accepts URL")
             .with_provider("base-sepolia-a");
         (FinalizedReader::new(Arc::new(client)), server)
+    }
+
+    /// A real L1-to-L2 bridge mint on Base Sepolia: the deposit transaction (type `0x7e`)
+    /// `0x63fa…cb88`, from the aliased L1CrossDomainMessenger (`0xC34855F4De64F1840e5686e64278da901e261f20`
+    /// plus `0x1111000000000000000000000000000000001111`), mints 500 units to `0x3c0f…ed34`.
+    const BRIDGE_MINT: B256 =
+        b256!("0x63fac1334834dc776a3fc9a524efa886fb365d170e2f50acb4524f08456ecb88");
+
+    fn bridge_mint_transfer() -> TransferLog {
+        TransferLog {
+            tx_hash: BRIDGE_MINT,
+            receipt_log_index: 0,
+            log_index: 1,
+            block_number: 47_297_199,
+            block_hash: b256!("0x92536ca815a609fb99feaab4d6339ce4fa0ea7174328e013ade3e2241f131125"),
+            block_time: DateTime::parse_from_rfc3339("2026-09-25T18:58:06Z")
+                .expect("time")
+                .into(),
+            tx_from: address!("0xd45955f4de64f1840e5686e64278da901e263031"),
+            // The receipt's `depositNonce`: the sender's nonce before the deposit ran.
+            tx_nonce: 724_602,
+            token: address!("0x94b1febed36174422fdb48000c620fc8432b7121"),
+            from: Address::ZERO,
+            to: address!("0x3c0fe91b38c2f708d360f5724208fa7ecaa6ed34"),
+            amount: AtomicAmount::new(U256::from(500)),
+        }
+    }
+
+    // The node records no `eth_getTransactionByHash` answer: the Ethereum network's transaction
+    // types refuse a deposit, and its origin is read from the receipt alone.
+    #[tokio::test]
+    async fn an_op_stack_deposit_transfer_takes_its_origin_from_the_receipt() {
+        let answers = vec![
+            ("eth_getLogs", base_sepolia("bridge-mint-logs")),
+            (
+                "eth_getTransactionReceipt",
+                base_sepolia("bridge-mint-receipt"),
+            ),
+            ("eth_getBlockByHash", base_sepolia("block-47297199")),
+        ];
+        let (scanner, scanner_node) = replay_node(answers.clone(), Vec::new()).await;
+        let (confirm, confirm_node) = replay_node(answers, Vec::new()).await;
+        let recipient = address!("0x3c0fe91b38c2f708d360f5724208fa7ecaa6ed34");
+        let logs = scanner
+            .transfer_logs_to(&[recipient], 47_297_199, 47_297_199)
+            .await;
+        let lookup = confirm.receipt_transfer(BRIDGE_MINT, 0).await;
+        scanner_node.abort();
+        confirm_node.abort();
+
+        let transfer = bridge_mint_transfer();
+        assert_eq!(logs.expect("transfer logs"), vec![transfer.clone()]);
+        assert_eq!(
+            lookup.expect("receipt lookup"),
+            ReceiptLookup::Included {
+                block_number: 47_297_199,
+                block_hash: transfer.block_hash,
+                transfer: Some(Box::new(transfer)),
+            }
+        );
+    }
+
+    // Base Sepolia's L1 attributes deposit, the first transaction of the incident's block: a
+    // system deposit without logs, which the confirm step may read at any receipt position.
+    #[tokio::test]
+    async fn an_op_stack_deposit_receipt_without_a_transfer_is_included() {
+        let (reader, node) = replay_node(
+            vec![(
+                "eth_getTransactionReceipt",
+                base_sepolia("l1-attributes-receipt"),
+            )],
+            Vec::new(),
+        )
+        .await;
+        let lookup = reader
+            .receipt_transfer(
+                b256!("0x492bed3f97b8258ada814f12d8d87d4df6f6668b112597f1b14c245e06643421"),
+                0,
+            )
+            .await;
+        node.abort();
+
+        assert_eq!(
+            lookup.expect("receipt lookup"),
+            ReceiptLookup::Included {
+                block_number: 47_445_875,
+                block_hash: b256!(
+                    "0xcac908304ca374430510276e42beb9f0f28596b6d925097e9b192913c6d195a2"
+                ),
+                transfer: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deposit_receipt_without_its_nonce_is_refused() {
+        let mut receipt = base_sepolia("bridge-mint-receipt");
+        receipt
+            .as_object_mut()
+            .expect("receipt object")
+            .remove("depositNonce");
+        let (reader, node) = replay_node(
+            vec![
+                ("eth_getLogs", base_sepolia("bridge-mint-logs")),
+                ("eth_getTransactionReceipt", receipt),
+            ],
+            Vec::new(),
+        )
+        .await;
+        let recipient = address!("0x3c0fe91b38c2f708d360f5724208fa7ecaa6ed34");
+        let logs = reader
+            .transfer_logs_to(&[recipient], 47_297_199, 47_297_199)
+            .await;
+        node.abort();
+
+        assert_eq!(logs, Err(ChainError::MissingField("receipt.depositNonce")));
+    }
+
+    /// Accepts every request and never answers, like a provider whose connection stalls.
+    async fn hanging_node(
+        request_timeout: Duration,
+    ) -> (
+        FinalizedReader,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        use axum::Router;
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let node = Router::new().route("/rpc", post(std::future::pending::<String>));
+        let server = tokio::spawn(async move { axum::serve(listener, node).await });
+        let client = EvmClient::with_timeout(&format!("http://{address}/rpc"), request_timeout)
+            .expect("production adapter accepts URL")
+            .with_provider("provider-a");
+        (FinalizedReader::new(Arc::new(client)), server)
+    }
+
+    #[tokio::test]
+    async fn every_reader_request_times_out_instead_of_hanging() {
+        let (reader, node) = hanging_node(Duration::from_millis(200)).await;
+        let address = Address::repeat_byte(1);
+        let reads = async {
+            let tokens = BTreeSet::from([address]);
+            vec![
+                reader.latest_head().await.map(drop),
+                reader.safe_head().await.map(drop),
+                reader.finalized_head().await.map(drop),
+                reader.transfer_logs_to(&[address], 1, 1).await.map(drop),
+                reader
+                    .token_transfers(&[address], &tokens, 1, 1)
+                    .await
+                    .map(drop),
+                reader
+                    .factory_logs(address, &[address], 1, 1)
+                    .await
+                    .map(drop),
+                reader.receipt_transfer(B256::ZERO, 0).await.map(drop),
+                reader.nonce_at(address, 1).await.map(drop),
+            ]
+        };
+        let results = timeout(Duration::from_secs(10), reads)
+            .await
+            .expect("every read is bounded");
+        node.abort();
+
+        for result in results {
+            let error = result.expect_err("a provider that never answers fails the read");
+            assert!(matches!(error, ChainError::Transport(_)), "{error:?}");
+            assert!(error.to_string().contains("timeout"), "{error}");
+            assert!(!error.is_rate_limited(), "{error}");
+        }
     }
 
     // On 2026-09-29 the gateway answered `finalized` 47446696, then 47446540 for minutes, while

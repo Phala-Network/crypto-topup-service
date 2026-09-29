@@ -473,7 +473,11 @@ The address list is read after `latest`, so an address issued later is paid only
 scanned without it; its earlier range is the backstop's. Each kept transfer's receipt gives its
 receipt position (its identity, §0) and its transaction's sender, and one transaction read gives
 the nonce; a node that returns `blockTimestamp` with the log spares the block read (otherwise read
-by block hash, once per block). For a route with a depth or `safe`, transfers at or below the
+by block hash, once per block). An OP-stack deposit transaction (type `0x7e`, such as an L1-to-L2
+bridge mint) has no signature or nonce of its own: its receipt gives its sender, the L1 caller or
+that caller's alias, and `depositNonce`, the sender's nonce the deposit consumed, so the
+transaction itself is not read. Every provider request is bounded by the RPC timeout, and one that
+outlasts it is retried like any other transport failure. For a route with a depth or `safe`, transfers at or below the
 horizon (the highest block that has reached the confirmation) become `detected` deposits
 (`ON CONFLICT DO NOTHING` on the identity), and the fast cursor advances to the horizon in the
 same transaction, so the blocks above it are read again on the next head and a block below it is
