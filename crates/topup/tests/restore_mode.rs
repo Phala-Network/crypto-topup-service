@@ -1211,7 +1211,10 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
             // After the restore point the merchant rotated the address twice and holds version 3.
             let held = harness.derived_address("team-42", 3);
             let held_id = topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4());
-            let held_secret = harness.client_reads.key().issue(&held_id)?;
+            let held_secret = harness
+                .client_reads
+                .key()
+                .issue(harness.account_id(), &held_id)?;
             let request = json!({
                 "account": harness.account_id(),
                 "livemode": true,
@@ -1235,17 +1238,25 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
                 .fetch_one(&harness.pool)
                 .await?;
             ensure!(versions == 1);
-            // A client secret the service did not issue for the id is refused.
-            let mut other_secret = request.clone();
-            other_secret["client_secret"] = json!(harness.client_reads.key().issue(
-                &topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4())
-            )?);
-            let refused = harness.admin(Method::POST, path, &other_secret).await?;
-            ensure!(
-                refused.body["error"]["param"] == "client_secret",
-                "{}",
-                refused.body
-            );
+            // A client secret the service did not issue for the id, or issued for it to another
+            // account (another merchant's record of the id), is refused.
+            let key = harness.client_reads.key();
+            for secret in [
+                key.issue(
+                    harness.account_id(),
+                    &topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4()),
+                )?,
+                key.issue("acct_other", &held_id)?,
+            ] {
+                let mut other_secret = request.clone();
+                other_secret["client_secret"] = json!(secret);
+                let refused = harness.admin(Method::POST, path, &other_secret).await?;
+                ensure!(
+                    refused.body["error"]["param"] == "client_secret",
+                    "{}",
+                    refused.body
+                );
+            }
             let reissued = harness.admin(Method::POST, path, &request).await?;
             ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
             ensure!(reissued.body["reissued"] == true);
@@ -1808,7 +1819,10 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
             // Terms no route issues today (a window past the route's, another amount) are the
             // merchant's record all the same: the route may have changed since.
             let created = Utc::now().timestamp() - 60;
-            let secret = harness.client_reads.key().issue(&qt)?;
+            let secret = harness
+                .client_reads
+                .key()
+                .issue(harness.account_id(), &qt)?;
             let request = json!({
                 "account": harness.account_id(),
                 "livemode": true,
@@ -1827,8 +1841,10 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 "reason": "the merchant's quote log",
             });
             let path = "/v1/admin/restore/quotes";
-            // A forged address, a client secret the service did not issue for the quote, or an
-            // asset no route has is refused, and no customer is created.
+            // A forged address, a client secret the service did not issue for the quote or issued
+            // for it to another account (another merchant's record of the id, or the payer's page
+            // of the owner's quote), or an asset no route has is refused, and no customer is
+            // created.
             let other_quote = topup::ids::format(topup::ids::QUOTE, Uuid::new_v4());
             for (field, value) in [
                 (
@@ -1837,7 +1853,16 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 ),
                 (
                     "client_secret",
-                    json!(harness.client_reads.key().issue(&other_quote)?),
+                    json!(
+                        harness
+                            .client_reads
+                            .key()
+                            .issue(harness.account_id(), &other_quote)?
+                    ),
+                ),
+                (
+                    "client_secret",
+                    json!(harness.client_reads.key().issue("acct_other", &qt)?),
                 ),
                 (
                     "client_secret",
@@ -1890,7 +1915,10 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
             let public = public_read(secret.clone()).await?;
             ensure!(public.status == StatusCode::OK, "{}", public.body);
             // Once it has one, another secret of the quote does not replace it.
-            let other = harness.client_reads.key().issue(&qt)?;
+            let other = harness
+                .client_reads
+                .key()
+                .issue(harness.account_id(), &qt)?;
             let mut other_secret = request.clone();
             other_secret["client_secret"] = json!(other);
             let repeated = harness.admin(Method::POST, path, &other_secret).await?;

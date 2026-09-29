@@ -393,7 +393,7 @@ pub(crate) async fn delete_webhook_endpoint(
     request_body = RestoreDepositAddressRequest,
     responses(
         (status = 200, description = "OK: re-issued, or the customer's existing version", body = RestoreDepositAddressResponse),
-        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -443,11 +443,12 @@ pub(crate) async fn reissue_deposit_address(
             request
                 .id
                 .as_deref()
-                .and_then(|id| client_secret_hash(&state, id, secret))
+                .and_then(|id| client_secret_hash(&state, &account, id, secret))
                 .ok_or_else(|| {
                     ApiError::invalid_param(
                         "client_secret",
-                        "client_secret is not one the service issued for the address's id",
+                        "client_secret is not one the service issued for the address's id to \
+                         this account",
                     )
                 })
         })
@@ -500,7 +501,7 @@ pub(crate) async fn reissue_deposit_address(
     request_body = RestoreQuoteRequest,
     responses(
         (status = 200, description = "OK: re-issued, or the quote exists already for the customer at the address", body = RestoreQuoteResponse),
-        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -510,11 +511,11 @@ pub(crate) async fn reissue_deposit_address(
 /// Re-issues a quote the merchant created after the restore point, from its record of the quote
 /// object: the address salt is derived from the account, customer, and `qt_` id, so only the
 /// quote's own address is accepted, backfilled from the restored cursor so the rescan finds a
-/// payment made to it since. A `client_secret` the service issued for the quote is kept, so the
-/// payer's page reads it again. The terms are stored as recorded but never applied: a payment to
-/// the quote is credited at spot unless an imported `deposit.credited` for it, which the service
-/// signed, carries its credit, and the payment window closes at the restore's detection at the
-/// latest. Audited.
+/// payment made to it since. A `client_secret` the service issued for the quote to the account is
+/// kept, so the payer's page reads it again. The terms are stored as recorded but never applied:
+/// a payment to the quote is credited at spot unless an imported `deposit.credited` for it, which
+/// the service signed, carries its credit, and the payment window closes at the restore's
+/// detection at the latest. Audited.
 pub(crate) async fn reissue_quote(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -547,10 +548,10 @@ pub(crate) async fn reissue_quote(
         .client_secret
         .as_deref()
         .map(|secret| {
-            client_secret_hash(&state, &request.id, secret).ok_or_else(|| {
+            client_secret_hash(&state, &account, &request.id, secret).ok_or_else(|| {
                 ApiError::invalid_param(
                     "client_secret",
-                    "client_secret is not one the service issued for this quote",
+                    "client_secret is not one the service issued for this quote to this account",
                 )
             })
         })
@@ -605,12 +606,19 @@ pub(crate) async fn reissue_quote(
 }
 
 /// The SHA-256 of `secret` when it is a client secret the service issued for the object whose
-/// public id is `id` (`crate::client_secret`): its tag proves the service issued that id.
-fn client_secret_hash(state: &AppState, id: &str, secret: &str) -> Option<[u8; 32]> {
+/// public id is `id` to `account` (`crate::client_secret`): its tag proves the service issued
+/// that id, its owner tag that it issued it to the account, so no other account's record of the
+/// id, nor a secret taken from the payer's page, re-issues it elsewhere.
+fn client_secret_hash(
+    state: &AppState,
+    account: &crate::db::Account,
+    id: &str,
+    secret: &str,
+) -> Option<[u8; 32]> {
     state
         .client_reads
         .key()
-        .verify(id, secret)
+        .verify_owner(&account.public_id, id, secret)
         .then(|| Sha256::digest(secret.as_bytes()).into())
 }
 

@@ -395,6 +395,97 @@ async fn a_request_dropped_in_its_transaction_commits_nothing() -> Result<()> {
     result.and(cleanup)
 }
 
+/// A transaction PostgreSQL rolled back by a deadlock or a serialization failure (`40P01`,
+/// `40001`) changed nothing: the request answers a `503` with `Retry-After` that its key does not
+/// save, so a retry with the key runs it.
+#[tokio::test]
+async fn a_transaction_rolled_back_by_a_conflict_is_an_unsaved_503() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let slow = SlowQuote::new(&database).await?;
+        // The first price fetch does not wait.
+        slow.quotes.release.notify_one();
+        sqlx::query(
+            "CREATE FUNCTION conflict_quote_insert() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'conflict' USING ERRCODE = TG_ARGV[0]; END $$",
+        )
+        .execute(&database.owner_pool)
+        .await?;
+        for (code, trigger) in [
+            (
+                "40P01",
+                "CREATE TRIGGER conflict_quote_insert BEFORE INSERT ON quotes FOR EACH ROW \
+                 EXECUTE FUNCTION conflict_quote_insert('40P01')",
+            ),
+            (
+                "40001",
+                "CREATE TRIGGER conflict_quote_insert BEFORE INSERT ON quotes FOR EACH ROW \
+                 EXECUTE FUNCTION conflict_quote_insert('40001')",
+            ),
+        ] {
+            sqlx::query(trigger).execute(&database.owner_pool).await?;
+            let refused = slow.app.clone().oneshot(slow.create()?).await?;
+            ensure!(
+                refused.status() == StatusCode::SERVICE_UNAVAILABLE,
+                "{code}"
+            );
+            ensure!(refused.headers().contains_key("retry-after"), "{code}");
+            ensure!(response_json(refused).await?["error"]["code"] == "unavailable");
+            sqlx::query("DROP TRIGGER conflict_quote_insert ON quotes")
+                .execute(&database.owner_pool)
+                .await?;
+            let saved: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM idempotency_keys WHERE key = 'slow'")
+                    .fetch_one(&database.app_pool)
+                    .await?;
+            ensure!(saved == 0, "{code}: the key was released");
+        }
+        let retried = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(retried.status() == StatusCode::OK);
+        ensure!(retried.headers().get("idempotent-replayed").is_none());
+        ensure!(slow.quotes(&database).await? == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// A repeat that waits for its key's row past `lock_timeout` (`55P03`), behind a transaction
+/// holding it, answers `409 idempotency_key_in_use` and saves nothing: a later repeat replays.
+#[tokio::test]
+async fn a_repeat_waiting_past_the_lock_timeout_is_a_409() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let slow = SlowQuote::new(&database).await?;
+        // The first price fetch does not wait.
+        slow.quotes.release.notify_one();
+        let first = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(first.status() == StatusCode::OK);
+        let created = response_json(first).await?;
+        let mut holder = database.owner_pool.begin().await?;
+        sqlx::query("SELECT 1 FROM idempotency_keys WHERE key = 'slow' FOR UPDATE")
+            .execute(&mut *holder)
+            .await?;
+        let repeat = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(repeat.status() == StatusCode::CONFLICT);
+        ensure!(response_json(repeat).await?["error"]["code"] == "idempotency_key_in_use");
+        holder.rollback().await?;
+        let replayed = slow.app.clone().oneshot(slow.create()?).await?;
+        ensure!(replayed.headers()["idempotent-replayed"] == "true");
+        ensure!(response_json(replayed).await?["id"] == created["id"]);
+        ensure!(slow.quotes(&database).await? == 1);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[tokio::test]
 async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip681() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -474,7 +565,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .as_str()
             .context("client_secret")?
             .to_owned();
-        // `{quote_id}_secret_`, then a 16-byte nonce and its 16-byte tag in hex.
+        // `{quote_id}_secret_`, then a 16-byte nonce (with its owner tag) and a 16-byte tag in hex.
         let random = first_secret
             .strip_prefix(&format!("{quote_id}_secret_"))
             .context("client_secret names its quote")?;

@@ -1,9 +1,12 @@
 //! Self-authenticating `client_secret`s of quotes and deposit addresses (architecture §12).
 //!
 //! A secret is `{id}_secret_{nonce}{tag}`: `id` is the object's public id (`qt_…` or `da_…`),
-//! `nonce` 16 random bytes, and `tag` the first 16 bytes of HMAC-SHA256, under the key derived
-//! from dstack at [`topup_core::CLIENT_SECRET_KEY_DOMAIN`] like the service's other keys, of
-//! everything before it; both are lowercase hex.
+//! `nonce` 8 random bytes and the 8-byte owner tag, and `tag` the first 16 bytes of HMAC-SHA256,
+//! under the key derived from dstack at [`topup_core::CLIENT_SECRET_KEY_DOMAIN`] like the
+//! service's other keys, of everything before it; all are lowercase hex. The owner tag is the
+//! first 8 bytes of the same HMAC of the account's public id, the object's id, and the random
+//! bytes, so a secret also proves which account the service issued the object to
+//! ([`ClientSecretKey::verify_owner`]), which a restore's re-issue checks.
 //! The tag is checked in memory in constant time, so a forged or malformed secret is refused
 //! without touching the database. The database still stores each issued secret's SHA-256: a
 //! secret is valid only while its row is, which lets a deposit address retire its old secrets.
@@ -15,7 +18,11 @@ use sha2::Sha256;
 use topup_core::SecretKey32;
 
 const SEPARATOR: &str = "_secret_";
-const NONCE_BYTES: usize = 16;
+/// Starts the owner tag's message, which no object id starts with.
+const OWNER_DOMAIN: &str = "owner:";
+const RANDOM_BYTES: usize = 8;
+const OWNER_TAG_BYTES: usize = 8;
+const NONCE_BYTES: usize = RANDOM_BYTES + OWNER_TAG_BYTES;
 const TAG_BYTES: usize = 16;
 
 /// The key that tags and checks client secrets.
@@ -53,13 +60,19 @@ impl ClientSecretKey {
         Self(SecretKey32::new(key))
     }
 
-    /// Issues a new secret of the object whose public id is `id`.
-    pub fn issue(&self, id: &str) -> Result<String, EntropyUnavailable> {
-        let mut nonce = [0_u8; NONCE_BYTES];
+    /// Issues a new secret of the object whose public id is `id`, of the account whose public id
+    /// is `account`.
+    pub fn issue(&self, account: &str, id: &str) -> Result<String, EntropyUnavailable> {
+        let mut random = [0_u8; RANDOM_BYTES];
         SysRng
-            .try_fill_bytes(&mut nonce)
+            .try_fill_bytes(&mut random)
             .map_err(|_| EntropyUnavailable)?;
-        let signed = format!("{id}{SEPARATOR}{}", hex::encode(nonce));
+        let random = hex::encode(random);
+        let owner = self.owner_mac(account, id, &random).finalize().into_bytes();
+        let signed = format!(
+            "{id}{SEPARATOR}{random}{}",
+            hex::encode(&owner[..OWNER_TAG_BYTES])
+        );
         let tag = self.mac(&signed).finalize().into_bytes();
         Ok(format!("{signed}{}", hex::encode(&tag[..TAG_BYTES])))
     }
@@ -68,23 +81,42 @@ impl ClientSecretKey {
     /// key's tag. It does not say whether the secret is still valid: the database does.
     #[must_use]
     pub fn verify(&self, id: &str, secret: &str) -> bool {
-        let Some(rest) = secret
-            .strip_prefix(id)
-            .and_then(|rest| rest.strip_prefix(SEPARATOR))
-        else {
+        self.nonce(id, secret).is_some()
+    }
+
+    /// Whether `secret` [verifies](Self::verify) for `id` and the service issued it to the
+    /// account whose public id is `account`: the tag proves the service issued the id, the owner
+    /// tag which account it issued it to.
+    #[must_use]
+    pub fn verify_owner(&self, account: &str, id: &str, secret: &str) -> bool {
+        let Some(nonce) = self.nonce(id, secret) else {
             return false;
         };
+        let (random, owner) = nonce.split_at(2 * RANDOM_BYTES);
+        hex::decode(owner).is_ok_and(|owner| {
+            self.owner_mac(account, id, random)
+                .verify_truncated_left(&owner)
+                .is_ok()
+        })
+    }
+
+    /// The hex nonce of `secret` when it is well formed for `id` and carries this key's tag.
+    fn nonce<'secret>(&self, id: &str, secret: &'secret str) -> Option<&'secret str> {
+        let rest = secret.strip_prefix(id)?.strip_prefix(SEPARATOR)?;
         let lowercase_hex = rest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
         if rest.len() != 2 * (NONCE_BYTES + TAG_BYTES) || !lowercase_hex {
-            return false;
+            return None;
         }
         let (signed, tag) = secret.split_at(secret.len() - 2 * TAG_BYTES);
-        let Ok(tag) = hex::decode(tag) else {
-            return false;
-        };
-        self.mac(signed).verify_truncated_left(&tag).is_ok()
+        let tag = hex::decode(tag).ok()?;
+        self.mac(signed).verify_truncated_left(&tag).ok()?;
+        Some(&rest[..2 * NONCE_BYTES])
+    }
+
+    fn owner_mac(&self, account: &str, id: &str, random: &str) -> Hmac<Sha256> {
+        self.mac(&format!("{OWNER_DOMAIN}{account}:{id}:{random}"))
     }
 
     fn mac(&self, message: &str) -> Hmac<Sha256> {
@@ -100,6 +132,7 @@ mod tests {
     use super::*;
 
     const ID: &str = "qt_0123456789abcdef0123456789abcdef";
+    const ACCOUNT: &str = "acct_0123456789abcdef0123456789abcdef";
 
     fn key(byte: u8) -> ClientSecretKey {
         ClientSecretKey::new(SecretKey32::new([byte; 32]))
@@ -107,18 +140,36 @@ mod tests {
 
     #[test]
     fn an_issued_secret_verifies_for_its_object_and_key_only() {
-        let secret = key(1).issue(ID).expect("secret");
+        let secret = key(1).issue(ACCOUNT, ID).expect("secret");
         assert_eq!(secret.len(), ID.len() + SEPARATOR.len() + 64);
         assert!(key(1).verify(ID, &secret));
         assert!(!key(2).verify(ID, &secret));
         let other = "qt_fedcba9876543210fedcba9876543210";
         assert!(!key(1).verify(other, &secret.replacen(ID, other, 1)));
-        assert_ne!(key(1).issue(ID).expect("secret"), secret, "nonces differ");
+        assert_ne!(
+            key(1).issue(ACCOUNT, ID).expect("secret"),
+            secret,
+            "nonces differ"
+        );
+    }
+
+    #[test]
+    fn a_secret_proves_the_account_it_was_issued_to() {
+        let secret = key(1).issue(ACCOUNT, ID).expect("secret");
+        assert!(key(1).verify_owner(ACCOUNT, ID, &secret));
+        assert!(!key(1).verify_owner("acct_fedcba9876543210fedcba9876543210", ID, &secret));
+        assert!(!key(2).verify_owner(ACCOUNT, ID, &secret));
+        // A secret with a random nonce, as issued before owner tags, verifies but proves no owner.
+        let signed = format!("{ID}{SEPARATOR}{}", "7".repeat(2 * NONCE_BYTES));
+        let tag = key(1).mac(&signed).finalize().into_bytes();
+        let unbound = format!("{signed}{}", hex::encode(&tag[..TAG_BYTES]));
+        assert!(key(1).verify(ID, &unbound));
+        assert!(!key(1).verify_owner(ACCOUNT, ID, &unbound));
     }
 
     #[test]
     fn a_forged_or_malformed_secret_is_refused() {
-        let secret = key(1).issue(ID).expect("secret");
+        let secret = key(1).issue(ACCOUNT, ID).expect("secret");
         let mut flipped = secret.clone().into_bytes();
         let last = flipped.len() - 1;
         flipped[last] = if flipped[last] == b'0' { b'1' } else { b'0' };

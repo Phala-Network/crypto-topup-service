@@ -367,10 +367,12 @@ pub async fn create_in(
     let treasury = treasury(transaction, scope, route.chain.chain_id).await?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
-    let client_secret = client_secrets.issue(&quote_id(id)).map_err(|error| {
-        tracing::error!(%error, "no client secret issued");
-        RateLockError::EntropyUnavailable
-    })?;
+    let client_secret = client_secrets
+        .issue(&account.public_id, &quote_id(id))
+        .map_err(|error| {
+            tracing::error!(%error, "no client secret issued");
+            RateLockError::EntropyUnavailable
+        })?;
     let salt = quote_salt(
         &account.public_id,
         &customer.client_reference_id,

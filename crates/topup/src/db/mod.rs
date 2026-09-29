@@ -93,8 +93,11 @@ pub(crate) fn parse_reason(
 }
 
 /// Commits `transaction` after a success and rolls it back after an error, before the caller
-/// answers. Dropping it instead only queues the rollback until its connection is next used, so its
-/// row locks would outlive the answer, and a worker that skips locked rows would pass them over.
+/// answers. Begun in the caller's transaction (a handler's, from `Idempotent::begin`), it is a
+/// savepoint: its commit keeps its changes for the caller to commit, and its rollback undoes them
+/// and releases the row locks taken since, while the caller's transaction goes on. Dropping it
+/// instead only queues the rollback until its connection is next used, so its row locks would
+/// outlive the answer, and a worker that skips locked rows would pass them over.
 pub async fn settle<T, E: From<sqlx::Error>>(
     transaction: sqlx::Transaction<'_, sqlx::Postgres>,
     result: Result<T, E>,

@@ -105,7 +105,8 @@ re-valued. The same reconciliation revokes again the keys, cancels again the tre
 pauses or resumes treasury crediting again, and deletes again the endpoints that the restore
 brought back, and re-issues the deposit addresses and quotes given out after the restore point,
 identically; a re-issued quote's payment is credited at spot unless a signed delivery carries its
-credit, and a quote no merchant reports stays lost ([runbook](runbooks/restore.md)).
+credit, a client secret re-issued with one is accepted only when the service issued it for that id
+to that account, and a quote no merchant reports stays lost ([runbook](runbooks/restore.md)).
 
 A service that booted straight from backup into the service compose (an empty volume, so the
 PostgreSQL entrypoint restored it, without the restore-check variant) is frozen as well: every
@@ -332,7 +333,8 @@ replacement is frozen (merchant writes and reads `503 service_restoring`, `GET /
 not, with the account's webhook key, that the lost key is refused like every key while frozen and
 is revoked again by prefix, that the lost address is re-issued with the same address and `da_` id,
 that the quote is re-issued at its own address with its client secret (the payer's read works
-again) while a secret of another quote is refused, that the delivered event's signed delivery is
+again) while a secret of another quote, or of this quote issued to another account, is refused,
+that the delivered event's signed delivery is
 imported exactly as delivered with no delivery and its credit kept for the deposit, while a body
 changed after signing is refused and changes nothing, and that the unfreeze is refused while no
 chain is rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
