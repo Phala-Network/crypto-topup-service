@@ -713,6 +713,8 @@
           "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
           "refunded": false,
           "rejection_reason": null,
+          "replaced_by": null,
+          "replaces": null,
           "status": "credited",
           "swept": false,
           "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -830,7 +832,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id.",
             "type": "string"
           },
           "livemode": {
@@ -884,6 +886,20 @@
           },
           "rejection_reason": {
             "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replaced_by": {
+            "description": "The deposit that took this reversed deposit's place, `dep_…` (its `replaces` is this one);\n`null` otherwise, or when that deposit is in another account or mode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replaces": {
+            "description": "The reversed deposit whose place this one took, `dep_…`: its transaction was re-included\nbefore finality against other state (a router or swap output), and the transfer at the same\nposition in the final chain is this deposit. `null` otherwise, or when that deposit is in\nanother account or mode.",
             "type": [
               "string",
               "null"
@@ -2018,6 +2034,8 @@
                   "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
                   "refunded": false,
                   "rejection_reason": null,
+                  "replaced_by": null,
+                  "replaces": null,
                   "status": "credited",
                   "swept": false,
                   "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",

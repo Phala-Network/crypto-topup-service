@@ -31,9 +31,10 @@ class DepositList:
             'exchange_rate': '0.12345679', 'final': True, 'final_at': 1790554572, 'from_address':
             '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False,
             'log_index': 212, 'metadata': {'order_id': 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote':
-            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'status': 'credited',
-            'swept': False, 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at':
-            1790553630}], 'has_more': False, 'object': 'list', 'url': '/v1/deposits'}
+            'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'replaced_by': None,
+            'replaces': None, 'status': 'credited', 'swept': False, 'tx_hash':
+            '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}], 'has_more':
+            False, 'object': 'list', 'url': '/v1/deposits'}
 
     Attributes:
         data (list[Deposit]): The deposits.

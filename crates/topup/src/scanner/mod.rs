@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use alloy_primitives::Address;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -693,34 +693,45 @@ fn resolve_logs(
             let address = addresses
                 .get(&log.to)
                 .ok_or(ScannerError::UnknownRecipient(log.to))?;
-            let selected = routes.routes.get(&log.token);
-            Ok(NewDeposit {
-                chain_id: routes.chain.chain_id,
-                tx_hash: log.tx_hash,
-                receipt_log_index: log.receipt_log_index,
-                log_index: log.log_index,
-                block_number: log.block_number,
-                block_hash: log.block_hash,
-                block_time: log.block_time,
-                address_id: address.id,
-                route: selected.map(|route| route.name.clone()),
-                route_version: selected.map(|route| route.version),
-                asset_contract: log.token,
-                from_address: log.from,
-                amount_atomic: log.amount,
-                state: if selected.is_some() {
-                    DepositState::Detected
-                } else {
-                    DepositState::Rejected
-                },
-                reason: selected.is_none().then_some(RejectReason::UnsupportedAsset),
-                next_attempt_at,
-                tx_from: log.tx_from,
-                tx_nonce: log.tx_nonce,
-                is_final: false,
-            })
+            Ok(resolve_log(log, address, routes, next_attempt_at))
         })
         .collect()
+}
+
+/// The deposit a transfer to the issued `address` is recorded as: `detected` on the route of its
+/// token, or `rejected(unsupported_asset)` for a token without one.
+pub(crate) fn resolve_log(
+    log: TransferLog,
+    address: &ScanAddress,
+    routes: &ChainRoutes,
+    next_attempt_at: DateTime<Utc>,
+) -> NewDeposit {
+    let selected = routes.routes.get(&log.token);
+    NewDeposit {
+        chain_id: routes.chain.chain_id,
+        tx_hash: log.tx_hash,
+        receipt_log_index: log.receipt_log_index,
+        log_index: log.log_index,
+        block_number: log.block_number,
+        block_hash: log.block_hash,
+        block_time: log.block_time,
+        address_id: address.id,
+        route: selected.map(|route| route.name.clone()),
+        route_version: selected.map(|route| route.version),
+        asset_contract: log.token,
+        from_address: log.from,
+        amount_atomic: log.amount,
+        state: if selected.is_some() {
+            DepositState::Detected
+        } else {
+            DepositState::Rejected
+        },
+        reason: selected.is_none().then_some(RejectReason::UnsupportedAsset),
+        next_attempt_at,
+        tx_from: log.tx_from,
+        tx_nonce: log.tx_nonce,
+        is_final: false,
+    }
 }
 
 fn scan_windows(from_block: u64, to_block: u64) -> Result<Vec<(u64, u64)>, ScannerError> {

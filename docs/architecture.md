@@ -31,7 +31,7 @@ Every mechanism follows a named practice. Where this design adapts a practice, t
 | Chain reads | JSON-RPC `latest`, `safe`, and `finalized` tags, `eth_getLogs`, receipts, two independent providers | Credit at a confirmation depth like exchanges and BTCPay's confirmation setting; watch to finality |
 | Price | Coin Metrics Reference Rate (benchmark methodology), checked against the deepest market | — |
 | Sanctions | Chainalysis sanctions oracle `isSanctioned(address)` | Direct list screening only; not KYT |
-| Deposit identity | UUIDv5 (RFC 9562) over `chain_id:lowercase_tx_hash:decimal_receipt_log_index` | The log's position in its transaction's receipt, which survives re-inclusion |
+| Deposit identity | UUIDv5 (RFC 9562) over `chain_id:lowercase_tx_hash:decimal_receipt_log_index`; reorg handling as in chain indexers: the orphaned record is rolled back and the canonical log indexed as a new record | The log's position in its transaction's receipt, which survives re-inclusion. The position does not fix the content: when another transfer is final at a reversed deposit's position, it is a new deposit with the next revision, `…:decimal_revision`, that `replaces` it (§7) |
 | Reversal | Etherscan "Dropped & Replaced", ethers `TRANSACTION_REPLACED`; Stripe's dispute after a failed ACH payment | A proven-dropped deposit becomes `reversed` and `deposit.reversed` |
 | Job queue | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` | — |
 | Outbound effects | Transactional outbox; at-least-once with idempotent receivers | — |
@@ -305,8 +305,10 @@ deposits      id, account_id, livemode, customer_id, chain_id, tx_hash, receipt_
               asset_contract, from_address, amount_atomic, tx_from, tx_nonce, confirmations_at,
               final_at, state, reason, attempt, next_attempt_at, lease_token, lease_until,
               valuation_at, price_scaled, price_source (spot|lock), credit_minor, quote jsonb,
-              metadata jsonb, created_at, updated_at
-              UNIQUE (chain_id, tx_hash, receipt_log_index)
+              metadata jsonb, revision, created_at, updated_at
+              UNIQUE (chain_id, tx_hash, receipt_log_index, revision)
+              UNIQUE (chain_id, tx_hash, receipt_log_index) WHERE state <> 'reversed'
+              -- revision: deposits recorded at the position before this one, each reversed (§7)
               -- account, mode, and customer are the address's; log_index and the block columns are
               -- evidence that follows re-inclusion; tx_from and tx_nonce prove a dropped
               -- transaction; swept requires final_at; metadata starts as the quote's or the
@@ -433,7 +435,7 @@ new block's:
 |---|---|
 | The receipt at or below `finalized`, with the same transfer at the deposit's receipt position | `final_at` is set, the evidence follows the block, and a credited deposit is swept by a finalized `Flushed` event after it. |
 | The receipt in a newer block that is not final, with the same transfer | The transaction was re-included: the evidence (block, hash, block-wide `log_index`) is followed; nothing is reversed. |
-| The receipt at or below `finalized` without the transfer at that position | `reversed` (a `detected` deposit with other agreed evidence to its address is left to its confirm step). |
+| The receipt at or below `finalized` without the transfer at that position | `reversed` (a `detected` deposit with other agreed evidence to its address is left to its confirm step). If another transfer is at that position (the re-included transaction ran against other state: a router or swap paying another amount or recipient), it is recorded in the same transaction as a new deposit, as the scanner records one, when it pays an issued address: evidence `transfer_changed_at_finality` with `successor_deposit_id`. |
 | No receipt, and the transaction's sender's nonce at `finalized` is past its nonce | Proven dropped, another transaction consumed the nonce: `reversed`. |
 | No receipt, nonce unused | Pending again; wait, and `TopupDepositPendingAfterReorg` after an hour. |
 | Anything else (the providers disagree) | Wait for the deposit's recheck time. |
@@ -444,6 +446,37 @@ deposit (`credited` or `rejected`); and a quote the deposit consumed opens again
 lasts, or expires with `quote.expired`; its pending refunds without a transaction are canceled,
 though none can exist while refunds require a final deposit (§12). The watch raises `TopupDepositReversed`. A reversed deposit is never claimed again,
 never swept, and not counted in custody reconciliation (§13).
+
+**A changed transfer at the same position** is handled as chain indexers handle a reorg: the
+orphaned record is rolled back and the canonical log indexed as a new record. A receipt position
+holds at most one deposit that is not reversed (a partial unique index); every deposit recorded
+there has a `revision`, the number recorded before it, and its id is `uuid_v5(NS,
+"{chain_id}:{tx_hash}:{receipt_log_index}")` at revision 0, so every earlier id is unchanged, and
+`uuid_v5(NS, "{chain_id}:{tx_hash}:{receipt_log_index}:{revision}")` after. A transfer re-included
+unchanged keeps its deposit, and the scanners, the backstop, and the reconciler's missing-deposit
+pass record nothing for a position a deposit still holds, whatever its content; the per-block scan
+never takes a position whose deposits were all reversed either, since that position is final and a
+read of it before finality may be of a log a reorganization removed, so only finalized evidence (the
+watch, the backstop, the reconciler, restore rescans) records a revision above 0. So the watch,
+which reverses the old deposit only once both providers show another transfer there at or below
+`finalized`, records that transfer in the same transaction, when it pays an issued address at or
+after the address's creation block, exactly as the scanner would (`detected` on its route, or
+`rejected(unsupported_asset)`); the scanners may have passed its block while the old deposit held
+the position. The new deposit is confirmed, valued, screened, and credited by the pump like any
+other; its block is already final, so its confirm step marks it final and the cap on credit
+before finality does not hold it. A later read of the transfer is a duplicate of it. It names the
+reversed deposit (`deposits.replaces`, the API's `replaces`, and the reversed one's `replaced_by`)
+when both are in the same account and mode; the reversal's evidence names it in any case
+(`successor_deposit_id`). A quote the old deposit consumed, when the new one pays the same
+address, is handed to it: it opens again whatever its window (the lock's in-time test is by block
+time), and the new deposit's confirm step consumes it if it pays it, or it expires once no payment
+to its address is left unconfirmed (§9); so no `quote.expired` precedes the credit that completes
+it. The two deposits' events are delivered independently, in no set order (a new deposit's
+`deposit.rejected` is written before the old one's `deposit.reversed`), and the balance rule
+(§11) nets them whatever the order. Only a transfer whose content depends on chain state (a
+router, a swap output) can change this way; a plain transfer of a routed token has its recipient
+and amount fixed by its transaction, since routes never take fee-on-transfer or rebasing tokens
+(§4).
 
 ## 8. Chain, valuation, screening
 
@@ -496,7 +529,7 @@ that caller's alias, and `depositNonce`, the sender's nonce the deposit consumed
 transaction itself is not read. Every provider request is bounded by the RPC timeout, and one that
 outlasts it is retried like any other transport failure. For a route with a depth or `safe`, transfers at or below the
 horizon (the highest block that has reached the confirmation) become `detected` deposits
-(`ON CONFLICT DO NOTHING` on the identity), and the fast cursor advances to the horizon in the
+(`ON CONFLICT DO NOTHING` on the receipt position), and the fast cursor advances to the horizon in the
 same transaction, so the blocks above it are read again on the next head and a block below it is
 not read by this loop again. The pump confirms them on both providers at once, so a payment to any
 issued address (an open quote's, a closed or expired one's, a repeated or wrong amount, or a
@@ -512,7 +545,9 @@ contract, records them as `rejected(unsupported_asset)` after finality.
 scanned range are upserted into `pending_transfers`, and rows in that range not seen this time
 (reorged) are deleted, in one transaction. Blocks the fast cursor has passed are not re-read, so a
 row there reorged away by more than the confirmation stays until the finalized backstop's cursor
-passes it; such a transfer is a deposit by then and is shown as one (§12). The pending view reads
+passes it; the fast scan recorded such a transfer as a deposit, which the view shows instead while
+it holds the position, and once the finality watch reverses it the position is final, so a
+pending row there is stale and not shown (§12). The pending view reads
 the finalized cursor `FOR SHARE`, and the finalized backstop deletes rows at or below its cursor
 in the transaction that advances it, so a transfer moves from pending to deposit atomically and no
 row below the cursor is written afterwards. Pending rows never feed deposits, transitions, locks,
@@ -527,8 +562,9 @@ the per-block scan (token-wide or by 1 000 addresses) for **every issued address
 one `eth_getLogs` on the factory address per window (no forwarder filter), kept locally when the
 forwarder is an issued address; so a window costs two requests in token mode however many
 addresses exist, and late payments to expired quotes are found. Deposits insert with
-`ON CONFLICT DO NOTHING` on the identity, so one the per-block scan recorded is left to the
-finality watch. Of the factory events it keeps only those of a known `(address, treasury)` pair
+`ON CONFLICT DO NOTHING` on the receipt position, so one the per-block scan recorded is left to the
+finality watch, even when the position now holds another transfer: the watch reverses the old
+deposit at finality and records the new transfer (§7). Of the factory events it keeps only those of a known `(address, treasury)` pair
 (`FlushFailed` carries no treasury; the forwarder address commits to it): `ForwarderCreated` sets
 the address's `deployed_block`, `Flushed` inserts a `flushed` row and sweeps the address's final
 credited deposits before it (§7), and `FlushFailed` inserts a `flush_failures` row, leaving the
@@ -818,7 +854,7 @@ Optional hardening, each the merchant's choice: fetch `GET /v1/deposits/{id}` an
 `status: "credited"` with the same amount; recompute the deposit UUID `uuid_v5(NS,
 "{chain_id}:{tx_hash}:{receipt_log_index}")`, where `receipt_log_index` is the transfer's
 position among its transaction's receipt logs, and verify the cited log on its own node at
-finality;
+finality (a deposit with `replaces` set has another id, §7);
 per-deposit and per-period caps as review holds. None is needed for correctness: the credit is
 authorized by the service's signature alone.
 
@@ -1048,8 +1084,8 @@ retired or replaced secret fails with `404`, and the view, is bounded to 2 s (`5
 **Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
 status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
 currency, exchange_rate, price_source, valued_at, address, from_address, tx_hash, log_index,
-block_number, amount_refunded_atomic, refunded, amount_refunded, amount_reversed, created,
-metadata}`. `status` is the merchant's
+block_number, amount_refunded_atomic, refunded, amount_refunded, amount_reversed, replaces,
+replaced_by, created, metadata}`. `status` is the merchant's
 view of the state machine (§7): `pending` (`detected` or `confirmed`), `credited` (`credited` or
 `swept`), `rejected`, or `reversed`; `final` is whether its block is final and `swept` whether a
 finalized `Flushed` event after it moved its forwarder's balance; a refund is not a state, because it neither moves custody nor
@@ -1403,7 +1439,15 @@ and checklist in `audit`. The unfinalized-credit cap and a deposit's `amount_ref
 `amount_reversed` are computed from ledger rows, so they hold after a restore: a deposit credited in
 the window is credited again within the cap, and the finality watch settles every restored
 credited deposit that is not final. A deposit not imported is credited again with the same event id, so the
-merchant ignores the repeat and keeps its first credit (§11). The restore drill runs weekly in CI
+merchant ignores the repeat and keeps its first credit (§11). When the backup lacks a deposit that
+was reversed because another transfer took its position (§7), the rescan finds only the final
+transfer and records it at revision 0, under the reversed deposit's id, not its successor's: the
+reversed deposit's imported events then show as `mismatch` when the amounts differ, and the
+successor's stay `pending`, and the operator settles them with the merchant as one incident. The
+reversal and its successor commit in one transaction, so a backup holding the reversed deposit
+holds its successor too; should one ever lack it, the rescan records the final transfer at
+revision 1 with `replaces` `null`, and the quote the reversed deposit completed is not handed over
+(the reversal reopened or expired it as for any reversal). The restore drill runs weekly in CI
 on a local stack, including the freeze and the reconciliation; the staging drill restores
 staging's real backups. Ingress via the
 dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, Sentry, and merchants' webhook URLs,

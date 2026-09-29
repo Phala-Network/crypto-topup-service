@@ -44,9 +44,9 @@ class Deposit:
                 'exchange_rate': '0.12345679', 'final': True, 'final_at': 1790554572, 'from_address':
                 '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False,
                 'log_index': 212, 'metadata': {'order_id': 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote':
-                'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'status': 'credited',
-                'swept': False, 'tx_hash': '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at':
-                1790553630}
+                'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'replaced_by': None,
+                'replaces': None, 'status': 'credited', 'swept': False, 'tx_hash':
+                '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}
 
         Attributes:
             address (str): Receiving forwarder address.
@@ -73,7 +73,9 @@ class Deposit:
             from_address (str): Sender of the transfer.
             id (str): `dep_` and the hex of the deposit's deterministic UUID,
                 `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
-                `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+                `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
+                deposit recorded at a position after the deposit there was reversed (`replaces`) has
+                another id.
             livemode (bool): Whether the deposit is on a live-mode route.
             log_index (int): Block-wide log index of the transfer; it changes if the transaction is re-included.
             metadata (DepositMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of
@@ -105,6 +107,14 @@ class Deposit:
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
                 `out_of_bounds`,
                 `out_of_range`, or `sanctioned`.
+            replaced_by (None | str | Unset): The deposit that took this reversed deposit's place, `dep_…` (its `replaces`
+                is this one);
+                `null` otherwise, or when that deposit is in another account or mode.
+            replaces (None | str | Unset): The reversed deposit whose place this one took, `dep_…`: its transaction was re-
+                included
+                before finality against other state (a router or swap output), and the transfer at the same
+                position in the final chain is this deposit. `null` otherwise, or when that deposit is in
+                another account or mode.
             valued_at (int | None | Unset): Valuation time, Unix seconds.
     """
 
@@ -139,6 +149,8 @@ class Deposit:
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
     rejection_reason: None | str | Unset = UNSET
+    replaced_by: None | str | Unset = UNSET
+    replaces: None | str | Unset = UNSET
     valued_at: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -249,6 +261,18 @@ class Deposit:
         else:
             rejection_reason = self.rejection_reason
 
+        replaced_by: None | str | Unset
+        if isinstance(self.replaced_by, Unset):
+            replaced_by = UNSET
+        else:
+            replaced_by = self.replaced_by
+
+        replaces: None | str | Unset
+        if isinstance(self.replaces, Unset):
+            replaces = UNSET
+        else:
+            replaces = self.replaces
+
         valued_at: int | None | Unset
         if isinstance(self.valued_at, Unset):
             valued_at = UNSET
@@ -301,6 +325,10 @@ class Deposit:
             field_dict["quote"] = quote
         if rejection_reason is not UNSET:
             field_dict["rejection_reason"] = rejection_reason
+        if replaced_by is not UNSET:
+            field_dict["replaced_by"] = replaced_by
+        if replaces is not UNSET:
+            field_dict["replaces"] = replaces
         if valued_at is not UNSET:
             field_dict["valued_at"] = valued_at
 
@@ -454,6 +482,24 @@ class Deposit:
 
         rejection_reason = _parse_rejection_reason(d.pop("rejection_reason", UNSET))
 
+        def _parse_replaced_by(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        replaced_by = _parse_replaced_by(d.pop("replaced_by", UNSET))
+
+        def _parse_replaces(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        replaces = _parse_replaces(d.pop("replaces", UNSET))
+
         def _parse_valued_at(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -495,6 +541,8 @@ class Deposit:
             price_source=price_source,
             quote=quote,
             rejection_reason=rejection_reason,
+            replaced_by=replaced_by,
+            replaces=replaces,
             valued_at=valued_at,
         )
 

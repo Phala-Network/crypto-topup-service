@@ -348,7 +348,9 @@ pub enum ExpandableDeposit {
 pub struct Deposit {
     /// `dep_` and the hex of the deposit's deterministic UUID,
     /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
-    /// `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+    /// `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
+    /// deposit recorded at a position after the deposit there was reversed (`replaces`) has
+    /// another id.
     pub id: String,
     /// Always `deposit`.
     pub object: String,
@@ -422,6 +424,14 @@ pub struct Deposit {
     /// deposit is refunded only once final, and a final deposit is never reversed, so a reversed
     /// deposit has no refunds); `0` otherwise.
     pub amount_reversed: u64,
+    /// The reversed deposit whose place this one took, `dep_…`: its transaction was re-included
+    /// before finality against other state (a router or swap output), and the transfer at the same
+    /// position in the final chain is this deposit. `null` otherwise, or when that deposit is in
+    /// another account or mode.
+    pub replaces: Option<String>,
+    /// The deposit that took this reversed deposit's place, `dep_…` (its `replaces` is this one);
+    /// `null` otherwise, or when that deposit is in another account or mode.
+    pub replaced_by: Option<String>,
     /// Detection time, Unix seconds.
     pub created: i64,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of the
