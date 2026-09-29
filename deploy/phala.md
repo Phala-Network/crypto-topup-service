@@ -269,26 +269,45 @@ non-zero with the reason.
 
 `pay.phala.com` is the static build of [product/web](product/web), served by the Cloudflare Worker
 `phala-pay-web` with static assets only (no Worker script) and deployed by **Cloudflare Workers
-Builds**, connected to this repository. Its dashboard settings: root directory
-`deploy/product/web` and build command `npm run build:cloudflare`; the deploy commands are the
-defaults, `npx wrangler deploy` on `main` and `npx wrangler versions upload` on other branches.
-Workers Builds uses the wrangler pinned in [product/web/package.json](product/web/package.json) and
-ignores a `build` section of the Wrangler config.
+Builds**, connected to this repository, with Cloudflare's [`cf` CLI](https://github.com/cloudflare/cf)
+pinned in [product/web/package.json](product/web/package.json). `main` deploys to production and
+every other branch to its own [Worker Preview](https://developers.cloudflare.com/workers/previews/).
+Its dashboard build settings, the same for production and the Previews Base: root directory
+`deploy/product/web` and build command `npm run build:cloudflare`; the deploy command is
+`npm run deploy` for production and `npm run deploy:preview` for Previews. A branch's Preview
+copies the Previews Base when it is created, so changing the Base leaves existing Previews on
+their old settings until each is edited too.
 
 - **Build.** `build:cloudflare` builds `sdk/js` (the page depends on it through `file:`) and then
   the page, each from its own lockfile with `npx -y pnpm@12.6.0`, on the Node of
-  `product/web/.node-version` (24, as CI). The page's API origin is fixed at build time:
+  `product/web/.node-version` (24, as CI). The Cloudflare Vite plugin writes the page as cf's
+  Build Output, in `product/web/.cloudflare/output`. The page's API origin is fixed at build time:
   `VITE_DEMO_API_ORIGIN` in `product/web/.env.production`, `https://pay-demo-api.phala.com`.
-- **[wrangler.jsonc](product/web/wrangler.jsonc).** The assets of `./dist`; any path but the page
-  and its assets is a real `404` (`not_found_handling: "none"`); the custom domain `pay.phala.com`
-  as a `custom_domain` route; no `workers.dev` copy of the site (`workers_dev: false`); and preview
-  URLs on (`preview_urls: true`) for the versions branch builds upload.
-- **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers: the
-  page's CSP (`connect-src` names only the demo API and `pay-api-staging.phala.com`, whose public
-  quote and deposit address views the SDK components read), `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`, `no-cache` for the page, a year's immutable caching for the
-  content-hashed `/assets/*`, and a day's caching for the fixed-name icons, manifest, link preview
-  image, `robots.txt`, and `sitemap.xml`.
-- **Pull requests.** Each branch build uploads a preview version with its own `workers.dev` URL,
-  to review the page. Its demo API calls are refused by CORS by design: the API allows only
-  `https://pay.phala.com`.
+- **Production.** `deploy` runs `cf deploy --prebuilt`, which uploads that Build Output and
+  deploys it. CI checks the config and the Build Output with `cf deploy --prebuilt --dry-run`.
+- **Previews.** `deploy:preview` rebuilds the page as a Preview build
+  (`CLOUDFLARE_PREVIEW_BUILD=true`, which `cf previews deploy --prebuilt` requires) and runs
+  `cf previews deploy --prebuilt`, which creates or updates the Preview named after the branch
+  (`WORKERS_CI_BRANCH`, set by Workers Builds). Its Preview URL,
+  `https://<branch slug>-phala-pay-web.phala-dev.workers.dev`, always serves the branch's latest
+  build; each deployment also has its own URL. Its demo API calls are refused by CORS by design:
+  the API allows only `https://pay.phala.com`.
+- **[cloudflare.config.ts](product/web/cloudflare.config.ts).** The Worker's name and
+  compatibility date; any path but the page and its assets is a real `404`
+  (`notFoundHandling: "none"`); the custom domain `pay.phala.com`, for production only (cf rejects
+  custom domains in a Preview, so the config leaves them out when `isPreview`); no `workers.dev`
+  copy of the production site (`workersDev: false`) and no `workers.dev` URL per production
+  version (`previewUrls: false`). A Preview has its own `workers.dev` URLs, which cf turns on for
+  every Preview whatever the config says.
+- **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers, served in
+  production and in every Preview: the page's CSP (`connect-src` names only the demo API and
+  `pay-api-staging.phala.com`, whose public quote and deposit address views the SDK components
+  read), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `no-cache` for the
+  page, a year's immutable caching for the content-hashed `/assets/*`, a day's caching for the
+  fixed-name icons, manifest, link preview image, `robots.txt`, and `sitemap.xml`, and
+  `X-Robots-Tag: noindex` on `workers.dev`. `vite preview` serves the Build Output in the Workers
+  runtime with these headers, as the end-to-end tests do.
+- **Moving from Wrangler.** The site was deployed with Wrangler until cf replaced it. The build
+  settings above name scripts only this configuration has, so they were set just before merging
+  the change that adds them, and its branch Preview was checked first; the merge then deploys
+  `main` with cf.

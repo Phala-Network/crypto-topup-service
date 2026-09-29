@@ -1,16 +1,19 @@
+import { cloudflare } from "@cloudflare/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
 // The website, pay.phala.com: one page at `/` with its assets in `assets/`, served by Cloudflare
-// (wrangler.jsonc, with the headers of public/_headers). Its demo calls the reference product's API
-// at VITE_DEMO_API_ORIGIN (.env.production). Content hashes in file names come from the content
-// only, so two builds of the same sources are identical.
+// (cloudflare.config.ts, with the headers of public/_headers). The Cloudflare plugin writes the
+// build as cf's Build Output, the page in .cloudflare/output/v0/workers/default/assets, and `vite
+// preview` serves it in the Workers runtime. Its demo calls the reference product's API at
+// VITE_DEMO_API_ORIGIN (.env.production). Content hashes in file names come from the content only,
+// so two builds of the same sources are identical.
 export default defineConfig({
   base: "./",
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), cloudflare()],
   resolve: { alias: { "@": resolve(import.meta.dirname, "src") } },
-  build: { outDir: "dist", emptyOutDir: true, sourcemap: false },
+  build: { sourcemap: false },
   logLevel: "warn",
 });

@@ -1,6 +1,5 @@
 node_modules/
-dist/
-.wrangler/
+.cloudflare/
 test-results/
 playwright-report/
 # Public build settings, not secrets (the repository ignores .env.*).
