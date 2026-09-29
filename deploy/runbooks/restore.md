@@ -265,8 +265,10 @@ the incident and settle it with the merchant. A `pending` finding that stays aft
 deposit the chain does not show: escalate. One exception: a deposit the finality watch reversed
 because another transfer took its receipt position, and its successor (the successor's
 `replaces` names it), when the backup predates both. The rescan records the final transfer under
-the reversed deposit's id, so that deposit's events may show as `mismatch` and the successor's stay
-`pending`: record the two as one incident and settle what the merchant applied with it. (A backup
+the reversed deposit's id, so that deposit's imported credit contradicts the transfer it now holds:
+it shows as `contradicted` and is held, and the successor's events stay `pending`. Record the two as
+one incident, settle what the merchant applied with it, then discard the held deposit's delivered
+credit (step 6). (A backup
 holding the reversed deposit holds its successor too: both commit in one transaction. Should one
 ever lack it, the rescan records the transfer as a new deposit with `replaces` `null`, and the
 quote is not handed over: link the two by their transaction hash.)

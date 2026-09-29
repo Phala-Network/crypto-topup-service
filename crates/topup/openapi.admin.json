@@ -801,6 +801,8 @@
           "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
           "refunded": false,
           "rejection_reason": null,
+          "replaced_by": null,
+          "replaces": null,
           "status": "credited",
           "swept": false,
           "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -918,7 +920,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id.",
             "type": "string"
           },
           "livemode": {
@@ -972,6 +974,20 @@
           },
           "rejection_reason": {
             "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replaced_by": {
+            "description": "The deposit that took this reversed deposit's place, `dep_…` (its `replaces` is this one);\n`null` otherwise, or when that deposit is in another account or mode.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replaces": {
+            "description": "The reversed deposit whose place this one took, `dep_…`: its transaction was re-included\nbefore finality against other state (a router or swap output), and the transfer at the same\nposition in the final chain is this deposit. `null` otherwise, or when that deposit is in\nanother account or mode.",
             "type": [
               "string",
               "null"
@@ -2309,7 +2325,7 @@
         "example": {
           "deliveries": [
             {
-              "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790553600,\"data\":{\"object\":{\"address\":\"0x2f3e91325b2288bce392711f85f5359661062a91\",\"amount\":2500,\"amount_atomic\":\"202510000000000000000\",\"amount_refunded\":0,\"amount_refunded_atomic\":\"0\",\"amount_reversed\":0,\"asset\":\"PHA\",\"asset_contract\":\"0x6c5ba91642f10282b576d91922ae6448c9d52f4e\",\"block_number\":21000000,\"chain_id\":1,\"client_reference_id\":\"team-42\",\"created\":1790553624,\"currency\":\"usd\",\"deposit_address\":null,\"exchange_rate\":\"0.12345679\",\"final\":true,\"final_at\":1790554572,\"from_address\":\"0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a\",\"id\":\"dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516\",\"livemode\":false,\"log_index\":212,\"metadata\":{\"order_id\":\"ord_1001\"},\"object\":\"deposit\",\"price_source\":\"quote\",\"quote\":\"qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10\",\"refunded\":false,\"rejection_reason\":null,\"status\":\"credited\",\"swept\":false,\"tx_hash\":\"0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e\",\"valued_at\":1790553630}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"deposit.credited\"}",
+              "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790553600,\"data\":{\"object\":{\"address\":\"0x2f3e91325b2288bce392711f85f5359661062a91\",\"amount\":2500,\"amount_atomic\":\"202510000000000000000\",\"amount_refunded\":0,\"amount_refunded_atomic\":\"0\",\"amount_reversed\":0,\"asset\":\"PHA\",\"asset_contract\":\"0x6c5ba91642f10282b576d91922ae6448c9d52f4e\",\"block_number\":21000000,\"chain_id\":1,\"client_reference_id\":\"team-42\",\"created\":1790553624,\"currency\":\"usd\",\"deposit_address\":null,\"exchange_rate\":\"0.12345679\",\"final\":true,\"final_at\":1790554572,\"from_address\":\"0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a\",\"id\":\"dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516\",\"livemode\":false,\"log_index\":212,\"metadata\":{\"order_id\":\"ord_1001\"},\"object\":\"deposit\",\"price_source\":\"quote\",\"quote\":\"qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10\",\"refunded\":false,\"rejection_reason\":null,\"replaced_by\":null,\"replaces\":null,\"status\":\"credited\",\"swept\":false,\"tx_hash\":\"0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e\",\"valued_at\":1790553630}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"deposit.credited\"}",
               "webhook_id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
               "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
               "webhook_timestamp": "1790553631"
