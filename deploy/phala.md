@@ -296,9 +296,9 @@ their old settings until each is edited too.
   compatibility date; any path but the page and its assets is a real `404`
   (`notFoundHandling: "none"`); the custom domain `pay.phala.com`, for production only (cf rejects
   custom domains in a Preview, so the config leaves them out when `isPreview`); no `workers.dev`
-  copy of the production site (`workersDev: false`) and no `workers.dev` URL per production
-  version (`previewUrls: false`). A Preview has its own `workers.dev` URLs, which cf turns on for
-  every Preview whatever the config says.
+  copy of the production site (`workersDev: false`); and Preview URLs (`previewUrls`) on for a
+  Preview (`isPreview`), whose `workers.dev` URLs need them, and off for production, whose versions
+  get none.
 - **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers, served in
   production and in every Preview: the page's CSP (`connect-src` names only the demo API and
   `pay-api-staging.phala.com`, whose public quote and deposit address views the SDK components
