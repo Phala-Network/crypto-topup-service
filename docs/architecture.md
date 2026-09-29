@@ -1005,7 +1005,7 @@ GET    /v1/admin/restore                      restore freeze, rescan per chain, 
 POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   revoke again after a restore
 POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply, reason}   cancellations and crediting pauses again
 POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
-POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, reason}   re-issue identically
+POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, client_secret?, reason}   re-issue identically
 POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, metadata?, client_secret?, reason}   re-issue identically; the lock never applies
 POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands
 POST   /v1/admin/restore/delivered_credits/discard {deposit, reason}   release a deposit whose transfer contradicts its delivered event
@@ -1070,9 +1070,19 @@ A seen transfer can disappear in a reorg; only deposits and `deposit.credited` r
 scopes, and while a chain is frozen (§13) it stops updating.
 
 **Client secret.** `POST /v1/quotes` returns `client_secret`, `{quote id}_secret_{nonce}{tag}`,
-for the payer's checkout page: `nonce` is 16 random bytes and `tag` the first 16 bytes of
-HMAC-SHA256 of everything before it, both as lowercase hex, under `get_key("client-secret/v1")`,
-derived like the service's other keys (§14), so every release and CVM checks the same secrets. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
+for the payer's checkout page, all lowercase hex after `_secret_`. Under the key
+`k = get_key("client-secret/v1")`, derived like the service's other keys (§14) so every release
+and CVM checks the same secrets:
+
+- `nonce` is `{random}{owner}`: 8 random bytes, then the owner tag, the first 8 bytes of
+  `HMAC-SHA256(k_owner, "owner:{acct}:{id}:{random}")`, where `acct` is the account's `acct_` id,
+  `id` the quote's `qt_` id, `random` the 16 hex digits as they appear in the secret, and the
+  subkey `k_owner = HMAC-SHA256(k, "client-secret/owner/v1")`;
+- `tag` is the first 16 bytes of `HMAC-SHA256(k, "{id}_secret_{nonce}")`.
+
+A read checks `tag` alone, in memory, so a forged secret costs no database work; a restore's
+re-issue (§14) also checks the owner tag, so a secret proves which account the service issued its
+id to. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
 secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, livemode, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
 payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
@@ -1108,7 +1118,8 @@ set, naming what the receiving address belongs to. Routes, versions, and valuati
 
 **Deposit address payments and client secret.** A deposit address carries `payments`, its payments
 of the last 24 hours in the quote's `payment` shape (`matches_quote` is `null`). Each create or
-rotation returns a new `client_secret`, `da_…_secret_…`; the newest 10 per address stay valid
+rotation returns a new `client_secret`, `da_…_secret_…`, built and checked as a quote's with the
+`da_` id; the newest 10 per address stay valid
 (`deposit_address_client_secrets`, SHA-256 only), as several pages of one customer may be open.
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
 `ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each payment
@@ -1441,7 +1452,8 @@ the reconciler runs. The operator reconciles through the admin API (`/v1/admin/r
 action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations, the
 merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses and
 quotes given out after the restore point re-issued identically from their deterministic salts
-(backfilled from the restored cursor), and the events merchants received imported from their
+(backfilled from the restored cursor), with the client secrets the merchant holds when the service
+issued them for those ids to that account (§12), and the events merchants received imported from their
 signed deliveries (the `v1a` signature verified with the account's webhook keys), so a deposit
 rebuilt from the chain keeps its `deposit.credited` event id and delivered body and is never
 re-emitted. A settled amount is immutable: the confirm step values a rebuilt deposit at the credit

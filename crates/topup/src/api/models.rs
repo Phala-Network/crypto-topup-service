@@ -1964,7 +1964,8 @@ pub struct RestoreDepositAddressRequest {
     #[serde(default)]
     pub id: Option<String>,
     /// A `client_secret` of the address the merchant holds (needs `id`): kept, so the payer's
-    /// page reads the address again. Only a secret the service issued for the `id` is accepted.
+    /// page reads the address again. Only a secret the service issued for the `id` to the
+    /// account is accepted.
     #[serde(default)]
     pub client_secret: Option<String>,
     /// Why, 1 to 1024 bytes.
@@ -2080,9 +2081,9 @@ pub struct RestoreQuoteRequest {
     #[schema(value_type = Option<Object>)]
     pub metadata: Option<serde_json::Value>,
     /// The quote's `client_secret`, when the merchant holds it: kept, so the payer's page reads the
-    /// quote again. Only a secret the service issued for the `id` is accepted, and it proves the
-    /// service issued the quote. Optional: without it the quote is re-issued, and found, all the
-    /// same, but its public view is not readable.
+    /// quote again. Only a secret the service issued for the `id` to the account is accepted, and
+    /// it proves the service issued the quote to the account. Optional: without it the quote is
+    /// re-issued, and found, all the same, but its public view is not readable.
     #[serde(default)]
     pub client_secret: Option<String>,
     /// Why, 1 to 1024 bytes.

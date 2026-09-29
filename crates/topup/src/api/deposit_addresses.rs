@@ -102,6 +102,7 @@ pub(crate) async fn create_deposit_address(
         &mut transaction,
         &state.routes,
         state.client_reads.key(),
+        &merchant.account,
         &address,
     )
     .await?;
@@ -346,6 +347,7 @@ pub(crate) async fn rotate_deposit_address(
         &mut transaction,
         &state.routes,
         state.client_reads.key(),
+        &merchant.account,
         &address,
     )
     .await?;
@@ -489,10 +491,11 @@ async fn respond_with_client_secret(
     connection: &mut PgConnection,
     routes: &RouteSet,
     key: &ClientSecretKey,
+    account: &Account,
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<Json<DepositAddress>> {
     let mut object = deposit_address_response(connection, routes, address).await?;
-    object.client_secret = Some(issue_client_secret(connection, key, address.id).await?);
+    object.client_secret = Some(issue_client_secret(connection, key, account, address.id).await?);
     Ok(Json(object))
 }
 
@@ -508,10 +511,11 @@ const CLIENT_PAYMENTS_SHOWN: usize = 10;
 async fn issue_client_secret(
     connection: &mut PgConnection,
     key: &ClientSecretKey,
+    account: &Account,
     id: Uuid,
 ) -> ApiResult<String> {
     let secret = key
-        .issue(&deposit_addresses::public_id(id))
+        .issue(&account.public_id, &deposit_addresses::public_id(id))
         .map_err(|error| {
             tracing::error!(%error, "no client secret issued");
             ApiError::internal()

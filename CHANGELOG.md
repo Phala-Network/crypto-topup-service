@@ -656,7 +656,14 @@ happens only from two-provider finalized data.
   waits for it (at most 5 seconds, then `409 idempotency_key_in_use`) and replays its response. A
   failure while rendering a response now creates nothing and is replayed as it failed (a quote was
   created before). A request the database cannot begin, or rolls back on a deadlock or
-  serialization failure, is an unsaved `503` with `Retry-After`.
+  serialization failure, is an unsaved `503` with `Retry-After`, as is one that finds no database
+  connection to claim its key (it was a `500`).
+- Admin: `POST /v1/admin/restore/quotes` and `/deposit_addresses` accept a `client_secret` only
+  when the service issued it for that id to that account. The secret's nonce now carries an owner
+  tag of the account (its length and format are unchanged, and it is still opaque): before, any
+  account's record of a lost id with the owner's secret, which the payer's page holds, re-issued
+  it under that account and address, and the owner's payer page showed that address. A secret
+  issued before this change reads as before but proves no account, so a re-issue refuses it.
 - Authorization runs before the idempotency lookup, as Stripe's: a restricted key no longer
   replays a response to a request its permissions refuse, and a `401` or `403` is no longer saved,
   so the same request by a key that holds the permission then runs.

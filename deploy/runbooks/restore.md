@@ -168,16 +168,30 @@ service's, so a payment to the quote is credited at spot, unless the merchant's 
 `deposit.credited` for it (step 5) carries the quote's credit; and the quote's `expires_at` is the
 restore's detection at the latest, so its payment page shows it expired instead of asking for a
 payment at a price that is not honoured. Send the quote's `client_secret` when the merchant holds
-it: only a secret the service issued for that `qt_` id is accepted (its tag proves it), and it is
-kept, so the payer's page reads the quote again; without it the quote is re-issued and its payment
-found all the same, and a repeat with the secret, once the merchant finds it, adds it. `reissued` is `false` when the quote exists already for the customer at the
-address. Its address is backfilled from the restored cursor, so the rescan finds a payment made to
-it. `400` means the address is not the quote's over the current treasury (check the treasury, then
-the record), the `client_secret` is not the quote's, or no route has the chain and asset. A quote
-nobody reports stays lost.
+it: only a secret the service issued for that `qt_` id to that account is accepted (its tags prove
+both, so a secret copied from another merchant's payer page is refused), and it is kept, so the
+payer's page reads the quote again; without it the quote is re-issued and its payment found all
+the same, and a repeat with the secret, once the merchant finds it, adds it. `reissued` is `false`
+when the quote exists already for the customer at the address. Its address is backfilled from the
+restored cursor, so the rescan finds a payment made to it. `400` means the address is not the
+quote's over the current treasury (check the treasury, then the record), the `client_secret` is
+not the quote's or not the account's, or no route has the chain and asset. A quote nobody reports
+stays lost.
+
+A `qt_` or `da_` id is unique across accounts, and nothing but its secret proves which account the
+service issued it to: a re-issue without one is the merchant's claim. `400` `id belongs to another
+quote` (or `deposit address`) for a request whose `client_secret` was accepted means another
+account or mode re-issued the id first, without its secret: this account's secret proves the id
+is its own. The other claim cannot show this merchant's payers its address (this secret is refused
+there), but it holds the id. Escalate: record both accounts and their records in the incident and
+decide with both merchants; a payment to this merchant's quote address is forwarded only to its
+treasury, but is not credited while the id is held elsewhere. Ask merchants for their secrets
+before re-issuing without one.
 
 The same `client_secret` field on the deposit address re-issue above (with its `id`) keeps a secret
-the merchant holds for the address.
+the merchant holds for the address, accepted likewise only when the service issued it for that
+`da_` id to that account. Without the secret, a re-issue without the `id` still brings the address
+back, under a new `da_` id.
 
 ## 5. Import the events the merchant received
 

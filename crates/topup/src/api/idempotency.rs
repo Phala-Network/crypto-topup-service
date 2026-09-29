@@ -203,10 +203,7 @@ pub(crate) async fn idempotent_post(
         Ok(Acquired::Replay(stored)) => return replay(&stored),
         Ok(Acquired::InUse) => return ApiError::idempotency_key_in_use().into_response(),
         Ok(Acquired::OtherRequest) => return ApiError::idempotency_key_reused().into_response(),
-        Err(error) if lock_not_available(&error) => {
-            return ApiError::idempotency_key_in_use().into_response();
-        }
-        Err(error) => return ApiError::from(error).into_response(),
+        Err(error) => return claim_error(error).into_response(),
     }
     parts.extensions.insert(claim.clone());
 
@@ -328,12 +325,22 @@ async fn acquire(
     })
 }
 
-/// Whether `error` is PostgreSQL's `lock_not_available` (`55P03`), a `lock_timeout`.
-fn lock_not_available(error: &sqlx::Error) -> bool {
-    error
+/// The answer to a claim that failed, before the request ran: `409 idempotency_key_in_use` when
+/// the wait for the key's row passed `lock_timeout` (PostgreSQL's `lock_not_available`, `55P03`),
+/// an unsaved `503` when no connection was available, as [`Idempotent::begin`]'s.
+fn claim_error(error: sqlx::Error) -> ApiError {
+    if error
         .as_database_error()
         .and_then(|error| error.code())
         .is_some_and(|code| code == "55P03")
+    {
+        return ApiError::idempotency_key_in_use();
+    }
+    if matches!(error, sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed) {
+        tracing::warn!(%error, "the idempotency key was not claimed");
+        return ApiError::database_busy();
+    }
+    ApiError::from(error)
 }
 
 /// The stored form of a response, `{"status", "body"}`, without a `secret` when it contains one;
@@ -430,5 +437,16 @@ mod tests {
             fingerprint(&Method::POST, "/a", b"b"),
             fingerprint(&Method::POST, "/ab", b"")
         );
+    }
+
+    /// No connection for the claim is a `503` the client retries, not saved: nothing ran.
+    #[test]
+    fn a_claim_without_a_connection_is_an_unsaved_503() {
+        for error in [sqlx::Error::PoolTimedOut, sqlx::Error::PoolClosed] {
+            let response = claim_error(error).into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().contains_key(header::RETRY_AFTER));
+            assert!(response.extensions().get::<NotExecuted>().is_some());
+        }
     }
 }

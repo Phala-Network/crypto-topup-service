@@ -275,8 +275,11 @@ delivered_delivery=
 
 # What the simulator derives at a dstack path, as the service derives its keys (the 32 key bytes
 # of GetKey): `pem PATH` prints them as an ed25519 private key (a webhook key is the seed itself),
-# and `secret PATH ID` issues a client secret of object ID under them, `{id}_secret_{nonce}{tag}`
-# with the tag the first 16 bytes of HMAC-SHA256 (crates/topup/src/client_secret.rs).
+# and `secret PATH ACCOUNT ID` issues a client secret of object ID of ACCOUNT under them,
+# `{id}_secret_{nonce}{tag}` with the nonce 8 random bytes and their owner tag, the first 8 bytes
+# of HMAC-SHA256 of `owner:ACCOUNT:ID:{random hex}` under the subkey HMAC-SHA256 of
+# `client-secret/owner/v1`, and the tag the first 16 bytes of HMAC-SHA256
+# (crates/topup/src/client_secret.rs).
 dstack_key() {
     dc exec -T mock-product python3 -c '
 import base64, hashlib, hmac, http.client, json, secrets, socket, sys
@@ -302,7 +305,11 @@ if sys.argv[1] == "pem":
     print(base64.b64encode(der).decode())
     print("-----END PRIVATE KEY-----")
 else:
-    signed = sys.argv[3] + "_secret_" + secrets.token_hex(16)
+    account, object_id, random = sys.argv[3], sys.argv[4], secrets.token_hex(8)
+    subkey = hmac.new(key, b"client-secret/owner/v1", hashlib.sha256).digest()
+    owner = "owner:%s:%s:%s" % (account, object_id, random)
+    signed = object_id + "_secret_" + random + hmac.new(
+        subkey, owner.encode(), hashlib.sha256).hexdigest()[:16]
     print(signed + hmac.new(key, signed.encode(), hashlib.sha256).hexdigest()[:32])
 ' "$@" </dev/null
 }
@@ -519,10 +526,10 @@ check_consistency_after_restore() {
         >/dev/null
 
     # The quote created after the backup is re-issued from the merchant's record with the client
-    # secret the service tagged, so the payer's page reads it again; a secret of another quote is
-    # refused.
-    local quote_request secret
-    secret=$(dstack_key secret client-secret/v1 "$consistency_quote")
+    # secret the service tagged, so the payer's page reads it again; a secret of another quote, or
+    # of this one issued to another account, is refused.
+    local quote_request secret refused
+    secret=$(dstack_key secret client-secret/v1 "$consistency_account_id" "$consistency_quote")
     quote_request=$(jq -cn --arg account "$consistency_account_id" --arg id "$consistency_quote" \
         --arg address "$consistency_quote_address" --arg secret "$secret" \
         '{account: $account, livemode: false, id: $id, client_reference_id: "restore-drill-qt",
@@ -530,10 +537,14 @@ check_consistency_after_restore() {
           exchange_rate: "0.25000000", address: $address, created: 1790000000,
           expires_at: 1790000900, client_secret: $secret,
           reason: "restore drill: quoted after the backup"}')
-    answer=$(admin_call POST /v1/admin/restore/quotes "$(jq -c --arg secret \
-        "$(dstack_key secret client-secret/v1 qt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" \
-        '.client_secret = $secret' <<<"$quote_request")")
-    expect_call 400 "$answer"
+    for refused in "$consistency_account_id qt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+        "acct_restoredrillother $consistency_quote"; do
+        # shellcheck disable=SC2086 # the account and the quote id, split on purpose
+        answer=$(admin_call POST /v1/admin/restore/quotes "$(jq -c --arg secret \
+            "$(dstack_key secret client-secret/v1 $refused)" \
+            '.client_secret = $secret' <<<"$quote_request")")
+        expect_call 400 "$answer"
+    done
     answer=$(admin_call POST /v1/admin/restore/quotes "$quote_request")
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg address "$consistency_quote_address" \

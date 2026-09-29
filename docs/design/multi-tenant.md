@@ -842,7 +842,8 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     restored cursor) and the quotes it created (the quote salt gives the same address from the
     `qt_` id; only that address over the current treasury is accepted, backfilled from the restored
     cursor, with the recorded terms kept but never applied and a `client_secret` accepted only
-    with the service's tag), and imports the deposit events it received
+    with the service's tag and its owner tag of the account: an id is unique across accounts, and
+    only the secret proves which one the service issued it to), and imports the deposit events it received
     from their deliveries, only those whose `v1a` signature verifies with the account's webhook
     keys: the delivered snapshot is the event, so a re-derived deposit never re-emits it with
     another body. A settled amount is immutable, so the credit a delivered `deposit.credited` or

@@ -2227,7 +2227,7 @@
             "type": "string"
           },
           "client_secret": {
-            "description": "A `client_secret` of the address the merchant holds (needs `id`): kept, so the payer's\npage reads the address again. Only a secret the service issued for the `id` is accepted.",
+            "description": "A `client_secret` of the address the merchant holds (needs `id`): kept, so the payer's\npage reads the address again. Only a secret the service issued for the `id` to the\naccount is accepted.",
             "type": [
               "string",
               "null"
@@ -2536,7 +2536,7 @@
             "type": "string"
           },
           "client_secret": {
-            "description": "The quote's `client_secret`, when the merchant holds it: kept, so the payer's page reads the\nquote again. Only a secret the service issued for the `id` is accepted, and it proves the\nservice issued the quote. Optional: without it the quote is re-issued, and found, all the\nsame, but its public view is not readable.",
+            "description": "The quote's `client_secret`, when the merchant holds it: kept, so the payer's page reads the\nquote again. Only a secret the service issued for the `id` to the account is accepted, and\nit proves the service issued the quote to the account. Optional: without it the quote is\nre-issued, and found, all the same, but its public view is not readable.",
             "type": [
               "string",
               "null"
@@ -5229,7 +5229,7 @@
                 }
               }
             },
-            "description": "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), or `treasury_not_set`; or `restore_not_frozen`",
+            "description": "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5479,7 +5479,7 @@
                 }
               }
             },
-            "description": "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
+            "description": "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5549,7 +5549,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Re-issues a quote the merchant created after the restore point, from its record of the quote\nobject: the address salt is derived from the account, customer, and `qt_` id, so only the\nquote's own address is accepted, backfilled from the restored cursor so the rescan finds a\npayment made to it since. A `client_secret` the service issued for the quote is kept, so the\npayer's page reads it again. The terms are stored as recorded but never applied: a payment to\nthe quote is credited at spot unless an imported `deposit.credited` for it, which the service\nsigned, carries its credit, and the payment window closes at the restore's detection at the\nlatest. Audited.",
+        "summary": "Re-issues a quote the merchant created after the restore point, from its record of the quote\nobject: the address salt is derived from the account, customer, and `qt_` id, so only the\nquote's own address is accepted, backfilled from the restored cursor so the rescan finds a\npayment made to it since. A `client_secret` the service issued for the quote to the account is\nkept, so the payer's page reads it again. The terms are stored as recorded but never applied:\na payment to the quote is credited at spot unless an imported `deposit.credited` for it, which\nthe service signed, carries its credit, and the payment window closes at the restore's\ndetection at the latest. Audited.",
         "tags": [
           "admin"
         ]
