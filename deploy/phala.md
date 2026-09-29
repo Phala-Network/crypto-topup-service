@@ -36,12 +36,33 @@ There is no USDT route: Tether publishes no testnet USDT, and a third-party toke
 USDC moves one or two transfers a block on both chains, so its routes set `backstop: addresses`,
 which puts each whole chain, PHA included, on transfer requests by recipient (architecture §8); the
 RPC cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
-usage](README.md#measuring-rpc-usage)). Base's public `https://sepolia.base.org` is not a provider: it
-caps `eth_getLogs` at 1 000 blocks. publicnode refuses logs with no contract address, so it is
-provider B ([RPC providers](README.md#rpc-providers)). The head loop polls every 12 s on both chains
+usage](README.md#measuring-rpc-usage)). The head loop polls every 12 s on both chains
 (`--head-poll-interval-s`), six Base blocks, so Base Sepolia costs about what Sepolia does.
 Routes are attested config: adding or changing one is a PR and a Deploy `upgrade` of `topup`,
 never a reset.
+
+### RPC providers
+
+Staging's providers, in the `staging` Environment's `TOPUP_RPC_<ID>_URL` variables
+([RPC providers](README.md#rpc-providers)); all four are keyless and free:
+
+| Chain | Slot | Provider |
+|---|---|---|
+| Sepolia | A | Tenderly public gateway (`https://sepolia.gateway.tenderly.co`) |
+| Sepolia | B | PublicNode (`https://ethereum-sepolia-rpc.publicnode.com`) |
+| Base Sepolia | A | Tenderly (`https://base-sepolia.gateway.tenderly.co`) |
+| Base Sepolia | B | PublicNode (`https://base-sepolia-rpc.publicnode.com`) |
+
+Checked on 2026-09-29, only Tenderly among keyless public endpoints (and Grove/Pocket on Sepolia)
+serves slot A's `eth_getLogs` over 2 000 blocks without a contract address. The others checked
+refuse it:
+
+- `sepolia.base.org` caps the range at 1 000 blocks;
+- PublicNode requires an address;
+- thirdweb caps the response size;
+- Nodies and 1RPC cap the range at 50 blocks.
+
+Mainnet needs keyed, paid providers from two different companies.
 
 ## Staging reset (HUMAN-ONLY)
 
