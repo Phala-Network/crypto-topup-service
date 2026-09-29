@@ -9,6 +9,10 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- Deposits carry `replaces` and `replaced_by` (`dep_…` or `null`), in the object and every
+  `deposit.*` snapshot: a deposit recorded for the transfer that took a reversed deposit's receipt
+  position after a reorganization names that deposit, and the reversed one names it (see Fixed).
+  Both are `null` when the other deposit is in another account or mode.
 - `GET /v1/attestation`'s webhook keys carry `standard_webhooks_public_key`, `public_key` as
   Standard Webhooks' `whpk_` and base64. `report_data` binds `public_key` only: pin the derived
   form only if it encodes the attested key (`verify_attestation_binding` checks it).
@@ -632,6 +636,16 @@ happens only from two-provider finalized data.
   replays a response to a request its permissions refuse, and a `401` or `403` is no longer saved,
   so the same request by a key that holds the permission then runs.
 
+- A payment made through a contract (a router, a swap output) whose transaction is re-included
+  before finality against other state, so that the transfer at the same receipt position pays
+  another amount or another issued address, is now recorded and credited. The first deposit is
+  `reversed` (`deposit.reversed` if you were told of it), and the transfer in the final chain is a
+  new deposit with a new id and its own `deposit.credited` (or `deposit.rejected`), already final,
+  whose `replaces` names the first one; a quote the first one completed goes to it without
+  `quote.expired`. The two deposits' events arrive in no set order: the balance rule nets them
+  whatever the order. The new transfer was never recorded, and custody reconciliation froze the
+  chain. Existing deposit ids are unchanged, and a transaction re-included unchanged keeps its
+  deposit.
 - A token without a route sent to an issued address is again recorded as
   `rejected(unsupported_asset)`, with its `deposit.rejected` event, once final. Since the per-block
   scanning change, routes in token mode (the default) never saw such transfers: the missing-deposit

@@ -14,6 +14,7 @@ use sqlx::migrate::Migrator;
 
 pub use accounts::{Account, Customer, get_account, get_customer};
 pub use addresses::{Address, get_address, list_chain_addresses};
+pub(crate) use deposits::Evidence;
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
     LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
@@ -31,6 +32,7 @@ pub use scanner::{
     ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,
     initialize_cursor, list_scan_addresses, record_backfill_progress,
 };
+pub(crate) use scanner::{find_scan_address, insert_scanned_deposit_in};
 pub(crate) use sweeps::mark_swept;
 pub use sweeps::{FactoryCommit, commit_factory_logs};
 

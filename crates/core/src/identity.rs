@@ -10,15 +10,37 @@ use uuid::Uuid;
 /// repository or DNS lookups.
 pub const DEPOSIT_NAMESPACE: Uuid = Uuid::from_u128(0xd55bab89f6565796a6a2bddfa1dd9631);
 
-/// Returns the UUIDv5 identity for an EVM transfer log.
+/// Returns the UUIDv5 identity of the first deposit recorded at an EVM transfer log's position.
 ///
 /// The name is `{chain_id}:{tx_hash lowercase 0x-prefixed}:{receipt_log_index decimal}`, where
 /// `receipt_log_index` is the log's position among the logs of its transaction's receipt (0 for
 /// the first). Unlike the block-wide log index, the position survives the transaction's
-/// re-inclusion in another block, so a re-included transfer keeps its deposit id.
+/// re-inclusion in another block, so a transfer re-included unchanged keeps its deposit id.
+///
+/// The position does not fix the content: a re-included transaction that runs against other
+/// state (a router, a swap) can put a different transfer at the same position. The deposit of the
+/// old transfer is then reversed at finality, and the transfer now at the position is a new
+/// deposit, [`deposit_revision_id`] with the next revision.
 #[must_use]
 pub fn deposit_id(chain_id: u64, tx_hash: B256, receipt_log_index: u64) -> Uuid {
-    let name = format!("{chain_id}:{tx_hash:#x}:{receipt_log_index}");
+    deposit_revision_id(chain_id, tx_hash, receipt_log_index, 0)
+}
+
+/// Returns the identity of the deposit recorded at a transfer log's position after `revision`
+/// earlier deposits there were reversed: [`deposit_id`] for revision 0, and otherwise UUIDv5 over
+/// `{chain_id}:{tx_hash}:{receipt_log_index}:{revision decimal}`.
+#[must_use]
+pub fn deposit_revision_id(
+    chain_id: u64,
+    tx_hash: B256,
+    receipt_log_index: u64,
+    revision: u64,
+) -> Uuid {
+    let name = if revision == 0 {
+        format!("{chain_id}:{tx_hash:#x}:{receipt_log_index}")
+    } else {
+        format!("{chain_id}:{tx_hash:#x}:{receipt_log_index}:{revision}")
+    };
     Uuid::new_v5(&DEPOSIT_NAMESPACE, name.as_bytes())
 }
 
@@ -61,6 +83,14 @@ mod tests {
         assert_eq!(
             deposit_id(1, tx_hash, 42).to_string(),
             "20513a59-9b80-53df-9832-08749de3dcc5"
+        );
+        assert_eq!(
+            deposit_revision_id(1, tx_hash, 42, 0),
+            deposit_id(1, tx_hash, 42)
+        );
+        assert_eq!(
+            deposit_revision_id(1, tx_hash, 42, 1).to_string(),
+            "718ca3c0-9ae4-55c7-b716-aa9dd168616f"
         );
     }
 

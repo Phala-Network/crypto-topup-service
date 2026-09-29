@@ -836,6 +836,8 @@ struct DepositRow {
     log_index: i64,
     block_number: i64,
     amount_refunded_atomic: String,
+    replaces: Option<Uuid>,
+    replaced_by: Option<Uuid>,
     created_at: DateTime<Utc>,
     metadata: JsonColumn<Metadata>,
 }
@@ -866,6 +868,11 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
                    FROM refunds AS refund
                    WHERE refund.deposit_id = deposit.id AND refund.status = 'succeeded'
                ), 0)::text AS amount_refunded_atomic,
+               deposit.replaces,
+               (
+                   SELECT successor.id FROM deposits AS successor
+                   WHERE successor.replaces = deposit.id
+               ) AS replaced_by,
                deposit.created_at, deposit.metadata
         FROM deposits AS deposit
         JOIN customers AS customer ON customer.id = deposit.customer_id
@@ -951,6 +958,8 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         refunded,
         amount_refunded,
         amount_reversed,
+        replaces: row.replaces.map(|id| ids::format(ids::DEPOSIT, id)),
+        replaced_by: row.replaced_by.map(|id| ids::format(ids::DEPOSIT, id)),
         created: row.created_at.timestamp(),
         metadata: row.metadata.0,
         admin: None,
