@@ -91,12 +91,13 @@ jobs:
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
       # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN,
-      # PRODUCT_PUBLIC_URL, and the gateway domain come from step "Resolve the public URLs". The
-      # RPC URLs are published with the compose: a keyed provider's URL has `{key}` in place of the
-      # key, which the owner seals as TOPUP_RPC_PROVIDER_<A|B>_KEY. SENTRY_ENVIRONMENT is the
-      # Environment's name; an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, or TOPUP_ADMIN_KID is
-      # derived in step "Check inputs and Environment settings". The product's RPC URLs, one per
-      # chain and keyless, are committed in deploy/product/docker-compose.yml, not settings.
+      # PRODUCT_PUBLIC_URL, and the gateway domain come from step "Resolve the public URLs", and the
+      # RPC provider URLs from step "Take the RPC provider URLs from the Environment". The RPC URLs
+      # are published with the compose: a keyed provider's URL has `{key}` in place of the key,
+      # which the owner seals as TOPUP_RPC_<ID>_KEY. SENTRY_ENVIRONMENT is the Environment's name;
+      # an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, or TOPUP_ADMIN_KID is derived in step "Check
+      # inputs and Environment settings". The product's RPC URLs, one per chain and keyless, are
+      # committed in deploy/product/docker-compose.yml, not settings.
       AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
       AWS_REGION: ${{ vars.AWS_REGION }}
       AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
@@ -105,8 +106,6 @@ jobs:
       PRODUCT_DOMAIN: ${{ vars.PRODUCT_DOMAIN }}
       TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
       TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
-      TOPUP_RPC_PROVIDER_A_URL: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
-      TOPUP_RPC_PROVIDER_B_URL: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
       SENTRY_ENVIRONMENT: ${{ inputs.environment }}
       PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
     steps:
@@ -131,8 +130,7 @@ jobs:
           case "$TARGET" in
             topup)
               required="AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
-                TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY
-                TOPUP_RPC_PROVIDER_A_URL TOPUP_RPC_PROVIDER_B_URL"
+                TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY"
               dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=phala-pay-$DEPLOY_ENVIRONMENT
               instance_type=tdx.medium domain_variable=TOPUP_DOMAIN
               gateway_variable=TOPUP_GATEWAY_DOMAIN policy=""
@@ -235,6 +233,31 @@ jobs:
         with:
           version: v1.8.3
 
+      # Every RPC provider the compose reads (deploy/README.md, "RPC providers") has its URL in the
+      # Environment variable of the same name, TOPUP_RPC_<ID>_URL, so a new chain's providers need
+      # no change here. Values are checked before they reach $GITHUB_ENV.
+      - name: Take the RPC provider URLs from the Environment
+        if: inputs.target == 'topup'
+        env:
+          ENVIRONMENT_VARIABLES: ${{ toJSON(vars) }}
+        run: |
+          status=0
+          names=$(grep -o '[$]{TOPUP_RPC_[A-Z0-9_]*_URL:-}' deploy/docker-compose.yml |
+            sed 's/^[$]{//; s/:-}$//' | sort -u)
+          for name in $names; do
+            value=$(jq -r --arg name "$name" '.[$name] // ""' <<<"$ENVIRONMENT_VARIABLES")
+            if [[ -z "$value" ]]; then
+              echo "::error::Environment variable $name is not set"
+              status=1
+            elif ! [[ "$value" =~ ^[[:graph:]]+$ ]]; then
+              echo "::error::Environment variable $name must be one URL, without spaces or line breaks"
+              status=1
+            else
+              echo "$name=$value" >>"$GITHUB_ENV"
+            fi
+          done
+          exit "$status"
+
       # The public URL is the target's custom domain, whose CNAME target is the gateway of the CVM's
       # node, which dstack-ingress names: from the existing CVM on an upgrade; a new CVM is rendered
       # with a provisional value until its node is known (step "Set the values known only after
@@ -278,9 +301,9 @@ jobs:
             deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
           fi
 
-      # topup: both RPCs, the contracts, anonymous image pulls. product: each chain's RPC reports
-      # its chain and the chain's treasury is a contract, topup's attestation, anonymous pull. Both:
-      # the Phala Cloud workspace and OS image.
+      # topup: each route's contracts and asset on every RPC provider it names, anonymous image
+      # pulls. product: each chain's RPC reports its chain and the chain's treasury is a contract,
+      # topup's attestation, anonymous pull. Both: the Phala Cloud workspace and OS image.
       - name: Preflight (read-only)
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -441,12 +464,13 @@ jobs:
               env_file=.env.$DEPLOY_ENVIRONMENT
               echo "### Owner: seal the runtime secrets"
               echo
+              names=$(awk '/^[[:space:]]*($|#)/ { next }
+                { sub(/=.*/, ""); printf "%s`%s`", (count++ ? ", " : ""), $0 }' deploy/staging.env.example)
               echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
               echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
-              echo "write \`$env_file\` (mode 0600) with exactly the staging.env.example names:"
-              echo "\`AWS_ACCESS_KEY_ID\`, \`AWS_SECRET_ACCESS_KEY\`, \`SENTRY_DSN\` (may be empty), and"
-              echo "\`TOPUP_RPC_PROVIDER_A_KEY\`, \`TOPUP_RPC_PROVIDER_B_KEY\` (the key for a \`{key}\` in the"
-              echo "provider's URL; empty for a keyless URL). The same name set keeps the compose hash."
+              echo "write \`$env_file\` (mode 0600) with exactly the staging.env.example names: $names."
+              echo "\`SENTRY_DSN\` may be empty; each \`TOPUP_RPC_<ID>_KEY\` is the key for the \`{key}\`"
+              echo "in provider <ID>'s URL, empty for a keyless URL. The same name set keeps the compose hash."
             else
               env_file=.env.product
               echo "### Owner: seal the product's API key"

@@ -133,6 +133,7 @@ once the instance exists or the restore is abandoned:
 ```sh
 umask 077
 export RESTORE_ENV_DIR="$(mktemp -d)"
+# One line per name of staging.env.example: every TOPUP_RPC_<ID>_KEY as well.
 printf '%s\n' 'AWS_ACCESS_KEY_ID=<read-only key id>' 'AWS_SECRET_ACCESS_KEY=<read-only secret>' \
   'SENTRY_DSN=<the live DSN, or empty>' 'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
   'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"

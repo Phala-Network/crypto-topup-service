@@ -50,6 +50,9 @@ Completed work is in git history and the changelogs.
       (Sepolia transaction `0xc63baf59…0812`). Owner: Safe owners.
 - [ ] Reset staging ([deploy/README.md](../deploy/README.md), "Staging reset"), deploy the PR 11
       image, re-create the staging accounts, and run the staging paths again. Owner: staging owner.
+- [ ] Base Sepolia (84532) beside Sepolia on staging, as configuration: the factory there, its
+      route, and two RPC providers of its own ([deploy/README.md, "RPC
+      providers"](../deploy/README.md#rpc-providers)). Owner: staging owner.
 
 ### Phala Cloud
 
@@ -69,7 +72,7 @@ Completed work is in git history and the changelogs.
 |---|---|---|
 | Mainnet PHA contract (proposed `0x6c5bA91642F10282b576d91922Ae6448C9d52f4E`) | Finance | to confirm |
 | Phala Cloud's treasury Safe per chain (owners, threshold), set by Phala Cloud through the API; not a route input | Finance | open |
-| Two paid mainnet RPC providers (public gateways rate-limit) | Ops | open |
+| Two paid mainnet RPC providers (public gateways rate-limit), each an id of the mainnet route with its `TOPUP_RPC_<ID>_URL` and, if keyed, sealed `TOPUP_RPC_<ID>_KEY` ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) | Ops | open |
 | Production R2 bucket and keys for WAL-G | Ops | open |
 | Production Phala Cloud workspace and API key for the CVM (`production` Environment) | Ops | open |
 | Production admin key (the operator's RFC 9421 key) | Operator | open |

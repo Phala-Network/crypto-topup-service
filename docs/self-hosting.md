@@ -31,8 +31,9 @@ the merchant's steps with the account's keys, never with the admin key.
   Environment that the other Environment's credentials cannot reach, and a read-write token for it.
   Cloudflare R2 needs no further settings; any other store also sets `AWS_REGION` and
   `AWS_S3_FORCE_PATH_STYLE`.
-- **Two RPC providers per chain**, from different companies, over HTTPS. Public gateways
-  rate-limit; use paid plans for a mainnet. The chain must carry the canonical Multicall3
+- **Two RPC providers per chain**, from different companies, over HTTPS: an endpoint serves one
+  chain, so each chain of your routes has two of its own. Public gateways rate-limit; use paid
+  plans for a mainnet. The chain must carry the canonical Multicall3
   ([deploy/contracts/multicall3.json](../deploy/contracts/multicall3.json)).
 - **A domain in DNS you control** for the API, for example `pay-api.example.com`: a CNAME and a TXT
   record per instance, not proxied. It becomes your `TOPUP_DOMAIN` and your merchants' service
@@ -78,7 +79,7 @@ the merchant's steps with the account's keys, never with the admin key.
    | `AWS_ENDPOINT` | the object store's endpoint, for example `https://<account>.r2.cloudflarestorage.com` |
    | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`, empty and used by no other app |
    | `TOPUP_ADMIN_PUBLIC_KEY` | step 3's `public_key` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the two providers' URLs, with `{key}` in place of an API key |
+   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the committed Sepolia routes' two providers' URLs, with `{key}` in place of an API key; a route on another chain adds one `TOPUP_RPC_<ID>_URL` per provider it names (section 3) |
 
    The meaning of each, the derived settings (`AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`,
    `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT`), and why all but the first two are attested are in
@@ -110,23 +111,34 @@ files are committed and attested: a new route is a pull request to your fork and
 - **Your own routes.** The fields and their defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment), and
   [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A
-  route goes in `deploy/config/routes/`, its identical copy in the `configs` of
-  [deploy/docker-compose.yml](../deploy/docker-compose.yml), and its path in the `--route`
-  arguments of the `topup` and `restore-check` services; [validate-compose.sh](../deploy/validate-compose.sh)
-  checks the compose against the files and names the route paths it expects, so update it with
-  them, and [cvm-rehearsal.sh](../deploy/local/cvm-rehearsal.sh) names a local stand-in token for
-  each route. `cargo run --locked -p topup -- route validate FILE` checks a file and `route show FILE`
-  prints it resolved. Deploy refuses a live route on a test network, a test route on a mainnet,
+  route `NAME.yaml` goes in `deploy/config/routes/`, its identical copy in the `configs` of
+  [deploy/docker-compose.yml](../deploy/docker-compose.yml) as `topup_route_<NAME, - as _>`,
+  mounted at `/etc/topup/routes/NAME.yaml` in the `topup` and `restore-check` services and passed
+  in their `--route` arguments; [validate-compose.sh](../deploy/validate-compose.sh) checks the
+  compose against the files, and [cvm-rehearsal.sh](../deploy/local/cvm-rehearsal.sh) names a local
+  stand-in token for each route. `cargo run --locked -p topup -- route validate FILE` checks a file
+  and `route show FILE` prints it resolved. Deploy refuses a live route on a test network, a test
+  route on a mainnet,
   any live route in `staging`, and a chain that [check-route-modes.sh](../deploy/check-route-modes.sh)
   does not list; add a chain there, and to
   [networks.json](../deploy/contracts/networks.json) for the contract scripts, after review. A
   chain without a Chainalysis sanctions oracle needs `chain.sanctions_oracle`.
+- **Its RPC providers.** A route names its chain's providers by id, `chain.rpc_providers:
+  [alchemy-base-sepolia, drpc-base-sepolia]` (lowercase letters, digits, `-`); one that names none
+  uses `provider-a` and `provider-b`, the Sepolia routes'. Each id is listed once in the
+  `x-rpc-providers` block of the compose: its URL, the Environment variable `TOPUP_RPC_<ID>_URL`
+  (the id upper-cased, `-` as `_`), and, for a provider that puts an API key in its URL, the
+  sealed `TOPUP_RPC_<ID>_KEY`, which also goes in
+  [staging.env.example](../deploy/staging.env.example) and the `allowed_envs` of
+  [app-compose.example.json](../deploy/app-compose.example.json). A provider serves one chain, so
+  another chain's route names providers of its own; preflight checks that each reports the chain
+  of every route naming it ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)).
 - **The contracts.** The `ForwarderFactory` has no owner, no roles, and no admin, and is deployed
   deterministically through the Arachnid proxy at `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   with its implementation at `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain. Reuse it;
   `topup run` refuses to start unless the chain holds exactly that code. Check a chain with the
   read-only `deploy/contracts/verify-deployment.sh --rpc NETWORK/a=URL_A --rpc NETWORK/b=URL_B`
-  (`NETWORK` from `networks.json`).
+  (`NETWORK` from `networks.json`, the URLs with their keys).
   Only where it is missing, deploy it (**HUMAN-ONLY**, a funded throwaway EOA) as in
   [deploy/CONTRACTS.md](../deploy/CONTRACTS.md); if anyone deployed it first, the broadcast sends
   nothing. It is deployed on Sepolia; Phala deploys it on mainnet after the contracts' independent
@@ -148,8 +160,9 @@ files are committed and attested: a new route is a pull request to your fork and
 3. **Seal the secrets** (**HUMAN-ONLY**). The CVM waits for them: PostgreSQL initializes only
    after it can list the empty backup prefix. Write `.env.production` (mode 0600) with exactly the
    names of [staging.env.example](../deploy/staging.env.example): `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be empty), `TOPUP_RPC_PROVIDER_A_KEY`,
-   `TOPUP_RPC_PROVIDER_B_KEY` (empty for a keyless URL). From a checkout of the deployed commit,
+   `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be empty), and each provider's `TOPUP_RPC_<ID>_KEY`
+   (`TOPUP_RPC_PROVIDER_A_KEY`, `TOPUP_RPC_PROVIDER_B_KEY`; empty for a keyless URL). From a
+   checkout of the deployed commit,
    with the rendered compose from the run's artifact and `PHALA_CLOUD_API_KEY` exported:
 
    ```sh
