@@ -4,8 +4,9 @@ The sandbox lets a merchant integrate before live mode (`docs/architecture.md` s
 package E4): Sepolia, a test token, a test-mode account, and scripted late, under, over, rejected,
 and refused payment scenarios driven through the reference product (`deploy/product`). The same
 scenarios run against a disposable local stack (`make sandbox-local`) and, unchanged, against
-production test mode with a test key. There is no separate integrator sandbox: staging is reset and
-stays internal pre-production, and integrators use production test mode (design §9).
+production test mode with a test key. There is no separate integrator sandbox: integrators use
+their operator's production test mode (design §9), and an operator's staging, if it runs one, stays
+internal pre-production.
 
 Every step that deploys contracts, changes a CVM, or creates an account with an admin key is
 marked **HUMAN-ONLY**; agents and CI never run them.
@@ -152,7 +153,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
 
 ```json
 {
-  "service_url": "https://pay-api.phala.com",
+  "service_url": "https://pay-api.example.com",
   "account": "acct_…",
   "api_key_file": "/home/me/acme-test.key",
   "route": "<the test-mode route>",
@@ -171,10 +172,11 @@ Write a configuration file; the fields are those of `ProductConfig` in
 }
 ```
 
-- `account` is your `acct_…` id, and `api_key_file` holds your test key.
+- `service_url` is the operator's service URL (`https://$TOPUP_DOMAIN`), `account` your `acct_…`
+  id, and `api_key_file` holds your test key.
 - `treasury` is your account's test-mode treasury on Sepolia, which quotes need. Set it once
   through the API with an EIP-4361 proof (design D10): from a test EOA key,
-  `deploy/sandbox/set-treasury.sh --api https://pay-api.phala.com --key-file
+  `deploy/sandbox/set-treasury.sh --api https://pay-api.example.com --key-file
   ~/acme-test.key --chain-id 11155111 --private-key 0x…` requests the challenge, signs it,
   and submits it; a Safe signs the challenge as a Safe message instead. Test-mode treasuries
   apply at once.
@@ -210,6 +212,6 @@ takes a few hours; pass scenario names to run a subset. The late payment scenari
 the route's quote window (`quote_ttl_seconds`; 120 seconds on the sandbox route).
 `restart_mid_flow` is reported as `SKIP` without a `restart_command`.
 
-Staging credits its own reference-product CVM and stays internal, so the scenarios do not run
-there; the deposit driver's options play their payments through that product instead
+Phala's staging credits its own reference-product CVM and stays internal, so the scenarios do not
+run there; the deposit driver's options play their payments through that product instead
 (deploy/README.md, "Abnormal paths").

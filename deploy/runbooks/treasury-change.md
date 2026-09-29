@@ -1,9 +1,8 @@
 # Treasury change
 
-**Trigger:** a merchant, Phala Cloud's Finance included, moves a chain's treasury to another
-address; an unexpected `treasury.created` event of a `pending` treasury, a change the merchant did not
-request;
-or the `TopupTreasurySanctioned` alert.
+**Trigger:** a merchant moves a chain's treasury to another address; an unexpected
+`treasury.created` event of a `pending` treasury, a change the merchant did not request; or the
+`TopupTreasurySanctioned` alert.
 
 **Impact:** treasuries are the accounts' own, set through the API per chain and mode with an
 EIP-4361 proof (docs/architecture.md §9, "Treasuries"; design D10); the operator never sets one.

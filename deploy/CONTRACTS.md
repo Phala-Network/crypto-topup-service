@@ -1,6 +1,9 @@
 # Deterministic contract deployment
 
-This runbook implements work package A2. No signing key is stored in CI: every funding or
+The factory is permissionless and deterministic, so every Phala Pay instance on a chain uses the
+same one: an operator reuses it wherever it is deployed and runs this runbook only on a chain where
+it is missing ([self-hosting guide](../docs/self-hosting.md#3-routes-and-contracts)). This runbook
+implements work package A2. No signing key is stored in CI: every funding or
 broadcast command below is **HUMAN-ONLY**, run by a deployer with their own key, and the
 Verify contracts workflow re-checks the deployment daily. Mainnet is never deployed from
 automation.
@@ -46,9 +49,10 @@ forwarder commits to the treasury it pays
 ([design D10](../docs/design/multi-tenant.md#d10-treasury-proof-and-changes);
 [Treasury change](runbooks/treasury-change.md)). The service never checks a Safe's configuration.
 `verify-safe.sh` remains a check of one Safe: the `treasury` in
-`deploy/contracts/safe-expectations.json`, Phala's finance Safe, which Phala's finance proves as the
-treasury of Phala Cloud's account. Run it before that proof and whenever the Safe's owners change
-(the Verify contracts workflow runs it daily on Sepolia). On every target it checks: the RPC's
+`deploy/contracts/safe-expectations.json`. In this repository that is Phala's finance Safe, which
+Phala's finance proves as the treasury of Phala Cloud's account; an operator or merchant that wants
+the same check of its own Safe records that Safe in its fork. Run it before that proof and whenever
+the Safe's owners change (the Verify contracts workflow runs it daily on Sepolia). On every target it checks: the RPC's
 `eth_chainId` equals the committed chain id for the target network, the address has code (an EOA is rejected), the proxy
 runtime code hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton,
 the singleton's runtime code hash matches, owners match as a set, the threshold matches exactly,
@@ -66,8 +70,8 @@ deploy/contracts/verify-safe.sh \
   --rpc sepolia/b="$SEPOLIA_RPC_B"
 ```
 
-If any Safe check fails, Phala's finance does not prove the Safe as a treasury (or moves the
-treasury off it) until the Safe or the reviewed expectations are corrected.
+If any Safe check fails, the Safe's owners do not prove it as a treasury (or move the treasury off
+it) until the Safe or the reviewed expectations are corrected.
 
 ## Reproducible build
 
@@ -119,12 +123,13 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The staging route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) uses the #202 build's
+The committed Sepolia route (`deploy/config/routes/phala-cloud-sepolia-pha.yaml`) uses the #202 build's
 deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
 (`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
 `topup run` checks the factory's `implementation()` and both runtime code hashes at startup. The
-commands below are the record of that deployment and the procedure for any other test network.
+commands below are the record of that deployment and the procedure for any other test network
+where the factory is missing (add the network to `deploy/contracts/networks.json`).
 
 **HUMAN-ONLY**, with the deployer key in the environment only (the forge script reads
 `PRIVATE_KEY`; it never appears in argv):
@@ -156,7 +161,8 @@ implementation runtime code hashes, `implementation()`, the implementation's `fa
 
 ## Mainnet
 
-Repeat only after Sepolia verification and the human release approval. **HUMAN-ONLY:**
+Not deployed yet. Repeat only after Sepolia verification and the human release approval; if
+anyone has deployed the factory first, the broadcast sends nothing. **HUMAN-ONLY:**
 
 ```sh
 read -rsp "Deployment private key: " PRIVATE_KEY && printf '\n'
@@ -206,5 +212,5 @@ chain; correct the code and deploy a new factory under a new salt and route vers
 historical versions available for existing deposits. A treasury change needs no new factory and
 no route change: treasuries are the accounts', set through the API
 ([Treasury change](runbooks/treasury-change.md)); new forwarders are derived for the new treasury,
-and existing forwarders keep paying theirs. Phala's finance Safe is Phala Cloud's account's
-treasury, verified here and proven through the API like any merchant's.
+and existing forwarders keep paying theirs. In Phala's instance, Phala's finance Safe is Phala
+Cloud's account's treasury, verified here and proven through the API like any merchant's.

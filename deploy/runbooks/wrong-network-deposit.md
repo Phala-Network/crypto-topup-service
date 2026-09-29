@@ -61,7 +61,7 @@ a date.
 All steps are **HUMAN-ONLY**; the service is not changed and the chain is not added to any route.
 
 1. For a Safe treasury, its owners recreate it at the same address on the other chain.
-2. A deployer (the merchant, or Phala's deployer on request; the deployment is permissionless)
+2. A deployer (the merchant, or the operator's deployer on request; the deployment is permissionless)
    deploys the canonical proxy and the factory exactly as in `deploy/CONTRACTS.md` and verifies
    that the forwarder address matches:
 

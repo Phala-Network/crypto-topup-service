@@ -28,14 +28,17 @@ round's findings on its `/healthz`.
 ## Environment
 
 Load values from the attested route and the admin's key store, never from chat or a ticket.
-`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, or signatures fail with `401`.
+`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, `https://$TOPUP_DOMAIN` (Phala's instance:
+`https://pay-api.phala.com`, staging `https://pay-api-staging.phala.com`), or signatures fail with
+`401`; `ADMIN_KEY_ID` is the deployment's `TOPUP_ADMIN_KID`, `admin/<Environment>-v1` unless
+rotated ([deploy/README.md, "One-time setup"](../README.md#one-time-setup-human-only-repository-owner)).
 
 ```sh
-export BASE_URL=https://pay-api.phala.com   # staging: https://pay-api-staging.phala.com
+export BASE_URL="https://$TOPUP_DOMAIN"
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x...
-export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/v1
+export ADMIN_KEY_FILE=admin.pem ADMIN_KEY_ID=admin/production-v1
 # admin METHOD PATH [JSON BODY]: signs the exact body (single-use, valid five minutes) and sends it.
 admin() {
   printf '%s' "${3:-}" > /tmp/topup-admin-body
@@ -82,10 +85,11 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 
 ## Exercise status
 
-Local exercises ran against PostgreSQL and Anvil with the `topup` CLI or the integration tests;
-Safe, Compliance, and publication steps are human-only and were never exercised. Except the staging
-restore drill, every exercise ran the earlier, database-level form of these runbooks; none has run
-in its current form against a CVM.
+The exercises of Phala's instance; an operator records its own. Local exercises ran against
+PostgreSQL and Anvil with the `topup` CLI or the integration tests; Safe, Compliance, and
+publication steps are human-only and were never exercised. Except the staging restore drill, every
+exercise ran the earlier, database-level form of these runbooks; none has run in its current form
+against a CVM.
 
 | Runbook | Last run | Outcome | Evidence |
 |---|---|---|---|

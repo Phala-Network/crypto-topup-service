@@ -1,8 +1,13 @@
 # Phala Pay
 
-An API-only, multi-tenant crypto payments service in Stripe's shape. The operator onboards each
-merchant as an account (`acct_…`) through the admin API; the merchant does everything else with
-its API keys and the SDKs (there is no dashboard). Phala Cloud is an ordinary account. The service
+Open-source, self-hosted software for an API-only, multi-tenant crypto payments service in
+Stripe's shape. Each operator runs its own instance in its own dstack confidential VM, for its own
+merchants: [self-hosting](docs/self-hosting.md) is the path from a fork to a credited deposit.
+Phala runs an instance only for Phala Cloud and offers no hosted service to others.
+
+The operator onboards each merchant as an account (`acct_…`) through the admin API; the merchant
+does everything else with its API keys and the SDKs (there is no dashboard). Phala Cloud is an
+ordinary account of Phala's instance. The service
 turns deposits of configured ERC-20 tokens into USD-valued credits and tells the merchant what to
 credit with signed `deposit.credited` webhooks, which it fulfills once per deposit. It is
 software, not custody: deposit addresses are CREATE2 forwarder contracts that can only pay the
@@ -16,12 +21,13 @@ every supported token on every chain (the same address wherever the treasury is 
 credited at spot for any amount, like the stable bank-transfer details of Stripe's customer
 balance.
 
-First route: Ethereum Mainnet PHA, for Phala Cloud's account first. Further assets and chains are
-added through route files; further merchants are accounts, not configuration.
+Routes (a chain and a token each) are route files each operator commits to its fork; further
+merchants are accounts, not configuration. Phala's first route is Ethereum Mainnet PHA, for Phala
+Cloud's account.
 
-**Website and live demo:** [pay.phala.com](https://pay.phala.com/), one page with the working
+**Website and live demo:** [pay.phala.com](https://pay.phala.com/), Phala's page with a working
 demo, a cloud console's billing page on Sepolia with test PHA; the page is served by Cloudflare and
-its demo is run by the staging reference product
+its demo is run by Phala's staging reference product
 ([deploy/README.md](deploy/README.md#staging-reference-product)).
 
 ## Flow
@@ -86,8 +92,9 @@ its customers' identity, balances, entitlements, and billing policy.
 - [Integration guide](docs/integration.md) — for merchants: quickstart, quotes, deposit addresses, treasuries, sweeps, webhooks, refunds, keys, reference
 - [API reference](https://phala-network.github.io/phala-pay/) — built from [crates/topup/openapi.json](crates/topup/openapi.json)
 - [First route profile](examples/phala-cloud-pha.yaml)
-- [Plan to production](docs/plan.md) — what is done, what remains, and who owns it
-- [Deployment](deploy/README.md) and [runbooks](deploy/runbooks/README.md) — for the operator
+- [Self-hosting](docs/self-hosting.md) — for the operator: running your own instance, in order
+- [Deployment](deploy/README.md) and [runbooks](deploy/runbooks/README.md) — for the operator: the reference
+- [Plan to production](docs/plan.md) — Phala's instance: what is done, what remains, and who owns it
 
 ## Database roles
 
@@ -132,8 +139,9 @@ read-only and records the restore; the [restore guide](deploy/RESTORE.md) and th
 
 ## Status
 
-Nothing is deployed to mainnet, and the staging deployment (Sepolia, `https://pay-api-staging.phala.com`)
-is reset for the multi-tenant schema: [the plan to production](docs/plan.md) lists what remains.
+The software is pre-1.0 and has not had its independent security review. Phala's instance is not
+on mainnet yet, and its staging deployment (Sepolia, `https://pay-api-staging.phala.com`) is reset
+for the multi-tenant schema: [the plan to production](docs/plan.md) lists what remains.
 
 ## License
 

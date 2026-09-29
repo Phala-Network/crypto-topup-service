@@ -1,10 +1,13 @@
 # Plan to production
 
-What remains before Phala Pay takes live payments, first for Phala Cloud's account on Ethereum
-Mainnet, and who owns each item. The decisions are the [design](design/multi-tenant.md) (§16 is
+What remains before Phala's instance of Phala Pay takes live payments for Phala Cloud's account on
+Ethereum Mainnet, and who owns each item. Phala Pay is open-source, self-hosted software: Phala's
+instance serves only Phala Cloud, Phala offers no hosted service, and other operators run their own
+([self-hosting](self-hosting.md)). The decisions are the [design](design/multi-tenant.md) (§16 is
 its PR plan); the specification is [architecture.md](architecture.md); merchants read
-[integration.md](integration.md); operators read [deploy/README.md](../deploy/README.md) and the
-[runbooks](../deploy/runbooks/README.md). Completed work is in git history and the changelogs.
+[integration.md](integration.md); operators read [self-hosting.md](self-hosting.md),
+[deploy/README.md](../deploy/README.md), and the [runbooks](../deploy/runbooks/README.md).
+Completed work is in git history and the changelogs.
 
 ## Where things stand
 
@@ -71,7 +74,7 @@ its PR plan); the specification is [architecture.md](architecture.md); merchants
 | Production Phala Cloud workspace and API key for the CVM (`production` Environment) | Ops | open |
 | Production admin key (the operator's RFC 9421 key) | Operator | open |
 | Sentry quota for production | Ops | open |
-| DNS for `pay-api.phala.com` (CNAME and `_dstack-app-address` TXT) | Ops | open |
+| DNS for Phala's production domain, `pay-api.phala.com` (CNAME and `_dstack-app-address` TXT) | Ops | open |
 | Route defaults in architecture §14 (minimum deposit 0, minimum credit $1, 4 quote decimals, deposit bounds, open exposure caps) and Phala Cloud's `max_unfinalized_credit` (default $1 000) | Finance | to confirm |
 
 ### Before mainnet
@@ -82,11 +85,12 @@ its PR plan); the specification is [architecture.md](architecture.md); merchants
       on Phala Cloud's account.
 - [ ] Restore drill against production backups, including the freeze and reconciliation.
 
-### Before third-party merchants go live
+### Third-party merchants
 
-- [ ] Phala's legal review (design §17): money transmission and crypto-asset licensing, sanctions
-      obligations, the due-diligence policy, merchant agreement, privacy and retention. Until it
-      signs off, the operator enables live mode only for Phala's own accounts. Owner: Legal.
+Phala's instance onboards no third-party merchants (design, amendment of 2026-09-29): others run
+their own instance, under their own legal and compliance review. The legal review of design §17
+was the gate for such merchants on Phala's instance, so it no longer gates anything there.
+
 - [ ] Design PR 13, account closure.
 
 ### Releases

@@ -146,7 +146,7 @@ shred -u "$RESTORE_ENV_DIR/restore.env" && rm -rf "$RESTORE_ENV_DIR"
 
 The dstack gateway routes `https://<app_id>-<port>.<gateway domain>` to any instance of the app
 that accepts a connection on that port ([dstack usage](https://github.com/Dstack-TEE/dstack/blob/v0.5.9/docs/usage.md#access-the-app)).
-Two instances listening on one port therefore share its traffic: the first staging drill
+Two instances listening on one port therefore share its traffic: Phala's first staging drill
 (2026-09-25), when the service was still published on 8080, saw 8 of 12 live `/healthz` requests
 reach its drill instance. The service now publishes only `dstack-ingress`, and the gateway sends
 its [custom domain](README.md#custom-domain) to the one instance the domain's TXT record names.
@@ -267,16 +267,17 @@ if it is authoritative, otherwise restore again from an older verified backup an
 
 ## Staging restore drill
 
-The drill restores the staging app's real backups into a throwaway instance of the staging app (a
+The drill restores an Environment's real backups (normally `staging`'s; an operator without a
+`staging` Environment drills `production` the same way) into a throwaway instance of the same app (a
 copy app cannot derive the backup key) and never goes past step 5 of [Restore](#restore). The
 restore-check variant guarantees it never writes to the prefix (its promoted timeline would divert
 a later real restore), never runs `backup` or the full `topup`, and never takes live traffic.
 
-1. Issue a read-only R2 token for the staging bucket, build the env file, render the variant with
-   the live staging images and settings, and require that it publishes only 8081:
+1. Issue a read-only token for the Environment's bucket, build the env file, render the variant
+   with its live images and settings, and require that it publishes only 8081:
    `docker compose -f restore-check.yml config --format json | jq -e '[.services[] | .ports[]? | .published] == ["8081"]'`.
 2. Require `live_isolated` to pass before the instance exists, with
-   `LIVE_URL=https://$TOPUP_DOMAIN` (`https://pay-api-staging.phala.com`).
+   `LIVE_URL=https://$TOPUP_DOMAIN` (Phala's staging: `https://pay-api-staging.phala.com`).
 3. Record the start time (the RPO anchor), run steps 1-5 of [Restore](#restore), and record the
    report, RPO, and RTO. **Hard abort:** run `live_isolated` right after creation, before each
    step, and at least every five minutes; if it fails once, delete the instance at once and record
