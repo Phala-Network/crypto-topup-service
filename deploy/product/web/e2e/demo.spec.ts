@@ -307,7 +307,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expectMetadata(page, headline);
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
   await expect(product.getByTestId("testnet-badge")).toHaveText("Testnet");
-  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const scenes = page.getByRole("complementary", { name: "Your backend" });
   await expect(scenes.getByRole("list", { name: "The steps of a payment" })).toBeVisible();
   const trust = await openTab(scenes, "Trust");
   await expect(trust).toContainText("Attestation verified");
@@ -492,7 +492,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await installWallet(page);
   await page.goto(env("SITE_URL"));
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
-  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const scenes = page.getByRole("complementary", { name: "Your backend" });
   await expect(product.getByTestId("balance")).toHaveText("$0.00");
 
   // The tabs follow the keyboard.
@@ -580,7 +580,7 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await installWallet(page);
   await page.goto(env("SITE_URL"));
   const product = page.getByRole("region", { name: "Cloud Console · Billing" });
-  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const scenes = page.getByRole("complementary", { name: "Your backend" });
   const helper = page.getByRole("note", { name: "Test tokens" });
   await expect(product.getByTestId("balance")).toHaveText("$0.00");
   await expectPaymentOptions(product);

@@ -24,8 +24,8 @@ import { EventStream, EventsLog, LedgerPanel, Requests } from "./Timeline.js";
 
 /**
  * What the merchant's backend sees while its customer pays: the payment's live steps, then its
- * payments, refunds, sweeps, API requests, and the service's attestation. A console in either
- * theme, apart from the product's own surface.
+ * payments, refunds, sweeps, API requests, and the service's attestation. A developer console in
+ * either theme: flat and set into the page, where the product is a raised app window.
  */
 // Every table of the panel: one cell padding, so their columns share a left edge.
 const TABLE = "text-xs [&_td]:px-3 [&_th]:h-9 [&_th]:px-3 [&_th]:text-muted-foreground";
@@ -57,13 +57,17 @@ export function Backend({
     // height, its header fixed and the stream with its tabs scrolling inside. Below lg, its natural
     // height in the page's flow.
     <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24 lg:h-[calc(100svh-7rem)] lg:self-start">
-      <AreaLabel icon={<Terminal />} title="Behind the scenes" text="What your backend sees" />
+      <AreaLabel step={2} title="Your backend's view" text="What your server receives" />
       <aside
-        aria-label="Behind the scenes"
-        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm lg:min-h-0 lg:flex-1"
+        aria-label="Your backend"
+        className="@container/console flex min-w-0 flex-col overflow-hidden rounded-xl border bg-muted/40 lg:min-h-0 lg:flex-1 dark:bg-background"
       >
-        <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-5 py-3.5">
-          <h2 className="text-sm font-medium">Event stream</h2>
+        {/* A console's title bar, as tall as the product's browser bar. */}
+        <header className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-muted/60 px-4 py-2 dark:bg-muted/30">
+          <h2 className="flex items-center gap-2 font-mono text-xs">
+            <Terminal className="size-3.5 text-muted-foreground" aria-hidden="true" />
+            Event stream
+          </h2>
           <Badge variant="outline" className="gap-1.5 font-normal text-muted-foreground" data-testid="stream-status">
             <span className="relative flex size-2" aria-hidden="true">
               {live && <span className="absolute inset-0 rounded-full bg-success/60 motion-safe:animate-ping" />}
@@ -219,20 +223,24 @@ function CreditsTab({
     <div className="flex flex-col gap-8">
       {account.payments.length > 0 && (
         <section aria-label="Credits" className="flex min-w-0 flex-col text-xs">
-          <Table className={cn(TABLE, "[&_td]:align-top [&_td]:leading-5")}>
+          {/* Where the console is narrow, without the token amount (the credit says its value), and
+              scrolling sideways rather than clipping what is left. */}
+          <Table className={cn(TABLE, "min-w-[30rem] [&_td]:align-top [&_td]:leading-5 @2xl/console:min-w-[38rem]")}>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead scope="col">Payment</TableHead>
-                <TableHead scope="col">Amount</TableHead>
+                <TableHead scope="col" className="hidden @2xl/console:table-cell">
+                  Amount
+                </TableHead>
                 <TableHead scope="col">Status</TableHead>
-                <TableHead scope="col" className="text-right">
+                <TableHead scope="col" className="w-28 text-right">
                   Credited
                 </TableHead>
-                <TableHead scope="col" className="text-right">
+                <TableHead scope="col" className="w-24 text-right">
                   Nets to
                 </TableHead>
-                <TableHead scope="col" className="text-right">
-                  Timeline
+                <TableHead scope="col" className="w-20 text-right">
+                  <span className="sr-only">Timeline</span>
                 </TableHead>
               </TableRow>
             </TableHeader>
@@ -260,7 +268,7 @@ function CreditsTab({
                         {day(row.created)}
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden @2xl/console:table-cell">
                       <div>{tokens(row.amount_atomic, symbol, decimals)}</div>
                       <div className="text-muted-foreground">
                         {row.exchange_rate === null ? "—" : `at ${price(row.exchange_rate)} / ${symbol}`}
@@ -317,10 +325,15 @@ function CreditsTab({
             <Table className={TABLE}>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead scope="col">When</TableHead>
-                  <TableHead scope="col">Deposit</TableHead>
+                  {/* When, where the console has room: the payments above carry their dates. */}
+                  <TableHead scope="col" className="hidden w-32 @2xl/console:table-cell">
+                    When
+                  </TableHead>
+                  <TableHead scope="col" className="w-40">
+                    Deposit
+                  </TableHead>
                   <TableHead scope="col">Event</TableHead>
-                  <TableHead scope="col" className="text-right">
+                  <TableHead scope="col" className="w-24 text-right">
                     Amount
                   </TableHead>
                 </TableRow>
@@ -332,7 +345,7 @@ function CreditsTab({
                     data-testid="ledger-line"
                     data-kind={line.kind}
                   >
-                    <TableCell className="text-muted-foreground" title={time(line.at)}>
+                    <TableCell className="hidden text-muted-foreground @2xl/console:table-cell" title={time(line.at)}>
                       {day(line.at)}
                     </TableCell>
                     <TableCell className="font-mono" title={line.deposit}>

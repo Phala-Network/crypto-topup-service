@@ -116,9 +116,11 @@ export function Hero() {
         <h1 id="hero-title" className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl">
           {TAGLINE}
         </h1>
-        <p className="max-w-2xl text-base text-balance text-muted-foreground sm:text-lg">
-          Credited at two confirmations, about 15&nbsp;s on Ethereum. Runs in a TEE you can verify. Addresses can only
-          pay your treasury. Stripe-shaped API.
+        <p className="max-w-2xl text-base text-pretty text-muted-foreground sm:text-lg">
+          {/* Each sentence a line where the paragraph is wide; on a phone, the no-break spaces keep its
+              wraps between clauses. */}
+          Credited at two confirmations, about 15&nbsp;s on&nbsp;Ethereum, in a TEE you can verify. Payment&nbsp;addresses
+          can only pay your treasury, behind a Stripe-shaped API.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-2">
           <Button asChild size="lg" className={HERO_BUTTON}>

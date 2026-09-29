@@ -31,12 +31,12 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     failed: "The quote expired without a payment.",
   },
   received: {
-    usually: "~12 s",
+    usually: "~12s",
     title: "Received by Phala Pay",
     hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
   },
   credited: {
-    usually: "~15 s",
+    usually: "~15s",
     title: "Credited",
     hint:
       "Usually about 15 s after sending: at 2 confirmations, once both RPC providers report the " +
@@ -48,7 +48,7 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     hint: "The signed deposit.credited moves the balance; its metadata arrives with it.",
   },
   final: {
-    usually: "~15 min",
+    usually: "~15m",
     title: "Final",
     hint:
       "About 15 minutes on Ethereum. Until then a reorg that drops the transaction reverses the " +
@@ -68,15 +68,15 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
 };
 
 // A step's line in columns: its time, its dot, its title with the opener, and the time since
-// sending, which ends on the card's right content edge. On a phone the time's column shows only
-// once a payment has times.
+// sending, which ends on the card's right content edge. The time's column shows only once a
+// payment has times.
 const STEP_GRID =
-  "grid grid-cols-[3.5rem_1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto] sm:gap-x-3";
-const UNTIMED_STEP_GRID =
-  "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto] sm:gap-x-3";
-// Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
-// phone, under its time, to keep the details' width.
+  "grid grid-cols-[4rem_1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:gap-x-3";
+const UNTIMED_STEP_GRID = "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-x-2 sm:gap-x-3";
+// Where a step's opened details start: under its title (px-2, the columns before it, and their
+// gaps); on a phone, a timed step's under its time, to keep the details' width.
 const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
+const UNTIMED_STEP_INDENT = "pl-[calc(0.5rem+1rem+0.5rem)] sm:pl-[calc(0.5rem+1rem+0.75rem)]";
 
 // A quote's steps, shown before there is a payment to follow.
 const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "webhook_received", "final", "swept"];
@@ -191,7 +191,7 @@ function StreamStep({
   sent: number | null;
   since?: number | null;
   token: StepToken;
-  /** Whether the payment has times yet: until then a phone leaves out the time's column. */
+  /** Whether the payment has times yet: until then the line leaves out the time's column. */
   timed: boolean;
 }) {
   const copy = STEP_COPY[step.key];
@@ -207,11 +207,14 @@ function StreamStep({
       aria-current={step.state === "current" ? "step" : undefined}
     >
       {/* The rail between this step's dot and the next one's, through the dots' centres (px-2, the
-          time's column, a gap, half a dot); on a phone the opened details take its place. */}
+          time's column and a gap, half a dot); on a phone a timed step's opened details take its
+          place. */}
       <span
         className={cn(
-          "absolute top-7 bottom-[-0.375rem] w-px bg-border group-last/step:hidden max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]",
-          timed ? "left-[calc(5rem-0.5px)]" : "left-[calc(1rem-0.5px)]",
+          "absolute top-7 bottom-[-0.375rem] w-px bg-border group-last/step:hidden",
+          timed
+            ? "left-[calc(5.5rem-0.5px)] max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]"
+            : "left-[calc(1rem-0.5px)]",
         )}
         aria-hidden="true"
       />
@@ -222,19 +225,18 @@ function StreamStep({
             "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
           )}
         >
-          <span className={cn("font-mono text-xs text-muted-foreground tabular-nums", !timed && "max-sm:hidden")}>
-            {step.at !== null ? (
-              <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
-            ) : since !== null ? (
-              <time dateTime={new Date(since * 1000).toISOString()} title="Waiting since">
-                {clock(since)}
-              </time>
-            ) : (
-              <span className="text-muted-foreground" aria-hidden="true">
-                --:--:--
-              </span>
-            )}
-          </span>
+          {/* A step yet to happen leaves its time blank. */}
+          {timed && (
+            <span className="font-mono text-xs text-muted-foreground tabular-nums">
+              {step.at !== null ? (
+                <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
+              ) : since !== null ? (
+                <time dateTime={new Date(since * 1000).toISOString()} title="Waiting since">
+                  {clock(since)}
+                </time>
+              ) : null}
+            </span>
+          )}
           <StepDot state={step.state} />
           <span className="flex min-w-0 items-center gap-1.5">
             <span
@@ -257,12 +259,21 @@ function StreamStep({
             {elapsed !== null ? (
               `+${duration(elapsed)}`
             ) : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined ? (
-              <span className="font-sans">usually {copy.usually}</span>
+              <>
+                <span className="font-sans">usually </span>
+                {copy.usually}
+              </>
             ) : null}
           </span>
         </CollapsibleTrigger>
-        {failed && <p className={cn("pb-1 text-xs text-pretty text-destructive", STEP_INDENT)}>{copy.failed}</p>}
-        <CollapsibleContent className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", STEP_INDENT)}>
+        {failed && (
+          <p className={cn("pb-1 text-xs text-pretty text-destructive", timed ? STEP_INDENT : UNTIMED_STEP_INDENT)}>
+            {copy.failed}
+          </p>
+        )}
+        <CollapsibleContent
+          className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", timed ? STEP_INDENT : UNTIMED_STEP_INDENT)}
+        >
           <p className="text-muted-foreground text-pretty">{copy.hint}</p>
           {step.at !== null && (
             <p className="font-mono text-xs" data-testid="step-time">

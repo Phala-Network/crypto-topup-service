@@ -1,7 +1,7 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
-import { AppWindow, Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
+import { Check, CircleAlert, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -90,10 +90,11 @@ export function Product({
   );
   return (
     <div className="flex min-w-0 flex-col gap-3 lg:sticky lg:top-24">
-      <AreaLabel icon={<AppWindow />} title="Your product" text="What your customer sees" />
+      <AreaLabel step={1} title="Your customer's view" text="Your app's billing page" />
+      {/* An app in a browser window: the raised surface of the two. */}
       <section
         aria-labelledby="product-title"
-        className="product-app overflow-hidden rounded-xl border bg-card text-card-foreground shadow-sm"
+        className="product-app overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg shadow-black/5 dark:shadow-black/40"
       >
         <div className="flex h-10 items-center gap-3 border-b bg-muted/40 px-4">
           <span className="flex gap-1.5" aria-hidden="true">
@@ -185,12 +186,17 @@ export function Product({
   );
 }
 
-/** A small caption above each of the page's two areas. */
-export function AreaLabel({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
+/** The caption above each of the demo's two areas, numbered as a guide's steps are. */
+export function AreaLabel({ step, title, text }: { step: number; title: string; text: string }) {
   return (
-    <p className="flex h-5 items-center gap-2 px-1 text-sm [&_svg]:size-4 [&_svg]:text-muted-foreground">
-      {icon}
-      <span>
+    <p className="flex min-h-5 items-center gap-2.5 px-1 text-sm">
+      <span
+        className="flex size-5 shrink-0 items-center justify-center rounded-full border font-mono text-xs text-muted-foreground"
+        aria-hidden="true"
+      >
+        {step}
+      </span>
+      <span className="min-w-0">
         <span className="font-medium">{title}</span>
         <span className="text-muted-foreground"> · {text}</span>
       </span>
@@ -640,7 +646,7 @@ function TestTokens({ network, className }: { network: Network; className?: stri
     <div
       role="note"
       aria-label="Test tokens"
-      className={cn("rounded-xl border bg-card text-sm text-card-foreground shadow-sm", className)}
+      className={cn("rounded-xl border bg-muted/30 text-sm", className)}
     >
       <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
         <span className="font-medium">Need test tokens?</span>
