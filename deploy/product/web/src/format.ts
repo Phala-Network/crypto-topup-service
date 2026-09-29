@@ -79,16 +79,31 @@ export function statusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-const rate = new Intl.NumberFormat("en-US", {
+// A rate to 4 significant digits, but never fewer than whole cents: `$0.06041`, `$0.25`, `$1.00`,
+// `$1,234.57`.
+const precise = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 8,
+  maximumFractionDigits: 2,
+  maximumSignificantDigits: 4,
+  roundingPriority: "morePrecision",
 });
 
-/** A USD-per-token rate as the service states it (8 decimals), without trailing zeros: `$0.0601`. */
+/** A USD-per-token rate, as the service states it (8 decimals), to 4 significant digits. */
 export function price(exchangeRate: string): string {
-  return rate.format(Number(exchangeRate));
+  const value = Number(exchangeRate);
+  const fraction = precise.formatToParts(value).find((part) => part.type === "fraction")?.value.length ?? 0;
+  return fraction < 2 ? usd.format(value) : precise.format(value);
+}
+
+/** `1 PHA = $0.06041`. */
+export function rate(symbol: string, exchangeRate: string): string {
+  return `1 ${symbol} = ${price(exchangeRate)}`;
+}
+
+/** Basis points as a percentage: `10%`, `2.5%`. */
+export function percent(bps: number): string {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(bps / 100)}%`;
 }
 
 /** A token as the customer sees it: `Test PHA` on a testnet, so it is never taken for real money. */

@@ -115,23 +115,24 @@ product_env() {
     env PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
         TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
         PRODUCT_DOMAIN=product.example PRODUCT_GATEWAY_DOMAIN=gateway.dstack.example \
-        PRODUCT_RPC_URL=https://rpc.example/sepolia \
         PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= "$@" \
         "$root/deploy/product/render-compose.sh"
 }
 product_env >"$tmp/product.yml"
-grep -F '"rpc_url": "https://rpc.example/sepolia",' "$tmp/product.yml" >/dev/null
-product_env PRODUCT_RPC_URL=https://other-rpc.example/sepolia >"$tmp/product-rpc.yml"
-[[ -n "$(label "$tmp/product.yml")" && "$(label "$tmp/product.yml")" != "$(label "$tmp/product-rpc.yml")" ]] || {
-    echo "the product label digest does not change with PRODUCT_RPC_URL" >&2
+grep -F '"public_url": "https://product.example",' "$tmp/product.yml" >/dev/null
+# Each chain's keyless RPC is committed in the source, not a setting.
+grep -F '"rpc_url": "https://base-sepolia-rpc.publicnode.com",' "$tmp/product.yml" >/dev/null
+product_env PRODUCT_PUBLIC_URL=https://other-product.example >"$tmp/product-url.yml"
+[[ -n "$(label "$tmp/product.yml")" && "$(label "$tmp/product.yml")" != "$(label "$tmp/product-url.yml")" ]] || {
+    echo "the product label digest does not change with PRODUCT_PUBLIC_URL" >&2
     exit 1
 }
-if product_env 'PRODUCT_RPC_URL=https://rpc.example/$SECRET' >"$tmp/dollar.out" 2>"$tmp/dollar.err"; then
+if product_env 'PRODUCT_PUBLIC_URL=https://secret-value.example/$SECRET' >"$tmp/dollar.out" 2>"$tmp/dollar.err"; then
     echo "the product renderer accepted a value with \$" >&2
     exit 1
 fi
-grep -F 'PRODUCT_RPC_URL must be' "$tmp/dollar.err" >/dev/null
-if grep -F 'rpc.example' "$tmp/dollar.err" >/dev/null; then
+grep -F 'PRODUCT_PUBLIC_URL must be' "$tmp/dollar.err" >/dev/null
+if grep -F 'secret-value' "$tmp/dollar.err" >/dev/null; then
     echo "the product renderer printed a rejected value" >&2
     exit 1
 fi

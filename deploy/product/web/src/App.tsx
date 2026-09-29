@@ -66,7 +66,7 @@ export function App() {
         <SiteHeader theme={theme} onThemeChange={setTheme} />
         <main id="top" className="flex-1">
           <Hero />
-          <section aria-label="Live demo" className={`${CONTAINER} pb-16 lg:pb-24`}>
+          <section id="demo" aria-label="Live demo" className={`${CONTAINER} scroll-mt-20 pb-16 lg:pb-20`}>
             <div className="grid items-start gap-x-8 gap-y-12 lg:grid-cols-[minmax(0,26rem)_minmax(0,1fr)] xl:grid-cols-[minmax(0,28rem)_minmax(0,1fr)] 2xl:gap-x-10">
               <Product
                 account={account.data ?? null}

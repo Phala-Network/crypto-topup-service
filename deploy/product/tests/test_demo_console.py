@@ -16,10 +16,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reference_product.config import ProductConfig
+from reference_product.config import ChainConfig, MintableToken, ProductConfig
 from reference_product.demo import ApiRecorder, DemoConsole
+from reference_product.fulfillment import Fulfillment, PinnedKeys
 from reference_product.ledger import ProductLedger
-from topup_sdk import deposit_address_salt, forwarder_address, quote_salt
+from topup_sdk import (
+    CreditedDeposit,
+    WebhookEvent,
+    deposit_address_salt,
+    forwarder_address,
+    quote_salt,
+)
 
 NOW = 1_790_000_000
 ACCOUNT = "acct_" + "ac" * 16
@@ -27,33 +34,48 @@ QUOTE = "qt_" + "0c" * 16
 DEPOSIT = "dep_" + "0d" * 16
 REFUND = "re_" + "0e" * 16
 ADDRESS_ID = "da_" + "0a" * 16
+TOKEN = "0x" + "44" * 20
+BASE_TOKEN = "0x" + "77" * 20
+TREASURY = "0x" + "cc" * 20
 CONFIG = ProductConfig(
     service_url="http://service.test",
     account=ACCOUNT,
-    route="sandbox-acme-tpha-usd",
-    chain_id=11155111,
-    rpc_url="http://rpc.test",
+    # Two chains with the same treasury; the service serves only Sepolia at first.
+    chains=(
+        ChainConfig(
+            chain_id=11155111,
+            name="Sepolia",
+            rpc_url="https://rpc.sepolia.test",
+            treasury=TREASURY,
+            test_tokens=(MintableToken("PHA", TOKEN),),
+        ),
+        ChainConfig(
+            chain_id=84532,
+            name="Base Sepolia",
+            rpc_url="https://rpc.base-sepolia.test",
+            treasury=TREASURY,
+            test_tokens=(MintableToken("PHA", BASE_TOKEN),),
+        ),
+    ),
     factory="0x" + "aa" * 20,
     implementation="0x" + "bb" * 20,
-    treasury="0x" + "cc" * 20,
-    token="0x" + "44" * 20,
-    token_symbol="PHA",  # noqa: S106 - an asset symbol, not a secret
     public_url="https://api.acme.example",
     web_origin="https://acme.example",
+    bonus_bps={"pha": 1000},
 )
 WEBSITE = {"Origin": "https://acme.example"}
 
 
 def _quote(customer: str = "acct", **fields: Any) -> dict[str, Any]:
     address = forwarder_address(
-        CONFIG.factory, CONFIG.implementation, CONFIG.treasury, quote_salt(ACCOUNT, customer, QUOTE)
+        CONFIG.factory, CONFIG.implementation, TREASURY, quote_salt(ACCOUNT, customer, QUOTE)
     )
     return {
         "id": QUOTE,
         "object": "quote",
         "livemode": False,
         "client_reference_id": customer,
-        "treasury": CONFIG.treasury.lower(),
+        "treasury": TREASURY,
         "metadata": {"order_id": "order_1"},
         "amount": 2500,
         "currency": "usd",
@@ -74,7 +96,7 @@ def _quote(customer: str = "acct", **fields: Any) -> dict[str, Any]:
 
 def _deposit_address(customer: str, *, address: str | None = None) -> dict[str, Any]:
     salt = deposit_address_salt(ACCOUNT, livemode=False, client_reference_id=customer, version=1)
-    derived = forwarder_address(CONFIG.factory, CONFIG.implementation, CONFIG.treasury, salt)
+    derived = forwarder_address(CONFIG.factory, CONFIG.implementation, TREASURY, salt)
     at = address or derived
     return {
         "id": ADDRESS_ID,
@@ -92,13 +114,13 @@ def _deposit_address(customer: str, *, address: str | None = None) -> dict[str, 
             {
                 "chain_id": 11155111,
                 "address": at,
-                "treasury": CONFIG.treasury,
+                "treasury": TREASURY,
                 "assets": [
                     {
                         "asset": "pha",
-                        "contract": CONFIG.token,
+                        "contract": TOKEN,
                         "decimals": 18,
-                        "payment_uri": f"ethereum:{CONFIG.token}@11155111/transfer?address={at}",
+                        "payment_uri": f"ethereum:{TOKEN}@11155111/transfer?address={at}",
                     }
                 ],
             }
@@ -181,7 +203,7 @@ class Service:
         # Test PHA and a second token on the product's chain, and a token on a chain the
         # product's pins do not cover.
         self.assets = [
-            _config_asset("pha", 11155111, CONFIG.token),
+            _config_asset("pha", 11155111, TOKEN),
             _config_asset("usdc", 11155111, "0x" + "55" * 20),
             _config_asset("pha", 1, "0x" + "66" * 20),
         ]
@@ -233,7 +255,7 @@ class Service:
                 "deposit": body["deposit"],
                 "amount_atomic": body["amount_atomic"],
                 "destination_address": body["destination_address"],
-                "treasury": CONFIG.treasury,
+                "treasury": TREASURY,
                 "status": "pending",
                 "failure_reason": None,
                 "transaction_hash": None,
@@ -254,7 +276,7 @@ class Service:
         if path == "/v1/balance":
             amount = {
                 "chain_id": 11155111,
-                "token": CONFIG.token,
+                "token": TOKEN,
                 "asset": "pha",
                 "amount_atomic": "300",
                 "final_amount_atomic": "200",
@@ -359,25 +381,68 @@ def test_offers_the_services_tokens_by_network_on_the_products_chains(
     response = console.handle("GET", "/api/assets", WEBSITE, b"")
     assert response.status == HTTPStatus.OK
     # The service also takes PHA on chain 1, which the product has no treasury pin for.
+    # Base Sepolia is configured but not served yet: it is simply absent.
     [network] = json.loads(response.body)["networks"]
-    assert {key: network[key] for key in ("chain_id", "name", "testnet")} == {
+    assert {key: network[key] for key in network if key != "assets"} == {
         "chain_id": 11155111,
         "name": "Sepolia testnet",
         "testnet": True,
+        "explorer": "https://sepolia.etherscan.io",
+        "faucet": "https://ethereum.org/en/developers/docs/networks/#sepolia",
+        "treasury": CONFIG.chain(11155111).treasury,
     }
     assert [a["symbol"] for a in network["assets"]] == ["PHA", "USDC"]
+    # Test PHA mints from the visitor's wallet and earns the product's bonus; test USDC comes
+    # from Circle's faucet.
     assert network["assets"][0] == {
         "asset": "pha",
         "symbol": "PHA",
-        "contract": CONFIG.token,
+        "contract": TOKEN,
         "decimals": 18,
         "pricing": "spot",
         "min_amount": 100,
         "quote_ttl_seconds": 900,
+        "mintable": True,
+        "faucet": None,
+        "bonus_bps": 1000,
     }
+    usdc = network["assets"][1]
+    assert (usdc["mintable"], usdc["faucet"], usdc["bonus_bps"]) == (
+        False,
+        "https://faucet.circle.com",
+        0,
+    )
     # Cached: the service's config is read once.
     console.handle("GET", "/api/assets", WEBSITE, b"")
     assert [r.url.path for r in service.requests].count("/v1/config") == 1
+
+
+def test_a_second_chain_appears_once_the_service_serves_it(
+    demo: tuple[DemoConsole, Service],
+) -> None:
+    console, service = demo
+    service.assets.append(_config_asset("pha", 84532, BASE_TOKEN))
+    response = console.handle("GET", "/api/assets", WEBSITE, b"")
+    networks = json.loads(response.body)["networks"]
+    # In the config's order, each with its own explorer and gas faucet.
+    assert [(n["chain_id"], n["name"]) for n in networks] == [
+        (11155111, "Sepolia testnet"),
+        (84532, "Base Sepolia testnet"),
+    ]
+    base = networks[1]
+    assert base["explorer"] == "https://sepolia.basescan.org"
+    assert base["faucet"] == "https://docs.base.org/get-started/get-funds#testnet-base-sepolia"
+    assert [(a["asset"], a["mintable"], a["bonus_bps"]) for a in base["assets"]] == [
+        ("pha", True, 1000)
+    ]
+    cookie = _account(console)
+    status, _ = _post(
+        console, cookie, "quotes", {"amount": 2500, "chain_id": 84532, "asset": "pha"}
+    )
+    assert status == HTTPStatus.OK
+    assert json.loads(service.requests[-1].content)["chain_id"] == 84532
+    _, account = _get(console, cookie, "account")
+    assert account["payments"][0]["chain_id"] == 84532
 
 
 def test_a_quote_is_for_an_offered_network_and_token_and_returns_its_locked_rate(
@@ -387,6 +452,7 @@ def test_a_quote_is_for_an_offered_network_and_token_and_returns_its_locked_rate
     cookie = _account(console)
     for pair in (
         {"chain_id": 1, "asset": "pha"},  # the service's, on a chain without the product's pins
+        {"chain_id": 84532, "asset": "pha"},  # the product's, not served there yet
         {"chain_id": 11155111, "asset": "dai"},  # no such token
         {"chain_id": "11155111", "asset": "pha"},
         {"asset": "pha"},
@@ -517,7 +583,7 @@ def test_refunds_of_own_deposits_show_the_transfer_to_make(
     status, body = _post(console, cookie, "refunds", refund)
     assert status == HTTPStatus.OK
     transfer = body["refund"]["transfer"]
-    assert transfer["from"] == CONFIG.treasury
+    assert transfer["from"] == TREASURY
     assert transfer["token"] == "0x" + "44" * 20
     assert transfer["data"] == "0xa9059cbb" + ("33" * 20).rjust(64, "0") + "28".rjust(64, "0")
     for bad in (
@@ -551,10 +617,10 @@ def test_the_sweep_is_built_only_from_forwarders_the_pins_derive(
         "object": "forwarder",
         "livemode": False,
         "chain_id": 11155111,
-        "address": forwarder_address(CONFIG.factory, CONFIG.implementation, CONFIG.treasury, salt),
+        "address": forwarder_address(CONFIG.factory, CONFIG.implementation, TREASURY, salt),
         "factory": CONFIG.factory,
         "salt": "0x" + salt.hex(),
-        "treasury": CONFIG.treasury,
+        "treasury": TREASURY,
     }
     # A forwarder over another treasury, or at an address its salt does not give, is refused.
     other_treasury = {**good, "id": "fwd_" + "02" * 16, "treasury": "0x" + "dd" * 20}
@@ -562,14 +628,23 @@ def test_the_sweep_is_built_only_from_forwarders_the_pins_derive(
     service.forwarders = [good, other_treasury, wrong_address]
     status, view = _get(console, cookie, "sweeps")
     assert status == HTTPStatus.OK
-    assert (view["sweepable_forwarders"], view["refused_forwarders"]) == (1, 2)
-    assert view["final_unswept_atomic"] == "200"
-    [flush] = view["flush"]
-    assert flush["to"].lower() == CONFIG.factory
+    # One group per network and token; only PHA on Sepolia has a final unswept balance.
+    assert [(g["chain_id"], g["symbol"]) for g in view["groups"]] == [
+        (11155111, "PHA"),
+        (11155111, "USDC"),
+    ]
+    group, usdc = view["groups"]
+    assert (group["sweepable_forwarders"], group["refused_forwarders"]) == (1, 2)
+    assert group["final_unswept_atomic"] == "200"
+    [flush] = group["flush"]
+    assert flush["to"].lower() == CONFIG.factory.lower()
     assert flush["data"].startswith("0x")
     assert salt.hex() in flush["data"]
-    assert view["safe_batch"]["meta"]["createdFromSafeAddress"].lower() == CONFIG.treasury
-    assert view["safe_batch"]["transactions"] == [flush]
+    assert group["safe_batch"]["meta"]["createdFromSafeAddress"].lower() == TREASURY
+    assert group["safe_batch"]["transactions"] == [flush]
+    assert (usdc["unswept_atomic"], usdc["flush"], usdc["safe_batch"]) == ("0", [], None)
+    forwarder_reads = [r for r in service.requests if r.url.path == "/v1/forwarders"]
+    assert [r.url.params["sweepable"] for r in forwarder_reads] == [TOKEN]
 
 
 def test_requests_need_the_cookie_and_posts_need_json(demo: tuple[DemoConsole, Service]) -> None:
@@ -684,7 +759,9 @@ def test_the_config_requires_an_account_id() -> None:
         replace(CONFIG, account="phala-cloud")
 
 
-def test_a_ledger_from_before_quotes_kept_their_asset_gains_the_column(tmp_path: Path) -> None:
+def test_a_ledger_from_before_quotes_kept_their_asset_and_chain_gains_the_columns(
+    tmp_path: Path,
+) -> None:
     ledger = ProductLedger()
     with ledger.transaction() as db:
         db.execute(
@@ -698,4 +775,77 @@ def test_a_ledger_from_before_quotes_kept_their_asset_gains_the_column(tmp_path:
         DemoConsole(replace(CONFIG, api_key_file=str(tmp_path / "product.key")), ledger)
     with ledger.transaction() as db:
         columns = [row[1] for row in db.execute("PRAGMA table_info(demo_quotes)")]
-    assert columns[-1] == "asset"
+    assert columns[-2:] == ["asset", "chain_id"]
+
+
+def test_the_ledger_lines_show_the_bonus_apart_from_the_credit(
+    demo: tuple[DemoConsole, Service],
+) -> None:
+    console, service = demo
+    cookie = _account(console)
+    customer = _customer(cookie)
+    deposit = _deposit(customer, final=False)
+    service.deposits = [deposit]
+    fulfillment = Fulfillment(console.config, console.ledger, lambda: PinnedKeys(False, []))
+    event = WebhookEvent(
+        id="evt_1",
+        type="deposit.credited",
+        created=NOW,
+        account=ACCOUNT,
+        livemode=False,
+        data={"object": deposit},
+    )
+    fulfillment.fulfill(CreditedDeposit.from_event(event), deposit)
+    _, account = _get(console, cookie, "account")
+    assert account["balance"] == 2750
+    assert {(line["kind"], line["reason"], line["amount"]) for line in account["ledger"]} == {
+        ("credit", "deposit.credited", 2500),
+        ("bonus", "PHA bonus +10%", 250),
+    }
+    assert account["payments"][0]["bonus"] == 250
+    _, view = _get(console, cookie, f"deposits/{DEPOSIT}")
+    assert view["ledger"]["product"]["bonus"] == 250
+    # The rates are the service's decimals, for the page to format.
+    credited = next(step for step in view["steps"] if step["key"] == "credited")
+    assert {"label": "Rate", "value": "25.00000000", "kind": "rate", "unit": "PHA"} in credited[
+        "details"
+    ]
+
+
+def test_the_config_validates_its_chains() -> None:
+    sepolia = CONFIG.chain(11155111)
+    # Addresses are normalised to their checksum; a wrong mixed-case checksum is refused.
+    assert sepolia.treasury == "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+    assert CONFIG.factory == "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
+    with pytest.raises(ValueError, match="checksum"):
+        replace(sepolia, treasury="0xCCcCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC")
+    for url in (
+        "http://rpc.example.org",
+        "https://sepolia.infura.io/v3/0123456789abcdef0123456789abcdef",
+        "https://user:secret@rpc.example.org",
+        "https://rpc.example.org/?key=abc",
+        "wss://rpc.example.org",
+    ):
+        with pytest.raises(ValueError, match="rpc_url"):
+            replace(sepolia, rpc_url=url)
+    # Local chains: the loopback host, or a compose service's name.
+    for url in ("http://127.0.0.1:8545", "http://anvil:8545"):
+        assert replace(sepolia, rpc_url=url).rpc_url == url
+    with pytest.raises(ValueError, match="repeat"):
+        replace(CONFIG, chains=(sepolia, sepolia))
+    with pytest.raises(ValueError, match="at least one"):
+        replace(CONFIG, chains=())
+    with pytest.raises(ValueError, match="distinct"):
+        replace(sepolia, test_tokens=(MintableToken("PHA", TOKEN), MintableToken("PHA", TOKEN)))
+    bonuses: list[dict[str, Any]] = [
+        {"PHA": 1000},
+        {"pha": 0},
+        {"pha": 10_001},
+        {"pha": True},
+        {"pha": 10.5},
+    ]
+    for bonus in bonuses:
+        with pytest.raises(ValueError, match="bonus_bps"):
+            replace(CONFIG, bonus_bps=bonus)
+    with pytest.raises(ValueError, match="not configured"):
+        CONFIG.chain(1)

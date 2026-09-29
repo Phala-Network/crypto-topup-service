@@ -1,4 +1,4 @@
-import { Braces, Cpu, GitBranch, Server, Wallet, type LucideIcon } from "lucide-react";
+import { ArrowRight, BookOpen, Braces, Cpu, GitBranch, Server, Wallet, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle, type Theme } from "./theme.js";
 
@@ -49,14 +49,14 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
           Phala Pay
         </a>
         <nav aria-label="Site" className="flex items-center gap-0.5 text-muted-foreground">
-          <Button variant="ghost" asChild className="hidden hover:text-foreground md:inline-flex">
-            <a href={LINKS.selfHosting}>Self-hosting</a>
-          </Button>
           <Button variant="ghost" asChild className="hidden hover:text-foreground sm:inline-flex">
             <a href={LINKS.docs}>Docs</a>
           </Button>
           <Button variant="ghost" asChild className="hidden hover:text-foreground sm:inline-flex">
             <a href={LINKS.reference}>API reference</a>
+          </Button>
+          <Button variant="ghost" asChild className="hidden hover:text-foreground md:inline-flex">
+            <a href={LINKS.selfHosting}>Self-hosting</a>
           </Button>
           <Button variant="ghost" asChild className="hover:text-foreground">
             <a href={LINKS.repo} aria-label="GitHub">
@@ -82,39 +82,40 @@ function Logo() {
   );
 }
 
-// README.md and docs/self-hosting.md: open source, run by each operator, and non-custodial. Phala
-// runs an instance only for Phala Cloud and offers no hosted service.
+// README.md's opening: what the product is. Self-hosting is how it is run, a secondary link.
 export function Hero() {
   return (
     <section aria-labelledby="hero-title">
-      <div className={`${CONTAINER} flex flex-col gap-6 pt-12 pb-10 sm:pt-16 lg:flex-row lg:items-end lg:justify-between lg:gap-16 lg:pt-20 lg:pb-14`}>
+      <div className={`${CONTAINER} flex flex-col items-start gap-3 pt-8 pb-7 lg:pt-10 lg:pb-8`}>
         <h1
           id="hero-title"
-          className="text-[2.75rem] leading-[1.02] font-semibold tracking-[-0.04em] text-balance sm:text-6xl xl:text-7xl"
+          className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl"
         >
-          Crypto payments,{" "}
-          <br />
-          <span className="text-muted-foreground">self-hosted.</span>
+          Non-custodial crypto payments with a Stripe-shaped API
         </h1>
-        <div className="flex max-w-md flex-col gap-6 lg:pb-2">
-          <p className="text-lg leading-relaxed text-pretty text-muted-foreground">
-            Open source and non-custodial: run it yourself, and your customers pay addresses that can only pay your
-            treasury.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            <Button asChild size="lg" className="h-10 gap-2 rounded-full px-5">
-              <a href={LINKS.selfHosting}>
-                <Server aria-hidden="true" />
-                Self-host it
-              </a>
-            </Button>
-            <Button asChild size="lg" variant="outline" className="h-10 gap-2 rounded-full px-5">
-              <a href={LINKS.repo}>
-                <GitBranch aria-hidden="true" />
-                GitHub
-              </a>
-            </Button>
-          </div>
+        <p className="max-w-4xl text-base text-pretty text-muted-foreground sm:text-lg">
+          Quotes, deposit addresses, refunds, and signed webhooks, where every address can only pay your treasury.
+        </p>
+        <div className="flex flex-wrap items-center gap-3 pt-2">
+          <Button asChild size="lg">
+            <a href={LINKS.docs}>
+              <BookOpen aria-hidden="true" />
+              Read the docs
+            </a>
+          </Button>
+          <Button asChild size="lg" variant="outline">
+            <a href={LINKS.repo}>
+              <GitBranch aria-hidden="true" />
+              GitHub
+            </a>
+          </Button>
+          <a
+            href={LINKS.selfHosting}
+            className="inline-flex items-center gap-1 px-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Open source · Self-host it
+            <ArrowRight className="size-3.5" aria-hidden="true" />
+          </a>
         </div>
       </div>
     </section>
@@ -123,51 +124,90 @@ export function Hero() {
 
 export function Properties() {
   return (
-    <section aria-label="Key properties" className={CONTAINER}>
-      <ul className="grid gap-x-10 gap-y-8 border-t py-14 sm:grid-cols-2 lg:grid-cols-4 lg:py-20">
-        {PROPERTIES.map(({ icon: Icon, title, text }) => (
-          <li key={title} className="flex flex-col gap-2">
-            <Icon className="size-4.5 text-foreground" aria-hidden="true" />
-            <span className="mt-1 text-sm font-medium">{title}</span>
-            <span className="text-sm leading-relaxed text-pretty text-muted-foreground">{text}</span>
-          </li>
-        ))}
-      </ul>
+    <section aria-labelledby="properties-title" className="border-t bg-muted/30">
+      <div className={`${CONTAINER} flex flex-col gap-10 py-16 lg:py-20`}>
+        <div className="flex max-w-2xl flex-col gap-2">
+          <h2 id="properties-title" className="text-2xl font-semibold tracking-tight">
+            Payments you can verify
+          </h2>
+          <p className="text-muted-foreground">
+            The service never holds funds, and you can check what it runs before you trust it.
+          </p>
+        </div>
+        <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {PROPERTIES.map(({ icon: Icon, title, text }) => (
+            <li key={title} className="flex flex-col gap-3 rounded-xl border bg-card p-5 text-card-foreground">
+              <span className="flex size-9 items-center justify-center rounded-lg border bg-background" aria-hidden="true">
+                <Icon className="size-4" />
+              </span>
+              <h3 className="text-sm font-semibold">{title}</h3>
+              <p className="text-sm leading-relaxed text-pretty text-muted-foreground">{text}</p>
+            </li>
+          ))}
+        </ul>
+      </div>
     </section>
   );
 }
 
+const FOOTER: { title: string; links: { href: string; label: string }[] }[] = [
+  {
+    title: "Product",
+    links: [
+      { href: "#demo", label: "Live demo" },
+      { href: LINKS.selfHosting, label: "Self-hosting" },
+      { href: LINKS.security, label: "Security" },
+    ],
+  },
+  {
+    title: "Developers",
+    links: [
+      { href: LINKS.docs, label: "Integration guide" },
+      { href: LINKS.reference, label: "API reference" },
+      { href: LINKS.npm, label: "npm @phala/pay" },
+    ],
+  },
+  {
+    title: "Open source",
+    links: [
+      { href: LINKS.repo, label: "GitHub" },
+      { href: LINKS.license, label: "Apache-2.0 license" },
+    ],
+  },
+];
+
 export function SiteFooter() {
-  const links = [
-    { href: LINKS.repo, label: "GitHub" },
-    { href: LINKS.selfHosting, label: "Self-hosting" },
-    { href: LINKS.docs, label: "Docs" },
-    { href: LINKS.reference, label: "API reference" },
-    { href: LINKS.npm, label: "npm @phala/pay" },
-    { href: LINKS.security, label: "Security" },
-  ];
   return (
     <footer className="border-t">
-      <div
-        className={`${CONTAINER} flex flex-col gap-4 py-8 text-[0.8125rem] text-muted-foreground md:flex-row md:items-center md:justify-between`}
-      >
-        <p className="flex items-center gap-2">
-          <Logo />
-          <span>
-            Phala Pay is open source under the{" "}
-            <a className="underline underline-offset-4 hover:text-foreground" href={LINKS.license}>
-              Apache-2.0 license
-            </a>
-            .
+      <div className={`${CONTAINER} grid gap-10 py-12 text-sm sm:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]`}>
+        <div className="flex flex-col gap-3">
+          <span className="flex items-center gap-2 font-semibold tracking-tight">
+            <Logo />
+            Phala Pay
           </span>
+          <p className="max-w-xs text-muted-foreground">
+            Non-custodial crypto payments with a Stripe-shaped API. Open source, self-hosted.
+          </p>
+        </div>
+        {FOOTER.map((column) => (
+          <nav key={column.title} aria-label={column.title} className="flex flex-col gap-3">
+            <h2 className="font-medium">{column.title}</h2>
+            <ul className="flex flex-col gap-2">
+              {column.links.map(({ href, label }) => (
+                <li key={label}>
+                  <a className="text-muted-foreground transition-colors hover:text-foreground" href={href}>
+                    {label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ))}
+      </div>
+      <div className="border-t">
+        <p className={`${CONTAINER} py-6 text-xs text-muted-foreground`}>
+          The demo above runs on testnets with test tokens; no real money moves.
         </p>
-        <nav aria-label="Developers" className="flex flex-wrap items-center gap-x-6 gap-y-2">
-          {links.map(({ href, label }) => (
-            <a key={label} className="transition-colors hover:text-foreground" href={href}>
-              {label}
-            </a>
-          ))}
-        </nav>
       </div>
     </footer>
   );

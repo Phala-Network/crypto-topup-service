@@ -247,11 +247,13 @@ jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .
 # exactly the names of its env example, which become its allowed_envs, carries its settings in the
 # attested config, mounts no host path but the dstack socket, and publishes only dstack-ingress on
 # 443 (tls-alpn-01, forwarding to product:8089, serving the host of its public URL). Its demo API
-# allows only the website's origin, https://pay.phala.com; the product serves no page.
+# allows only the website's origin, https://pay.phala.com; the product serves no page. Its chains
+# are Sepolia and Base Sepolia, each with a committed https RPC; Base Sepolia's treasury is never
+# 0x936c…4504, whose Base Sepolia copy has a destroyed owner key.
 PRODUCT_IMAGE=ghcr.io/phala-network/phala-pay-reference-product@sha256:3333333333333333333333333333333333333333333333333333333333333333 \
     TOPUP_ORIGIN=https://topup.example PRODUCT_PUBLIC_URL=https://product.example \
     PRODUCT_DOMAIN=product.example PRODUCT_GATEWAY_DOMAIN=gateway.dstack.example \
-    PRODUCT_RPC_URL=https://rpc.example PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
+    PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= \
     "$root/deploy/product/render-compose.sh" >"$product_compose"
 docker compose -f "$product_compose" config --variables |
     awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$compose_envs"
@@ -271,12 +273,16 @@ jq -e "$ingress"'([.services[].volumes[]? | select(.type == "bind") | .source]
         | $ingress.CHALLENGE_TYPE == "tls-alpn-01" and $ingress.TARGET_ENDPOINT == "product:8089"
         and (.configs.product_config.content | fromjson
             | .public_url == "https://\($ingress.DOMAIN)"
-            and .service_url == "https://topup.example" and .rpc_url == "https://rpc.example"
+            and .service_url == "https://topup.example"
+            and ([.chains[].chain_id] == [11155111, 84532])
+            and all(.chains[]; .rpc_url | startswith("https://"))
+            and all(.chains[] | select(.chain_id == 84532);
+                .treasury | ascii_downcase != "0x936c1991f8da9a919fa11b557a3514719f5a4504")
             and .web_origin == "https://pay.phala.com"))' \
     "$rendered" >/dev/null || {
     echo "the product compose must bind-mount only the dstack socket into dstack-ingress, publish only" \
         "dstack-ingress on 443 (tls-alpn-01, forwarding to product:8089, serving the host of its" \
-        "public URL), carry its settings, and allow only the website's origin" >&2
+        "public URL), carry its settings and chains, and allow only the website's origin" >&2
     exit 1
 }
 

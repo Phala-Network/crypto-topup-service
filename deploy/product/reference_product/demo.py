@@ -6,9 +6,12 @@ JSON API at `{public_url}/api/` from its origin, `web_origin`, the only origin t
 backend runs them with its API key:
 
 - `GET api/account`: the visitor's demo account (a random id in a cookie; no other data is kept),
-  its balance from this product's ledger, the ledger lines behind it, and its payments;
-- `GET api/assets`: the networks a customer can pay on, each with its tokens, from the service's
-  `GET /v1/config` `assets` on the chains the product has pins for;
+  its balance from this product's ledger, the ledger lines behind it (credits, claw-backs, and the
+  product's own bonus lines), and its payments;
+- `GET api/assets`: the networks a customer can pay on, each with its explorer, gas faucet, and
+  treasury, and its tokens (the service's `GET /v1/config` `assets` on the chains the product has
+  pins for, so a chain appears once the service serves it there), each with its faucet or
+  whether its test token mints, and the product's bonus rate for it;
 - `POST api/quotes` `{"amount", "chain_id", "asset"}` (cents, and a network and token of
   `api/assets`): creates a locked-price quote with the SDK, with an order id in its `metadata`,
   and returns its `client_secret`, the `expected_address` the SDK recomputed from the pins, for
@@ -24,8 +27,9 @@ backend runs them with its API key:
   `POST api/refunds/{id}/mark_paid` `{"transaction_hash", "receipt_log_index"?}`, and
   `POST api/refunds/{id}/cancel`: the refund flow, for the visitor's own deposits; the visitor
   plays the merchant's finance team, which pays refunds from the treasury;
-- `GET api/sweeps`: the account's unswept balance, the `factory.flush` call and Safe Transaction
-  Builder batch the SDK builds for the merchant to sign, and the finalized sweeps;
+- `GET api/sweeps`: per network and token, the account's unswept balance, the `factory.flush`
+  call and Safe Transaction Builder batch the SDK builds for the merchant to sign, and the
+  finalized sweeps;
 - `GET api/trust`: the service's attestation, with the report-data binding checked by the SDK, and
   the app id and compose hash of its TLS evidence.
 
@@ -84,9 +88,22 @@ MIN_AMOUNT = 100
 MAX_AMOUNT = 100_000
 # The forwarders one flush call may name (topup_sdk.sweeps.MAX_SALTS_PER_FLUSH).
 MAX_SWEEP_FORWARDERS = 200
-EXPLORERS = {1: "https://etherscan.io", 11155111: "https://sepolia.etherscan.io"}
-NETWORKS = {1: "Ethereum", 11155111: "Sepolia"}
-MAINNETS = {1}
+EXPLORERS = {
+    1: "https://etherscan.io",
+    8453: "https://basescan.org",
+    11155111: "https://sepolia.etherscan.io",
+    84532: "https://sepolia.basescan.org",
+}
+MAINNETS = {1, 8453}
+# Where the visitor's wallet gets gas: ethereum.org's list of Sepolia faucets, and Base's page
+# pointing to its Base Sepolia faucets.
+GAS_FAUCETS = {
+    11155111: "https://ethereum.org/en/developers/docs/networks/#sepolia",
+    84532: "https://docs.base.org/get-started/get-funds#testnet-base-sepolia",
+}
+# Testnet tokens the visitor cannot mint, by asset: Circle's faucet serves its test USDC on every
+# testnet it supports (the visitor picks the network there).
+TOKEN_FAUCETS = {"usdc": "https://faucet.circle.com"}
 VERIFY_DOCS = (
     "https://github.com/Phala-Network/phala-pay/blob/main/deploy/README.md"
     "#attestation-ingress-and-egress"
@@ -103,7 +120,8 @@ CREATE TABLE IF NOT EXISTS demo_quotes (
     expires_at INTEGER NOT NULL,
     created INTEGER NOT NULL,
     api TEXT NOT NULL,
-    asset TEXT
+    asset TEXT,
+    chain_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS demo_quotes_account ON demo_quotes (account, created);
 CREATE TABLE IF NOT EXISTS demo_deposit_addresses (
@@ -228,15 +246,18 @@ class DemoConsole:
         self._trust: tuple[float, dict[str, Any]] | None = None
         self._networks: tuple[float, list[dict[str, Any]]] | None = None
         self._sweeps: tuple[float, dict[str, Any]] | None = None
-        self._block_times: dict[str, tuple[int, int]] = {}
+        self._block_times: dict[tuple[int, str], tuple[int, int]] = {}
+        self._chain_ids = set(config.treasuries())
         with ledger.transaction() as db:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     db.execute(statement)
-            # A ledger from before quotes kept their asset.
+            # A ledger from before quotes kept their asset, then their chain.
             columns = {row[1] for row in db.execute("PRAGMA table_info(demo_quotes)")}
             if "asset" not in columns:
                 db.execute("ALTER TABLE demo_quotes ADD COLUMN asset TEXT")
+            if "chain_id" not in columns:
+                db.execute("ALTER TABLE demo_quotes ADD COLUMN chain_id INTEGER")
 
     # Routing ------------------------------------------------------------------------------------
 
@@ -377,8 +398,8 @@ class DemoConsole:
         now = self._clock()
         with self.ledger.transaction() as db:
             quotes = db.execute(
-                "SELECT id, amount, amount_atomic, exchange_rate, asset, expires_at, created "
-                "FROM demo_quotes WHERE account = ? ORDER BY created DESC LIMIT 20",
+                "SELECT id, amount, amount_atomic, exchange_rate, asset, chain_id, expires_at, "
+                "created FROM demo_quotes WHERE account = ? ORDER BY created DESC LIMIT 20",
                 (account,),
             ).fetchall()
             address = db.execute(
@@ -395,6 +416,7 @@ class DemoConsole:
                 "created": deposit["created"],
                 "amount": deposit.get("amount"),
                 "amount_atomic": deposit["amount_atomic"],
+                "chain_id": deposit["chain_id"],
                 "asset": deposit.get("asset"),
                 "exchange_rate": deposit.get("exchange_rate"),
                 "status": deposit["status"],
@@ -403,10 +425,14 @@ class DemoConsole:
                 "tx_hash": deposit["tx_hash"],
                 "amount_refunded_atomic": deposit["amount_refunded_atomic"],
                 "net": ledgers[deposit["id"]]["net"],
+                "bonus": ledgers[deposit["id"]]["bonus"],
             }
             for deposit in deposits
         ]
-        for quote_id, amount, amount_atomic, rate, asset, expires_at, created in quotes:
+        # Quotes from before they kept their asset and chain were test PHA on the first chain.
+        first = self.config.chain()
+        legacy_asset = first.test_tokens[0].symbol.lower() if first.test_tokens else None
+        for quote_id, amount, amount_atomic, rate, asset, chain_id, expires_at, created in quotes:
             if quote_id in paid_quotes:
                 continue
             payments.append(
@@ -417,7 +443,8 @@ class DemoConsole:
                     "created": created,
                     "amount": amount,
                     "amount_atomic": amount_atomic,
-                    "asset": asset or self.config.token_symbol.lower(),
+                    "chain_id": chain_id or first.chain_id,
+                    "asset": asset or legacy_asset,
                     "exchange_rate": rate,
                     "status": "expired" if now >= expires_at else "awaiting_payment",
                     "final": False,
@@ -425,6 +452,7 @@ class DemoConsole:
                     "tx_hash": None,
                     "amount_refunded_atomic": "0",
                     "net": None,
+                    "bonus": None,
                 }
             )
         payments.sort(key=lambda payment: payment["created"], reverse=True)
@@ -436,14 +464,6 @@ class DemoConsole:
             "min_amount": MIN_AMOUNT,
             "max_amount": MAX_AMOUNT,
             "api_base": self.config.service_url,
-            "network": {
-                "chain_id": self.config.chain_id,
-                "name": NETWORKS.get(self.config.chain_id, f"Chain {self.config.chain_id}"),
-                "explorer": EXPLORERS.get(self.config.chain_id),
-                "testnet": self.config.chain_id not in MAINNETS,
-            },
-            "token": {"symbol": self.config.token_symbol, "address": self.config.token},
-            "treasury": self.config.treasury,
             "factory": self.config.factory,
             "deposit_address": None if address is None else address[0],
             "payments": payments,
@@ -488,8 +508,8 @@ class DemoConsole:
         with self.ledger.transaction() as db:
             db.execute(
                 "INSERT OR IGNORE INTO demo_quotes (id, account, amount, amount_atomic, "
-                "exchange_rate, address, expires_at, created, api, asset) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "exchange_rate, address, expires_at, created, api, asset, chain_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     quote.id,
                     account,
@@ -501,6 +521,7 @@ class DemoConsole:
                     quote.created,
                     json.dumps(calls),
                     quote.asset,
+                    quote.chain_id,
                 ),
             )
         return _json(
@@ -628,7 +649,11 @@ class DemoConsole:
             if deposit["swept"]:
                 sweep = self._sweep_of(deposit)
         tx_hash = deposit["tx_hash"] if deposit else (payment["tx_hash"] if payment else None)
-        sent = None if tx_hash is None else self._block_time(tx_hash)
+        source = deposit or payment or quote or {}
+        chain_id = source.get("chain_id")
+        sent = None
+        if tx_hash is not None and isinstance(chain_id, int) and chain_id in self._chain_ids:
+            sent = self._block_time(chain_id, tx_hash)
         keys = {deposit["id"]} if deposit else ({payment["deposit"]} if payment else set())
         keys |= {refund["id"] for refund in refunds}
         if quote is not None:
@@ -680,26 +705,26 @@ class DemoConsole:
             )
         return events
 
-    def _block_time(self, tx_hash: str) -> dict[str, Any] | None:
-        """The block and time of the transaction's block, from the product's RPC."""
-        cached = self._block_times.get(tx_hash)
+    def _block_time(self, chain_id: int, tx_hash: str) -> dict[str, Any] | None:
+        """The block and time of the transaction's block, from the product's RPC of its chain."""
+        cached = self._block_times.get((chain_id, tx_hash))
         if cached is None:
             try:
-                receipt = self._rpc("eth_getTransactionReceipt", tx_hash)
+                receipt = self._rpc(chain_id, "eth_getTransactionReceipt", tx_hash)
                 if not isinstance(receipt, dict):
                     return None
-                block = self._rpc("eth_getBlockByNumber", receipt["blockNumber"], False)
+                block = self._rpc(chain_id, "eth_getBlockByNumber", receipt["blockNumber"], False)
                 cached = (int(receipt["blockNumber"], 16), int(block["timestamp"], 16))
             except (httpx.HTTPError, ValueError, KeyError, TypeError):
                 LOG.warning("demo: block time lookup failed", exc_info=True)
                 return None
             with self._lock:
-                self._block_times[tx_hash] = cached
+                self._block_times[(chain_id, tx_hash)] = cached
         return {"tx_hash": tx_hash, "block_number": cached[0], "at": cached[1]}
 
-    def _rpc(self, method: str, *params: Any) -> Any:
+    def _rpc(self, chain_id: int, method: str, *params: Any) -> Any:
         body = self._http.post(
-            self.config.rpc_url,
+            self.config.chain(chain_id).rpc_url,
             json={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
         ).json()
         return body["result"]
@@ -782,25 +807,52 @@ class DemoConsole:
     # Sweeps -------------------------------------------------------------------------------------
 
     def _sweeps_view(self) -> dict[str, Any]:
-        """The account's unswept balance, the flush the merchant signs, and the finalized sweeps;
-        the same for every visitor, cached for 10 seconds."""
+        """Per network and token the product offers: the account's unswept balance, the flush
+        the merchant signs, and the finalized sweeps; the same for every visitor, cached for 10
+        seconds."""
         now = self._clock()
         with self._lock:
             if self._sweeps is not None and now - self._sweeps[0] < 10:
                 return self._sweeps[1]
-        chain_id, token, treasury = self.config.chain_id, self.config.token, self.config.treasury
+        networks = self._payable_networks()
         with self.recorder.capture() as calls:
-            balance = self._service().get_balance()
+            unswept = self._service().get_balance().unswept
+            groups = [
+                self._sweep_group(network, asset, unswept, now)
+                for network in networks
+                for asset in network["assets"]
+            ]
+        view = {"factory": self.config.factory, "groups": groups, "api": calls}
+        with self._lock:
+            self._sweeps = (now, view)
+        return view
+
+    def _sweep_group(
+        self, network: dict[str, Any], asset: dict[str, Any], unswept: list[Any], now: float
+    ) -> dict[str, Any]:
+        """One token's sweep on one network."""
+        chain_id, token, treasury = network["chain_id"], asset["contract"], network["treasury"]
+        amounts = next(
+            (
+                amount.to_dict()
+                for amount in unswept
+                if amount.chain_id == chain_id and same_address(amount.token, token)
+            ),
+            {"amount_atomic": "0", "final_amount_atomic": "0"},
+        )
+        # Only a final unswept balance has forwarders to flush.
+        forwarders = []
+        if amounts["final_amount_atomic"] != "0":
             forwarders = list(
                 _take(
                     self._service().list_forwarders(chain_id=chain_id, sweepable=token),
                     MAX_SWEEP_FORWARDERS,
                 )
             )
-            sweeps = [
-                sweep.to_dict()
-                for sweep in _take(self._service().list_sweeps(chain_id=chain_id, token=token), 10)
-            ]
+        sweeps = [
+            sweep.to_dict()
+            for sweep in _take(self._service().list_sweeps(chain_id=chain_id, token=token), 10)
+        ]
         # Flush only forwarders the pins derive: the service's word decides nothing here.
         derived = [
             forwarder
@@ -818,21 +870,16 @@ class DemoConsole:
             )
         ]
         calls_to_sign = flush_transactions(derived, token) if derived else []
-        unswept = next(
-            (
-                amount.to_dict()
-                for amount in balance.unswept
-                if amount.chain_id == chain_id and same_address(amount.token, token)
-            ),
-            {"amount_atomic": "0", "final_amount_atomic": "0"},
-        )
-        view = {
+        return {
             "chain_id": chain_id,
+            "network": network["name"],
+            "asset": asset["asset"],
+            "symbol": asset["symbol"],
+            "decimals": asset["decimals"],
             "token": token,
             "treasury": treasury,
-            "factory": self.config.factory,
-            "unswept_atomic": unswept["amount_atomic"],
-            "final_unswept_atomic": unswept["final_amount_atomic"],
+            "unswept_atomic": amounts["amount_atomic"],
+            "final_unswept_atomic": amounts["final_amount_atomic"],
             "sweepable_forwarders": len(derived),
             "refused_forwarders": len(forwarders) - len(derived),
             "flush": calls_to_sign,
@@ -843,48 +890,29 @@ class DemoConsole:
                 treasury,
                 calls_to_sign,
                 name="Phala Pay sweep",
-                description=f"Sweep {self.config.token_symbol} to the treasury",
+                description=f"Sweep {asset['symbol']} to the treasury",
                 created_at_ms=int(now * 1000),
             ),
             "sweeps": sweeps,
-            "api": calls,
         }
-        with self._lock:
-            self._sweeps = (now, view)
-        return view
 
     # Networks -----------------------------------------------------------------------------------
 
-    def _treasuries(self) -> dict[int, str]:
-        """The chains the product has pins for, and each one's treasury: a quote on any other
-        chain has no treasury to recompute its address from. One chain today (`chain_id`)."""
-        return {self.config.chain_id: self.config.treasury}
-
     def _payable_networks(self) -> list[dict[str, Any]]:
         """The networks a customer can pay on, each with its tokens: the service's payable assets
-        (`GET /v1/config`) on the chains of `_treasuries`, in the service's order."""
+        (`GET /v1/config`) on the configured chains (a quote on any other chain has no treasury to
+        recompute its address from), in the config's order, then the service's. A configured
+        chain the service does not serve yet is left out."""
         now = self._clock()
         with self._lock:
             if self._networks is not None and now - self._networks[0] < 300:
                 return self._networks[1]
-        chains = self._treasuries()
-        networks: dict[int, dict[str, Any]] = {}
-        for asset in self._service().get_config().assets:
-            chain = asset.chain_id
-            if chain not in chains:
-                continue
-            testnet = chain not in MAINNETS
-            name = NETWORKS.get(chain, f"Chain {chain}")
-            network = networks.setdefault(
-                chain,
-                {
-                    "chain_id": chain,
-                    "name": f"{name} testnet" if testnet else name,
-                    "testnet": testnet,
-                    "assets": [],
-                },
-            )
-            network["assets"].append(
+        offered = self._service().get_config().assets
+        networks = []
+        for chain in self.config.chains:
+            testnet = chain.chain_id not in MAINNETS
+            mintable = {token.address.lower() for token in chain.test_tokens}
+            assets = [
                 {
                     "asset": asset.asset,
                     "symbol": asset.asset.upper(),
@@ -893,12 +921,32 @@ class DemoConsole:
                     "pricing": asset.pricing,
                     "min_amount": asset.min_amount,
                     "quote_ttl_seconds": asset.quote_ttl_seconds,
+                    # The page's faucet helper: the visitor's wallet mints a mintable test token;
+                    # another testnet token may have its issuer's faucet.
+                    "mintable": asset.contract.lower() in mintable,
+                    "faucet": TOKEN_FAUCETS.get(asset.asset) if testnet else None,
+                    # The product's own promotion (reference_product.fulfillment).
+                    "bonus_bps": self.config.bonus_bps.get(asset.asset.lower(), 0),
+                }
+                for asset in offered
+                if asset.chain_id == chain.chain_id
+            ]
+            if not assets:
+                continue
+            networks.append(
+                {
+                    "chain_id": chain.chain_id,
+                    "name": f"{chain.name} testnet" if testnet else chain.name,
+                    "testnet": testnet,
+                    "explorer": EXPLORERS.get(chain.chain_id),
+                    "faucet": GAS_FAUCETS.get(chain.chain_id) if testnet else None,
+                    "treasury": chain.treasury,
+                    "assets": assets,
                 }
             )
-        view = list(networks.values())
         with self._lock:
-            self._networks = (now, view)
-        return view
+            self._networks = (now, networks)
+        return networks
 
     # Trust --------------------------------------------------------------------------------------
 
@@ -955,7 +1003,7 @@ class DemoConsole:
                     self.config.api_key(),
                     account=self.config.account,
                     forwarder=(self.config.factory, self.config.implementation),
-                    treasuries=self._treasuries(),
+                    treasuries=self.config.treasuries(),
                     transport=self.recorder,
                 )
             return self._client
@@ -1009,7 +1057,9 @@ def _steps(
                 {"label": "Quote", "value": quote["id"], "mono": True},
                 {
                     "label": "Locked price",
-                    "value": f"{quote['exchange_rate']} USD per {quote['asset'].upper()}",
+                    "value": quote["exchange_rate"],
+                    "kind": "rate",
+                    "unit": quote["asset"].upper(),
                 },
                 {"label": "Exact amount", "value": quote["amount_atomic"], "kind": "atomic"},
                 {
@@ -1079,7 +1129,12 @@ def _steps(
                     if deposit.get("price_source") == "quote"
                     else "spot (market rate on arrival)",
                 },
-                {"label": "Rate", "value": f"{deposit.get('exchange_rate')} USD"},
+                {
+                    "label": "Rate",
+                    "value": deposit.get("exchange_rate"),
+                    "kind": "rate",
+                    "unit": (deposit.get("asset") or "").upper(),
+                },
             ],
         )
     else:
@@ -1098,6 +1153,14 @@ def _steps(
                 {"label": "Ledger order", "value": f"{ledger['status']} ({ledger['order_key']})"},
                 {"label": "Credit", "value": ledger["credit"], "kind": "usd_delta"},
             ]
+            if ledger["bonus"]:
+                details.append(
+                    {
+                        "label": "Bonus (this product's)",
+                        "value": ledger["bonus"],
+                        "kind": "usd_delta",
+                    }
+                )
         step("webhook_received", "complete", delivered["received_at"], details)
     else:
         step("webhook_received", "current" if credited else "upcoming", None, [])
@@ -1222,6 +1285,7 @@ def _ledger(db: Any, deposit_id: str) -> dict[str, Any]:
         "credit_transaction": None,
         "credit": None,
         "net": None,
+        "bonus": None,
         "adjustments": [],
         "snapshot": None
         if snapshot is None
@@ -1233,6 +1297,7 @@ def _ledger(db: Any, deposit_id: str) -> dict[str, Any]:
     view.update(status=row[2], reason=row[3], credit_transaction=row[4], credit=row[5])
     if row[5] is not None:
         view["net"] = ProductLedger.order_amounts(db, order_id)[1]
+        view["bonus"] = ProductLedger.order_bonus(db, order_id)
     view["adjustments"] = [
         {"amount": amount, "reason": reason, "at": at}
         for amount, reason, at in db.execute(
@@ -1261,18 +1326,22 @@ def _ledger_view(deposit: dict[str, Any], ledger: dict[str, Any] | None) -> dict
 
 
 def _ledger_lines(db: Any, account: str) -> list[dict[str, Any]]:
-    """The workspace's balance, line by line: credits and their claw-backs, newest first."""
+    """The workspace's balance, line by line, newest first: credits and their claw-backs, and
+    the product's bonus lines (`kind` `bonus`: the grant, `PHA bonus +10%`, and its claw-backs,
+    named by the event that took them back)."""
     rows = db.execute(
-        "SELECT o.provider_order_id, c.amount_minor, 'deposit.credited', c.created_at "
+        "SELECT o.provider_order_id, c.amount_minor, 'deposit.credited', c.created_at, 'credit' "
         "FROM credit_transactions c JOIN orders o ON o.id = c.order_id WHERE c.team_id = ? "
-        "UNION ALL SELECT o.provider_order_id, a.amount_minor, a.reason, a.created_at "
+        "UNION ALL SELECT o.provider_order_id, a.amount_minor, a.reason, a.created_at, 'credit' "
         "FROM credit_adjustments a JOIN orders o ON o.id = a.order_id WHERE a.team_id = ? "
-        "ORDER BY 4 DESC LIMIT 50",
-        (account, account),
+        "UNION ALL SELECT o.provider_order_id, b.amount_minor, b.reason, b.created_at, 'bonus' "
+        "FROM bonus_credits b JOIN orders o ON o.id = b.order_id WHERE b.team_id = ? "
+        "ORDER BY 4 DESC, 5 DESC LIMIT 50",
+        (account, account, account),
     ).fetchall()
     return [
-        {"deposit": key, "amount": amount, "reason": reason, "at": at}
-        for key, amount, reason, at in rows
+        {"deposit": key, "amount": amount, "reason": reason, "at": at, "kind": kind}
+        for key, amount, reason, at, kind in rows
     ]
 
 

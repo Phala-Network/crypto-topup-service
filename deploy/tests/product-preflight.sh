@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local (offline) checks of deploy/product/preflight.sh: the example env file, a malformed or live
 # key, a stale render, a malformed rendered setting, account, or website origin, an ingress domain
-# other than the public URL's host, and an RPC URL with an API key are refused; an unsealed env
-# file is accepted only with --unsealed, and a restricted or secret test key without it.
+# other than the public URL's host, a chain's RPC URL over http or with an API key, and a repeated
+# chain are refused; an unsealed env file is accepted only with --unsealed, and a restricted or
+# secret test key without it.
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -15,14 +16,21 @@ export PRODUCT_DRIVER_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
 export PRODUCT_PUBLIC_URL=https://product.example
 export PRODUCT_DOMAIN=product.example
 export PRODUCT_GATEWAY_DOMAIN=gateway.pending.invalid
-export PRODUCT_RPC_URL=https://rpc.example/sepolia
 export TOPUP_ORIGIN=https://topup.example
 "$root/deploy/product/render-compose.sh" >"$tmp/compose.yml"
 # A hand edit that keeps the label digest, e.g. of a setting, is stale.
-sed 's|https://rpc.example/sepolia|https://rpc.example/other|' "$tmp/compose.yml" >"$tmp/stale.yml"
-PRODUCT_RPC_URL=http://rpc.example/sepolia "$root/deploy/product/render-compose.sh" >"$tmp/http-rpc.yml"
-PRODUCT_RPC_URL=https://sepolia.infura.io/v3/0123456789abcdef0123456789abcdef \
-    "$root/deploy/product/render-compose.sh" >"$tmp/keyed-rpc.yml"
+sed 's|https://base-sepolia-rpc.publicnode.com|https://rpc.example/other|' "$tmp/compose.yml" \
+    >"$tmp/stale.yml"
+# A chain's RPC over http, with an API key, and a repeated chain (rendered from edited sources).
+sed 's|https://base-sepolia-rpc.publicnode.com|http://base-sepolia-rpc.publicnode.com|' \
+    "$root/deploy/product/docker-compose.yml" >"$tmp/http-rpc-source.yml"
+"$root/deploy/product/render-compose.sh" "$tmp/http-rpc-source.yml" >"$tmp/http-rpc.yml"
+sed 's|https://base-sepolia-rpc.publicnode.com|https://base-sepolia.infura.io/v3/0123456789abcdef0123456789abcdef|' \
+    "$root/deploy/product/docker-compose.yml" >"$tmp/keyed-rpc-source.yml"
+"$root/deploy/product/render-compose.sh" "$tmp/keyed-rpc-source.yml" >"$tmp/keyed-rpc.yml"
+sed 's|"chain_id": 84532,|"chain_id": 11155111,|' "$root/deploy/product/docker-compose.yml" \
+    >"$tmp/repeated-source.yml"
+"$root/deploy/product/render-compose.sh" "$tmp/repeated-source.yml" >"$tmp/repeated.yml"
 PRODUCT_DOMAIN=other.example "$root/deploy/product/render-compose.sh" >"$tmp/other-domain.yml"
 printf 'PRODUCT_API_KEY=\n' >"$tmp/unsealed.env"
 sed 's/^PRODUCT_API_KEY=$/PRODUCT_API_KEY=sk_test_123/' "$tmp/unsealed.env" >"$tmp/bad-key.env"
@@ -68,10 +76,12 @@ expect_failure stale "differs from a fresh render" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/stale.yml"
 expect_failure other-domain "dstack-ingress must serve PRODUCT_DOMAIN" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/other-domain.yml"
-expect_failure http-rpc "PRODUCT_RPC_URL must use https" --unsealed \
+expect_failure http-rpc "chain 84532's rpc_url must use https" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/http-rpc.yml"
-expect_failure keyed-rpc "PRODUCT_RPC_URL seems to embed an API key" --unsealed \
+expect_failure keyed-rpc "chain 84532's rpc_url seems to embed an API key" --unsealed \
     --env "$tmp/unsealed.env" --compose "$tmp/keyed-rpc.yml"
+expect_failure repeated "the product config repeats a chain" --unsealed \
+    --env "$tmp/unsealed.env" --compose "$tmp/repeated.yml"
 if grep -q 0123456789abcdef "$tmp/keyed-rpc.out" "$tmp/keyed-rpc.err"; then
     echo "product preflight printed the RPC key" >&2
     exit 1

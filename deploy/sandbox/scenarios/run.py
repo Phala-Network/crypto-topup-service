@@ -62,7 +62,9 @@ def main() -> int:
         pinned = pin_webhook_keys(config)
         fulfillment = harness.ScenarioFulfillment(config, ledger, lambda: pinned)
         with ProductServer(fulfillment):
-            context = harness.Context(config, client, ledger, fulfillment, Payer(config))
+            context = harness.Context(
+                config, client, ledger, fulfillment, Payer(config, config.chain())
+            )
             for name in [name for name in args.names or SCENARIOS if name not in args.skip]:
                 results.append(_run(name, SCENARIOS[name].run, context))
 

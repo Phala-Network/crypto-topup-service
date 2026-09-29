@@ -799,6 +799,26 @@ correctness: as with a card processor, the credit is authorized by the service's
 Do not credit from a checkout page's own fetch of the deposit: credits come only from signed
 events, and the event follows the `credited` commit within a second.
 
+#### Promotions are your own logic
+
+Phala Pay reports each deposit's exact USD value and nothing else: a bonus, a discount, or any
+other incentive is your product's decision, applied in your own fulfillment. Phala Pay has no
+promotion setting. A pattern that stays correct under the balance rule: fix the rate when you
+credit (on the order, so ending a promotion changes no earlier deposit), keep the bonus as a
+ledger line of its own beside the credit, and bring it, on every `deposit.*` event and in the same
+transaction, to its share of what the deposit nets to:
+
+```python
+bonus_target = nets_to * bonus_bps // 10_000  # cents, rounded down; nets_to as above
+change = bonus_target - bonus_so_far            # one ledger line when non-zero
+```
+
+A partial refund then takes back its share of the bonus, a full refund or a reversal all of it,
+and a repeated or reordered event changes nothing, so refunding or reversing never leaves a bonus
+behind. The staging reference product's +10% on credits paid in PHA is this pattern
+([fulfillment.py](../deploy/product/reference_product/fulfillment.py), `bonus_bps` in its config);
+the live demo on [pay.phala.com](https://pay.phala.com/) shows it as a demo merchant's promotion.
+
 ### 2.4 Refusing a credit
 
 The service never asks whether you accept a deposit. To refuse one (a customer you do not know, a

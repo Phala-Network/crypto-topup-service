@@ -6,10 +6,11 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import type { Account, Deposit, Refund, Timeline } from "./api.js";
+import type { Deposit, Refund, Timeline } from "./api.js";
+import { assetOf, networkOf } from "./chains.js";
 import { Detail, Details, ExplorerLink, InfoTip, StatusBadge, Subsection, describe, errorMessage, wallet } from "./common.js";
 import { statusLabel, tokens } from "./format.js";
-import { useCancelRefund, useCreateRefund, useMarkRefundPaid } from "./queries.js";
+import { useCancelRefund, useCreateRefund, useMarkRefundPaid, useNetworks } from "./queries.js";
 
 /**
  * The refund flow (design D5): declare the refund, pay it from the treasury the deposit's address
@@ -17,8 +18,14 @@ import { useCancelRefund, useCreateRefund, useMarkRefundPaid } from "./queries.j
  * no keys and the treasury is Phala's finance Safe, so the visitor plays the merchant's finance
  * team: a payment from the treasury succeeds, and one from any other wallet fails verification.
  */
-export function Refunds({ timeline, deposit, account }: { timeline: Timeline; deposit: Deposit; account: Account }) {
-  const symbol = account.token.symbol;
+export function Refunds({ timeline, deposit }: { timeline: Timeline; deposit: Deposit }) {
+  const network = networkOf(useNetworks().data, deposit.chain_id);
+  const token: RefundToken = {
+    chainId: deposit.chain_id,
+    symbol: (deposit.asset ?? "token").toUpperCase(),
+    decimals: assetOf(network, deposit.asset)?.decimals ?? 18,
+  };
+  const treasury = network?.treasury ?? timeline.refunds[0]?.treasury ?? "";
   const refundable = deposit.final && (deposit.status === "credited" || deposit.status === "rejected");
   return (
     <Subsection
@@ -34,12 +41,12 @@ export function Refunds({ timeline, deposit, account }: { timeline: Timeline; de
     >
       <p className="text-muted-foreground">
         On this staging demo the treasury{" "}
-        <ExplorerLink account={account} kind="address" value={account.treasury} /> is Phala's finance Safe, which
+        <ExplorerLink chainId={token.chainId} kind="address" value={treasury} /> is Phala's finance Safe, which
         you do not control: a refund you pay from your own wallet is verified and <strong>fails</strong> with{" "}
         <code>sender_mismatch</code>, which is exactly what should happen.
       </p>
       {refundable ? (
-        <RefundForm deposit={deposit} symbol={symbol} />
+        <RefundForm deposit={deposit} token={token} />
       ) : (
         <p data-testid="refund-unavailable" className="text-muted-foreground">
           {deposit.status === "reversed"
@@ -50,7 +57,7 @@ export function Refunds({ timeline, deposit, account }: { timeline: Timeline; de
       {timeline.refunds.length > 0 && (
         <ul className="flex flex-col gap-3" aria-label="Refunds of this deposit">
           {timeline.refunds.map((refund) => (
-            <RefundItem key={refund.id} refund={refund} account={account} />
+            <RefundItem key={refund.id} refund={refund} token={token} />
           ))}
         </ul>
       )}
@@ -58,7 +65,15 @@ export function Refunds({ timeline, deposit, account }: { timeline: Timeline; de
   );
 }
 
-function RefundForm({ deposit, symbol }: { deposit: Deposit; symbol: string }) {
+/** The refunded deposit's token: its chain, symbol, and decimals. */
+interface RefundToken {
+  chainId: number;
+  symbol: string;
+  decimals: number;
+}
+
+function RefundForm({ deposit, token }: { deposit: Deposit; token: RefundToken }) {
+  const { symbol, decimals } = token;
   const remaining = BigInt(deposit.amount_atomic) - BigInt(deposit.amount_refunded_atomic);
   const [amount, setAmount] = useState("");
   const [destination, setDestination] = useState(deposit.from_address);
@@ -70,13 +85,13 @@ function RefundForm({ deposit, symbol }: { deposit: Deposit; symbol: string }) {
     event.preventDefault();
     let atomic: bigint;
     try {
-      atomic = parseUnits(amount.trim(), 18);
+      atomic = parseUnits(amount.trim(), decimals);
     } catch {
       setInvalid(`Enter an amount of ${symbol}.`);
       return;
     }
     if (atomic <= 0n || atomic > remaining) {
-      setInvalid(`Enter at most ${tokens(remaining.toString(), symbol)}.`);
+      setInvalid(`Enter at most ${tokens(remaining.toString(), symbol, decimals)}.`);
       return;
     }
     if (!isAddress(destination)) {
@@ -94,7 +109,7 @@ function RefundForm({ deposit, symbol }: { deposit: Deposit; symbol: string }) {
     <form className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]" onSubmit={submit} aria-label="Declare a refund">
       <Field>
         <FieldLabel htmlFor={amountId}>
-          Amount ({symbol}, at most {tokens(remaining.toString(), symbol)})
+          Amount ({symbol}, at most {tokens(remaining.toString(), symbol, decimals)})
         </FieldLabel>
         <Input
           id={amountId}
@@ -126,8 +141,8 @@ function RefundForm({ deposit, symbol }: { deposit: Deposit; symbol: string }) {
   );
 }
 
-function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
-  const symbol = account.token.symbol;
+function RefundItem({ refund, token }: { refund: Refund; token: RefundToken }) {
+  const { chainId, symbol, decimals } = token;
   const [hash, setHash] = useState("");
   const [logIndex, setLogIndex] = useState("");
   const [invalid, setInvalid] = useState<string | null>(null);
@@ -138,7 +153,7 @@ function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
   const pay = useMutation({
     mutationFn: async (transfer: NonNullable<Refund["transfer"]>) => {
       const { transferTokens } = await wallet();
-      return transferTokens(account.network.chain_id, transfer.token, transfer.to, BigInt(transfer.amount_atomic));
+      return transferTokens(chainId, transfer.token, transfer.to, BigInt(transfer.amount_atomic));
     },
     onSuccess: setHash,
   });
@@ -177,8 +192,8 @@ function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
         <StatusBadge status={refund.status}>{statusLabel(refund.status)}</StatusBadge>
       </div>
       <p>
-        {tokens(refund.amount_atomic, symbol)} to{" "}
-        <ExplorerLink account={account} kind="address" value={refund.destination_address} />
+        {tokens(refund.amount_atomic, symbol, decimals)} to{" "}
+        <ExplorerLink chainId={chainId} kind="address" value={refund.destination_address} />
       </p>
       {transfer !== null && (
         <>
@@ -197,7 +212,7 @@ function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
                 {transfer.to}
               </Detail>
               <Detail label="Amount">
-                {tokens(transfer.amount_atomic, symbol)} (<span className="font-mono">{transfer.amount_atomic}</span>)
+                {tokens(transfer.amount_atomic, symbol, decimals)} (<span className="font-mono">{transfer.amount_atomic}</span>)
               </Detail>
               <Detail label="Calldata" className="font-mono">
                 {transfer.data}
@@ -253,8 +268,8 @@ function RefundItem({ refund, account }: { refund: Refund; account: Account }) {
       )}
       {refund.status === "pending" && refund.transaction_hash !== null && (
         <p role="status">
-          Marked paid with <ExplorerLink account={account} kind="tx" value={refund.transaction_hash} />. Verifying once
-          the transaction is final (about 15 minutes on Sepolia); the amount stays reserved meanwhile.
+          Marked paid with <ExplorerLink chainId={chainId} kind="tx" value={refund.transaction_hash} />. Verifying once
+          the transaction is final; the amount stays reserved meanwhile.
         </p>
       )}
       {refund.status === "succeeded" && (

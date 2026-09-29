@@ -1,10 +1,12 @@
 """A stand-in for the Phala Pay service in the demo's end-to-end test.
 
 It answers the merchant API the demo uses, in the shapes of crates/topup/openapi.json: the config
-(test PHA on Sepolia), quotes and
+(the tokens of each chain in `--chains`: test PHA on Sepolia and Base Sepolia, and a 6-decimal
+test USDC priced as a stablecoin on Sepolia), quotes and
 their public view, deposit addresses and their public view, deposits, refunds (`mark_paid`
 verified on chain), forwarders, the balance, sweeps, attestation, and the TLS evidence. It follows
-real payments on Anvil the way the service does, compressed in time (one block a second):
+real payments on each chain's Anvil the way the service does, compressed in time (one block a
+second):
 
 - a transfer to an issued address is a `seen` payment as soon as it is in a block;
 - at `CREDIT_DEPTH` confirmations it is recorded as a deposit, valued (the quote's locked price
@@ -24,7 +26,9 @@ service's finality watch does for a proven-dropped transaction, and sends `depos
 Addresses, deposit ids, the webhook signature, and the attestation binding use the SDK's own
 helpers, so the product checks them exactly as it checks the real service.
 
-    python fake_service.py --port 8545 --rpc http://127.0.0.1:8546 --token 0x… \\
+    python fake_service.py --port 8545 --chains '[{"chain_id": 11155111, "rpc": "http://…",
+        "tokens": [{"asset": "pha", "contract": "0x…", "decimals": 18, "price": "0.25000000",
+        "pricing": "spot"}]}]' \\
         --product-webhook http://127.0.0.1:8089/webhooks --webhook-seed <64 hex> \\
         --factory 0x… --implementation 0x… --account acct_… --treasury 0x…
 """
@@ -38,6 +42,7 @@ import secrets
 import threading
 import time
 import uuid
+from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -59,11 +64,9 @@ from topup_sdk.addresses import (
 LOG = logging.getLogger("fake_service")
 TRANSFER_TOPIC = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
 FLUSHED_TOPIC = "0x" + keccak256(b"Flushed(bytes32,address,address,address,uint256)").hex()
-CHAIN_ID = 11155111
-PRICE = "0.25000000"  # USD per token
 CREDIT_DEPTH = 2
 FINAL_DEPTH = 12
-MIN_REFUND_ATOMIC = 20 * 10**18  # the staging route's min_refund_atomic
+MIN_REFUND_TOKENS = 20  # the staging PHA route's min_refund_atomic, in whole tokens
 NAMESPACE = uuid.UUID("5b0c6f7e-0f3a-4c9e-9d1e-2f3a4b5c6d7e")
 DOCS = "https://phala-network.github.io/phala-pay/#section/Errors/"
 
@@ -98,7 +101,16 @@ class FakeTopup:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.treasury = args.treasury.lower()
-        self.token = args.token.lower()
+        # Each chain's RPC, its tokens by lowercase contract, and how far it has been scanned.
+        self.chains: dict[int, dict[str, Any]] = {
+            int(chain["chain_id"]): {
+                "rpc": chain["rpc"],
+                "tokens": {token["contract"].lower(): token for token in chain["tokens"]},
+                "scanned": 0,
+                "flushes_scanned": 0,
+            }
+            for chain in json.loads(args.chains)
+        }
         self.key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(args.webhook_seed))
         self.rpc = httpx.Client(timeout=10)
         self.stop = threading.Event()
@@ -106,88 +118,109 @@ class FakeTopup:
         self.quotes: dict[str, dict[str, Any]] = {}
         self.addresses: dict[str, dict[str, Any]] = {}  # deposit addresses by id
         self.secrets: dict[str, list[str]] = {}
-        self.forwarders: dict[str, dict[str, Any]] = {}  # by lowercase address
+        self.forwarders: dict[str, dict[str, Any]] = {}  # by `chain_id:lowercase address`
         self.seen: dict[str, dict[str, Any]] = {}  # transfers by deposit id
         self.deposits: dict[str, dict[str, Any]] = {}
         self.refunds: dict[str, dict[str, Any]] = {}
         self.sweeps: list[dict[str, Any]] = []
         self.outbox: list[dict[str, Any]] = []
         self.idempotent: dict[str, dict[str, Any]] = {}
-        self.scanned = 0
-        self.flushes_scanned = 0
 
     # Chain ------------------------------------------------------------------------------------
 
-    def call(self, method: str, *params: Any) -> Any:
+    def call(self, chain_id: int, method: str, *params: Any) -> Any:
         body = self.rpc.post(
-            self.args.rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            self.chains[chain_id]["rpc"],
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
         ).json()
         if "error" in body:
             raise RuntimeError(f"{method}: {body['error']}")
         return body["result"]
 
-    def head(self) -> int:
-        return int(self.call("eth_blockNumber"), 16)
+    def head(self, chain_id: int) -> int:
+        return int(self.call(chain_id, "eth_blockNumber"), 16)
+
+    def token(self, chain_id: int, asset: str) -> dict[str, Any]:
+        """The chain's token for `asset`; refuses a pair the config does not offer."""
+        for token in self.chains.get(chain_id, {"tokens": {}})["tokens"].values():
+            if token["asset"] == asset:
+                return dict(token)
+        raise RefusedError(HTTPStatus.BAD_REQUEST, "asset_unsupported", "asset")
 
     def watch(self) -> None:
         while not self.stop.wait(1.0):
             try:
-                self.call("evm_mine")
+                for chain_id in self.chains:
+                    self.call(chain_id, "evm_mine")
                 self.step()
             except (httpx.HTTPError, RuntimeError):
                 LOG.exception("watch step failed")
 
     def step(self) -> None:
-        head = self.head()
-        self.detect(head)
+        heads = {chain_id: self.head(chain_id) for chain_id in self.chains}
+        for chain_id, head in heads.items():
+            self.detect(chain_id, head)
         with self.lock:
             for transfer in list(self.seen.values()):
                 if (
                     transfer["id"] not in self.deposits
-                    and self.depth(transfer, head) >= CREDIT_DEPTH
+                    and self.depth(transfer, heads[transfer["chain_id"]]) >= CREDIT_DEPTH
                 ):
                     self.record(transfer)
             for deposit in self.deposits.values():
-                deep = head - deposit["block_number"] + 1 >= FINAL_DEPTH
+                deep = heads[deposit["chain_id"]] - deposit["block_number"] + 1 >= FINAL_DEPTH
                 if deep and deposit["status"] != "reversed" and not deposit["final"]:
                     deposit["final"] = True
                     deposit["final_at"] = int(time.time())
-        self.verify_refunds(head)
-        self.index_sweeps(head)
+        self.verify_refunds(heads)
+        for chain_id, head in heads.items():
+            self.index_sweeps(chain_id, head)
         self.deliver()
 
     @staticmethod
     def depth(transfer: dict[str, Any], head: int) -> int:
         return head - int(transfer["block"]) + 1
 
-    def detect(self, head: int) -> None:
-        """Every transfer of the token to an issued address, in the blocks not scanned yet."""
+    def detect(self, chain_id: int, head: int) -> None:
+        """Every transfer of a chain's token to an issued address there, in the blocks not
+        scanned yet."""
+        chain = self.chains[chain_id]
         with self.lock:
-            watched = [_topic(address) for address in self.forwarders]
-        if not watched or head <= self.scanned:
+            watched = [
+                _topic(forwarder["address"])
+                for forwarder in self.forwarders.values()
+                if forwarder["chain_id"] == chain_id
+            ]
+        if not watched or head <= chain["scanned"]:
             return
         logs = self.call(
+            chain_id,
             "eth_getLogs",
             {
-                "address": self.args.token,
-                "fromBlock": hex(self.scanned + 1),
+                "address": list(chain["tokens"]),
+                "fromBlock": hex(chain["scanned"] + 1),
                 "toBlock": hex(head),
                 "topics": [TRANSFER_TOPIC, None, watched],
             },
         )
         for log in logs:
-            receipt = self.call("eth_getTransactionReceipt", log["transactionHash"])
+            token = chain["tokens"][log["address"].lower()]
+            receipt = self.call(chain_id, "eth_getTransactionReceipt", log["transactionHash"])
             position = next(
                 index
                 for index, item in enumerate(receipt["logs"])
                 if item["logIndex"] == log["logIndex"]
             )
-            key = deposit_id(CHAIN_ID, log["transactionHash"], position)
+            key = deposit_id(chain_id, log["transactionHash"], position)
             with self.lock:
                 self.seen.setdefault(
                     key,
                     {
                         "id": key,
+                        "chain_id": chain_id,
+                        "asset": token["asset"],
+                        "contract": token["contract"].lower(),
+                        "decimals": token["decimals"],
                         "address": _address(log["topics"][2]),
                         "from": _address(log["topics"][1]),
                         "amount_atomic": str(int(log["data"], 16)),
@@ -197,20 +230,23 @@ class FakeTopup:
                         "created": int(time.time()),
                     },
                 )
-        self.scanned = head
+        chain["scanned"] = head
 
     def record(self, transfer: dict[str, Any]) -> None:
         """Records a transfer at the credit depth as a deposit, values it, and credits it."""
-        forwarder = self.forwarders[transfer["address"]]
+        forwarder = self.forwarders[f"{transfer['chain_id']}:{transfer['address']}"]
         quote = self.quotes.get(forwarder["quote"] or "")
         owner = quote or self.addresses[forwarder["deposit_address"]]
+        token = self.chains[transfer["chain_id"]]["tokens"][transfer["contract"]]
         atomic = int(transfer["amount_atomic"])
         at_quote = (
             quote is not None
             and quote["status"] == "open"
             and time.time() < quote["expires_at"]
+            and transfer["contract"] == quote["_contract"]
             and transfer["amount_atomic"] == quote["amount_atomic"]
         )
+        spot = int(atomic * Fraction(token["price"]) * 100 / 10 ** token["decimals"])
         now = int(time.time())
         deposit = {
             "id": transfer["id"],
@@ -225,13 +261,13 @@ class FakeTopup:
             "swept": False,
             "metadata": dict(owner["metadata"]),
             "rejection_reason": None,
-            "chain_id": CHAIN_ID,
-            "asset": "pha",
-            "asset_contract": self.token,
+            "chain_id": transfer["chain_id"],
+            "asset": token["asset"],
+            "asset_contract": transfer["contract"],
             "amount_atomic": transfer["amount_atomic"],
-            "amount": quote["amount"] if at_quote and quote else atomic * 25 // 10**18,
+            "amount": quote["amount"] if at_quote and quote else spot,
             "currency": "usd",
-            "exchange_rate": PRICE,
+            "exchange_rate": token["price"],
             "price_source": "quote" if at_quote else "spot",
             "valued_at": now,
             "address": transfer["address"],
@@ -250,7 +286,7 @@ class FakeTopup:
             quote.update(status="complete", deposit=deposit["id"])
         self.emit("deposit.credited", deposit, event_id=credited_event_id(deposit["id"]))
 
-    def verify_refunds(self, head: int) -> None:
+    def verify_refunds(self, heads: dict[int, int]) -> None:
         with self.lock:
             marked = [
                 r
@@ -258,8 +294,10 @@ class FakeTopup:
                 if r["status"] == "pending" and r["transaction_hash"]
             ]
         for refund in marked:
-            receipt = self.call("eth_getTransactionReceipt", refund["transaction_hash"])
-            if receipt is None or head - int(receipt["blockNumber"], 16) + 1 < FINAL_DEPTH:
+            chain_id = self.deposits[refund["deposit"]]["chain_id"]
+            receipt = self.call(chain_id, "eth_getTransactionReceipt", refund["transaction_hash"])
+            final = heads[chain_id] - FINAL_DEPTH + 1
+            if receipt is None or int(receipt["blockNumber"], 16) > final:
                 continue
             with self.lock:
                 reason = self.match(refund, receipt)
@@ -316,16 +354,18 @@ class FakeTopup:
         self.emit("refund.updated", refund)
         self.emit("deposit.refunded", deposit)
 
-    def index_sweeps(self, head: int) -> None:
-        """Indexes the factory's finalized `Flushed` events, whoever sent the flush."""
+    def index_sweeps(self, chain_id: int, head: int) -> None:
+        """Indexes the factory's finalized `Flushed` events on a chain, whoever sent the flush."""
+        chain = self.chains[chain_id]
         final = head - FINAL_DEPTH + 1
-        if final <= self.flushes_scanned:
+        if final <= chain["flushes_scanned"]:
             return
         logs = self.call(
+            chain_id,
             "eth_getLogs",
             {
                 "address": self.args.factory,
-                "fromBlock": hex(self.flushes_scanned + 1),
+                "fromBlock": hex(chain["flushes_scanned"] + 1),
                 "toBlock": hex(final),
                 "topics": [FLUSHED_TOPIC],
             },
@@ -333,8 +373,9 @@ class FakeTopup:
         with self.lock:
             for log in logs:
                 address = _address(log["topics"][2])
-                forwarder = self.forwarders.get(address)
-                if forwarder is None:
+                forwarder = self.forwarders.get(f"{chain_id}:{address}")
+                token = chain["tokens"].get(_address(log["topics"][3]))
+                if forwarder is None or token is None:
                     continue
                 data = log["data"].removeprefix("0x")
                 block, index = int(log["blockNumber"], 16), int(log["logIndex"], 16)
@@ -342,11 +383,11 @@ class FakeTopup:
                     "id": "sw_" + uuid.uuid5(NAMESPACE, f"{log['transactionHash']}:{index}").hex,
                     "object": "sweep",
                     "livemode": False,
-                    "chain_id": CHAIN_ID,
+                    "chain_id": chain_id,
                     "forwarder": forwarder["id"],
                     "address": address,
                     "token": _address(log["topics"][3]),
-                    "asset": "pha",
+                    "asset": token["asset"],
                     "treasury": _address(data[:64]),
                     "amount_atomic": str(int(data[64:128], 16)),
                     "tx_hash": log["transactionHash"],
@@ -356,11 +397,14 @@ class FakeTopup:
                 }
                 self.sweeps.insert(0, sweep)
                 for deposit in self.deposits.values():
-                    if deposit["address"] == address and (
-                        (deposit["block_number"], deposit["log_index"]) < (block, index)
+                    if (
+                        deposit["chain_id"] == chain_id
+                        and deposit["address"] == address
+                        and deposit["asset_contract"] == token["contract"].lower()
+                        and (deposit["block_number"], deposit["log_index"]) < (block, index)
                     ):
                         deposit["swept"] = True
-        self.flushes_scanned = final
+        chain["flushes_scanned"] = final
 
     # Webhooks ---------------------------------------------------------------------------------
 
@@ -402,13 +446,19 @@ class FakeTopup:
     # Quotes -----------------------------------------------------------------------------------
 
     def add_forwarder(
-        self, address: str, salt: bytes, *, quote: str | None, deposit_address: str | None
+        self,
+        chain_id: int,
+        address: str,
+        salt: bytes,
+        *,
+        quote: str | None,
+        deposit_address: str | None,
     ) -> None:
-        self.forwarders[address.lower()] = {
-            "id": "fwd_" + uuid.uuid5(NAMESPACE, address.lower()).hex,
+        self.forwarders[f"{chain_id}:{address.lower()}"] = {
+            "id": "fwd_" + uuid.uuid5(NAMESPACE, f"{chain_id}:{address.lower()}").hex,
             "object": "forwarder",
             "livemode": False,
-            "chain_id": CHAIN_ID,
+            "chain_id": chain_id,
             "address": address,
             "factory": self.args.factory,
             "salt": "0x" + salt.hex(),
@@ -422,11 +472,17 @@ class FakeTopup:
         quote_id = "qt_" + uuid.uuid5(uuid.NAMESPACE_OID, idempotency_key).hex
         customer = str(body["client_reference_id"])
         amount = int(body["amount"])
+        chain_id = int(body["chain_id"])
+        token = self.token(chain_id, str(body["asset"]))
         salt = quote_salt(self.args.account, customer, quote_id)
         address = forwarder_address(
             self.args.factory, self.args.implementation, self.treasury, salt
         )
-        atomic = str(amount * 4 * 10**16)  # cents / 100 / 0.25 USD per token * 10**18
+        # The amount at the token's price (cents / 100 / USD per token), rounded up to 4 decimals
+        # as the service rounds it (a route's default `quote.amount_decimals`).
+        step = 10 ** max(token["decimals"] - 4, 0)
+        exact = Fraction(amount * 10 ** token["decimals"]) / (Fraction(token["price"]) * 100)
+        atomic = str(-(-exact // step) * step)
         now = int(time.time())
         with self.lock:
             quote = self.quotes.get(quote_id)
@@ -440,28 +496,35 @@ class FakeTopup:
                     "metadata": dict(body.get("metadata") or {}),
                     "amount": amount,
                     "currency": "usd",
-                    "chain_id": CHAIN_ID,
-                    "asset": "pha",
+                    "chain_id": chain_id,
+                    "asset": token["asset"],
                     "amount_atomic": atomic,
-                    "exchange_rate": PRICE,
+                    "exchange_rate": token["price"],
                     "address": address,
-                    "payment_uri": f"ethereum:{self.args.token}@{CHAIN_ID}/transfer"
+                    "payment_uri": f"ethereum:{token['contract']}@{chain_id}/transfer"
                     f"?address={address}&uint256={atomic}",
                     "status": "open",
                     "expires_at": now + 900,
                     "created": now,
                     "deposit": None,
+                    "_contract": token["contract"].lower(),
+                    "_decimals": token["decimals"],
                 }
                 self.quotes[quote_id] = quote
-                self.add_forwarder(address, salt, quote=quote_id, deposit_address=None)
+                self.add_forwarder(chain_id, address, salt, quote=quote_id, deposit_address=None)
             secret = f"{quote_id}_secret_{secrets.token_hex(24)}"
             self.secrets.setdefault(quote_id, []).append(secret)
             return {**self.quote_view(quote), "client_secret": secret}
 
-    def transfers_at(self, address: str) -> list[dict[str, Any]]:
+    def transfers_at(self, address: str, chain_id: int | None = None) -> list[dict[str, Any]]:
+        """Transfers to the address, on one chain or (a deposit address) on every chain."""
         return sorted(
-            (t for t in self.seen.values() if t["address"] == address.lower()),
-            key=lambda t: (t["block"], t["log_index"]),
+            (
+                t
+                for t in self.seen.values()
+                if t["address"] == address.lower() and chain_id in (None, t["chain_id"])
+            ),
+            key=lambda t: (t["created"], t["block"], t["log_index"]),
         )
 
     def payment(self, transfer: dict[str, Any], quote: dict[str, Any] | None) -> dict[str, Any]:
@@ -469,11 +532,13 @@ class FakeTopup:
         recorded = transfer["id"] in self.deposits
         return {
             "status": "recorded" if recorded else "seen",
-            "chain_id": CHAIN_ID,
-            "asset": "pha",
+            "chain_id": transfer["chain_id"],
+            "asset": transfer["asset"],
             "tx_hash": transfer["tx_hash"],
             "amount_atomic": transfer["amount_atomic"],
-            "confirmations": None if recorded else self.depth(transfer, self.head()),
+            "confirmations": None
+            if recorded
+            else self.depth(transfer, self.head(transfer["chain_id"])),
             "estimated_final_at": None if recorded else transfer["created"] + 60,
             "matches_quote": None
             if quote is None
@@ -482,26 +547,30 @@ class FakeTopup:
         }
 
     def quote_view(self, quote: dict[str, Any]) -> dict[str, Any]:
-        transfers = self.transfers_at(quote["address"])
+        transfers = self.transfers_at(quote["address"], quote["chain_id"])
         shown = next((t for t in transfers if t["id"] == quote["deposit"]), None)
         shown = shown or (transfers[0] if transfers else None)
-        return {**quote, "payment": None if shown is None else self.payment(shown, quote)}
+        payment = None if shown is None else self.payment(shown, quote)
+        return {**_public(quote), "payment": payment}
 
     def client_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
-        transfers = self.transfers_at(quote["address"])
+        transfers = self.transfers_at(quote["address"], quote["chain_id"])
         payment_status, confirmations = "none", None
         if quote["deposit"] is not None or any(t["id"] in self.deposits for t in transfers):
             payment_status = "credited"
         elif transfers:
             payment_status = "seen"
-            confirmations = self.depth(transfers[0], self.head())
+            confirmations = self.depth(transfers[0], self.head(quote["chain_id"]))
         keys = (
             *("id", "object", "status", "amount", "currency", "asset", "chain_id"),
             *("amount_atomic", "address", "payment_uri", "expires_at"),
         )
         view = {k: quote[k] for k in keys}
         view.update(
-            livemode=False, decimals=18, payment_status=payment_status, confirmations=confirmations
+            livemode=False,
+            decimals=quote["_decimals"],
+            payment_status=payment_status,
+            confirmations=confirmations,
         )
         return view
 
@@ -537,25 +606,31 @@ class FakeTopup:
                     "created": int(time.time()),
                     "retired_at": None,
                     "metadata": {},
+                    # The same address on every chain, as the treasury is the same.
                     "networks": [
                         {
-                            "chain_id": CHAIN_ID,
+                            "chain_id": chain_id,
                             "address": at,
                             "treasury": self.treasury,
                             "assets": [
                                 {
-                                    "asset": "pha",
-                                    "contract": self.token,
-                                    "decimals": 18,
-                                    "payment_uri": f"ethereum:{self.token}@{CHAIN_ID}/transfer"
-                                    f"?address={at}",
+                                    "asset": token["asset"],
+                                    "contract": token["contract"].lower(),
+                                    "decimals": token["decimals"],
+                                    "payment_uri": f"ethereum:{token['contract']}@{chain_id}"
+                                    f"/transfer?address={at}",
                                 }
+                                for token in chain["tokens"].values()
                             ],
                         }
+                        for chain_id, chain in self.chains.items()
                     ],
                 }
                 self.addresses[address["id"]] = address
-                self.add_forwarder(at, salt, quote=None, deposit_address=address["id"])
+                for chain_id in self.chains:
+                    self.add_forwarder(
+                        chain_id, at, salt, quote=None, deposit_address=address["id"]
+                    )
             # The create request's metadata merges into the address's, as an update would.
             address["metadata"].update(body.get("metadata") or {})
             secret = f"{address['id']}_secret_{secrets.token_hex(24)}"
@@ -571,15 +646,16 @@ class FakeTopup:
         for transfer in self.transfers_at(address["address"])[::-1][:10]:
             deposit = self.deposits.get(transfer["id"])
             status = "seen" if deposit is None else deposit["status"]
+            head = self.head(transfer["chain_id"])
             payments.append(
                 {
                     "status": status,
-                    "chain_id": CHAIN_ID,
-                    "asset": "pha",
-                    "decimals": 18,
+                    "chain_id": transfer["chain_id"],
+                    "asset": transfer["asset"],
+                    "decimals": transfer["decimals"],
                     "amount_atomic": transfer["amount_atomic"],
                     "tx_hash": transfer["tx_hash"],
-                    "confirmations": self.depth(transfer, self.head()) if deposit is None else None,
+                    "confirmations": self.depth(transfer, head) if deposit is None else None,
                     "created": transfer["created"],
                 }
             )
@@ -614,7 +690,8 @@ class FakeTopup:
             )
             remainder = int(deposit["amount_atomic"]) - reserved
             amount = int(body.get("amount_atomic") or remainder)
-            if amount < MIN_REFUND_ATOMIC or remainder <= 0:
+            token = self.chains[deposit["chain_id"]]["tokens"][deposit["asset_contract"]]
+            if amount < MIN_REFUND_TOKENS * 10 ** token["decimals"] or remainder <= 0:
                 raise RefusedError(HTTPStatus.BAD_REQUEST, "amount_too_small", "amount_atomic")
             if amount > remainder:
                 raise RefusedError(HTTPStatus.BAD_REQUEST, "amount_too_large", "amount_atomic")
@@ -626,7 +703,9 @@ class FakeTopup:
                 "amount_atomic": str(amount),
                 "destination_address": str(body["destination_address"]).lower(),
                 # The treasury the deposit's address pays, which the refund must come from.
-                "treasury": self.forwarders[deposit["address"]]["treasury"],
+                "treasury": self.forwarders[f"{deposit['chain_id']}:{deposit['address']}"][
+                    "treasury"
+                ],
                 "status": "pending",
                 "failure_reason": None,
                 "transaction_hash": None,
@@ -707,43 +786,62 @@ class FakeTopup:
         return deposit["status"] != "reversed" and not deposit["swept"]
 
     def balance(self) -> dict[str, Any]:
+        """The unswept amounts, per chain and token."""
+        amounts: dict[tuple[int, str], dict[str, Any]] = {}
         with self.lock:
-            unswept = [d for d in self.deposits.values() if self.unswept(d)]
-            total = sum(int(d["amount_atomic"]) for d in unswept)
-            final = sum(int(d["amount_atomic"]) for d in unswept if d["final"])
-        amounts = [
+            for deposit in self.deposits.values():
+                if not self.unswept(deposit):
+                    continue
+                key = (deposit["chain_id"], deposit["asset_contract"])
+                amount = amounts.setdefault(
+                    key,
+                    {
+                        "chain_id": deposit["chain_id"],
+                        "token": deposit["asset_contract"],
+                        "asset": deposit["asset"],
+                        "amount_atomic": 0,
+                        "final_amount_atomic": 0,
+                    },
+                )
+                amount["amount_atomic"] += int(deposit["amount_atomic"])
+                if deposit["final"]:
+                    amount["final_amount_atomic"] += int(deposit["amount_atomic"])
+        unswept = [
             {
-                "chain_id": CHAIN_ID,
-                "token": self.token,
-                "asset": "pha",
-                "amount_atomic": str(total),
-                "final_amount_atomic": str(final),
+                **a,
+                "amount_atomic": str(a["amount_atomic"]),
+                "final_amount_atomic": str(a["final_amount_atomic"]),
             }
+            for a in amounts.values()
         ]
-        return {"object": "balance", "livemode": False, "unswept": amounts if total else []}
+        return {"object": "balance", "livemode": False, "unswept": unswept}
 
     def config(self) -> dict[str, Any]:
-        pha = {
-            "asset": "pha",
-            "chain_id": CHAIN_ID,
-            "confirmations": str(CREDIT_DEPTH),
-            "contract": self.token,
-            "decimals": 18,
-            "max_deposit_atomic": str(10**24),
-            "min_amount": 100,
-            "min_refund_atomic": str(MIN_REFUND_ATOMIC),
-            "pricing": "spot",
-            "quote_spread_bps": 0,
-            "quote_tolerance_bps": 0,
-            "quote_ttl_seconds": 900,
-            "typical_credit_seconds": CREDIT_DEPTH,
-            "typical_finality_seconds": FINAL_DEPTH,
-        }
+        assets = [
+            {
+                "asset": token["asset"],
+                "chain_id": chain_id,
+                "confirmations": str(CREDIT_DEPTH),
+                "contract": token["contract"].lower(),
+                "decimals": token["decimals"],
+                "max_deposit_atomic": str(10 ** (6 + token["decimals"])),
+                "min_amount": 100,
+                "min_refund_atomic": str(MIN_REFUND_TOKENS * 10 ** token["decimals"]),
+                "pricing": token["pricing"],
+                "quote_spread_bps": 0,
+                "quote_tolerance_bps": 0,
+                "quote_ttl_seconds": 900,
+                "typical_credit_seconds": CREDIT_DEPTH,
+                "typical_finality_seconds": FINAL_DEPTH,
+            }
+            for chain_id, chain in self.chains.items()
+            for token in chain["tokens"].values()
+        ]
         return {
             "object": "config",
             "livemode": False,
             "currency": "usd",
-            "assets": [pha],
+            "assets": assets,
             "max_open_amount_per_account": 1_000_000,
             "max_open_amount_per_customer": 500_000,
             "max_open_quotes": 100,
@@ -751,14 +849,19 @@ class FakeTopup:
 
     def list_forwarders(self, query: dict[str, str]) -> list[dict[str, Any]]:
         with self.lock:
-            forwarders = list(self.forwarders.values())[::-1]
+            forwarders = [
+                f
+                for f in list(self.forwarders.values())[::-1]
+                if query.get("chain_id", str(f["chain_id"])) == str(f["chain_id"])
+            ]
             sweepable = query.get("sweepable", "").lower()
             if sweepable:
                 forwarders = [
                     f
                     for f in forwarders
                     if any(
-                        d["address"] == f["address"].lower()
+                        d["chain_id"] == f["chain_id"]
+                        and d["address"] == f["address"].lower()
                         and d["asset_contract"] == sweepable
                         and d["final"]
                         and self.unswept(d)
@@ -890,6 +993,7 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
                         s
                         for s in fake.sweeps
                         if query.get("token", s["token"]).lower() == s["token"]
+                        and query.get("chain_id", str(s["chain_id"])) == str(s["chain_id"])
                         and query.get("forwarder", s["forwarder"]) == s["forwarder"]
                     ]
                 self.send(HTTPStatus.OK, _page(path, data))
@@ -957,7 +1061,7 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    for name in ("rpc", "token", "product-webhook", "webhook-seed", "factory"):
+    for name in ("chains", "product-webhook", "webhook-seed", "factory"):
         parser.add_argument(f"--{name}", required=True)
     for name in ("implementation", "account", "treasury"):
         parser.add_argument(f"--{name}", required=True)

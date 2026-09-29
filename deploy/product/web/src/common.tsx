@@ -3,8 +3,10 @@ import type { ComponentProps, ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { ApiError, type Account } from "./api.js";
+import { ApiError } from "./api.js";
+import { networkOf } from "./chains.js";
 import { short } from "./format.js";
+import { useNetworks } from "./queries.js";
 
 /** An inline text link, in the page's text colour. */
 export const LINK = "font-medium underline decoration-foreground/30 underline-offset-4 transition-colors hover:decoration-foreground";
@@ -26,16 +28,17 @@ export function loadSdk() {
 export const BRAND_BUTTON =
   "h-11 w-full rounded-lg bg-brand text-[0.9375rem] font-semibold text-brand-foreground shadow-[inset_0_-1px_0_rgb(0_0_0/0.12)] hover:bg-brand/85 dark:shadow-none";
 
+/** A transaction or address, linked to its chain's explorer, with the full value in a tooltip. */
 export function ExplorerLink({
-  account,
+  chainId,
   kind,
   value,
 }: {
-  account: Account | null;
+  chainId: number | undefined;
   kind: "address" | "tx";
   value: string;
 }) {
-  const explorer = account?.network.explorer ?? null;
+  const explorer = networkOf(useNetworks().data, chainId)?.explorer ?? null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -47,7 +50,7 @@ export function ExplorerLink({
           </a>
         )}
       </TooltipTrigger>
-      <TooltipContent className="max-w-sm font-mono break-all">{value}</TooltipContent>
+      <TooltipContent className="font-mono break-all">{value}</TooltipContent>
     </Tooltip>
   );
 }
@@ -68,7 +71,7 @@ export function InfoTip({ label, children, className }: { label: string; childre
           <Info className="size-3.5" aria-hidden="true" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-sm leading-relaxed text-pretty">{children}</TooltipContent>
+      <TooltipContent>{children}</TooltipContent>
     </Tooltip>
   );
 }

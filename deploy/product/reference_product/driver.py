@@ -1,7 +1,8 @@
 """The deposit driver: plays a Phala Cloud user against a running product.
 
-It registers a workspace through the product's account API, gets a quote and recomputes its
-address locally, pays the exact locked amount with the test token, polls until the deposit is
+It registers a workspace through the product's account API, gets a quote on one of the product's
+chains (the config's first unless `chain_id` names another) and recomputes its address locally,
+pays the exact locked amount with the chain's test token, polls until the deposit is
 credited, and checks that the product ledger credited the locked amount exactly once and received
 the verified `deposit.credited` webhook. Its options drive the abnormal paths instead: a different
 amount, a payment after the quote window, another token, and
@@ -32,7 +33,7 @@ from topup_client.models import Deposit, Quote
 from topup_sdk import RequestSigner, SigningAuth
 from topup_sdk.addresses import same_address
 
-from .config import ProductConfig
+from .config import ChainConfig, ProductConfig
 from .server import quote_address
 
 LOG = logging.getLogger(__name__)
@@ -53,18 +54,20 @@ TOKEN_ABI = [
 
 
 class Payer:
-    """Sends test-token transactions with web3.py.
+    """Sends test-token transactions with web3.py, on the chain's RPC.
 
-    On Anvil the payer is `payer`, an unlocked development account. On Sepolia it signs with a
+    On Anvil the payer is `payer`, an unlocked development account. On a testnet it signs with a
     Foundry keystore holding a funded throwaway test key: the account named by `payer_account`
     (`cast wallet import`), or else the keystore file named by `ETH_KEYSTORE`. As with `cast`, the
     keystore password comes from the mode-0600 file named by `ETH_PASSWORD`, or is prompted for;
     no key is ever passed in the environment or on a command line. The test token's `mint` is
-    public, so the payer mints what it pays and needs only Sepolia ETH for gas.
+    public, so the payer mints what it pays and needs only the testnet's ETH for gas.
     """
 
-    def __init__(self, config: ProductConfig) -> None:
-        self._web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+    def __init__(self, config: ProductConfig, chain: ChainConfig) -> None:
+        self._web3 = Web3(Web3.HTTPProvider(chain.rpc_url))
+        if self._web3.eth.chain_id != chain.chain_id:
+            raise ValueError(f"the RPC of chain {chain.chain_id} reports another chain")
         keystore = os.environ.get("ETH_KEYSTORE")
         if config.payer_account is not None:
             keystore = str(Path.home() / ".foundry/keystores" / config.payer_account)
@@ -119,8 +122,8 @@ class ProductApi:
     def register(self, team: str) -> None:
         self._call("POST", "/accounts", {"account_id": team})
 
-    def quote(self, team: str, amount_minor: int) -> Quote:
-        body = {"amount_minor": amount_minor}
+    def quote(self, team: str, amount_minor: int, chain_id: int, asset: str) -> Quote:
+        body = {"amount_minor": amount_minor, "chain_id": chain_id, "asset": asset}
         return Quote.from_dict(self._call("POST", f"/accounts/{quote(team)}/quotes", body))
 
     def account(self, team: str) -> dict[str, Any]:
@@ -156,26 +159,31 @@ def run_deposit(
     pay_after_expiry: bool = False,
     token: str | None = None,
     refund_to: str | None = None,
+    chain_id: int | None = None,
 ) -> None:
     """Registers a workspace through the product, pays one quote, and checks the outcome.
 
     By default it pays the exact amount of a fresh quote and expects exactly the quoted credit
     at the quoted price. `pay_bps` pays that fraction of the quote instead, and
     `pay_after_expiry` pays it after the quote's window; those deposits must be credited at spot.
-    `token` pays another token. `until` is `credited` or `swept` for a credit, `rejected` for a
-    rejection, or `refunded`: a rejection, then a refund to `refund_to` for the whole deposit,
-    which the operator pays from the refund's treasury and attaches with
-    `POST /v1/refunds/{id}/mark_paid` while this waits for the `deposit.refunded` webhook.
+    `token` pays another token. `chain_id` is the configured chain to pay on, the first by
+    default; the quote is in that chain's first test token. `until` is `credited` or `swept` for
+    a credit, `rejected` for a rejection, or `refunded`: a rejection, then a refund to
+    `refund_to` for the whole deposit, which the operator pays from the refund's treasury and
+    attaches with `POST /v1/refunds/{id}/mark_paid` while this waits for the `deposit.refunded`
+    webhook.
     """
-    payer = Payer(config)
+    chain = config.chain(chain_id)
+    payer = Payer(config, chain)
     with ProductApi(config.public_url, driver) as api:
         team = f"team-{uuid.uuid4().hex[:12]}"
         api.register(team)
         LOG.info("registered workspace %s", team)
 
-        quote = api.quote(team, amount_minor)
-        # Pay only an address recomputed here from the account, workspace, and quote id.
-        if not same_address(quote_address(config, team, quote.id), quote.address):
+        quote = api.quote(team, amount_minor, chain.chain_id, chain.test_token.symbol.lower())
+        # Pay only an address recomputed here from the account, workspace, quote id, and the
+        # chain's treasury.
+        if not same_address(quote_address(config, team, quote.id, chain.chain_id), quote.address):
             raise RuntimeError("quote address does not match the driver's own computation")
         address = quote.address
         amount_atomic = int(quote.amount_atomic) * pay_bps // 10_000
@@ -199,7 +207,7 @@ def run_deposit(
             LOG.info("waiting %.0fs to pay after the quote window", max(wait_s, 0))
             time.sleep(max(wait_s, 0))
 
-        tx_hash = payer.mint_and_transfer(token or config.token, address, amount_atomic)
+        tx_hash = payer.mint_and_transfer(token or chain.test_token.address, address, amount_atomic)
         LOG.info("paid %s atomic in %s from %s", amount_atomic, tx_hash, payer.address)
         if until in {"rejected", "refunded"}:
             _check_rejection(api, team, address, refund_to, timeout)

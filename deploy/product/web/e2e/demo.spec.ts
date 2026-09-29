@@ -6,15 +6,19 @@ import {
   erc20Abi,
   getAddress,
   http,
+  parseAbi,
   parseEther,
+  parseUnits,
+  publicActions,
   walletActions,
   type Hash,
 } from "viem";
-import { sepolia } from "viem/chains";
+import { baseSepolia, sepolia } from "viem/chains";
 
 declare global {
   interface Window {
     anvilRequest(
+      chainId: number,
       method: string,
       params: unknown,
     ): Promise<{ result: unknown } | { error: { code: number; message: string } }>;
@@ -29,10 +33,14 @@ function env(name: string): string {
   return value;
 }
 
-async function tokenBalance(owner: string): Promise<bigint> {
-  const chain = createPublicClient({ chain: sepolia, transport: http(env("ANVIL_URL")) });
+/** The owner's balance of a token: Sepolia's test PHA unless named. */
+async function tokenBalance(
+  owner: string,
+  { rpc = env("ANVIL_URL"), token = env("TOKEN_ADDRESS") }: { rpc?: string; token?: string } = {},
+): Promise<bigint> {
+  const chain = createPublicClient({ transport: http(rpc) });
   return chain.readContract({
-    address: getAddress(env("TOKEN_ADDRESS")),
+    address: getAddress(token),
     abi: erc20Abi,
     functionName: "balanceOf",
     args: [getAddress(owner)],
@@ -59,10 +67,33 @@ async function payFromTreasury(to: string, amount: bigint): Promise<Hash> {
   return hash;
 }
 
-/** An EIP-6963 wallet on Anvil holding the payer account; it starts on mainnet. */
+/** The test USDC's public mint, from the test (the page offers Circle's faucet instead). */
+async function mintUsdc(to: string, amount: bigint): Promise<void> {
+  const chain = createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) })
+    .extend(walletActions)
+    .extend(publicActions);
+  const payer = getAddress(env("PAYER_ADDRESS"));
+  await chain.waitForTransactionReceipt({
+    hash: await chain.sendTransaction({
+      account: payer,
+      to: getAddress(env("USDC_ADDRESS")),
+      data: encodeFunctionData({
+        abi: parseAbi(["function mint(address account, uint256 amount)"]),
+        functionName: "mint",
+        args: [getAddress(to), amount],
+      }),
+    }),
+  });
+}
+
+/** An EIP-6963 wallet on the Anvils holding the payer account; it starts on mainnet. */
 async function installWallet(page: Page) {
-  const rpc = env("ANVIL_URL");
-  await page.exposeFunction("anvilRequest", async (method: string, params: unknown) => {
+  const rpcs: Record<number, string> = { [sepolia.id]: env("ANVIL_URL"), [baseSepolia.id]: env("BASE_ANVIL_URL") };
+  await page.exposeFunction("anvilRequest", async (chainId: number, method: string, params: unknown) => {
+    const rpc = rpcs[chainId];
+    if (rpc === undefined) {
+      return { error: { code: 4901, message: "wallet is on another chain" } };
+    }
     const response = await fetch(rpc, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -75,7 +106,7 @@ async function installWallet(page: Page) {
     return body.error === undefined ? { result: body.result } : { error: body.error };
   });
   await page.addInitScript(
-    ({ account, chainId }) => {
+    ({ account, chainIds }) => {
       let current = 1;
       const known = new Set([1]);
       const fail = (code: number, message: string) => Object.assign(new Error(message), { code });
@@ -100,10 +131,10 @@ async function installWallet(page: Page) {
               known.add(Number(first?.chainId));
               return null;
           }
-          if (current !== chainId) {
+          if (!chainIds.includes(current)) {
             throw fail(4901, "wallet is on another chain");
           }
-          const answer = await window.anvilRequest(method, params);
+          const answer = await window.anvilRequest(current, method, params);
           if ("error" in answer) {
             throw fail(answer.error.code, answer.error.message);
           }
@@ -125,18 +156,30 @@ async function installWallet(page: Page) {
       window.addEventListener("eip6963:requestProvider", announce);
       announce();
     },
-    { account: env("PAYER_ADDRESS"), chainId: sepolia.id },
+    { account: env("PAYER_ADDRESS"), chainIds: [sepolia.id, baseSepolia.id] as number[] },
   );
 }
 
-/** The network, then the token, chosen: one network, Sepolia, with one token, test PHA. */
+/**
+ * The network, then the token, chosen by default: Sepolia, and the first of its two tokens, test
+ * PHA, which earns the demo merchant's bonus; test USDC is a stablecoin.
+ */
 async function expectPaymentOptions(product: Locator) {
-  const network = product.getByRole("radiogroup", { name: "Network" });
-  await expect(network.getByRole("radio")).toHaveCount(1);
-  await expect(network.getByRole("radio", { name: "Sepolia testnet", exact: true })).toBeChecked();
+  await expect(product.getByRole("combobox", { name: "Network" })).toContainText("Sepolia");
   const token = product.getByRole("radiogroup", { name: "Token" });
-  await expect(token.getByRole("radio")).toHaveCount(1);
+  await expect(token.getByRole("radio")).toHaveCount(2);
   await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
+  const rows = product.getByTestId("token-option");
+  await expect(rows.filter({ hasText: "PHA" })).toContainText("+10% bonus");
+  await expect(rows.filter({ hasText: "USDC" })).toContainText("Stablecoin · $1.00");
+  await expect(rows.filter({ hasText: "USDC" })).not.toContainText("bonus");
+}
+
+/** Chooses a network in the product's network select. */
+async function chooseNetwork(page: Page, product: Locator, name: string) {
+  await product.getByRole("combobox", { name: "Network" }).click();
+  await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
+  await expect(product.getByRole("combobox", { name: "Network" })).toContainText(name);
 }
 
 /** Collects the page's console errors and CSP violations; the flows expect none. */
@@ -211,8 +254,10 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 
   // The headline, the product (marked as a testnet demo) beside its backend (the attestation in
   // the backend's Trust tab), and a fresh demo account.
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Crypto payments, self-hosted.");
-  await expect(page.getByRole("link", { name: "Self-host it" })).toHaveAttribute(
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "Non-custodial crypto payments with a Stripe-shaped API",
+  );
+  await expect(page.getByRole("link", { name: /Self-host it/ })).toHaveAttribute(
     "href",
     "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md",
   );
@@ -254,7 +299,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(step(timeline, "quote_created")).toHaveAttribute("data-state", "complete");
   await expect(step(timeline, "sent")).toHaveAttribute("data-state", "current");
   const created = await openStep(timeline, "quote_created");
-  await expect(created).toContainText("0.25000000 USD per PHA");
+  await expect(created).toContainText("1 PHA = $0.25");
   await expect(created).toContainText("80 PHA");
   const order = (await scenes.getByText(/^Order order_[0-9a-f]{12}/).textContent())?.match(/order_[0-9a-f]{12}/)?.[0];
   expect(order).toBeDefined();
@@ -268,7 +313,9 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00");
   // Nothing pending once credited: the locked rate is gone with the countdown.
   await expect(rate).toHaveCount(0);
-  await expect(product.getByTestId("balance")).toHaveText("$20.00", { timeout: 10_000 });
+  // The demo merchant's +10% PHA bonus, a line of its own: $20.00 and $2.00.
+  await expect(product.getByTestId("bonus-credited")).toContainText("+$2.00", { timeout: 10_000 });
+  await expect(product.getByTestId("balance")).toHaveText("$22.00", { timeout: 10_000 });
   // Real times: the block's, then each step's, with the elapsed time since sending.
   const credited = await openStep(timeline, "credited");
   await expect(credited).toContainText("after sending");
@@ -290,7 +337,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 
   // The merchant sweeps: the SDK's flush, signed from a wallet (anyone may send it; the funds can
   // only reach the treasury), indexed by the service once final.
-  const sweeps = await openTab(scenes, "Sweeps");
+  const sweeps = (await openTab(scenes, "Sweeps")).getByRole("region", { name: "PHA on Sepolia testnet" });
   await expect(sweeps.getByTestId("unswept")).toContainText("80 PHA in 1 forwarder", { timeout: 30_000 });
   await sweeps.getByRole("button", { name: "Sign the flush from my wallet" }).click();
   await expect(sweeps.getByTestId("flush-status")).toContainText("Flush sent: 0x");
@@ -312,8 +359,10 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(paid).toHaveAttribute("data-status", "succeeded", { timeout: 60_000 });
   await expect(paid).toContainText("deposit.refunded");
   await expect(scenes.getByTestId("nets-to")).toHaveText("$15.00");
-  await expect(product.getByTestId("balance")).toHaveText("$15.00", { timeout: 10_000 });
+  // The bonus follows the credit down: 10% of $15.00.
+  await expect(product.getByTestId("balance")).toHaveText("$16.50", { timeout: 10_000 });
   await expect(scenes.getByTestId("console-net")).toContainText("−$5.00 by deposit.refunded");
+  await expect(scenes.getByTestId("console-bonus")).toContainText("+$1.50");
 
   // A refund paid from another wallet fails verification: the service checks the sender.
   const wrong = await declareRefund(scenes, "20");
@@ -322,7 +371,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await wrong.getByRole("button", { name: "Mark paid" }).click();
   await expect(wrong).toHaveAttribute("data-status", "failed", { timeout: 60_000 });
   await expect(wrong).toContainText("sender_mismatch");
-  await expect(product.getByTestId("balance")).toHaveText("$15.00");
+  await expect(product.getByTestId("balance")).toHaveText("$16.50");
 
   // A declared refund without a payment can be canceled.
   const canceled = await declareRefund(scenes, "20");
@@ -349,7 +398,14 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(row).toContainText("80 PHA");
   await expect(row).toContainText("at $0.25 / PHA");
   await expect(row).toContainText("$15.00");
-  await expect(scenes.getByTestId("ledger-line").filter({ hasText: "deposit.refunded" })).toContainText("−$5.00");
+  await expect(row).toContainText("+$1.50 bonus");
+  // How the balance adds up: the credit and its refund, and the bonus and its claw-back, apart.
+  const credits = scenes.locator('[data-testid="ledger-line"][data-kind="credit"]');
+  const bonuses = scenes.locator('[data-testid="ledger-line"][data-kind="bonus"]');
+  await expect(credits.filter({ hasText: "deposit.credited" })).toContainText("+$20.00");
+  await expect(credits.filter({ hasText: "deposit.refunded" })).toContainText("−$5.00");
+  await expect(bonuses.filter({ hasText: "PHA bonus +10%" })).toContainText("+$2.00");
+  await expect(bonuses.filter({ hasText: "deposit.refunded" })).toContainText("−$0.50");
 
   await page.screenshot({ path: testInfo.outputPath("refunds-light.png"), fullPage: true });
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
@@ -401,9 +457,11 @@ test("a deposit address: one verified address, any amount credited at spot, then
   // The backend sees the address checked against the product's pins.
   await expect(scenes.getByTestId("deposit-address-verified")).toContainText("Verified");
   // Its networks and tokens, named as the product's selectors name them.
+  // One address on both networks (the treasury is the same), each with its tokens.
   const tokensOnNetwork = scenes.getByTestId("deposit-address-network");
-  await expect(tokensOnNetwork).toHaveText("Test PHA");
-  await expect(tokensOnNetwork.locator("xpath=..")).toContainText("Sepolia testnet");
+  await expect(tokensOnNetwork).toHaveText(["Test PHA, Test USDC", "Test PHA"]);
+  await expect(tokensOnNetwork.first().locator("xpath=..")).toContainText("Sepolia testnet");
+  await expect(tokensOnNetwork.last().locator("xpath=..")).toContainText("Base Sepolia testnet");
   const address = (await scenes.getByTestId("deposit-address").textContent()) ?? "";
   expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
   // The SDK's <DepositAddress> shows the customer the same address to copy.
@@ -456,8 +514,92 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await openTab(scenes, "Payments");
   const lines = scenes.getByTestId("ledger-line");
   await expect(lines.filter({ hasText: "deposit.credited" })).toContainText("+$6.25");
-  await expect(lines.filter({ hasText: "deposit.reversed" })).toContainText("−$6.25");
+  // A reversal takes the whole bonus back with the credit.
+  await expect(lines.filter({ hasText: "PHA bonus +10%" })).toContainText("+$0.62");
+  const reversals = lines.filter({ hasText: "deposit.reversed" });
+  await expect(reversals.and(scenes.locator('[data-kind="credit"]'))).toContainText("−$6.25");
+  await expect(reversals.and(scenes.locator('[data-kind="bonus"]'))).toContainText("−$0.62");
   await page.screenshot({ path: testInfo.outputPath("deposit-address.png"), fullPage: true });
+  expect(problems).toEqual([]);
+});
+
+test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepolia with one; the faucets follow", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const problems = await watchConsole(page);
+  await installWallet(page);
+  await page.goto(env("SITE_URL"));
+  const product = page.getByRole("region", { name: "Cloud Console · Billing" });
+  const scenes = page.getByRole("complementary", { name: "Behind the scenes" });
+  const helper = page.getByRole("note", { name: "Test tokens" });
+  await expect(product.getByTestId("balance")).toHaveText("$0.00");
+  await expectPaymentOptions(product);
+
+  // Test PHA mints from the wallet; gas comes from ethereum.org's list of Sepolia faucets.
+  await expect(helper.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
+  await expect(helper.getByRole("link", { name: /^Sepolia ETH faucets/ })).toHaveAttribute(
+    "href",
+    "https://ethereum.org/en/developers/docs/networks/#sepolia",
+  );
+
+  // Test USDC: Circle's faucet, on the network chosen there; no bonus, at $1.00.
+  await product.getByRole("radio", { name: "Test USDC", exact: true }).check({ force: true });
+  await expect(helper.getByRole("button", { name: /^Mint/ })).toHaveCount(0);
+  await expect(helper.getByRole("link", { name: /^Get test USDC from Circle/ })).toHaveAttribute(
+    "href",
+    "https://faucet.circle.com",
+  );
+  await expect(helper.getByTestId("faucet-hint")).toHaveText("On the faucet, pick Sepolia as the network.");
+  await mintUsdc(env("PAYER_ADDRESS"), parseUnits("100", 6));
+  await product.getByText("$5.00", { exact: true }).click();
+  const usdcRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
+  await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  expect((await usdcRequest).postDataJSON()).toEqual({ amount: 500, chain_id: sepolia.id, asset: "usdc" });
+  await expect(product.getByTestId("locked-rate")).toContainText("1 USDC = $1.00");
+  await expect(product.getByText(/bonus/)).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.screenshot({ path: testInfo.outputPath("usdc-quote.png") });
+  await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
+  await expect(product.getByRole("status").first()).toHaveText("Payment credited: $5.00", { timeout: 60_000 });
+  await expect(product.getByTestId("balance")).toHaveText("$5.00", { timeout: 10_000 });
+  await expect(product.getByTestId("bonus-credited")).toHaveCount(0);
+  expect(await tokenBalance(env("PAYER_ADDRESS"), { token: env("USDC_ADDRESS") })).toBe(parseUnits("95", 6));
+  await openTab(scenes, "Payments");
+  await expect(scenes.getByTestId("payment").first()).toContainText("5 USDC");
+  await expect(scenes.getByTestId("payment").first()).toContainText("at $1.00 / USDC");
+
+  // Base Sepolia: its own token list and faucets; test PHA mints there, from the wallet on that
+  // network, and a PHA quote there earns the bonus, at staging's rate, formatted.
+  await product.getByRole("button", { name: "Start a new top-up" }).click();
+  await chooseNetwork(page, product, "Base Sepolia");
+  const tokens = product.getByRole("radiogroup", { name: "Token" });
+  await expect(tokens.getByRole("radio")).toHaveCount(1);
+  await expect(tokens.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
+  await expect(helper.getByRole("link", { name: /^Base Sepolia ETH faucets/ })).toHaveAttribute(
+    "href",
+    "https://docs.base.org/get-started/get-funds#testnet-base-sepolia",
+  );
+  await helper.getByRole("button", { name: "Mint 1,000 test PHA" }).click();
+  await expect(helper).toContainText("Minted:");
+  const base = { rpc: env("BASE_ANVIL_URL"), token: env("BASE_TOKEN_ADDRESS") };
+  expect(await tokenBalance(env("PAYER_ADDRESS"), base)).toBe(parseEther("1000"));
+  await expect(helper.locator("p", { hasText: "Minted:" }).getByRole("link")).toHaveAttribute(
+    "href",
+    /^https:\/\/sepolia\.basescan\.org\/tx\//,
+  );
+  const baseRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
+  await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  expect((await baseRequest).postDataJSON()).toEqual({ amount: 2000, chain_id: baseSepolia.id, asset: "pha" });
+  await expect(product.getByTestId("locked-rate")).toContainText("1 PHA = $0.06041");
+  await expect(product.getByTestId("testnet-badge")).toBeVisible();
+  await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
+  await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00", { timeout: 60_000 });
+  await expect(product.getByTestId("bonus-credited")).toContainText("+$2.00", { timeout: 10_000 });
+  await expect(product.getByTestId("balance")).toHaveText("$27.00", { timeout: 10_000 });
+  await page.getByRole("button", { name: "Switch to dark theme" }).click();
+  await page.screenshot({ path: testInfo.outputPath("base-bonus-dark.png") });
+  await page.getByRole("button", { name: "Switch to light theme" }).click();
   expect(problems).toEqual([]);
 });
 

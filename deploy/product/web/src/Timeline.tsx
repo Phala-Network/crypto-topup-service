@@ -3,7 +3,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type {
-  Account,
   ApiExchange,
   Detail as StepDetail,
   LedgerView,
@@ -13,7 +12,9 @@ import type {
   WebhookEvent,
 } from "./api.js";
 import { Detail, Details, Empty, ExplorerLink, InfoTip, Subsection } from "./common.js";
-import { clock, dollars, duration, short, signedDollars, time, tokens } from "./format.js";
+import { assetOf, networkOf } from "./chains.js";
+import { clock, dollars, duration, rate, short, signedDollars, time, tokens } from "./format.js";
+import { useNetworks } from "./queries.js";
 
 // Each step's title, what it waits for, and the time it usually takes: the hints are expectations,
 // every time shown next to them is real (the chain's block time, the service's timestamps, or when
@@ -77,22 +78,23 @@ const PREVIEW: StepKey[] = ["quote_created", "sent", "received", "credited", "we
  * The payment's steps as a compact live log: one line per step, with its status and its real
  * time; each line opens to what it waits for and its data.
  */
-export function EventStream({
-  timeline,
-  loading,
-  account,
-}: {
-  timeline: Timeline | null;
-  loading: string | null;
-  account: Account | null;
-}) {
+export function EventStream({ timeline, loading }: { timeline: Timeline | null; loading: string | null }) {
+  const networks = useNetworks().data;
+  // The payment's own chain and token, for its amounts and links.
+  const chainId = timeline?.deposit?.chain_id ?? timeline?.quote?.chain_id;
+  const asset = timeline?.deposit?.asset ?? timeline?.quote?.asset ?? null;
+  const token: StepToken = {
+    chainId,
+    symbol: (asset ?? "").toUpperCase(),
+    decimals: assetOf(networkOf(networks, chainId), asset)?.decimals ?? 18,
+  };
   if (loading === null) {
     return (
       <div className="flex flex-col gap-3">
         <p className="px-2 text-xs text-muted-foreground">Start a payment to follow it here, live, with real data only.</p>
         <ol className="flex flex-col" aria-label="The steps of a payment">
           {PREVIEW.map((key) => (
-            <StreamStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} account={account} />
+            <StreamStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} token={token} />
           ))}
         </ol>
       </div>
@@ -114,7 +116,7 @@ export function EventStream({
   return (
     <ol className="flex flex-col" aria-label="Payment timeline">
       {timeline.steps.map((step) => (
-        <StreamStep key={step.key} step={step} sent={timeline.sent?.at ?? null} account={account} />
+        <StreamStep key={step.key} step={step} sent={timeline.sent?.at ?? null} token={token} />
       ))}
     </ol>
   );
@@ -145,7 +147,14 @@ function StepDot({ state }: { state: Step["state"] }) {
   );
 }
 
-function StreamStep({ step, sent, account }: { step: Step; sent: number | null; account: Account | null }) {
+/** The followed payment's chain and token. */
+interface StepToken {
+  chainId: number | undefined;
+  symbol: string;
+  decimals: number;
+}
+
+function StreamStep({ step, sent, token }: { step: Step; sent: number | null; token: StepToken }) {
   const copy = STEP_COPY[step.key];
   // Seconds since the payment was sent, for the steps after it.
   const elapsed =
@@ -213,7 +222,7 @@ function StreamStep({ step, sent, account }: { step: Step; sent: number | null; 
             <Details>
               {step.details.map((detail) => (
                 <Detail key={detail.label} label={detail.label}>
-                  <DetailValue detail={detail} account={account} />
+                  <DetailValue detail={detail} token={token} />
                 </Detail>
               ))}
             </Details>
@@ -224,13 +233,13 @@ function StreamStep({ step, sent, account }: { step: Step; sent: number | null; 
   );
 }
 
-function DetailValue({ detail, account }: { detail: StepDetail; account: Account | null }) {
+function DetailValue({ detail, token }: { detail: StepDetail; token: StepToken }) {
   const { value, kind } = detail;
   if (value === null) {
     return <>—</>;
   }
   if ((kind === "address" || kind === "tx") && typeof value === "string") {
-    return <ExplorerLink account={account} kind={kind} value={value} />;
+    return <ExplorerLink chainId={token.chainId} kind={kind} value={value} />;
   }
   if (kind === "time" && typeof value === "number") {
     return <>{time(value)}</>;
@@ -242,7 +251,10 @@ function DetailValue({ detail, account }: { detail: StepDetail; account: Account
     return <span className="text-success tabular-nums">{signedDollars(value)}</span>;
   }
   if (kind === "atomic" && typeof value === "string") {
-    return <span className="tabular-nums">{tokens(value, account?.token.symbol ?? "")}</span>;
+    return <span className="tabular-nums">{tokens(value, token.symbol, token.decimals)}</span>;
+  }
+  if (kind === "rate" && typeof value === "string") {
+    return <span className="tabular-nums">{rate(detail.unit ?? token.symbol, value)}</span>;
   }
   return <span className={detail.mono === true ? "font-mono" : undefined}>{String(value)}</span>;
 }
@@ -281,6 +293,11 @@ export function LedgerPanel({ ledger }: { ledger: LedgerView }) {
                   .map((adjustment) => `, ${signedDollars(adjustment.amount)} by ${adjustment.reason}`)
                   .join("")})`}
         </Detail>
+        {product?.bonus != null && product.bonus !== 0 && (
+          <Detail label="Bonus (this demo's)" data-testid="console-bonus">
+            {signedDollars(product.bonus)}, its promotion's share of what the credit nets to
+          </Detail>
+        )}
       </Details>
     </Subsection>
   );

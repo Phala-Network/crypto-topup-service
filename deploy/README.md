@@ -90,7 +90,6 @@ key, and the database passwords: that is a key migration, not an image bump.
    | OS image | `dstack-0.5.9`, fixed in `deploy.yml` (architecture Â§14; no override) |
    | `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE` | `auto` and `true` for an R2 `AWS_ENDPOINT`; set both variables for any other endpoint |
    | `TOPUP_ADMIN_KID` | `admin/<Environment>-v1`; set the variable only after an admin key rotation to a new key id |
-   | `PRODUCT_RPC_URL` | `TOPUP_RPC_PROVIDER_B_URL`, which must then be keyless (product preflight refuses a keyed URL) |
 
    `TOPUP_PUBLIC_ORIGIN` is not a variable: the compose sets it to `https://$TOPUP_DOMAIN`.
 5. **Sentry** (project admin; the Crons monitors create themselves on their first check-in):
@@ -686,7 +685,10 @@ them. In order:
    `0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99` as its fallback handler (Sepolia transaction
    `0xc63baf595bd13f9f27c27ba2a370c602bb2008c8703ab9629095af8844f10812`), so it can prove itself as
    a treasury; [contracts/safe-expectations.json](contracts/safe-expectations.json) records it, and
-   `deploy/contracts/verify-safe.sh` passes on both providers.
+   `deploy/contracts/verify-safe.sh` passes on both providers. The reference product's account has
+   since moved to the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`, the same address
+   (SafeL2 v1.4.1, 1-of-1, the same fallback handler) on Sepolia and Base Sepolia. Never use
+   `0x936câ€¦4504` on Base Sepolia: a copy exists there whose owner key is destroyed.
 4. **Stop the old service.** `npx --yes phala@1.1.22 cvms stop "$TOPUP_CVM_ID"` and the same for
    `$STAGING_PRODUCT_CVM_ID`. Keep both CVMs and the old backup prefix for the retention period: they
    restore only with an image built before the reset. Record their ids.
@@ -734,16 +736,22 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   Its preflight ([product/preflight.sh](product/preflight.sh)) accepts only a test key, restricted
   or secret. The account's secret key stays with the staging owner, offline.
 - **Its pins.** The attested product config names its `account` (`acct_â€¦`), the forwarder factory
-  and implementation, and its Sepolia treasury, from which the SDK recomputes every quote and
+  and implementation (the same on every chain), and, for each of its `chains` (Sepolia and Base
+  Sepolia), the account's treasury there, from which the SDK recomputes every quote and
   deposit address before the product shows it; the placeholder `acct_000â€¦` fails the online
   preflight until a PR sets the real id. It pins its account's test-mode webhook keys from the
   authenticated attestation at `TOPUP_ORIGIN`, fetched with `PRODUCT_API_KEY`, at startup or on the
   first webhook when the key is sealed later (until then it answers `503`, and topup retries).
 - **Attested settings.** `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`), `PRODUCT_PUBLIC_URL`
   (`https://$PRODUCT_DOMAIN`, its [custom domain](#custom-domain)), `PRODUCT_DOMAIN` and
-  `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), `PRODUCT_RPC_URL` (a keyless Sepolia RPC: it is published and the product seals no
-  RPC key), and `PRODUCT_DRIVER_PUBLIC_KEY`. The config also fixes `web_origin`,
+  `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), and `PRODUCT_DRIVER_PUBLIC_KEY`. The config itself
+  commits each chain's `rpc_url`, a keyless public RPC (publicnode's; the product seals no RPC key,
+  and its preflight refuses a keyed URL and checks online that each reports its chain and that the
+  chain's treasury is a contract), its test tokens, `bonus_bps` (the demo merchant's own +10% on
+  credits paid in PHA, a promotion, not a Phala Pay feature), and `web_origin`,
   `https://pay.phala.com`, the only origin the demo's API allows.
+- **Its networks.** The page offers a configured chain only once the service serves assets there
+  (`GET /v1/config`): Base Sepolia appears when its route is deployed, with no product change.
 
 The product serves the JSON API of the live demo on the public **Phala Pay website**
 ([pay.phala.com](https://pay.phala.com/), [product/web](product/web), served by Cloudflare:
@@ -773,8 +781,8 @@ browser gets a random demo account in a cookie of the API's origin (`HttpOnly; S
 SameSite=Lax; Path=/`, host-only: the two origins are same-site under `phala.com`, so the page's
 credentialed requests carry it); quote creation is rate-limited per account (3 a minute, 20 a day)
 and overall (30 a minute), POSTs must be JSON, and the page carries a strict CSP. Test PHA is
-minted by the visitor's own wallet (`mint` is public on the staging token), with Sepolia ETH from a
-public faucet for gas. With `sdk/js` built, `cd product/web && pnpm run e2e` runs the whole flow on
+minted by the visitor's own wallet on the selected network (`mint` is public on the staging tokens);
+test USDC comes from Circle's faucet, and gas from each testnet's public faucets. With `sdk/js` built, `cd product/web && pnpm run e2e` runs the whole flow on
 Anvil, with the real factory at its deterministic address, against a stand-in service
 ([product/web/e2e/fake_service.py](product/web/e2e/fake_service.py)): it builds the page against
 the local product and serves it from its own origin under the CSP of `public/_headers`, so the
@@ -784,8 +792,7 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1â
 **HUMAN-ONLY** unless it is a workflow run):
 
 1. On the owner's machine (mode-0600 files, never committed), create the driver key and set the
-   `staging` variable `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`);
-   `PRODUCT_RPC_URL` is `TOPUP_RPC_PROVIDER_B_URL` unless the variable of that name is set:
+   `staging` variable `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`):
 
    ```sh
    cd sdk/python
@@ -803,7 +810,7 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1â
      "refunds.write", "sweeps.read", "forwarders.read"]}'
    ```
 
-3. **Treasury Safe owners**: set the account's Sepolia treasury to the finance Safe
+3. **Treasury Safe owners**: set the account's treasury on each of its chains to the staging Safe
    ([Treasury setup](#treasury-setup), Safe message; in test mode it applies at once). Open a PR
    setting the product config's `account` in [product/docker-compose.yml](product/docker-compose.yml)
    to the new `acct_â€¦` id, and merge it.
@@ -814,12 +821,13 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1â
    the certificate evidence. Then, with the secret key, register the product's endpoint:
    `POST /v1/webhook_endpoints {"url": "<PRODUCT_PUBLIC_URL>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.
-5. Run a deposit. The payer is a Foundry keystore with a throwaway key and some Sepolia ETH; the
+5. Run a deposit. The payer is a Foundry keystore with a throwaway key and some testnet ETH; the
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the quoted amount and
    pays it. `driver.json` holds the `ProductConfig` fields: `service_url` (topup's origin),
-   `account`, `route`, `chain_id`, `rpc_url`, `factory`, `implementation`, `treasury` (the
-   account's Sepolia treasury), `token`, `token_symbol`, and `public_url` (the product URL), with
-   the route's values.
+   `account`, `factory`, `implementation`, `chains` (as in the product config: each with its
+   `chain_id`, `name`, `rpc_url`, `treasury`, and `test_tokens`), and `public_url` (the product
+   URL). The driver pays on the first chain, with its first test token; `--chain-id 84532` pays on
+   Base Sepolia instead, once its route is served.
 
    ```sh
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer ETH_PASSWORD=~/staging/payer.password

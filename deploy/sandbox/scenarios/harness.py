@@ -117,7 +117,8 @@ class Context:
         return quote.id, quote
 
     def pay(self, to: str, amount_atomic: int, token: str | None = None) -> str:
-        tx_hash = self.payer.mint_and_transfer(token or self.config.token, to, amount_atomic)
+        default = self.config.chain().test_token.address
+        tx_hash = self.payer.mint_and_transfer(token or default, to, amount_atomic)
         LOG.info("sent %s atomic to %s in %s", amount_atomic, to, tx_hash)
         return tx_hash
 

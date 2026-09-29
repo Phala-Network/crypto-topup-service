@@ -20,6 +20,13 @@ view and the snapshot merge (the later status and the larger claw-backs win), an
 is adjusted to what its credit nets to, `credit - amount_refunded - amount_reversed`. A
 `deposit.reversed` that arrives before `deposit.credited` leaves nothing to credit. Every other
 event type is stored for notifications and history; none moves a balance.
+
+A promotion is the product's own logic, not Phala Pay's: with `bonus_bps` set for the deposit's
+asset (`{"pha": 1000}`), an accepted credit also earns a bonus line of `credit * bps / 10_000`
+cents, rounded down, fixed on the order when it is credited. It follows the same snapshots: a
+deposit's bonus is always `net * bps / 10_000` of what its credit nets to, so a refund takes back
+its share of the bonus and a reversal or full refund all of it, and a replayed event changes
+nothing.
 """
 
 from __future__ import annotations
@@ -45,7 +52,7 @@ from topup_sdk import (
 )
 
 from .config import MissingProductKeyError, ProductConfig
-from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, DepositView, ProductLedger
+from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, DepositView, ProductLedger, StoredOrder
 
 LOG = logging.getLogger(__name__)
 
@@ -170,6 +177,8 @@ class Fulfillment:
                 if credit is None or view.status == "reversed":
                     return None
                 order_id, status = self._credit(db, credit, now)
+                order = ProductLedger._find_order(db, key)
+                assert order is not None
             else:
                 order_id, status = order.id, order.status
                 stored = parse_decimal(order.payload.get("amount_minor"))
@@ -184,7 +193,8 @@ class Fulfillment:
                     )
             if status == "accepted":
                 credited, net = ProductLedger.order_amounts(db, order_id)
-                change = view.contribution(credited) - net
+                nets_to = view.contribution(credited)
+                change = nets_to - net
                 if change:
                     db.execute(
                         "INSERT INTO credit_adjustments "
@@ -193,7 +203,33 @@ class Fulfillment:
                         (f"adj_{uuid.uuid4().hex}", change, reason, now, order_id),
                     )
                     LOG.info("fulfillment %s adjusted %+d by %s", key, change, reason)
+                self._settle_bonus(db, order, nets_to, reason, now)
         return status
+
+    @staticmethod
+    def _settle_bonus(db: Any, order: StoredOrder, nets_to: int, reason: str, now: float) -> None:
+        """Brings the order's bonus to its share of what the credit nets to: the grant on the
+        credit, then the claw-backs of refunds and reversals. Nothing without a bonus rate."""
+        bps = parse_decimal(order.payload.get("bonus_bps")) or 0
+        if not bps:
+            return
+        change = nets_to * bps // 10_000 - ProductLedger.order_bonus(db, order.id)
+        if not change:
+            return
+        grant = reason == CREDITED_EVENT and change > 0
+        db.execute(
+            "INSERT INTO bonus_credits (id, team_id, order_id, amount_minor, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"bon_{uuid.uuid4().hex}",
+                order.team_id,
+                order.id,
+                change,
+                bonus_label(order.payload.get("asset"), bps) if grant else reason,
+                now,
+            ),
+        )
+        LOG.info("fulfillment %s bonus %+d by %s", order.provider_order_id, change, reason)
 
     def _credit(self, db: Any, credit: CreditedDeposit, now: float) -> tuple[str, str]:
         """Creates the deposit's order, credited or held; returns its id and status."""
@@ -210,7 +246,7 @@ class Fulfillment:
                 ORDER_PROVIDER,
                 ORDER_FLOW_CODE,
                 key,
-                json.dumps(_payload(credit)),
+                json.dumps(_payload(credit, self.bonus_bps(credit.asset))),
                 "held" if hold else "pending",
                 hold,
                 now,
@@ -227,7 +263,7 @@ class Fulfillment:
                     credit.client_reference_id,
                     order_id,
                     credit.amount,
-                    f"crypto:{self.config.token_symbol}:{credit.chain_id}",
+                    f"crypto:{(credit.asset or credit.asset_contract).upper()}:{credit.chain_id}",
                     now,
                 ),
             )
@@ -239,6 +275,10 @@ class Fulfillment:
         status = "held" if hold else "accepted"
         LOG.info("fulfillment %s -> %s %s", key, status, hold or "")
         return order_id, status
+
+    def bonus_bps(self, asset: str | None) -> int:
+        """The product's bonus rate for a deposit of `asset`, in basis points; 0 for none."""
+        return 0 if asset is None else self.config.bonus_bps.get(asset.lower(), 0)
 
     def _hold_reason(self, db: Any, credit: CreditedDeposit, now: float) -> str | None:
         row = db.execute(
@@ -257,8 +297,18 @@ class Fulfillment:
         return None
 
 
-def _payload(credit: CreditedDeposit) -> dict[str, Any]:
+def bonus_label(asset: object, bps: int) -> str:
+    """A bonus grant's ledger line: `PHA bonus +10%`."""
+    symbol = asset.upper() if isinstance(asset, str) else "Deposit"
+    return f"{symbol} bonus +{bps / 100:g}%"
+
+
+def _payload(credit: CreditedDeposit, bonus_bps: int) -> dict[str, Any]:
+    # The bonus rate is fixed when the deposit is credited: ending a promotion changes no
+    # earlier deposit's claw-backs.
     return {
+        "asset": credit.asset,
+        "bonus_bps": str(bonus_bps),
         "deposit_id": credit.deposit_id,
         "account_id": credit.client_reference_id,
         "amount_minor": str(credit.amount),

@@ -22,3 +22,26 @@ contract TestPha {
         return true;
     }
 }
+
+/// Circle's test USDC in miniature: 6 decimals. Its `mint` stays public for the test's payer; the
+/// product does not list it as mintable, so the page points to Circle's faucet instead.
+contract TestUsdc {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    string public constant symbol = "USDC";
+    uint8 public constant decimals = 6;
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address account, uint256 amount) external {
+        balanceOf[account] += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+}

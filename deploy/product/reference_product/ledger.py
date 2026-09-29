@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS credit_adjustments (
     reason TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- The product's own promotion on an accepted order (`bonus_bps`), a line of its own beside the
+-- credit: the grant, then its claw-backs as refunds and reversals net the credit down. An order's
+-- rows sum to its current bonus. Not a Phala Pay amount: the service never sees it.
+CREATE TABLE IF NOT EXISTS bonus_credits (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES teams (id),
+    order_id TEXT NOT NULL REFERENCES orders (id),
+    amount_minor INTEGER NOT NULL CHECK (amount_minor <> 0),
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS webhook_events (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
@@ -191,15 +202,28 @@ class ProductLedger:
         return [(str(key), int(amount)) for key, amount in rows]
 
     def balance_for(self, team_id: str) -> int:
-        """The workspace's crypto top-up balance: its credits less their claw-backs."""
+        """The workspace's crypto top-up balance: its credits less their claw-backs, and its
+        bonuses less theirs."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT (SELECT COALESCE(SUM(amount_minor), 0) FROM credit_transactions "
                 "WHERE team_id = ?) + (SELECT COALESCE(SUM(amount_minor), 0) "
-                "FROM credit_adjustments WHERE team_id = ?)",
-                (team_id, team_id),
+                "FROM credit_adjustments WHERE team_id = ?) + (SELECT "
+                "COALESCE(SUM(amount_minor), 0) FROM bonus_credits WHERE team_id = ?)",
+                (team_id, team_id, team_id),
             ).fetchone()
         return int(row[0])
+
+    def bonuses_for(self, team_id: str) -> list[tuple[str, int, str]]:
+        """The workspace's bonus lines: `(provider_order_id, amount_minor, reason)`, oldest
+        first."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT o.provider_order_id, b.amount_minor, b.reason FROM bonus_credits b "
+                "JOIN orders o ON o.id = b.order_id WHERE b.team_id = ? ORDER BY b.created_at",
+                (team_id,),
+            ).fetchall()
+        return [(str(key), int(amount), str(reason)) for key, amount, reason in rows]
 
     def adjustments_for(self, team_id: str) -> list[tuple[str, int, str]]:
         """The workspace's claw-backs: `(provider_order_id, amount_minor, reason)`, oldest first."""
@@ -241,6 +265,15 @@ class ProductLedger:
             (order_id, order_id),
         ).fetchone()
         return int(row[0]), int(row[0]) + int(row[1])
+
+    @staticmethod
+    def order_bonus(db: sqlite3.Connection, order_id: str) -> int:
+        """An order's current bonus, in cents: its grant less its claw-backs."""
+        row = db.execute(
+            "SELECT COALESCE(SUM(amount_minor), 0) FROM bonus_credits WHERE order_id = ?",
+            (order_id,),
+        ).fetchone()
+        return int(row[0])
 
     def orders_for(self, team_id: str) -> list[dict[str, Any]]:
         """The workspace's crypto top-up orders: `accepted` (credited) or `held` (refused)."""

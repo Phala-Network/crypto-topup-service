@@ -16,7 +16,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reference_product.config import DRIVER_KEYID, MissingProductKeyError, ProductConfig
+from reference_product.config import (
+    DRIVER_KEYID,
+    ChainConfig,
+    MintableToken,
+    MissingProductKeyError,
+    ProductConfig,
+)
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
 from reference_product.ledger import ProductLedger
 from reference_product.server import AccountApi
@@ -26,18 +32,23 @@ from topup_sdk.addresses import deposit_id
 TEAM = "team-1"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([3] * 32))
 
+CHAIN_ID = 11155111
+TOKEN = "0x" + "44" * 20
 CONFIG = ProductConfig(
     service_url="http://service.test",
     account="acct_" + "ac" * 16,
     api_key_file="unused",
-    route="sandbox-acme-tpha-usd",
-    chain_id=11155111,
-    rpc_url="http://rpc.test",
+    chains=(
+        ChainConfig(
+            chain_id=CHAIN_ID,
+            name="Sepolia",
+            rpc_url="https://rpc.test",
+            treasury="0x0000000000000000000000000000000000007EA5",
+            test_tokens=(MintableToken("PHA", TOKEN),),
+        ),
+    ),
     factory="0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
     implementation="0xfeb1871c9897251C74b39DFC74e577888290faE6",
-    treasury="0x0000000000000000000000000000000000007EA5",
-    token="0x" + "44" * 20,
-    token_symbol="PHA",  # noqa: S106 - an asset symbol, not a secret
     listen_host="127.0.0.1",
     listen_port=0,
     public_url="https://acme.example/topup",
@@ -47,11 +58,14 @@ CONFIG = ProductConfig(
 )
 
 
-def _fulfillment(*, suspended: bool = False) -> Fulfillment:
-    ledger = ProductLedger()
-    ledger.add_team(TEAM, suspended=suspended)
+def _fulfillment(
+    *, suspended: bool = False, config: ProductConfig = CONFIG, ledger: ProductLedger | None = None
+) -> Fulfillment:
+    if ledger is None:
+        ledger = ProductLedger()
+        ledger.add_team(TEAM, suspended=suspended)
     pinned = PinnedKeys(livemode=False, keys=[SERVICE_KEY.public_key()])
-    return Fulfillment(CONFIG, ledger, lambda: pinned)
+    return Fulfillment(config, ledger, lambda: pinned)
 
 
 def _credited(
@@ -66,7 +80,7 @@ def _credited(
 ) -> tuple[dict[str, str], bytes]:
     """A signed `deposit.*` delivery about deposit `number`; `fields` override its object."""
     tx_hash = "0x" + f"{number:02x}" * 32
-    deposit = deposit_id(CONFIG.chain_id, tx_hash, 0)
+    deposit = deposit_id(CHAIN_ID, tx_hash, 0)
     event_id = (
         credited_event_id(deposit)
         if event_type == "deposit.credited"
@@ -93,9 +107,9 @@ def _credited(
                     "swept": False,
                     "metadata": {},
                     "rejection_reason": None,
-                    "chain_id": CONFIG.chain_id,
+                    "chain_id": CHAIN_ID,
                     "asset": "pha",
-                    "asset_contract": CONFIG.token,
+                    "asset_contract": TOKEN,
                     "amount_atomic": "25000000000000000000",
                     "amount": amount_minor,
                     "currency": "usd",
@@ -129,6 +143,91 @@ def test_a_credit_is_applied_once_across_redeliveries() -> None:
     assert amount == 2_500
     assert key.startswith("dep_")
     assert len(fulfillment.ledger.events("deposit.credited")) == 1
+
+
+# The product's own promotion: +10% on credits paid in PHA.
+BONUS = replace(CONFIG, bonus_bps={"pha": 1000})
+
+
+def test_a_pha_credit_earns_a_separate_bonus_line_once() -> None:
+    fulfillment = _fulfillment(config=BONUS)
+    headers, body = _credited(amount_minor=2_505)
+    for _ in range(3):
+        assert fulfillment.handle(headers, body).status == 204
+    ledger = fulfillment.ledger
+    # The credit is the service's exact USD value; the bonus, rounded down to cents, is its own
+    # line.
+    [(key, credit)] = ledger.credits_for(TEAM)
+    assert credit == 2_505
+    assert ledger.bonuses_for(TEAM) == [(key, 250, "PHA bonus +10%")]
+    assert ledger.balance_for(TEAM) == 2_505 + 250
+
+
+def test_refunds_claw_the_bonus_back_in_proportion() -> None:
+    fulfillment = _fulfillment(config=BONUS)
+    third = _credited(event_type="deposit.refunded", amount_refunded=833)
+    whole = _credited(event_type="deposit.refunded", amount_refunded=2_500, refunded=True)
+    assert fulfillment.handle(*_credited()).status == 204
+    for _ in range(2):
+        assert fulfillment.handle(*third).status == 204
+    ledger = fulfillment.ledger
+    # Nets to 1667: its bonus is 166, so the refund takes back 84 of the 250.
+    assert [(amount, reason) for _, amount, reason in ledger.bonuses_for(TEAM)] == [
+        (250, "PHA bonus +10%"),
+        (-84, "deposit.refunded"),
+    ]
+    assert ledger.balance_for(TEAM) == 1_667 + 166
+    for _ in range(2):
+        assert fulfillment.handle(*whole).status == 204
+    assert sum(amount for _, amount, _ in ledger.bonuses_for(TEAM)) == 0
+    assert ledger.balance_for(TEAM) == 0
+
+
+def test_a_reversal_takes_the_whole_bonus_back_in_either_order() -> None:
+    reversal = _credited(event_type="deposit.reversed", status="reversed", amount_reversed=2_500)
+    after = _fulfillment(config=BONUS)
+    assert after.handle(*_credited()).status == 204
+    assert after.handle(*reversal).status == 204
+    assert [amount for _, amount, _ in after.ledger.bonuses_for(TEAM)] == [250, -250]
+    assert after.ledger.balance_for(TEAM) == 0
+    before = _fulfillment(config=BONUS)
+    assert before.handle(*reversal).status == 204
+    assert before.handle(*_credited()).status == 204
+    assert before.ledger.bonuses_for(TEAM) == []
+    assert before.ledger.balance_for(TEAM) == 0
+
+
+def test_a_refund_delivered_before_the_credit_grants_only_the_netted_bonus() -> None:
+    fulfillment = _fulfillment(config=BONUS)
+    refund = _credited(event_type="deposit.refunded", amount_refunded=500)
+    assert fulfillment.handle(*refund).status == 204
+    assert fulfillment.handle(*_credited()).status == 204
+    assert [amount for _, amount, _ in fulfillment.ledger.bonuses_for(TEAM)] == [200]
+    assert fulfillment.ledger.balance_for(TEAM) == 2_000 + 200
+
+
+def test_other_assets_and_held_credits_earn_no_bonus() -> None:
+    usdc = _fulfillment(config=BONUS)
+    assert usdc.handle(*_credited(asset="usdc")).status == 204
+    assert usdc.ledger.bonuses_for(TEAM) == []
+    assert usdc.ledger.balance_for(TEAM) == 2_500
+    held = _fulfillment(config=BONUS, suspended=True)
+    assert held.handle(*_credited()).status == 204
+    assert held.ledger.bonuses_for(TEAM) == []
+    assert held.ledger.balance_for(TEAM) == 0
+
+
+def test_a_bonus_keeps_the_rate_it_was_granted_at() -> None:
+    granted = _fulfillment(config=BONUS)
+    assert granted.handle(*_credited()).status == 204
+    # The promotion ends; a later refund still claws back at the granted 10%.
+    ended = _fulfillment(ledger=granted.ledger)
+    refund = _credited(event_type="deposit.refunded", amount_refunded=1_250)
+    assert ended.handle(*refund).status == 204
+    assert [amount for _, amount, _ in ended.ledger.bonuses_for(TEAM)] == [250, -125]
+    # And a deposit credited after it ends earns none.
+    assert ended.handle(*_credited(2)).status == 204
+    assert len(ended.ledger.bonuses_for(TEAM)) == 2
 
 
 def test_partial_refunds_take_back_their_share_of_the_credit() -> None:
@@ -226,7 +325,7 @@ def test_refused_credits_are_held_for_refund(
 def test_a_credit_for_an_unknown_workspace_is_held() -> None:
     fulfillment = _fulfillment()
     assert fulfillment.handle(*_credited(team="team-unknown")).status == 204
-    order = fulfillment.ledger.find_order(deposit_id(CONFIG.chain_id, "0x" + "01" * 32, 0))
+    order = fulfillment.ledger.find_order(deposit_id(CHAIN_ID, "0x" + "01" * 32, 0))
     assert order is not None
     assert (order.status, order.reason, order.team_id) == ("held", "unknown_account", None)
 
@@ -311,6 +410,10 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     assert _account_call(api, "POST", "/accounts", register).status == 200
     quote = json.dumps({"amount_minor": 2500}).encode()
     assert _account_call(api, "POST", f"/accounts/{TEAM}/quotes", quote).status == 503
+    # A quote names a configured chain, if any.
+    for chain in ({"chain_id": 1}, {"chain_id": "11155111"}, {"asset": 1}):
+        body = json.dumps({"amount_minor": 2500, **chain}).encode()
+        assert _account_call(api, "POST", f"/accounts/{TEAM}/quotes", body).status == 400
 
 
 def test_the_account_view_lists_the_workspaces_quote_events() -> None:
