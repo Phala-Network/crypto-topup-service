@@ -254,14 +254,18 @@ confirmation, then
 values, screens, and credits in the same pass: **credited in about 30 seconds** at the default;
 `GET /v1/config` reports the typical credit time for the account's policy. A deposit's identity
 is its transfer's position in its transaction's receipt (`receipt_log_index`), which survives
-re-inclusion. A finality watch re-reads every not-yet-final deposit's receipt on both providers
+re-inclusion; the position holds at most one deposit that is not reversed, and a deposit recorded
+after one there was reversed takes the next revision and a new id (architecture §7). A finality watch re-reads every not-yet-final deposit's receipt on both providers
 once its recorded block is final:
 same log at or below `finalized` → `final`; re-included in a newer block → followed, not
 reversed; the transfer gone at finality, or the transaction **proven dropped** (no receipt and
 the sender's nonce consumed at `finalized`: Etherscan's "Dropped & Replaced",
 [Etherscan](https://info.etherscan.com/transaction-dropped-replaced/); ethers'
 `TRANSACTION_REPLACED`, [ethers](https://docs.ethers.org/v6/api/utils/errors/)) → **`reversed`**
-(terminal); no receipt and the nonce not consumed → wait, alert after one hour.
+(terminal); another transfer at the position at finality (a contract-mediated transfer
+re-executed against other state) → the deposit **`reversed`** and that transfer, if it pays an
+issued address, a **new deposit** credited through the normal path, as indexers re-index the
+canonical log after a reorg; no receipt and the nonce not consumed → wait, alert after one hour.
 
 - `deposit.reversed` is sent for a reversed deposit that was reported as credited or rejected; a
   quote it consumed re-opens if its window is still open; its pending refunds without a

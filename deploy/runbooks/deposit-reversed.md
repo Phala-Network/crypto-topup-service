@@ -25,7 +25,10 @@ rare one means the chain, or a provider, is misbehaving.
 
    In `admin.transitions`, the transition to `reversed` has `evidence.result`
    `dropped_nonce_consumed` (with `tx_from`, `tx_nonce`, and each provider's nonce at
-   `finalized`) or `transfer_absent_at_finality` (with the block both providers showed). The
+   `finalized`), `transfer_absent_at_finality` (with the block both providers showed), or
+   `transfer_changed_at_finality`: another transfer is final at the deposit's receipt position (a
+   contract-mediated payment re-executed against other state), and `successor_deposit_id`, when
+   present, is the new deposit recorded for it, which the pump credits like any other. The
    watch's records (`evidence.stage` `finality`, `result` `followed`) show where the transaction
    was followed; `admin.final_at` stays `null` (and `final` false) on a reversed deposit.
 2. Read the transaction on both providers:
@@ -42,7 +45,10 @@ rare one means the chain, or a provider, is misbehaving.
 - `TopupDepositReversed`, one deposit, both providers agree the transaction is gone (or the
   transfer is missing from its final receipt): a real reorg or a replaced transaction. Confirm the
   merchant received `deposit.reversed` (the view's `events` shows `delivered_at`); if the payer
-  still wants to top up, they pay a new quote.
+  still wants to top up, they pay a new quote. With `transfer_changed_at_finality` and a
+  `successor_deposit_id`, the payer's payment is the successor instead: confirm it is credited
+  (`admin GET "/v1/admin/deposits/$SUCCESSOR_DEPOSIT_ID"`, the evidence's id), and nothing more is
+  needed.
 - Several reversals on one chain in a short time: treat as a chain or provider incident. Pause
   settlement on the chain's routes so no further credit is made before finality, and escalate:
 

@@ -1334,7 +1334,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after `revision` earlier deposits there were reversed (a\nre-included transaction that paid differently) appends `:{revision}` to the name.",
             "type": "string"
           },
           "livemode": {

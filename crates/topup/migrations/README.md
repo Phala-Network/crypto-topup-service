@@ -232,3 +232,11 @@ replaces, so only the owner saves a response, in the transaction of the request'
 drops `permissions`: a secret key holds every permission and a restricted key all but
 `api_keys.write`, `treasury.write`, `endpoints.write`, and `account.write`, now in code. Its down
 migration recreates `permissions` with those grants and drops `owner`.
+
+`20261021130000_deposit_revisions` lets a receipt position take a new deposit after its deposit was
+reversed because another transfer is final there (architecture §7): `deposits.revision` counts the
+deposits recorded at the position before a row (0 for every existing one, whose id is unchanged),
+`deposits_chain_event_unique` becomes `(chain_id, tx_hash, receipt_log_index, revision)`, and the
+partial unique index `deposits_chain_event_live_unique` keeps at most one deposit that is not
+reversed per position. Its down migration refuses to run once a deposit with a revision above 0
+exists.

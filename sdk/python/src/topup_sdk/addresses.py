@@ -27,15 +27,21 @@ def keccak256(data: bytes) -> bytes:
     return bytes(keccak.new(digest_bits=256, data=data).digest())
 
 
-def deposit_id(chain_id: int, tx_hash: str, receipt_log_index: int) -> str:
+def deposit_id(chain_id: int, tx_hash: str, receipt_log_index: int, revision: int = 0) -> str:
     """Returns a transfer's deposit id, `dep_` and the hex of
     UUIDv5(NS, `{chain_id}:{lowercase tx_hash}:{receipt_log_index}`), where `receipt_log_index`
     is the transfer's position among the logs of its transaction's receipt (0 for a plain token
-    transfer). The id survives the transaction's re-inclusion in another block."""
+    transfer). The id survives the transaction's re-inclusion in another block. A deposit recorded
+    at the position after `revision` earlier deposits there were reversed (a re-included
+    transaction that paid differently) appends `:{revision}` to the name."""
     tx_hash = tx_hash.lower()
     if len(_hex_bytes(tx_hash)) != 32:
         raise ValueError("tx_hash must be 32 bytes")
+    if revision < 0:
+        raise ValueError("revision must not be negative")
     name = f"{chain_id}:{tx_hash}:{receipt_log_index}"
+    if revision:
+        name = f"{name}:{revision}"
     return object_id(DEPOSIT, uuid.uuid5(DEPOSIT_NAMESPACE, name))
 
 

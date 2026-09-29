@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use topup_core::deposit::{DepositState, RejectReason, Transition};
-use topup_core::identity::deposit_id;
+use topup_core::identity::deposit_revision_id;
 use topup_core::money::{AtomicAmount, MinorAmount};
 use uuid::Uuid;
 
@@ -382,22 +382,42 @@ impl TryFrom<DepositRecord> for Deposit {
     }
 }
 
-/// Inserts a deposit and returns `false` when the chain event already exists.
+/// Inserts a deposit and returns `false` when a deposit that is not reversed already holds its
+/// receipt position.
 pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let inserted = insert_deposit_in(&mut transaction, deposit).await?;
     transaction.commit().await?;
-    Ok(inserted)
+    Ok(inserted.is_some())
 }
 
+/// Inserts a deposit and returns its id, or `None` when a deposit that is not reversed already
+/// holds its receipt position: the same transfer seen again, or another one at that position,
+/// which the finality watch settles when the position is final. A position whose deposits were
+/// all reversed takes a new deposit with the next revision (`identity::deposit_revision_id`), so
+/// an existing deposit keeps its id and a concurrent insert of the same revision does nothing.
 pub(crate) async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
-) -> Result<bool, sqlx::Error> {
-    let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.receipt_log_index);
+) -> Result<Option<Uuid>, sqlx::Error> {
     let chain_id = to_i64(deposit.chain_id, "deposits.chain_id")?;
     let tx_hash = b256_hex(deposit.tx_hash);
     let receipt_log_index = to_i64(deposit.receipt_log_index, "deposits.receipt_log_index")?;
+    let revision: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(max(revision) + 1, 0) FROM deposits \
+         WHERE chain_id = $1 AND tx_hash = $2 AND receipt_log_index = $3",
+    )
+    .bind(chain_id)
+    .bind(&tx_hash)
+    .bind(receipt_log_index)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let id = deposit_revision_id(
+        deposit.chain_id,
+        deposit.tx_hash,
+        deposit.receipt_log_index,
+        to_u64(revision, "deposits.revision")?,
+    );
     let log_index = to_i64(deposit.log_index, "deposits.log_index")?;
     let block_number = to_i64(deposit.block_number, "deposits.block_number")?;
     let block_hash = b256_hex(deposit.block_hash);
@@ -418,20 +438,20 @@ pub(crate) async fn insert_deposit_in(
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, route, route_version, asset_contract,
             from_address, amount_atomic, state, reason, next_attempt_at, receipt_log_index,
-            tx_from, tx_nonce, final_at, metadata
+            tx_from, tx_nonce, final_at, metadata, revision
         )
         SELECT
             $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
             COALESCE(quote.customer_id, deposit_address.customer_id), $9, $10, $11, $12,
             $13::text::numeric, $14, $15, $16, $17, $18, $19::text::numeric,
             CASE WHEN $20 THEN now() END,
-            COALESCE(quote.metadata, deposit_address.metadata)
+            COALESCE(quote.metadata, deposit_address.metadata), $21
         FROM addresses AS address
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id
         WHERE address.id = $8
-        ON CONFLICT (chain_id, tx_hash, receipt_log_index) DO NOTHING
+        ON CONFLICT DO NOTHING
         "#,
         id,
         chain_id,
@@ -452,11 +472,12 @@ pub(crate) async fn insert_deposit_in(
         receipt_log_index,
         tx_from,
         tx_nonce,
-        deposit.is_final
+        deposit.is_final,
+        revision
     )
     .execute(&mut **transaction)
     .await?;
-    Ok(result.rows_affected() == 1)
+    Ok((result.rows_affected() == 1).then_some(id))
 }
 
 /// Fetches a deposit by its deterministic identifier.

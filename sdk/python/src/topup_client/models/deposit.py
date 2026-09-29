@@ -73,7 +73,9 @@ class Deposit:
             from_address (str): Sender of the transfer.
             id (str): `dep_` and the hex of the deposit's deterministic UUID,
                 `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
-                `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+                `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
+                deposit recorded at a position after `revision` earlier deposits there were reversed (a
+                re-included transaction that paid differently) appends `:{revision}` to the name.
             livemode (bool): Whether the deposit is on a live-mode route.
             log_index (int): Block-wide log index of the transfer; it changes if the transaction is re-included.
             metadata (DepositMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of

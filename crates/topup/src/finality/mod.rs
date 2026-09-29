@@ -20,7 +20,10 @@
 //!   the sender's nonce at `finalized` is past the transaction's (another transaction consumed
 //!   it): the deposit is `reversed`, `deposit.reversed` is sent if the account was told of it,
 //!   a quote it consumed opens again (or expires), and its pending refunds without a transaction
-//!   are canceled.
+//!   are canceled. When the final receipt holds another transfer at the deposit's receipt
+//!   position (the re-included transaction ran against other state), that transfer is recorded
+//!   in the same transaction as a new deposit, as the scanner records one, if it pays an issued
+//!   address: the scanners that read it while the old deposit held the position recorded nothing.
 //! - No receipt and the nonce not consumed: the transaction is pending again; the watch waits and
 //!   alerts after an hour.
 //!
@@ -47,7 +50,7 @@ use uuid::Uuid;
 
 use crate::db::{self, EventObject, NewOutboxEvent};
 use crate::routes::RouteSet;
-use crate::scanner::FinalizedHeads;
+use crate::scanner::{FinalizedHeads, chain_routes, resolve_log};
 use crate::tenancy::Scope;
 
 /// Delay between passes without a new `finalized` advance.
@@ -415,20 +418,31 @@ impl FinalityWatch {
                     Applied::Nothing
                 })
             }
-            Verdict::Reverse(evidence) => {
-                let reversed = reverse_deposit(&self.pool, &self.routes, deposit, evidence).await?;
-                if reversed {
-                    tracing::warn!(
-                        tags.alert = "TopupDepositReversed",
-                        tags.chain_id = chain_id,
-                        tags.state = db::state_code(deposit.state),
-                        deposit_id = %deposit.id,
-                        tx_hash = %deposit.tx_hash,
-                        "a deposit's transfer is not in the final chain; the deposit is reversed"
-                    );
-                    Ok(Applied::Reversed)
-                } else {
-                    Ok(Applied::Nothing)
+            Verdict::Reverse(evidence, successor) => {
+                let reversed = reverse_deposit(
+                    &self.pool,
+                    &self.routes,
+                    chain_id,
+                    deposit,
+                    evidence,
+                    successor.as_deref(),
+                )
+                .await?;
+                match reversed {
+                    Some(Reversed { successor }) => {
+                        tracing::warn!(
+                            tags.alert = "TopupDepositReversed",
+                            tags.chain_id = chain_id,
+                            tags.state = db::state_code(deposit.state),
+                            deposit_id = %deposit.id,
+                            tx_hash = %deposit.tx_hash,
+                            successor_deposit_id = successor.map(tracing::field::display),
+                            "a deposit's transfer is not in the final chain; the deposit is \
+                             reversed"
+                        );
+                        Ok(Applied::Reversed)
+                    }
+                    None => Ok(Applied::Nothing),
                 }
             }
         }
@@ -440,6 +454,12 @@ enum Applied {
     Followed,
     Reversed,
     Nothing,
+}
+
+/// A reversal [`reverse_deposit`] committed.
+struct Reversed {
+    /// The new deposit recorded for the transfer now at the reversed deposit's position, if any.
+    successor: Option<Uuid>,
 }
 
 /// A deposit that is neither final nor reversed, with the stored evidence the watch compares.
@@ -503,8 +523,9 @@ enum Verdict {
     Final(BlockEvidence),
     /// Both providers show the transfer re-included in a newer block that is not final.
     Follow(BlockEvidence),
-    /// The transfer is not part of the final chain.
-    Reverse(Value),
+    /// The transfer is not part of the final chain; the transfer both providers show at its
+    /// receipt position instead, if any, becomes a new deposit.
+    Reverse(Value, Option<Box<TransferLog>>),
     /// The transaction is in no block and its nonce is still unused.
     Pending,
     /// Nothing to record now.
@@ -555,14 +576,21 @@ fn decide(
                 {
                     Verdict::Wait
                 }
-                _ if is_final => Verdict::Reverse(json!({
-                    "stage": "finality",
-                    "result": "transfer_absent_at_finality",
-                    "block_number": block_number,
-                    "block_hash": format!("{block_hash:#x}"),
-                    "provider_a_finalized": primary.finalized,
-                    "provider_b_finalized": secondary.finalized,
-                })),
+                _ if is_final => Verdict::Reverse(
+                    json!({
+                        "stage": "finality",
+                        "result": if primary_transfer.is_some() {
+                            "transfer_changed_at_finality"
+                        } else {
+                            "transfer_absent_at_finality"
+                        },
+                        "block_number": block_number,
+                        "block_hash": format!("{block_hash:#x}"),
+                        "provider_a_finalized": primary.finalized,
+                        "provider_b_finalized": secondary.finalized,
+                    }),
+                    primary_transfer.clone(),
+                ),
                 _ => Verdict::Wait,
             }
         }
@@ -570,16 +598,19 @@ fn decide(
             (Some((from, nonce)), Some((primary_nonce, secondary_nonce)))
                 if primary_nonce > nonce && secondary_nonce > nonce =>
             {
-                Verdict::Reverse(json!({
-                    "stage": "finality",
-                    "result": "dropped_nonce_consumed",
-                    "tx_from": format!("{from:#x}"),
-                    "tx_nonce": nonce,
-                    "provider_a_nonce": primary_nonce,
-                    "provider_b_nonce": secondary_nonce,
-                    "provider_a_finalized": primary.finalized,
-                    "provider_b_finalized": secondary.finalized,
-                }))
+                Verdict::Reverse(
+                    json!({
+                        "stage": "finality",
+                        "result": "dropped_nonce_consumed",
+                        "tx_from": format!("{from:#x}"),
+                        "tx_nonce": nonce,
+                        "provider_a_nonce": primary_nonce,
+                        "provider_b_nonce": secondary_nonce,
+                        "provider_a_finalized": primary.finalized,
+                        "provider_b_finalized": secondary.finalized,
+                    }),
+                    None,
+                )
             }
             _ => Verdict::Pending,
         },
@@ -727,14 +758,20 @@ async fn record_evidence(
 /// refunds without a transaction are canceled (design D1), while one marked paid stays tracked
 /// until verification ends it. Refunds require a final deposit, so the cancel only keeps that
 /// rule whole should one ever be pending.
+///
+/// `successor`, the final transfer now at the deposit's receipt position, is recorded as a new
+/// deposit in the same transaction ([`record_successor`]). Returns `None` when nothing was
+/// reversed.
 async fn reverse_deposit(
     pool: &PgPool,
     routes: &RouteSet,
+    chain_id: u64,
     deposit: &WatchedDeposit,
-    evidence: Value,
-) -> Result<bool, FinalityError> {
+    mut evidence: Value,
+    successor: Option<&TransferLog>,
+) -> Result<Option<Reversed>, FinalityError> {
     let Ok(transition) = reverse(deposit.state) else {
-        return Ok(false);
+        return Ok(None);
     };
     let from = db::state_code(transition.from);
     let to = db::state_code(transition.to);
@@ -754,8 +791,15 @@ async fn reverse_deposit(
     .fetch_optional(&mut *transaction)
     .await?;
     let Some((account_id, livemode)) = owner else {
-        return Ok(false);
+        return Ok(None);
     };
+    let successor = match successor {
+        Some(transfer) => record_successor(&mut transaction, routes, chain_id, transfer).await?,
+        None => None,
+    };
+    if let (Some(id), Some(evidence)) = (successor, evidence.as_object_mut()) {
+        evidence.insert("successor_deposit_id".to_owned(), json!(id));
+    }
     insert_transition(
         &mut transaction,
         deposit.id,
@@ -824,7 +868,34 @@ async fn reverse_deposit(
         db::enqueue_in(&mut transaction, routes, &event, None).await?;
     }
     transaction.commit().await?;
-    Ok(true)
+    Ok(Some(Reversed { successor }))
+}
+
+/// Records `transfer`, final on both providers at a reversed deposit's receipt position, as a new
+/// deposit exactly as the scanner would, when it pays an issued address at or after the address's
+/// creation block; returns its id. The old deposit, reversed earlier in `transaction`, no longer
+/// holds the position, so the new one takes the next revision (`identity::deposit_revision_id`)
+/// and goes through the pump like any other: the scanners and the reconciler read it while the
+/// old deposit held the position and recorded nothing, and read it again only as a duplicate.
+async fn record_successor(
+    transaction: &mut Transaction<'_, Postgres>,
+    routes: &RouteSet,
+    chain_id: u64,
+    transfer: &TransferLog,
+) -> Result<Option<Uuid>, FinalityError> {
+    let Some(address) = db::find_scan_address(&mut **transaction, chain_id, transfer.to).await?
+    else {
+        return Ok(None);
+    };
+    if transfer.block_number < address.created_block {
+        return Ok(None);
+    }
+    let chain = chain_routes(routes)
+        .into_iter()
+        .find(|chain| chain.chain.chain_id == chain_id)
+        .ok_or(FinalityError::UnknownChain(chain_id))?;
+    let deposit = resolve_log(transfer.clone(), &address, &chain, Utc::now());
+    Ok(db::insert_scanned_deposit_in(transaction, &deposit).await?)
 }
 
 async fn insert_transition(
@@ -969,7 +1040,7 @@ mod tests {
                 observed(200, &missing),
                 Some((10, 10))
             ),
-            Verdict::Reverse(evidence) if evidence["result"] == "dropped_nonce_consumed"
+            Verdict::Reverse(evidence, None) if evidence["result"] == "dropped_nonce_consumed"
         ));
         assert_eq!(
             decide(
@@ -999,7 +1070,7 @@ mod tests {
         let without = included(None, 100, 2);
         assert!(matches!(
             decide(&deposit, observed(100, &without), observed(100, &without), None),
-            Verdict::Reverse(evidence) if evidence["result"] == "transfer_absent_at_finality"
+            Verdict::Reverse(evidence, None) if evidence["result"] == "transfer_absent_at_finality"
         ));
         // Not final yet: the transaction may still change.
         assert_eq!(
@@ -1048,6 +1119,8 @@ mod tests {
             ),
             Verdict::Wait
         );
+        // Past `detected`, another transfer at the position reverses the deposit, and that
+        // transfer becomes a new one.
         let credited = WatchedDeposit {
             state: DepositState::Credited,
             ..deposit
@@ -1059,7 +1132,8 @@ mod tests {
                 observed(100, &receipt),
                 None
             ),
-            Verdict::Reverse(_)
+            Verdict::Reverse(evidence, Some(successor))
+                if evidence["result"] == "transfer_changed_at_finality" && *successor == corrected
         ));
     }
 }

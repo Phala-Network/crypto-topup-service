@@ -348,7 +348,9 @@ pub enum ExpandableDeposit {
 pub struct Deposit {
     /// `dep_` and the hex of the deposit's deterministic UUID,
     /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
-    /// `receipt_log_index` is the transfer's position among its transaction's receipt logs.
+    /// `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
+    /// deposit recorded at a position after `revision` earlier deposits there were reversed (a
+    /// re-included transaction that paid differently) appends `:{revision}` to the name.
     pub id: String,
     /// Always `deposit`.
     pub object: String,
