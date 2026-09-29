@@ -270,33 +270,43 @@ non-zero with the reason.
 `pay.phala.com` is the static build of [product/web](product/web), served by the Cloudflare Worker
 `phala-pay-web` with static assets only (no Worker script) and deployed by **Cloudflare Workers
 Builds**, connected to this repository, with Cloudflare's [`cf` CLI](https://github.com/cloudflare/cf)
-pinned in [product/web/package.json](product/web/package.json). Its dashboard build settings: root
-directory `deploy/product/web`, build command `npm run build:cloudflare`, deploy command
-`npm run deploy` (`cf deploy --prebuilt`) for `main`, and preview command `npm run deploy:preview`
-(`cf workers versions create --prebuilt`) for other branches.
+pinned in [product/web/package.json](product/web/package.json). `main` deploys to production and
+every other branch to its own [Worker Preview](https://developers.cloudflare.com/workers/previews/).
+Its dashboard build settings, the same for production and the Previews Base: root directory
+`deploy/product/web` and build command `npm run build:cloudflare`; the deploy command is
+`npm run deploy` for production and `npm run deploy:preview` for Previews. A branch's Preview
+copies the Previews Base when it is created, so changing the Base leaves existing Previews on
+their old settings until each is edited too.
 
 - **Build.** `build:cloudflare` builds `sdk/js` (the page depends on it through `file:`) and then
   the page, each from its own lockfile with `npx -y pnpm@12.6.0`, on the Node of
   `product/web/.node-version` (24, as CI). The Cloudflare Vite plugin writes the page as cf's
-  Build Output, in `product/web/.cloudflare/output`, which both deploy commands upload without
-  building again. The page's API origin is fixed at build time: `VITE_DEMO_API_ORIGIN` in
-  `product/web/.env.production`, `https://pay-demo-api.phala.com`.
+  Build Output, in `product/web/.cloudflare/output`. The page's API origin is fixed at build time:
+  `VITE_DEMO_API_ORIGIN` in `product/web/.env.production`, `https://pay-demo-api.phala.com`.
+- **Production.** `deploy` runs `cf deploy --prebuilt`, which uploads that Build Output and
+  deploys it. CI checks the config and the Build Output with `cf deploy --prebuilt --dry-run`.
+- **Previews.** `deploy:preview` rebuilds the page as a Preview build
+  (`CLOUDFLARE_PREVIEW_BUILD=true`, which `cf previews deploy --prebuilt` requires) and runs
+  `cf previews deploy --prebuilt`, which creates or updates the Preview named after the branch
+  (`WORKERS_CI_BRANCH`, set by Workers Builds). Its Preview URL,
+  `https://<branch slug>-phala-pay-web.phala-dev.workers.dev`, always serves the branch's latest
+  build; each deployment also has its own URL. Its demo API calls are refused by CORS by design:
+  the API allows only `https://pay.phala.com`.
 - **[cloudflare.config.ts](product/web/cloudflare.config.ts).** The Worker's name and
   compatibility date; any path but the page and its assets is a real `404`
-  (`notFoundHandling: "none"`); the custom domain `pay.phala.com`; no `workers.dev` copy of the site
-  (`workersDev: false`); and preview URLs on (`previewUrls: true`) for the versions branch builds
-  upload. CI checks it and the Build Output with `cf deploy --prebuilt --dry-run`.
-- **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers: the
-  page's CSP (`connect-src` names only the demo API and `pay-api-staging.phala.com`, whose public
-  quote and deposit address views the SDK components read), `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`, `no-cache` for the page, a year's immutable caching for the
-  content-hashed `/assets/*`, and a day's caching for the fixed-name icons, manifest, link preview
-  image, `robots.txt`, and `sitemap.xml`. `vite preview` serves the Build Output in the Workers
+  (`notFoundHandling: "none"`); the custom domain `pay.phala.com`, for production only (cf rejects
+  custom domains in a Preview, so the config leaves them out when `isPreview`); no `workers.dev`
+  copy of the production site (`workersDev: false`); and preview URLs on for uploaded versions
+  (`previewUrls: true`).
+- **[public/_headers](product/web/public/_headers).** Cloudflare's static-assets headers, served in
+  production and in every Preview: the page's CSP (`connect-src` names only the demo API and
+  `pay-api-staging.phala.com`, whose public quote and deposit address views the SDK components
+  read), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `no-cache` for the
+  page, a year's immutable caching for the content-hashed `/assets/*`, a day's caching for the
+  fixed-name icons, manifest, link preview image, `robots.txt`, and `sitemap.xml`, and
+  `X-Robots-Tag: noindex` on `workers.dev`. `vite preview` serves the Build Output in the Workers
   runtime with these headers, as the end-to-end tests do.
-- **Pull requests.** Each branch build uploads a preview version with its own `workers.dev` URL,
-  to review the page. Its demo API calls are refused by CORS by design: the API allows only
-  `https://pay.phala.com`.
 - **Moving from Wrangler.** The site was deployed with Wrangler until cf replaced it. The build
-  settings above name scripts only this configuration has, so set them just before merging the
-  change that adds them, and rerun its branch build to check its preview version; the merge then
-  deploys `main` with cf.
+  settings above name scripts only this configuration has, so they were set just before merging
+  the change that adds them, and its branch Preview was checked first; the merge then deploys
+  `main` with cf.

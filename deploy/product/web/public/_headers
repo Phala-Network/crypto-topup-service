@@ -38,6 +38,6 @@
 /sitemap.xml
   Cache-Control: public, max-age=86400
 
-# Branch builds' preview versions (previewUrls in cloudflare.config.ts) stay out of search results.
+# Branch Previews and preview versions on workers.dev stay out of search results.
 https://:version.:subdomain.workers.dev/*
   X-Robots-Tag: noindex
