@@ -372,7 +372,7 @@ async fn losing_the_lease_owner_connection_stops_guarded_pumps() -> Result<()> {
         let pump = Pump::new(
             pool.clone(),
             Arc::default(),
-            Arc::new(StepSet::new(step(), step(), step())),
+            Arc::new(StepSet::new(step(), step())),
             PumpConfig::default(),
         )?;
         let pump_shutdown = shutdown.child_token();
@@ -1151,7 +1151,7 @@ async fn frozen_chain_gates_startup_pumps_and_scanner() -> Result<()> {
         let pump = Pump::new(
             pool.clone(),
             Arc::default(),
-            Arc::new(StepSet::new(step(), step(), step())),
+            Arc::new(StepSet::new(step(), step())),
             PumpConfig::default(),
         )?;
         ensure!(pump.run_once().await? == RunOnceResult::Applied { deposit_id });

@@ -1356,6 +1356,11 @@ pub struct WebhookKeyObject {
     /// Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:
     /// every delivery carries a `v1a` signature by it.
     pub public_key: String,
+    /// The same key in Standard Webhooks' serialization, `whpk_` and the standard base64 of its
+    /// raw bytes, for a Standard Webhooks library. Always present; optional in the schema so
+    /// clients read a service that predates it.
+    #[schema(required = false)]
+    pub standard_webhooks_public_key: String,
     /// When a rolled key stops signing, Unix seconds; `null` for the current key.
     pub expires_at: Option<i64>,
 }

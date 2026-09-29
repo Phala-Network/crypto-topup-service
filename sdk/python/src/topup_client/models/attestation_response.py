@@ -28,7 +28,8 @@ class AttestationResponse:
             {'account': 'acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10', 'livemode': False, 'object': 'attestation', 'report_data':
                 '9f2c4e6a8b0d1f3a5c7e9b1d3f5a7c9e2b4d6f8a0c1e3a5b7d9f1c3e5a7b9d1f', 'tdx_quote':
                 '040002008100000000000000939a7233f79c4ca9940a0db3957f0607', 'webhook_keys': [{'expires_at': None, 'public_key':
-                '3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29', 'version': 1}]}
+                '3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29', 'standard_webhooks_public_key':
+                'whpk_O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=', 'version': 1}]}
 
         Attributes:
             account (str): The caller's account, `acct_…`.

@@ -594,7 +594,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             "{config}"
         );
         let asset = &config["assets"][0];
-        ensure!(asset["chain_id"] == 1 && asset["asset"] == "pha" && asset["decimals"] == 0);
+        ensure!(asset["chain_id"] == 1 && asset["asset"] == "pha" && asset["decimals"] == 2);
         ensure!(asset["contract"] == format!("{:#x}", route.asset.contract));
         ensure!(asset["min_amount"] == 1 && asset["quote_ttl_seconds"] == 900);
         ensure!(asset["quote_spread_bps"] == 0 && asset["quote_tolerance_bps"] == 100);
@@ -625,9 +625,10 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
 
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "round-up").await?;
+        // A cent at $3 a token is 33⅓ ten-thousandths of one: the quote rounds up to 34.
         let mut route = test_route();
-        route.asset.decimals = 2;
-        route.rate_lock.amount_decimals = 2;
+        route.asset.decimals = 4;
+        route.rate_lock.amount_decimals = 4;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(ThreeDollarQuote);
         let (lock, _) = locks::create(
             &database.app_pool,
@@ -672,7 +673,6 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
         seed_account(&database.app_pool, product.id, "short-amount").await?;
         let mut route = test_route();
         route.asset.decimals = 18;
-        route.destination.unit_decimals = 2;
         route.rate_lock.amount_decimals = 4;
         route.screening.max_deposit_atomic = AtomicAmount::new(U256::MAX);
         let app = topup::api::router(AppState {
@@ -1670,9 +1670,8 @@ fn test_route() -> RouteFile {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
             .expect("route fixture");
-    route.asset.decimals = 0;
-    route.rate_lock.amount_decimals = 0;
-    route.destination.unit_decimals = 0;
+    route.asset.decimals = 2;
+    route.rate_lock.amount_decimals = 2;
     route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
     route.rate_lock.max_creations_per_minute = 100;
     route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));

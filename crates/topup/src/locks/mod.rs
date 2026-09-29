@@ -23,7 +23,7 @@ use topup_core::money::{
     AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, lock_price, round_up_to_decimals,
     tokens_for_credit,
 };
-use topup_core::route::RouteFile;
+use topup_core::route::{RouteFile, UNIT_DECIMALS};
 use uuid::Uuid;
 
 use crate::audit::{self, Actor};
@@ -414,27 +414,20 @@ fn new_client_secret(id: Uuid) -> Result<String, RateLockError> {
     Ok(format!("{}_secret_{}", quote_id(id), hex::encode(random)))
 }
 
-/// Loads the quote a client secret belongs to; any secret that does not match a stored one, in
-/// form or value, is `None`.
-pub async fn get_by_client_secret(
+/// The account and mode of quote `id` when `secret_hash` is the SHA-256 of its client secret.
+pub async fn client_secret_scope(
     pool: &PgPool,
-    client_secret: &str,
-) -> Result<Option<RateLock>, RateLockError> {
-    let Some(id) = client_secret
-        .split_once("_secret_")
-        .and_then(|(quote, _)| crate::ids::parse(crate::ids::QUOTE, quote))
-    else {
-        return Ok(None);
-    };
-    let row = sqlx::query_as::<_, RateLockRow>(concat!(
-        select_lock!(),
-        " WHERE quote.id = $1 AND quote.client_secret_hash = $2"
-    ))
+    id: Uuid,
+    secret_hash: &[u8],
+) -> Result<Option<Scope>, RateLockError> {
+    let owner: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT account_id, livemode FROM quotes WHERE id = $1 AND client_secret_hash = $2",
+    )
     .bind(id)
-    .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
+    .bind(secret_hash)
     .fetch_optional(pool)
     .await?;
-    row.map(TryInto::try_into).transpose()
+    Ok(owner.map(|(account_id, livemode)| Scope::new(account_id, livemode)))
 }
 
 /// Loads one lock when it belongs to `scope`.
@@ -776,20 +769,15 @@ fn amount_for_credit(
     }
     // The smallest amount worth the credit, rounded up to the route's shown decimals so the payer
     // reads and types a short amount; the rounding overpays, never underpays, the locked credit.
-    tokens_for_credit(
-        credit_minor,
-        price,
-        route.asset.decimals,
-        route.destination.unit_decimals,
-    )
-    .and_then(|amount| {
-        round_up_to_decimals(
-            amount,
-            route.asset.decimals,
-            route.rate_lock.amount_decimals,
-        )
-    })
-    .map_err(|_| RateLockError::AmountTooLarge("amount is too large to quote"))
+    tokens_for_credit(credit_minor, price, route.asset.decimals, UNIT_DECIMALS)
+        .and_then(|amount| {
+            round_up_to_decimals(
+                amount,
+                route.asset.decimals,
+                route.rate_lock.amount_decimals,
+            )
+        })
+        .map_err(|_| RateLockError::AmountTooLarge("amount is too large to quote"))
 }
 
 fn validate_bounds(

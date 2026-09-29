@@ -296,6 +296,7 @@
             {
               "expires_at": null,
               "public_key": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+              "standard_webhooks_public_key": "whpk_O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
               "version": 1
             }
           ]
@@ -3752,6 +3753,10 @@
           },
           "public_key": {
             "description": "Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:\nevery delivery carries a `v1a` signature by it.",
+            "type": "string"
+          },
+          "standard_webhooks_public_key": {
+            "description": "The same key in Standard Webhooks' serialization, `whpk_` and the standard base64 of its\nraw bytes, for a Standard Webhooks library. Always present; optional in the schema so\nclients read a service that predates it.",
             "type": "string"
           },
           "version": {

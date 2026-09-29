@@ -654,11 +654,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         .context("invalid confirm-step configuration")?;
     let screen_step = ScreenStep::from_routes(pool.clone(), &routes)
         .context("failed to configure screening step")?;
-    let steps = Arc::new(StepSet::new(
-        Box::new(confirm_step),
-        Box::new(screen_step),
-        Box::new(topup::steps::sweep::SweepStep),
-    ));
+    let steps = Arc::new(StepSet::new(Box::new(confirm_step), Box::new(screen_step)));
     let pump = Pump::new(
         pool.clone(),
         Arc::clone(&routes),

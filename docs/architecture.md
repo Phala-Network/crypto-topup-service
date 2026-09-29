@@ -357,7 +357,8 @@ and never rewrites them.
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
 `(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`.
 
-Credit: `exp = asset_decimals + price_scale − unit_decimals`,
+Credit: `exp = asset_decimals + price_scale − unit_decimals`, where `unit_decimals` is 2 on every
+route (credit is USD cents, the API's `amount`; a route file cannot set it),
 `credit_minor = floor(amount_atomic × price_scaled / 10^exp)` (multiply when `exp < 0`),
 512-bit intermediate, checked into `u64` or `rejected(out_of_range)`. Property tests:
 monotone; splitting into `n` parts loses at most `n − 1` minor units.
@@ -617,8 +618,8 @@ Invoice model, with this service's exception profile:
   shows the quote `open` past `expires_at`, and cancellation is refused once the window has
   closed (`400 quote_window_closed`). A quote whose address has received any payment, even a
   rejected one, can no longer be cancelled (`400 quote_payment_received`).
-- Exposure counters sum `credit_minor` across routes, so every route must use the same
-  `unit_decimals`; the service refuses to load routes that differ.
+- Exposure counters sum `credit_minor` across routes, which every route counts in USD cents
+  (§6).
 - A "quote, then pay to a reusable address" variant is deliberately not offered: matching a
   quote by amount alone is ambiguous, and the single-use address is the processor-standard
   answer. A deposit address (below) carries no price.
@@ -760,7 +761,9 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 - Delivery is the outbox (§12): at least once, in no order, to every enabled endpoint of the
   account and mode that subscribes to the event (`enabled_events`, or `*`). `2xx` acknowledges;
   a redirect (never followed), anything else, or no answer within 20 s is retried with
-  full-jitter backoff (ceiling 30 s doubling to 1 h) until delivered, forever: a failing
+  full-jitter backoff (ceiling 30 s doubling to 1 h) until delivered, forever, and a `429` or
+  `503` with `Retry-After` in delay-seconds is retried no sooner than it asks, at most 1 h later
+  (an HTTP date is ignored); the endpoint's cooldown (below) waits as long. A failing
   endpoint is never disabled automatically, since without an email channel a disabled endpoint
   would leave a paid deposit uncredited silently (owner decision, design §11). Only `410 Gone`
   disables an endpoint (`disabled_reason: gone`), as Standard Webhooks asks, announced to the
@@ -1007,9 +1010,15 @@ route's confirmation, being valued and screened), `credited`, `rejected` (the re
 exposed), or `reversed`. No account,
 price, deposit id, or transaction hash. Every such response, errors included, allows any
 origin (`Access-Control-Allow-Origin: *`) and exposes `Request-Id` and `Retry-After`; the secret
-is the bearer. A secret that is not the quote's is `404`. These reads are limited in the process
-to 120 per quote and 6 000 in total per minute (`429 rate_limit`, `Retry-After` the rest of the
-minute).
+is the bearer. A secret that is not the quote's is `404`. These reads, and a deposit address's,
+are limited in the process in tiers, so a forged secret never spends a real one's budget. At most
+4 run at once (`429 rate_limit`, `Retry-After: 1`). A read is charged only once its secret
+verifies (one indexed lookup of its SHA-256; nothing cheaper exists for a random secret): 120 per
+quote or address and 6 000 per account and mode per minute (`429 rate_limit`, `Retry-After` the
+rest of the minute). Reads whose secret matches nothing have their own budget of 1 200 per minute;
+once it is spent, a secret the process has not issued or verified in this minute or the one
+before is refused before its lookup for the rest of the minute, while known secrets keep being
+served.
 
 **Deposit.** `{id, object: "deposit", livemode, client_reference_id, quote, deposit_address,
 status, final, swept, rejection_reason, chain_id, asset, asset_contract, amount_atomic, amount,
@@ -1292,7 +1301,6 @@ defaulted addresses from it. The defaults and why:
 | `quote.window_s`, `spread_bps`, `tolerance_bps`, `max_creations_per_minute` | 900, 50, 100, 10 |
 | `quote.amount_decimals` | 4, or `asset.decimals` if fewer: a quote asks for, say, `273.9185` PHA rather than 18 decimals; at most `asset.decimals` |
 | `alerts.stuck_after_s` | detected 1 800, confirmed 1 800 (a credited deposit waits for its merchant's sweep and has no threshold) |
-| `unit_decimals` | 2 (USD cents) |
 
 The defaults are the launch numbers *(policy)*: finance confirms each, including the zero token
 floors, before production, and a route overrides any it does not accept.

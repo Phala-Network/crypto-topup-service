@@ -589,3 +589,12 @@ def test_construct_event_accepts_either_pinned_key_during_a_rotation() -> None:
     with pytest.raises(SignatureVerificationError, match="no valid webhook signature"):
         _construct(body, headers)
     assert _construct(body, headers, [new_public, SERVICE_PUBLIC_KEY]).id == EVENT_ID
+
+
+def test_construct_event_accepts_a_standard_webhooks_public_key() -> None:
+    raw = SERVICE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    body, headers = _delivery()
+    pinned = f"whpk_{base64.b64encode(raw).decode()}"
+    assert _construct(body, headers, pinned).id == EVENT_ID
+    with pytest.raises(ValueError, match="32 bytes"):
+        _construct(body, headers, f"whpk_{base64.b64encode(raw[:16]).decode()}")

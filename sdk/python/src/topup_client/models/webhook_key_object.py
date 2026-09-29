@@ -24,11 +24,16 @@ class WebhookKeyObject:
             every delivery carries a `v1a` signature by it.
         version (int): Key version, from 1; it grows by one per roll.
         expires_at (int | None | Unset): When a rolled key stops signing, Unix seconds; `null` for the current key.
+        standard_webhooks_public_key (str | Unset): The same key in Standard Webhooks' serialization, `whpk_` and the
+            standard base64 of its
+            raw bytes, for a Standard Webhooks library. Always present; optional in the schema so
+            clients read a service that predates it.
     """
 
     public_key: str
     version: int
     expires_at: int | None | Unset = UNSET
+    standard_webhooks_public_key: str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +47,8 @@ class WebhookKeyObject:
         else:
             expires_at = self.expires_at
 
+        standard_webhooks_public_key = self.standard_webhooks_public_key
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -52,6 +59,8 @@ class WebhookKeyObject:
         )
         if expires_at is not UNSET:
             field_dict["expires_at"] = expires_at
+        if standard_webhooks_public_key is not UNSET:
+            field_dict["standard_webhooks_public_key"] = standard_webhooks_public_key
 
         return field_dict
 
@@ -71,10 +80,13 @@ class WebhookKeyObject:
 
         expires_at = _parse_expires_at(d.pop("expires_at", UNSET))
 
+        standard_webhooks_public_key = d.pop("standard_webhooks_public_key", UNSET)
+
         webhook_key_object = cls(
             public_key=public_key,
             version=version,
             expires_at=expires_at,
+            standard_webhooks_public_key=standard_webhooks_public_key,
         )
 
         webhook_key_object.additional_properties = d

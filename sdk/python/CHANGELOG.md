@@ -8,6 +8,18 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Added
+
+- `Webhook.construct_event` and `load_public_key` accept a public key in Standard Webhooks' `whpk_`
+  form (`whpk_` and base64), beside hex and base64.
+- `WebhookKeyObject.standard_webhooks_public_key`, the attested key in that form.
+
+### Fixed
+
+- The client module's docstring no longer says nothing is credited until a deposit is final: a
+  deposit is credited at its route's confirmations, within the account's
+  `max_unfinalized_credit`, and a reorg before finality reverses it.
+
 ## [0.2.0] - 2026-09-29
 
 The first release on PyPI.

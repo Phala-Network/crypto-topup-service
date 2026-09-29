@@ -3,6 +3,7 @@
 use axum::Json;
 use axum::extract::{Extension, RawQuery, State};
 use axum::response::{IntoResponse as _, Response};
+use sha2::{Digest as _, Sha256};
 use sqlx::{PgConnection, PgPool};
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
@@ -16,6 +17,7 @@ use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
 use super::auth::Merchant;
+use super::client_limit::SecretHash;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, expansions, query_pairs};
 use super::handlers::ensure_customer;
@@ -187,6 +189,9 @@ pub(crate) async fn create_quote(
     )
     .await
     .map_err(map_error)?;
+    state
+        .client_reads
+        .issued(Sha256::digest(client_secret.as_bytes()).into());
     let mut quote = quote_object(&mut *state.pool.acquire().await?, &state.routes, lock).await?;
     quote.client_secret = Some(client_secret);
     Ok(Json(quote))
@@ -456,11 +461,23 @@ async fn client_quote(
                 .is_some_and(|rest| rest.starts_with("_secret_"))
         })
         .ok_or_else(ApiError::not_found)?;
+    let secret: SecretHash = Sha256::digest(client_secret.as_bytes()).into();
+    let _read = state
+        .client_reads
+        .begin(&secret)
+        .map_err(ApiError::client_reads_limited)?;
+    let Some(scope) = locks::client_secret_scope(&state.pool, quote, &secret)
+        .await
+        .map_err(map_error)?
+    else {
+        state.client_reads.failed(&secret);
+        return Err(ApiError::not_found());
+    };
     state
         .client_reads
-        .allow(quote)
+        .verified(secret, quote, scope)
         .map_err(ApiError::client_reads_limited)?;
-    let lock = locks::get_by_client_secret(&state.pool, client_secret)
+    let lock = locks::get(&state.pool, scope, quote)
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;

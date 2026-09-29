@@ -583,14 +583,14 @@ impl ApiError {
         )
     }
 
-    /// Returns a read of a quote's or deposit address's public view over its limit, retryable
-    /// after `retry_after` seconds.
+    /// Returns a read of a quote's or deposit address's public view by `client_secret` over a
+    /// limit, retryable after `retry_after` seconds.
     #[must_use]
     pub fn client_reads_limited(retry_after: u64) -> Self {
         Self::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit",
-            "too many reads of this object; retry after Retry-After seconds",
+            "too many reads by client_secret; retry after Retry-After seconds",
         )
         .with_retry_after(retry_after)
     }

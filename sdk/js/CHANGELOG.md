@@ -6,6 +6,17 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `constructEvent` accepts a public key in Standard Webhooks' `whpk_` form (`whpk_` and base64),
+  beside hex and base64.
+
+### Fixed
+
+- `constructEvent` returns the event's `request` (the causing API request's `id` and
+  `idempotency_key`, or `null`), as `WebhookEvent` declares; it was dropped. A malformed `request`
+  is refused like any malformed event.
+
 ## [0.2.0] - 2026-09-29
 
 ### Changed (breaking)

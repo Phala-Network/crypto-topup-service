@@ -38,8 +38,11 @@ In live mode the check is mandatory and fails closed: without `account`, `forwar
 `treasuries`, every address check raises. In test mode, without `forwarder` nothing is checked,
 and without `treasuries` the response's treasury is used with an `UnpinnedTreasuryWarning`.
 
-`Quote.payment` reports a transfer seen before finality. It is display only: nothing is credited
-until the deposit is final and appears under `list_deposits`, and a reorg can remove it.
+`Quote.payment` reports a transfer as soon as it is seen on chain. It is display only, and a reorg
+can remove it: credit comes from the `deposit.credited` webhook (or `list_deposits`). A deposit is
+credited at its route's confirmations, before finality, while the account's credit that is not
+final stays within its `max_unfinalized_credit` (past it, once final); a reorg before finality
+reverses it (`deposit.reversed`).
 """
 
 from __future__ import annotations

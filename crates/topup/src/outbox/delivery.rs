@@ -5,7 +5,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures_util::future::{Fuse, FusedFuture as _, FutureExt as _};
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
-use reqwest::{Client, Proxy, Url};
+use reqwest::header::{HeaderMap, RETRY_AFTER};
+use reqwest::{Client, Proxy, StatusCode, Url};
 use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::postgres::PgPool;
@@ -25,6 +26,8 @@ use crate::webhook_endpoints;
 const MAX_POSTGRES_INTERVAL_SECONDS: u64 = i32::MAX as u64;
 /// Endpoints considered by one scheduling pass.
 const MAX_ENDPOINTS_PER_PASS: i64 = 1000;
+/// The longest `Retry-After` a delivery honors: the backoff's own ceiling, an hour.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// Runtime limits for the webhook delivery loop.
 #[derive(Clone, Debug)]
@@ -108,8 +111,9 @@ struct ClaimedEvent {
 enum Reach {
     /// The endpoint acknowledged it.
     Reached,
-    /// The endpoint failed it: an error status, a redirect, a timeout, or no connection.
-    Failed,
+    /// The endpoint failed it: an error status, a redirect, a timeout, or no connection; with the
+    /// wait its `Retry-After` asked for.
+    Failed { retry_after: Option<Duration> },
     /// Nothing about the endpoint as it is: the service failed before sending it, or it was a
     /// notice to the endpoint's former URL.
     Unknown,
@@ -133,6 +137,8 @@ enum Outcome {
         error: &'static str,
         /// Whether the endpoint caused it, as opposed to the service failing to render or sign.
         endpoint_fault: bool,
+        /// The wait a `429` or `503` asked for in `Retry-After`, at most [`MAX_RETRY_AFTER`].
+        retry_after: Option<Duration>,
     },
 }
 
@@ -143,6 +149,7 @@ impl Outcome {
             body: None,
             error,
             endpoint_fault: false,
+            retry_after: None,
         }
     }
 }
@@ -247,14 +254,15 @@ where
                         Ok(Reach::Reached) => {
                             cooldowns.remove(&endpoint_id);
                         }
-                        Ok(Reach::Failed) => {
+                        Ok(Reach::Failed { retry_after }) => {
                             let failures = cooldowns
                                 .get(&endpoint_id)
                                 .map_or(0, |cooldown| cooldown.failures);
                             let delay = retry_delay(
                                 i32::try_from(failures).unwrap_or(i32::MAX),
                                 self.entropy.as_ref(),
-                            );
+                            )
+                            .max(retry_after.unwrap_or_default());
                             cooldowns.insert(endpoint_id, Cooldown {
                                 failures: failures.saturating_add(1),
                                 until: Instant::now() + delay,
@@ -508,10 +516,12 @@ where
                     body: None,
                     error: request_error_code(&error),
                     endpoint_fault: true,
+                    retry_after: None,
                 });
             }
         };
         let status = response.status();
+        let retry_after = retry_after(status, response.headers());
         let (body, body_error) =
             read_response_body(response, self.config.response_body_limit).await;
         Ok(if status.is_success() {
@@ -522,6 +532,7 @@ where
                 body,
                 error: body_error.unwrap_or("non_2xx_status"),
                 endpoint_fault: true,
+                retry_after,
             }
         })
     }
@@ -566,7 +577,7 @@ where
             } => record_attempt(&self.pool, event, status.map(u64::from)).await?,
             Outcome::Failed { .. } => {}
         }
-        let (status, body, error, endpoint_fault) = match outcome {
+        let (status, body, error, endpoint_fault, retry_after) = match outcome {
             Outcome::Delivered(response) => {
                 mark_delivered(&self.pool, event, &response).await?;
                 return Ok(());
@@ -576,12 +587,15 @@ where
                 body,
                 error,
                 endpoint_fault,
-            } => (status, body, error, endpoint_fault),
+                retry_after,
+            } => (status, body, error, endpoint_fault, retry_after),
         };
         let response = response_value(status, body, Some(error));
         let gone = endpoint_fault && status == Some(410);
         if !gone {
-            let delay = retry_delay(event.attempts, self.entropy.as_ref());
+            // A receiver's `Retry-After` defers the retry, never hastens it past the backoff.
+            let delay = retry_delay(event.attempts, self.entropy.as_ref())
+                .max(retry_after.unwrap_or_default());
             schedule_retry(&self.pool, event, &response, delay).await?;
             return Ok(());
         }
@@ -809,10 +823,30 @@ fn reach(notice: bool, outcome: &Outcome) -> Reach {
         Outcome::Delivered(_) => Reach::Reached,
         Outcome::Failed {
             endpoint_fault: true,
+            retry_after,
             ..
-        } => Reach::Failed,
+        } => Reach::Failed {
+            retry_after: *retry_after,
+        },
         Outcome::Failed { .. } => Reach::Unknown,
     }
+}
+
+/// The wait a `429` or `503` asks for in `Retry-After` as delay-seconds (Standard Webhooks),
+/// at most [`MAX_RETRY_AFTER`]. An HTTP date, a malformed value, or any other status asks for
+/// nothing, and the backoff alone applies.
+fn retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
+    if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE {
+        return None;
+    }
+    let seconds: u64 = headers
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
 }
 
 fn retry_delay(attempts: i32, entropy: &dyn JitterSource) -> Duration {
@@ -856,18 +890,51 @@ mod tests {
             body: None,
             error: "http_status",
             endpoint_fault,
+            retry_after: None,
         };
         assert_eq!(
             reach(false, &Outcome::Delivered(Value::Null)),
             Reach::Reached
         );
-        assert_eq!(reach(false, &failed(true)), Reach::Failed);
+        assert_eq!(
+            reach(false, &failed(true)),
+            Reach::Failed { retry_after: None }
+        );
         assert_eq!(reach(false, &failed(false)), Reach::Unknown);
         assert_eq!(
             reach(true, &Outcome::Delivered(Value::Null)),
             Reach::Unknown
         );
         assert_eq!(reach(true, &failed(true)), Reach::Unknown);
+    }
+
+    #[test]
+    fn retry_after_is_read_from_429_and_503_and_bounded() {
+        let headers = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(RETRY_AFTER, value.parse().expect("header value"));
+            headers
+        };
+        let limited = StatusCode::TOO_MANY_REQUESTS;
+        assert_eq!(
+            retry_after(limited, &headers("120")),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_after(StatusCode::SERVICE_UNAVAILABLE, &headers(" 5 ")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            retry_after(limited, &headers("86400")),
+            Some(MAX_RETRY_AFTER)
+        );
+        assert_eq!(
+            retry_after(limited, &headers("Wed, 21 Oct 2026 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(retry_after(limited, &headers("-1")), None);
+        assert_eq!(retry_after(limited, &HeaderMap::new()), None);
+        assert_eq!(retry_after(StatusCode::BAD_GATEWAY, &headers("120")), None);
     }
 
     #[test]

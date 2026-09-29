@@ -533,7 +533,6 @@ async fn step_timeout_is_persisted_as_a_retry() -> Result<()> {
             let steps = StepSet::new(
                 Box::new(SlowStep),
                 Box::new(StaticStep(step_result(StepOutcome::Advance))),
-                Box::new(StaticStep(step_result(StepOutcome::Advance))),
             );
             let pump = test_pump(
                 &context.app_pool,
@@ -811,7 +810,6 @@ fn static_steps(outcome: StepOutcome) -> StepSet {
 fn result_steps(result: StepResult) -> StepSet {
     StepSet::new(
         Box::new(StaticStep(result.clone())),
-        Box::new(StaticStep(result.clone())),
         Box::new(StaticStep(result)),
     )
 }
@@ -823,7 +821,6 @@ fn step_result(outcome: StepOutcome) -> StepResult {
 fn blocking_steps(control: Arc<StepControl>, outcome: StepOutcome) -> StepSet {
     StepSet::new(
         Box::new(BlockingStep { control, outcome }),
-        Box::new(StaticStep(step_result(outcome))),
         Box::new(StaticStep(step_result(outcome))),
     )
 }
@@ -953,9 +950,8 @@ fn confirmation_route() -> RouteFile {
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
             .expect("route fixture");
     route.asset.contract = evm_address(200);
-    route.asset.decimals = 0;
-    route.rate_lock.amount_decimals = 0;
-    route.destination.unit_decimals = 0;
+    route.asset.decimals = 2;
+    route.rate_lock.amount_decimals = 2;
     route.screening.min_credit_minor = 1;
     route
 }

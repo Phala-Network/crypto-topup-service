@@ -81,19 +81,6 @@ impl RouteSet {
                 ));
             }
         }
-        // Rate-lock exposure caps sum credit across routes, so every route must count credit in
-        // the same destination minor unit.
-        let mut lock_routes = routes.iter();
-        if let Some(first) = lock_routes.next()
-            && let Some(other) = lock_routes
-                .find(|route| route.destination.unit_decimals != first.destination.unit_decimals)
-        {
-            return Err(format!(
-                "rate-lock routes `{}` and `{}` use different destination.unit_decimals; exposure caps require one unit",
-                first.route, other.route
-            ));
-        }
-
         let mut current = BTreeMap::<(u64, Address), usize>::new();
         let mut chains = BTreeMap::<u64, ChainEntry>::new();
         for (index, route) in routes.iter().enumerate() {
@@ -252,25 +239,6 @@ mod tests {
         };
         assert_eq!(names(true), ["phala-cloud-ethereum-pha-usd"]);
         assert_eq!(names(false), ["sepolia-route"]);
-    }
-
-    #[test]
-    fn route_loading_requires_one_unit_for_rate_lock_exposure() {
-        let route = fixture();
-        let mut other = route.clone();
-        other.route = "other-route".to_owned();
-        other.asset.contract = Address::repeat_byte(0x42);
-        other.destination.unit_decimals = route.destination.unit_decimals + 1;
-
-        assert_eq!(
-            RouteSet::new(vec![route.clone(), other.clone()]).map(|_| ()),
-            Err(format!(
-                "rate-lock routes `{}` and `other-route` use different destination.unit_decimals; exposure caps require one unit",
-                route.route
-            ))
-        );
-        other.destination.unit_decimals = route.destination.unit_decimals;
-        RouteSet::new(vec![route, other]).expect("one rate-lock unit loads");
     }
 
     #[test]

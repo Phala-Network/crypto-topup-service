@@ -482,7 +482,9 @@ pub async fn get_deposit(pool: &PgPool, id: Uuid) -> Result<Option<Deposit>, sql
     record.map(TryInto::try_into).transpose()
 }
 
-/// Claims one due non-terminal deposit with a five-minute lease.
+/// Claims one due `detected` or `confirmed` deposit with a five-minute lease. A credited deposit
+/// is not claimed: only a finalized `Flushed` event moves it on, and the scanner and the finality
+/// watch apply that ([`crate::db::commit_factory_logs`]).
 pub async fn claim_deposit(
     pool: &PgPool,
     lease_token: Uuid,
@@ -493,7 +495,7 @@ pub async fn claim_deposit(
         WITH candidate AS (
             SELECT id
             FROM deposits
-            WHERE state NOT IN ('swept', 'rejected', 'reversed')
+            WHERE state IN ('detected', 'confirmed')
               AND next_attempt_at <= now()
               AND (lease_until IS NULL OR lease_until <= now())
             ORDER BY next_attempt_at, created_at, id

@@ -1008,9 +1008,8 @@ async fn run_confirm_scenario(
     );
 
     let mut route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(&fixture.path)?)?;
-    route.asset.decimals = 0;
-    route.rate_lock.amount_decimals = 0;
-    route.destination.unit_decimals = 0;
+    route.asset.decimals = 2;
+    route.rate_lock.amount_decimals = 2;
     route.screening.min_credit_minor = 1;
     let now = u64::try_from(chrono::Utc::now().timestamp())?;
     let primary_price: Arc<dyn PriceSource> =
@@ -1357,7 +1356,7 @@ impl Step for WaitStep {
 }
 
 fn wait_steps() -> StepSet {
-    StepSet::new(Box::new(WaitStep), Box::new(WaitStep), Box::new(WaitStep))
+    StepSet::new(Box::new(WaitStep), Box::new(WaitStep))
 }
 
 fn reader(rpc_url: &str) -> Result<FinalizedReader> {

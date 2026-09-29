@@ -23,6 +23,7 @@ use crate::tenancy::{Permission, Scope};
 
 use super::AppState;
 use super::auth::Merchant;
+use super::client_limit::SecretHash;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath, query_pairs};
 use super::handlers::validate_client_reference_id;
@@ -483,7 +484,11 @@ async fn respond_with_client_secret(
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<Json<DepositAddress>> {
     let mut object = deposit_address_response(&state.pool, &state.routes, address).await?;
-    object.client_secret = Some(issue_client_secret(&state.pool, address.id).await?);
+    let secret = issue_client_secret(&state.pool, address.id).await?;
+    state
+        .client_reads
+        .issued(Sha256::digest(secret.as_bytes()).into());
+    object.client_secret = Some(secret);
     Ok(Json(object))
 }
 
@@ -547,9 +552,10 @@ async fn client_deposit_address(
                 .is_some_and(|rest| rest.starts_with("_secret_"))
         })
         .ok_or_else(ApiError::not_found)?;
-    state
+    let secret: SecretHash = Sha256::digest(client_secret.as_bytes()).into();
+    let _read = state
         .client_reads
-        .allow(address_id)
+        .begin(&secret)
         .map_err(ApiError::client_reads_limited)?;
     // The secret authenticates for its address's account and mode, as an API key does for its
     // own; the scope comes from the stored row, never from the request.
@@ -559,12 +565,20 @@ async fn client_deposit_address(
          JOIN deposit_addresses AS address ON address.id = secret.deposit_address_id \
          WHERE secret.secret_hash = $1 AND address.id = $2",
     )
-    .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
+    .bind(secret.as_slice())
     .bind(address_id)
     .fetch_optional(&state.pool)
     .await?;
-    let (account_id, livemode) = owner.ok_or_else(ApiError::not_found)?;
-    let address = deposit_addresses::get(&state.pool, Scope::new(account_id, livemode), address_id)
+    let Some((account_id, livemode)) = owner else {
+        state.client_reads.failed(&secret);
+        return Err(ApiError::not_found());
+    };
+    let scope = Scope::new(account_id, livemode);
+    state
+        .client_reads
+        .verified(secret, address_id, scope)
+        .map_err(ApiError::client_reads_limited)?;
+    let address = deposit_addresses::get(&state.pool, scope, address_id)
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;

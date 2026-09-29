@@ -93,7 +93,8 @@ class Webhook:
 
         `payload` is the raw request body, before any JSON parsing; `headers` are the request
         headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`); `public_key` is your
-        account's webhook key in the mode you receive (hex or base64), pinned from
+        account's webhook key in the mode you receive (hex, base64, or Standard Webhooks'
+        `whpk_` and base64), pinned from
         `GET /v1/attestation`, or a list of keys while a rotation overlaps. `expected_account` is
         your `acct_…` id and `expected_livemode` the mode of the endpoint.
 

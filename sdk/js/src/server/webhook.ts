@@ -48,8 +48,8 @@ export interface ConstructEventOptions {
 
 /**
  * Verifies a delivery and returns its event, as Stripe's `constructEvent` does, failing closed
- * unless a `v1a` signature verifies with one of `publicKeys` (hex or base64 raw ed25519 keys; pass
- * both while a rotation overlaps), the timestamp is within tolerance, the body's id is the
+ * unless a `v1a` signature verifies with one of `publicKeys` (raw ed25519 keys as hex, base64, or
+ * Standard Webhooks' `whpk_` and base64; pass both while a rotation overlaps), the timestamp is within tolerance, the body's id is the
  * `webhook-id`, and the event is `expectedAccount`'s in `expectedLivemode`.
  *
  * `payload` is the raw request body, before any JSON parsing.
@@ -113,7 +113,7 @@ export async function constructEvent(
   const data = e["data"];
   const object: unknown =
     typeof data === "object" && data !== null ? (data as Record<string, unknown>)["object"] : null;
-  const { id: eventId, type, account, livemode, created, actor } = e;
+  const { id: eventId, type, account, livemode, created, actor, request } = e;
   if (
     e["object"] !== "event" ||
     typeof eventId !== "string" ||
@@ -124,7 +124,8 @@ export async function constructEvent(
     !Number.isSafeInteger(created) ||
     typeof object !== "object" ||
     object === null ||
-    !(actor === undefined || typeof actor === "string")
+    !(actor === undefined || typeof actor === "string") ||
+    !(request === undefined || request === null || isRequest(request))
   ) {
     throw new TypeError("webhook body is not an event");
   }
@@ -146,6 +147,7 @@ export async function constructEvent(
     type,
     created,
     ...(actor === undefined ? {} : { actor }),
+    ...(request === undefined ? {} : { request }),
     data: {
       object: object as Record<string, unknown>,
       ...(typeof previous === "object" && previous !== null
@@ -170,11 +172,26 @@ function header(
   return undefined;
 }
 
+function isRequest(value: unknown): value is { id: string; idempotency_key: string | null } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const { id, idempotency_key: key } = value as Record<string, unknown>;
+  return typeof id === "string" && (key === null || typeof key === "string");
+}
+
 async function importKey(encoded: string): Promise<CryptoKey> {
-  const value = encoded.trim().replace(/^0x/, "");
-  const raw = /^[0-9a-fA-F]{64}$/.test(value) ? hex(value) : base64(value);
+  const value = encoded.trim();
+  const standard = value.startsWith("whpk_") ? value.slice("whpk_".length) : undefined;
+  const bare = value.replace(/^0x/, "");
+  const raw =
+    standard !== undefined
+      ? base64(standard)
+      : /^[0-9a-fA-F]{64}$/.test(bare)
+        ? hex(bare)
+        : base64(bare);
   if (raw?.length !== 32) {
-    throw new TypeError("a webhook public key is 32 bytes of hex or base64");
+    throw new TypeError("a webhook public key is 32 bytes of hex, base64, or whpk_ and base64");
   }
   return crypto.subtle.importKey("raw", raw, "Ed25519", false, ["verify"]);
 }

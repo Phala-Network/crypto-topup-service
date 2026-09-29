@@ -7,7 +7,7 @@ use alloy_primitives::{Address, U512};
 
 use crate::money::{AtomicAmount, Bps, CreditError, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use crate::route::{
-    AssetConfig, DestinationConfig, PricingConfig, RateLockConfig, RouteFile, ScreeningConfig,
+    AssetConfig, PricingConfig, RateLockConfig, RouteFile, ScreeningConfig, UNIT_DECIMALS,
 };
 
 const BASIS_POINTS: u128 = 10_000;
@@ -103,8 +103,6 @@ impl From<&PricingConfig> for ValuationPolicy {
 pub struct RouteValuation<'route> {
     /// Deposited asset settings.
     pub asset: &'route AssetConfig,
-    /// Destination ledger settings.
-    pub destination: &'route DestinationConfig,
     /// Deposit screening thresholds.
     pub screening: &'route ScreeningConfig,
     /// Rate-lock tolerance settings.
@@ -115,7 +113,6 @@ impl<'route> From<&'route RouteFile> for RouteValuation<'route> {
     fn from(route: &'route RouteFile) -> Self {
         Self {
             asset: &route.asset,
-            destination: &route.destination,
             screening: &route.screening,
             rate_lock: &route.rate_lock,
         }
@@ -303,12 +300,7 @@ pub fn value_deposit(
         });
     }
 
-    let credit_minor = credit(
-        amount,
-        spot_price,
-        route.asset.decimals,
-        route.destination.unit_decimals,
-    )?;
+    let credit_minor = credit(amount, spot_price, route.asset.decimals, UNIT_DECIMALS)?;
     if credit_minor.value() < route.screening.min_credit_minor {
         return Err(ValuationError::BelowMinimum);
     }
@@ -467,7 +459,6 @@ mod tests {
 
     struct TestRoute {
         asset: AssetConfig,
-        destination: DestinationConfig,
         screening: ScreeningConfig,
         rate_lock: RateLockConfig,
     }
@@ -482,7 +473,6 @@ mod tests {
                     min_refund_atomic: AtomicAmount::new(U256::ZERO),
                     backstop: crate::route::Backstop::Token,
                 },
-                destination: DestinationConfig { unit_decimals: 2 },
                 screening: ScreeningConfig {
                     sanctions_oracle: Address::from([9_u8; 20]),
                     min_deposit_atomic: AtomicAmount::new(U256::ZERO),
@@ -502,7 +492,6 @@ mod tests {
         fn valuation(&self) -> RouteValuation<'_> {
             RouteValuation {
                 asset: &self.asset,
-                destination: &self.destination,
                 screening: &self.screening,
                 rate_lock: &self.rate_lock,
             }
@@ -848,8 +837,7 @@ mod tests {
     fn amount_exactly_at_lock_tolerance_is_accepted() {
         let asset = Address::from([1_u8; 20]);
         let mut route = TestRoute::new(asset, 0, 100);
-        route.asset.decimals = 0;
-        route.destination.unit_decimals = 0;
+        route.asset.decimals = 2;
         let lock = LockTerms {
             asset,
             amount: AtomicAmount::new(U256::from(1_000_u64)),
@@ -877,8 +865,7 @@ mod tests {
     fn amount_outside_lock_tolerance_falls_back_to_spot() {
         let asset = Address::from([1_u8; 20]);
         let mut route = TestRoute::new(asset, 0, 100);
-        route.asset.decimals = 0;
-        route.destination.unit_decimals = 0;
+        route.asset.decimals = 2;
         let lock = LockTerms {
             asset,
             amount: AtomicAmount::new(U256::from(1_000_u64)),
@@ -988,8 +975,7 @@ mod tests {
         );
 
         let mut route = TestRoute::new(Address::from([1_u8; 20]), 0, 100);
-        route.asset.decimals = 0;
-        route.destination.unit_decimals = 0;
+        route.asset.decimals = 2;
         assert_eq!(
             value_deposit(
                 AtomicAmount::new(U256::MAX),

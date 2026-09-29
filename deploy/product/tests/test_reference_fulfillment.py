@@ -28,6 +28,7 @@ from reference_product.ledger import ProductLedger
 from reference_product.server import AccountApi
 from topup_sdk import RequestSigner, credited_event_id, load_public_key, sign_webhook
 from topup_sdk.addresses import deposit_id
+from topup_sdk.signing import sf_string
 
 TEAM = "team-1"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([3] * 32))
@@ -383,11 +384,22 @@ def test_orders_keyed_by_the_old_deposit_key_are_migrated(tmp_path: Path) -> Non
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))
 
 
+def _signed(
+    method: str, path: str, body: bytes, signer: RequestSigner = DRIVER
+) -> tuple[str, dict[str, str]]:
+    """The target and headers of a driver request; a `POST` carries a signed Idempotency-Key."""
+    target = "/topup" + path
+    key = sf_string(str(uuid.uuid4())) if method == "POST" else None
+    headers = signer.sign(method, "https://acme.example" + target, body, idempotency_key=key)
+    if key is not None:
+        headers["Idempotency-Key"] = key
+    return target, headers
+
+
 def _account_call(
     api: AccountApi, method: str, path: str, body: bytes, signer: RequestSigner = DRIVER
 ) -> Answer:
-    target = "/topup" + path
-    headers = signer.sign(method, "https://acme.example" + target, body)
+    target, headers = _signed(method, path, body, signer)
     return api.handle(method, target, headers, body)
 
 
@@ -402,6 +414,9 @@ def test_account_api_requires_the_driver_key_and_valid_refs(
     assert _account_call(api, "POST", "/accounts", register, other).status == 401
     unsigned = api.handle("POST", "/topup/accounts", {}, register)
     assert unsigned.status == 401
+    # A POST's signature must cover an Idempotency-Key.
+    without_key = DRIVER.sign("POST", "https://acme.example/topup/accounts", register)
+    assert api.handle("POST", "/topup/accounts", without_key, register).status == 401
     bad_ref = json.dumps({"account_id": "a/b"}).encode()
     assert _account_call(api, "POST", "/accounts", bad_ref).status == 400
     assert _account_call(api, "GET", f"/accounts/{TEAM}", b"").status == 404
@@ -437,13 +452,18 @@ def test_the_account_view_lists_the_workspaces_quote_events() -> None:
 def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     own, other = "dep_" + uuid.uuid4().hex, "dep_" + uuid.uuid4().hex
     requested: list[tuple[str, str, int]] = []
+    keys: list[str] = []
 
     class Service:
         def list_deposits(self, *, client_reference_id: str) -> list[SimpleNamespace]:
             return [SimpleNamespace(id=own)] if client_reference_id == TEAM else []
 
-        def create_refund(self, deposit: str, to: str, amount: int) -> SimpleNamespace:
+        def create_refund(
+            self, deposit: str, to: str, amount: int, *, idempotency_key: str | None
+        ) -> SimpleNamespace:
             requested.append((deposit, to, amount))
+            assert idempotency_key is not None
+            keys.append(idempotency_key)
             return SimpleNamespace(to_dict=lambda: {"id": "re_1", "status": "pending"})
 
     ledger = ProductLedger()
@@ -465,3 +485,9 @@ def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     answer = refund(own, body)
     assert (answer.status, answer.body) == (200, {"id": "re_1", "status": "pending"})
     assert requested == [(own, to, 5)]
+    # A replayed request passes the same key on, so the service answers it with the first refund.
+    payload = json.dumps(body).encode()
+    target, headers = _signed("POST", f"/accounts/{TEAM}/deposits/{own}/refunds", payload)
+    for _ in range(2):
+        assert api.handle("POST", target, headers, payload).status == 200
+    assert keys[1] == keys[2] != keys[0]

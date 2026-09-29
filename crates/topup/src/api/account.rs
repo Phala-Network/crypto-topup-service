@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Extension, State};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 use topup_core::route::Confirmations;
@@ -460,6 +462,7 @@ pub(crate) async fn get_attestation(
             .map(|(key, version)| WebhookKeyObject {
                 version: key.version,
                 public_key: hex::encode(key.public_key.0),
+                standard_webhooks_public_key: format!("whpk_{}", STANDARD.encode(key.public_key.0)),
                 expires_at: version.expires_at.map(|time| time.timestamp()),
             })
             .collect(),

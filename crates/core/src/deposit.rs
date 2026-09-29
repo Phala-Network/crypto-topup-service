@@ -94,8 +94,6 @@ pub enum WaitReason {
     Confirmations,
     /// Crediting is paused for the account, product, or route.
     Paused,
-    /// No finalized `Flushed` event after the deposit has been indexed yet.
-    FlushNotConfirmed,
     /// Crediting the deposit before it is final would take the account's credit that is not
     /// final yet past its cap; it is credited once final.
     UnfinalizedCreditCap,
@@ -269,7 +267,7 @@ mod tests {
         error: RetryError::Transient,
     };
     const WAIT: StepOutcome = StepOutcome::Wait {
-        reason: WaitReason::FlushNotConfirmed,
+        reason: WaitReason::Finality,
     };
     const PAUSED_WAIT: StepOutcome = StepOutcome::Wait {
         reason: WaitReason::Paused,
