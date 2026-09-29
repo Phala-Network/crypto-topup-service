@@ -51,13 +51,16 @@ embedded or licensed separately.
   in the A's feet: flat cuts, now on the cap line. The stem is 3.61 units, the mean of the stems of
   P, H and L, and ends flat on the baseline. The arms meet the stem, on average, at the underside
   of the H's bar, 4.8 units up, which puts the crotch at 9.01 units, just above the middle.
-- **Spacing.** PHALA keeps Phala's spacing and kerning. The new pairs match it by area: measured
-  across the cap height, with each letter's recesses counted to 1.1 units deep, Phala's four pairs
-  (PH, HA, AL, LA) all hold about 2.67 units of white, within 6% of their mean. PA and AY are
-  spaced to that mean, which leaves 0.91 and 0.65 units between their outlines; LA, the source's
-  tightest pair, has 0.80.
-- **Word space.** The white between PHALA and PAY is an invisible I, a stem and its spacing on
-  each side: 2.67 + 3.61 + 2.67 = 8.96 units of white, 7.95 between the A and the P.
+- **Spacing.** PHALA keeps Phala's spacing and kerning. Measured as the closest distance between
+  outlines, its pairs are PH 2.05, HA 1.51, AL 1.65 and LA 0.80 units. PAY is spaced by eye to
+  the same colour, then checked blurred against PHALA. PA and AY cannot reach those distances,
+  since the P's bowl and the A's and Y's diagonals leave open space on both sides of the pair, so
+  they are kerned the way a text face kerns them. The A sits 0.21 units from the P's bowl at their
+  bounding boxes, 3.75 at the closest outlines. The Y's arm tip overhangs the A's foot by 0.55
+  units, 4.33 at the closest outlines. Spacing those pairs by white area, with each letter's
+  recesses counted only 1.1 units deep, undercounted their open sides and left them at 4.39 and
+  5.53 units, visibly looser than PHALA.
+- **Word space.** 7.95 units from the last A's foot to the P's stem, about half the cap height.
 
 ## Rendering
 
