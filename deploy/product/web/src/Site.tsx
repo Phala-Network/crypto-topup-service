@@ -61,7 +61,7 @@ export function SiteHeader({ theme, onThemeChange }: { theme: Theme; onThemeChan
           <Logo />
           Phala Pay
         </a>
-        <nav aria-label="Site" className="flex items-center gap-1 text-muted-foreground">
+        <nav aria-label="Site" className="-mr-3 flex items-center gap-1 text-muted-foreground">
           {NAV.map(({ href, label }) => (
             <Button key={label} variant="ghost" asChild className="hidden hover:text-foreground md:inline-flex">
               <a href={href}>{label}</a>
@@ -109,6 +109,9 @@ function Logo() {
   );
 }
 
+// The hero's two calls to action: one height, whatever their variant.
+const HERO_BUTTON = "h-10 px-4";
+
 // The headline, with the fact behind each of its words (docs/architecture.md §8, the typical credit
 // at depth 2; README.md), and the way to run it: self-hosting on Phala Cloud.
 export function Hero() {
@@ -118,18 +121,18 @@ export function Hero() {
         <h1 id="hero-title" className="max-w-5xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl">
           {TAGLINE}
         </h1>
-        <p className="text-base text-pretty text-muted-foreground sm:text-lg">
-          Credited at two confirmations, about 15 s on Ethereum. Runs in a TEE you can verify. Addresses can only pay
-          your treasury. Stripe-shaped API.
+        <p className="max-w-2xl text-base text-balance text-muted-foreground sm:text-lg">
+          Credited at two confirmations, about 15&nbsp;s on Ethereum. Runs in a TEE you can verify. Addresses can only
+          pay your treasury. Stripe-shaped API.
         </p>
         <div className="flex flex-wrap items-center gap-3 pt-2">
-          <Button asChild size="lg">
+          <Button asChild size="lg" className={HERO_BUTTON}>
             <a href={LINKS.deploy}>
               <Rocket aria-hidden="true" />
               Deploy on Phala Cloud
             </a>
           </Button>
-          <Button asChild size="lg" variant="outline">
+          <Button asChild size="lg" variant="outline" className={HERO_BUTTON}>
             <a href={LINKS.docs}>
               <BookOpen aria-hidden="true" />
               Docs
@@ -202,7 +205,7 @@ export function SiteFooter() {
             <Logo />
             Phala Pay
           </span>
-          <p className="mt-3 max-w-xs leading-6 text-muted-foreground">{TAGLINE}.</p>
+          <p className="mt-3 max-w-xs leading-6 text-muted-foreground">{TAGLINE}</p>
         </div>
         {FOOTER.map((column) => (
           <nav key={column.title} aria-label={column.title}>

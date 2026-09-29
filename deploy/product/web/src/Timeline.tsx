@@ -19,7 +19,8 @@ import { useNetworks } from "./queries.js";
 // Each step's title, what it waits for, and the time it usually takes: the hints are expectations,
 // every time shown next to them is real (the chain's block time, the service's timestamps, or when
 // this console received a webhook).
-const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string }> = {
+// A step that usually takes a known time says so on its line until it happens (`usually`).
+const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string; usually?: string }> = {
   quote_created: {
     title: "Quote created",
     hint: "A locked price for an exact amount, for 15 minutes.",
@@ -30,10 +31,12 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
     failed: "The quote expired without a payment.",
   },
   received: {
+    usually: "~12 s",
     title: "Received by Phala Pay",
     hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
   },
   credited: {
+    usually: "~15 s",
     title: "Credited",
     hint:
       "Usually about 15 s after sending: at 2 confirmations, once both RPC providers report the " +
@@ -45,6 +48,7 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
     hint: "The signed deposit.credited moves the balance; its metadata arrives with it.",
   },
   final: {
+    usually: "~15 min",
     title: "Final",
     hint:
       "About 15 minutes on Ethereum. Until then a reorg that drops the transaction reverses the " +
@@ -64,9 +68,11 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
 };
 
 // A step's line in columns: its time, its dot, its title, the time since sending (right-aligned),
-// and the opener.
+// and the opener. On a phone the time's column shows only once a payment has times.
 const STEP_GRID =
   "grid grid-cols-[3.5rem_1rem_minmax(0,1fr)_auto_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto_0.875rem] sm:gap-x-3";
+const UNTIMED_STEP_GRID =
+  "grid grid-cols-[1rem_minmax(0,1fr)_auto_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto_0.875rem] sm:gap-x-3";
 // Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
 // phone, under its time, to keep the details' width.
 const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
@@ -91,10 +97,18 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
   if (loading === null) {
     return (
       <div className="flex flex-col gap-3">
-        <p className="px-2 text-xs text-muted-foreground">Start a payment to follow it here, live, with real data only.</p>
+        <p className="px-2 text-xs text-pretty text-muted-foreground">
+          Start a payment to follow it here, live, with real data only.
+        </p>
         <ol className="flex flex-col" aria-label="The steps of a payment">
           {PREVIEW.map((key) => (
-            <StreamStep key={key} step={{ key, state: "upcoming", at: null, details: [] }} sent={null} token={token} />
+            <StreamStep
+              key={key}
+              step={{ key, state: "upcoming", at: null, details: [] }}
+              sent={null}
+              token={token}
+              timed={false}
+            />
           ))}
         </ol>
       </div>
@@ -127,6 +141,7 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
               : null
           }
           token={token}
+          timed
         />
       ))}
     </ol>
@@ -169,11 +184,14 @@ function StreamStep({
   sent,
   since = null,
   token,
+  timed,
 }: {
   step: Step;
   sent: number | null;
   since?: number | null;
   token: StepToken;
+  /** Whether the payment has times yet: until then a phone leaves out the time's column. */
+  timed: boolean;
 }) {
   const copy = STEP_COPY[step.key];
   // Seconds since the payment was sent, for the steps after it.
@@ -190,17 +208,20 @@ function StreamStep({
       {/* The rail between this step's dot and the next one's, through the dots' centres (px-2, the
           time's column, a gap, half a dot); on a phone the opened details take its place. */}
       <span
-        className="absolute top-7 bottom-[-0.375rem] left-[calc(5rem-0.5px)] w-px bg-border group-last/step:hidden max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]"
+        className={cn(
+          "absolute top-7 bottom-[-0.375rem] w-px bg-border group-last/step:hidden max-sm:group-has-[[data-state=open]]/step:hidden sm:left-[calc(5.75rem-0.5px)]",
+          timed ? "left-[calc(5rem-0.5px)]" : "left-[calc(1rem-0.5px)]",
+        )}
         aria-hidden="true"
       />
       <Collapsible>
         <CollapsibleTrigger
           className={cn(
-            STEP_GRID,
+            timed ? STEP_GRID : UNTIMED_STEP_GRID,
             "group/trigger relative min-h-9 w-full rounded-md px-2 py-1.5 text-left outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
           )}
         >
-          <span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+          <span className={cn("font-mono text-xs text-muted-foreground tabular-nums", !timed && "max-sm:hidden")}>
             {step.at !== null ? (
               <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
             ) : since !== null ? (
@@ -216,7 +237,7 @@ function StreamStep({
           <StepDot state={step.state} />
           <span
             className={cn(
-              "min-w-0 text-[0.8125rem] text-pretty",
+              "min-w-0 text-sm text-pretty",
               step.state === "upcoming" && "text-muted-foreground",
               step.state === "current" && "font-medium",
               step.state === "failed" && "text-destructive",
@@ -225,19 +246,23 @@ function StreamStep({
             {copy.title}
             <span className="sr-only">, {stateLabel(step.state)}</span>
           </span>
-          <span className="ml-auto text-right font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
-            {elapsed !== null && `+${duration(elapsed)}`}
+          <span className="ml-auto text-right font-mono text-xs text-muted-foreground tabular-nums">
+            {elapsed !== null
+              ? `+${duration(elapsed)}`
+              : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined
+                ? <span className="font-sans">usually {copy.usually}</span>
+                : null}
           </span>
           <ChevronDown
             className="size-3.5 text-muted-foreground opacity-0 transition-[transform,opacity] group-hover/step:opacity-100 group-focus-within/step:opacity-100 group-data-[state=open]/trigger:rotate-180 group-data-[state=open]/trigger:opacity-100 motion-reduce:transition-none"
             aria-hidden="true"
           />
         </CollapsibleTrigger>
-        {failed && <p className={cn("pb-1 text-xs text-destructive", STEP_INDENT)}>{copy.failed}</p>}
+        {failed && <p className={cn("pb-1 text-xs text-pretty text-destructive", STEP_INDENT)}>{copy.failed}</p>}
         <CollapsibleContent className={cn("flex flex-col gap-2 pr-2 pb-3 text-xs", STEP_INDENT)}>
           <p className="text-muted-foreground text-pretty">{copy.hint}</p>
           {step.at !== null && (
-            <p className="font-mono text-[0.6875rem]" data-testid="step-time">
+            <p className="font-mono text-xs" data-testid="step-time">
               {time(step.at)}
               {elapsed !== null && <span className="text-muted-foreground"> · {duration(elapsed)} after sending</span>}
             </p>
@@ -390,7 +415,7 @@ export function Requests({ exchanges, title, id }: { exchanges: ApiExchange[]; t
                   </code>
                   <span className={exchange.status < 400 ? "text-success" : "text-destructive"}>{exchange.status}</span>
                 </summary>
-                <pre className="max-h-80 overflow-auto border-t bg-muted p-3 font-mono text-[0.6875rem] leading-relaxed">
+                <pre className="max-h-80 overflow-auto border-t bg-muted p-3 font-mono text-xs leading-relaxed">
                   {JSON.stringify({ request: exchange.request, response: exchange.response }, null, 2)}
                 </pre>
               </details>

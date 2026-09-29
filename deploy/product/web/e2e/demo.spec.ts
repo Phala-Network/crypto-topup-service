@@ -329,7 +329,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
 
   // $20 at the fake service's 0.25 USD per PHA: exactly 80 PHA, with an order id in its metadata.
   // The quote is for the chosen network and token.
-  await product.getByText("$20.00", { exact: true }).click();
+  await product.getByText("$20", { exact: true }).click();
   const quoteRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
   expect((await quoteRequest).postDataJSON()).toEqual({ amount: 2000, chain_id: sepolia.id, asset: "pha" });
@@ -441,7 +441,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(api).not.toContainText("AAAAAAAA");
 
   // The history row and the ledger lines behind the balance.
-  await openTab(scenes, "Payments");
+  await openTab(scenes, "Credits");
   const row = scenes.getByTestId("payment").first();
   await expect(row).toContainText("Quote");
   await expect(row).toContainText("80 PHA");
@@ -470,8 +470,8 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
     ["cancel", "This quote was canceled"],
   ] as const) {
     const before = await followed.getAttribute("title");
-    await product.getByRole("button", { name: "Start a new top-up" }).click();
-    await product.getByText("$5.00", { exact: true }).click();
+    await product.getByRole("button", { name: "Add more credits" }).click();
+    await product.getByText("$5", { exact: true }).click();
     await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
     await expect(rate).toContainText("1 PHA = $0.25");
     await expect(followed).not.toHaveAttribute("title", before ?? "");
@@ -558,9 +558,9 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(scenes.getByTestId("webhook-event").filter({ hasText: "deposit.reversed" })).toBeVisible();
   await expect(product.locator(".pp-payments")).toContainText("25 PHA");
   // The customer sees each payment at the rate it was credited at.
-  await expect(product.getByTestId("top-up").first()).toContainText("25 Test PHA");
-  await expect(product.getByTestId("top-up").first()).toContainText("Credited at $0.25 / PHA, then reversed");
-  await openTab(scenes, "Payments");
+  await expect(product.getByTestId("credit").first()).toContainText("25 Test PHA");
+  await expect(product.getByTestId("credit").first()).toContainText("Credited at $0.25 / PHA, then reversed");
+  await openTab(scenes, "Credits");
   const lines = scenes.getByTestId("ledger-line");
   await expect(lines.filter({ hasText: "deposit.credited" })).toContainText("+$6.25");
   // A reversal takes the whole bonus back with the credit.
@@ -601,7 +601,7 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await expect(helper.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
   await expect(circle).toBeVisible();
   await mintUsdc(env("PAYER_ADDRESS"), parseUnits("100", 6));
-  await product.getByText("$5.00", { exact: true }).click();
+  await product.getByText("$5", { exact: true }).click();
   const usdcRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
   expect((await usdcRequest).postDataJSON()).toEqual({ amount: 500, chain_id: sepolia.id, asset: "usdc" });
@@ -614,13 +614,13 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await expect(product.getByTestId("balance")).toHaveText("$5.00", { timeout: 10_000 });
   await expect(product.getByTestId("bonus-credited")).toHaveCount(0);
   expect(await tokenBalance(env("PAYER_ADDRESS"), { token: env("USDC_ADDRESS") })).toBe(parseUnits("95", 6));
-  await openTab(scenes, "Payments");
+  await openTab(scenes, "Credits");
   await expect(scenes.getByTestId("payment").first()).toContainText("5 USDC");
   await expect(scenes.getByTestId("payment").first()).toContainText("at $1.00 / USDC");
 
   // Base Sepolia: its own token list and faucets; test PHA mints there, from the wallet on that
   // network, and a PHA quote there earns the bonus, at staging's rate, formatted.
-  await product.getByRole("button", { name: "Start a new top-up" }).click();
+  await product.getByRole("button", { name: "Add more credits" }).click();
   await chooseNetwork(page, product, "Base Sepolia");
   const tokens = product.getByRole("radiogroup", { name: "Token" });
   await expect(tokens.getByRole("radio")).toHaveCount(1);

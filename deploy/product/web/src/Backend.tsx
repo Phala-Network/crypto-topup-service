@@ -70,14 +70,14 @@ export function Backend({
         <div className="px-3 py-3" aria-live="off">
           <EventStream timeline={timeline} loading={selected?.id ?? null} />
         </div>
-        <Tabs defaultValue="payments" className="gap-0 border-t">
+        <Tabs defaultValue="credits" className="gap-0 border-t">
           <TabsList
             variant="line"
             aria-label="Backend"
             className="h-11! w-full justify-start gap-2 overflow-x-auto rounded-none border-b px-3.5 py-0 sm:gap-5 sm:px-5"
           >
-            <Tab value="payments" count={account?.payments.length}>
-              Payments
+            <Tab value="credits" count={account?.payments.length}>
+              Credits
             </Tab>
             <Tab value="refunds" count={timeline?.refunds.length}>
               Refunds
@@ -86,15 +86,10 @@ export function Backend({
             <Tab value="api" count={timeline === null ? undefined : timeline.api.length + timeline.events.length}>
               API
             </Tab>
-            <Tab value="trust">
-              Trust
-              {trust?.attestation.binding_verified === true && (
-                <ShieldCheck className="size-3.5 text-success" aria-label="attestation verified" />
-              )}
-            </Tab>
+            <Tab value="trust">Trust</Tab>
           </TabsList>
-          <TabsContent value="payments" className="p-5">
-            <PaymentsTab
+          <TabsContent value="credits" className="p-5">
+            <CreditsTab
               account={account}
               selected={selected}
               address={address}
@@ -149,10 +144,10 @@ function MetaItem({ label, value, testId }: { label: string; value: string; test
 
 function Tab({ value, count, children }: { value: string; count?: number | undefined; children: ReactNode }) {
   return (
-    <TabsTrigger value={value} className="h-full flex-none px-0 text-[0.8125rem] after:bottom-[-1px]!">
+    <TabsTrigger value={value} className="h-full flex-none px-0 text-sm after:bottom-[-1px]!">
       {children}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-muted px-1.5 font-mono text-[0.625rem] text-muted-foreground tabular-nums">
+        <span className="rounded-full bg-muted px-1.5 font-mono text-xs text-muted-foreground tabular-nums">
           {count}
         </span>
       )}
@@ -177,7 +172,7 @@ function ViewButton({ selected, id, onClick }: { selected: boolean; id: string; 
   );
 }
 
-function PaymentsTab({
+function CreditsTab({
   account,
   selected,
   address,
@@ -190,12 +185,14 @@ function PaymentsTab({
   networks: Network[] | undefined;
   onSelect: (selection: Selection) => void;
 }) {
+  // One empty state for the panel until the first payment.
+  if (account === null || (account.payments.length === 0 && account.ledger.length === 0 && address === null)) {
+    return <Empty>No credits yet. Pay with crypto in the product to follow a payment here.</Empty>;
+  }
   return (
     <div className="flex flex-col gap-8">
-      <section aria-label="Payments" className="flex min-w-0 flex-col text-xs">
-        {account === null || account.payments.length === 0 ? (
-          <Empty>No top-ups yet.</Empty>
-        ) : (
+      {account.payments.length > 0 && (
+        <section aria-label="Credits" className="flex min-w-0 flex-col text-xs">
           <Table className={cn(TABLE, "[&_td]:align-top [&_td]:leading-5")}>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -277,22 +274,20 @@ function PaymentsTab({
               })}
             </TableBody>
           </Table>
-        )}
-      </section>
+        </section>
+      )}
       <div className={cn("grid gap-8", address !== null && "@4xl/console:grid-cols-2")}>
-        <Subsection
-          title="How this balance adds up"
-          id="balance-lines-title"
-          aside={
-            <InfoTip label="About the bonus lines">
-              A bonus is this demo merchant's own promotion, not a Phala Pay feature: its backend adds a line of its own
-              on deposit.credited, and takes the same share back when a refund or reversal nets the credit down.
-            </InfoTip>
-          }
-        >
-          {account === null || account.ledger.length === 0 ? (
-            <Empty>Nothing credited yet.</Empty>
-          ) : (
+        {account.ledger.length > 0 && (
+          <Subsection
+            title="How this balance adds up"
+            id="balance-lines-title"
+            aside={
+              <InfoTip label="About the bonus lines">
+                A bonus is this demo merchant's own promotion, not a Phala Pay feature: its backend adds a line of its own
+                on deposit.credited, and takes the same share back when a refund or reversal nets the credit down.
+              </InfoTip>
+            }
+          >
             <Table className={TABLE}>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
@@ -333,9 +328,9 @@ function PaymentsTab({
                 ))}
               </TableBody>
             </Table>
-          )}
-        </Subsection>
-        {account !== null && address !== null && (
+          </Subsection>
+        )}
+        {address !== null && (
           <AddressView
             account={account}
             address={address}
@@ -375,7 +370,7 @@ function AddressView({
           <Badge className="bg-success/15 text-success" data-testid="deposit-address-verified">
             <ShieldCheck aria-hidden="true" />
             Verified
-            <InfoTip label="About the address check" className="translate-y-0 text-success">
+            <InfoTip label="About the address check" className="text-success">
               The product's SDK recomputed {view.address === null ? "every network's address" : "this address"} from
               its pinned account, factory, implementation, and treasury before showing it.
             </InfoTip>
@@ -470,7 +465,7 @@ function TrustDetails({ trust, networks }: { trust: Trust | null; networks: Netw
   return (
     <div className="flex flex-col gap-6 text-xs">
       <div className="flex flex-wrap items-center gap-3">
-        <h3 className="text-[0.8125rem] font-medium">Why you can trust Phala Pay</h3>
+        <h3 className="text-sm font-medium">Why you can trust Phala Pay</h3>
         {attestation?.binding_verified === true && (
           <Badge className="bg-success/15 text-success">Attestation verified</Badge>
         )}
@@ -538,7 +533,7 @@ function TrustDetails({ trust, networks }: { trust: Trust | null; networks: Netw
 function TrustItem({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-2 rounded-lg bg-card p-4" aria-label={title}>
-      <h4 className="flex items-center gap-2 text-[0.8125rem] font-medium [&_svg]:size-4 [&_svg]:text-muted-foreground">
+      <h4 className="flex items-center gap-2 text-sm font-medium [&_svg]:size-4 [&_svg]:text-muted-foreground">
         {icon}
         {title}
       </h4>
