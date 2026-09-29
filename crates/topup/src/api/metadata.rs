@@ -178,7 +178,14 @@ pub async fn update<'c>(
         return Ok(false);
     };
     if let Some(update) = update {
-        let merged = update.apply(current.clone())?;
+        let merged = match update.apply(current.clone()) {
+            Ok(merged) => merged,
+            Err(error) => {
+                // Awaited, so the object is unlocked before the refusal is answered.
+                transaction.rollback().await?;
+                return Err(error);
+            }
+        };
         if merged != current {
             let announced = match object.updated_event(id) {
                 Some((event_type, event_object)) => {
