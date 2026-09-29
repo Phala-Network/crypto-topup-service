@@ -63,10 +63,10 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string 
   },
 };
 
-// A step's line in columns: its time, its dot, its title, the time since sending, and the opener;
-// the title's column is capped so the durations stay next to the titles on a wide console.
+// A step's line in columns: its time, its dot, its title, the time since sending (right-aligned),
+// and the opener.
 const STEP_GRID =
-  "grid grid-cols-[3.5rem_1rem_minmax(0,17rem)_2.75rem_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,17rem)_3.5rem_0.875rem] sm:gap-x-3";
+  "grid grid-cols-[3.5rem_1rem_minmax(0,1fr)_auto_0.875rem] items-center gap-x-2 sm:grid-cols-[4rem_1rem_minmax(0,1fr)_auto_0.875rem] sm:gap-x-3";
 // Where a step's opened details start: under its title (px-2, 4rem, 1rem, and two gaps); on a
 // phone, under its time, to keep the details' width.
 const STEP_INDENT = "pl-2 sm:pl-[calc(0.5rem+5rem+1.5rem)]";
@@ -115,8 +115,19 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
   }
   return (
     <ol className="flex flex-col" aria-label="Payment timeline">
-      {timeline.steps.map((step) => (
-        <StreamStep key={step.key} step={step} sent={timeline.sent?.at ?? null} token={token} />
+      {timeline.steps.map((step, index) => (
+        <StreamStep
+          key={step.key}
+          step={step}
+          sent={timeline.sent?.at ?? null}
+          // The current step shows when it started: when the step before it completed.
+          since={
+            step.state === "current" && step.at === null
+              ? Math.max(0, ...timeline.steps.slice(0, index).map((each) => each.at ?? 0)) || null
+              : null
+          }
+          token={token}
+        />
       ))}
     </ol>
   );
@@ -126,8 +137,7 @@ function StepDot({ state }: { state: Step["state"] }) {
   if (state === "current") {
     return (
       <span className="relative flex size-4 items-center justify-center" aria-hidden="true">
-        <span className="absolute size-4 rounded-full bg-brand/30 motion-safe:animate-ping" />
-        <span className="relative size-2.5 rounded-full bg-brand shadow-[0_0_12px_var(--brand)]" />
+        <span className="size-2.5 rounded-full bg-brand ring-2 ring-primary/30" />
       </span>
     );
   }
@@ -154,7 +164,17 @@ interface StepToken {
   decimals: number;
 }
 
-function StreamStep({ step, sent, token }: { step: Step; sent: number | null; token: StepToken }) {
+function StreamStep({
+  step,
+  sent,
+  since = null,
+  token,
+}: {
+  step: Step;
+  sent: number | null;
+  since?: number | null;
+  token: StepToken;
+}) {
   const copy = STEP_COPY[step.key];
   // Seconds since the payment was sent, for the steps after it.
   const elapsed =
@@ -183,6 +203,10 @@ function StreamStep({ step, sent, token }: { step: Step; sent: number | null; to
           <span className="font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
             {step.at !== null ? (
               <time dateTime={new Date(step.at * 1000).toISOString()}>{clock(step.at)}</time>
+            ) : since !== null ? (
+              <time dateTime={new Date(since * 1000).toISOString()} title="Waiting since">
+                {clock(since)}
+              </time>
             ) : (
               <span className="text-muted-foreground/40" aria-hidden="true">
                 --:--:--
@@ -194,14 +218,14 @@ function StreamStep({ step, sent, token }: { step: Step; sent: number | null; to
             className={cn(
               "min-w-0 text-[0.8125rem] text-pretty",
               step.state === "upcoming" && "text-muted-foreground",
-              step.state === "current" && "font-medium text-brand",
+              step.state === "current" && "font-medium",
               step.state === "failed" && "text-destructive",
             )}
           >
             {copy.title}
             <span className="sr-only">, {stateLabel(step.state)}</span>
           </span>
-          <span className="text-right font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
+          <span className="ml-auto text-right font-mono text-[0.6875rem] text-muted-foreground tabular-nums">
             {elapsed !== null && `+${duration(elapsed)}`}
           </span>
           <ChevronDown
@@ -321,7 +345,7 @@ export function EventsLog({ events }: { events: WebhookEvent[] }) {
           <TableBody>
             {events.map((event) => (
               <TableRow key={event.id} data-testid="webhook-event">
-                <TableCell className="font-mono text-brand">{event.type}</TableCell>
+                <TableCell className="font-mono text-muted-foreground">{event.type}</TableCell>
                 <TableCell className="font-mono text-muted-foreground" title={event.id}>
                   {short(event.id)}
                 </TableCell>

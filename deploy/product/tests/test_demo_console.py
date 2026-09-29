@@ -170,7 +170,9 @@ def _list(url: str, data: list[dict[str, Any]]) -> dict[str, Any]:
     return {"object": "list", "url": url, "has_more": False, "data": data}
 
 
-def _config_asset(asset: str, chain_id: int, contract: str) -> dict[str, Any]:
+def _config_asset(
+    asset: str, chain_id: int, contract: str, pricing: str = "spot"
+) -> dict[str, Any]:
     return {
         "asset": asset,
         "chain_id": chain_id,
@@ -180,7 +182,7 @@ def _config_asset(asset: str, chain_id: int, contract: str) -> dict[str, Any]:
         "max_deposit_atomic": "1" + "0" * 24,
         "min_amount": 100,
         "min_refund_atomic": "1" + "0" * 18,
-        "pricing": "spot",
+        "pricing": pricing,
         "quote_spread_bps": 50,
         "quote_tolerance_bps": 100,
         "quote_ttl_seconds": 900,
@@ -204,7 +206,7 @@ class Service:
         # product's pins do not cover.
         self.assets = [
             _config_asset("pha", 11155111, TOKEN),
-            _config_asset("usdc", 11155111, "0x" + "55" * 20),
+            _config_asset("usdc", 11155111, "0x" + "55" * 20, "stablecoin"),
             _config_asset("pha", 1, "0x" + "66" * 20),
         ]
 
@@ -405,12 +407,15 @@ def test_offers_the_services_tokens_by_network_on_the_products_chains(
         "mintable": True,
         "faucet": None,
         "bonus_bps": 1000,
+        # No quote locked a rate yet.
+        "rate": None,
     }
     usdc = network["assets"][1]
-    assert (usdc["mintable"], usdc["faucet"], usdc["bonus_bps"]) == (
+    assert (usdc["mintable"], usdc["faucet"], usdc["bonus_bps"], usdc["rate"]) == (
         False,
         "https://faucet.circle.com",
         0,
+        "1.00000000",
     )
     # Cached: the service's config is read once.
     console.handle("GET", "/api/assets", WEBSITE, b"")
@@ -472,11 +477,26 @@ def test_a_quote_is_for_an_offered_network_and_token_and_returns_its_locked_rate
         "25.00000000",
         NOW + 900,
     )
-    assert body["amount_atomic"] == "100"
+    assert (body["amount"], body["amount_atomic"]) == (2500, "100")
     # The unpaid quote's row carries its asset and rate.
     _, account = _get(console, cookie, "account")
     [row] = account["payments"]
     assert (row["asset"], row["exchange_rate"]) == ("usdc", "25.00000000")
+
+
+def test_a_spot_token_shows_the_rate_its_latest_quote_locked(
+    demo: tuple[DemoConsole, Service],
+) -> None:
+    console, _ = demo
+    cookie = _account(console)
+    _create_quote(console, cookie)
+    response = console.handle("GET", "/api/assets", WEBSITE, b"")
+    [network] = json.loads(response.body)["networks"]
+    # The service publishes no price: PHA shows its latest locked rate, USDC a stablecoin's 1.00.
+    assert [(a["asset"], a["rate"]) for a in network["assets"]] == [
+        ("pha", "25.00000000"),
+        ("usdc", "1.00000000"),
+    ]
 
 
 def test_an_expired_quote_without_payment_fails_at_the_transfer(

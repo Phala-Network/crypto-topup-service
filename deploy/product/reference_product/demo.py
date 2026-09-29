@@ -319,7 +319,7 @@ class DemoConsole:
         if name == "trust" and method == "GET":
             return _json(HTTPStatus.OK, self._trust_view())
         if name == "assets" and method == "GET":
-            return _json(HTTPStatus.OK, {"networks": self._payable_networks()})
+            return _json(HTTPStatus.OK, {"networks": self._networks_with_rates()})
         account = _cookie_account(headers.get("cookie", ""))
         if name == "account" and method == "GET":
             cookie = None
@@ -533,6 +533,7 @@ class DemoConsole:
                 # the quote only when the service's address is this one.
                 "expected_address": quote.address,
                 "order_id": order_id,
+                "amount": quote.amount,
                 # The price the quote locks until `expires_at`, in USD per token.
                 "chain_id": quote.chain_id,
                 "asset": quote.asset,
@@ -947,6 +948,36 @@ class DemoConsole:
         with self._lock:
             self._networks = (now, networks)
         return networks
+
+    def _networks_with_rates(self) -> list[dict[str, Any]]:
+        """`_payable_networks`, each token with its `rate` for display: 1.00 for a stablecoin,
+        else the rate the latest quote for it locked within the hour (the service publishes no
+        price feed), or `None`."""
+        since = self._clock() - 3600
+        with self.ledger.transaction() as db:
+            rows = db.execute(
+                "SELECT chain_id, asset, exchange_rate FROM demo_quotes "
+                "WHERE created >= ? AND chain_id IS NOT NULL ORDER BY created DESC",
+                (since,),
+            ).fetchall()
+        latest: dict[tuple[int, str], str] = {}
+        for chain_id, asset, rate in rows:
+            latest.setdefault((chain_id, asset), rate)
+        return [
+            {
+                **network,
+                "assets": [
+                    {
+                        **asset,
+                        "rate": "1.00000000"
+                        if asset["pricing"] == "stablecoin"
+                        else latest.get((network["chain_id"], asset["asset"])),
+                    }
+                    for asset in network["assets"]
+                ],
+            }
+            for network in self._payable_networks()
+        ]
 
     # Trust --------------------------------------------------------------------------------------
 

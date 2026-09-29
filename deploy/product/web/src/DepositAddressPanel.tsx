@@ -45,7 +45,7 @@ export function DepositAddressPanel({
 
   if (created === null || created.client_secret === undefined) {
     return (
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-6">
         {picker}
         <div className="flex flex-col gap-3">
           <Button

@@ -171,7 +171,7 @@ async function expectPaymentOptions(product: Locator) {
   await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
   const rows = product.getByTestId("token-option");
   await expect(rows.filter({ hasText: "PHA" })).toContainText("+10% bonus");
-  await expect(rows.filter({ hasText: "USDC" })).toContainText("Stablecoin · $1.00");
+  await expect(rows.filter({ hasText: "USDC" }).getByTestId("token-price")).toHaveText("$1.00");
   await expect(rows.filter({ hasText: "USDC" })).not.toContainText("bonus");
 }
 
@@ -257,7 +257,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "Non-custodial crypto payments with a Stripe-shaped API",
   );
-  await expect(page.getByRole("link", { name: /Self-host it/ })).toHaveAttribute(
+  await expect(page.getByRole("navigation", { name: "Site" }).getByRole("link", { name: "Self-hosting" })).toHaveAttribute(
     "href",
     "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md",
   );
@@ -301,7 +301,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const created = await openStep(timeline, "quote_created");
   await expect(created).toContainText("1 PHA = $0.25");
   await expect(created).toContainText("80 PHA");
-  const order = (await scenes.getByText(/^Order order_[0-9a-f]{12}/).textContent())?.match(/order_[0-9a-f]{12}/)?.[0];
+  const order = (await scenes.getByTestId("meta-order").getAttribute("title"))?.match(/^order_[0-9a-f]{12}$/)?.[0];
   expect(order).toBeDefined();
   // Nothing of the backend shows in the product.
   await expect(product).not.toContainText("order_");
@@ -310,11 +310,16 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
   await expect(product.getByText(/^Transaction sent:/)).toBeVisible();
   await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
-  await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00");
+  // One confirmation: the credit, the demo merchant's bonus, the total, and the transaction.
+  const confirmation = product.getByTestId("payment-credited");
+  await expect(confirmation).toContainText("Payment credited");
+  await expect(confirmation).toContainText("$20.00");
   // Nothing pending once credited: the locked rate is gone with the countdown.
   await expect(rate).toHaveCount(0);
   // The demo merchant's +10% PHA bonus, a line of its own: $20.00 and $2.00.
   await expect(product.getByTestId("bonus-credited")).toContainText("+$2.00", { timeout: 10_000 });
+  await expect(confirmation).toContainText("Total$22.00");
+  await expect(confirmation.getByRole("link")).toHaveAttribute("href", /\/tx\/0x[0-9a-f]{64}$/);
   await expect(product.getByTestId("balance")).toHaveText("$22.00", { timeout: 10_000 });
   // Real times: the block's, then each step's, with the elapsed time since sending.
   const credited = await openStep(timeline, "credited");
@@ -479,7 +484,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
   // The backend follows the payment as it arrives.
   const payment = scenes.getByTestId("address-payment").first();
   await expect(payment).toContainText("25 PHA");
-  await expect(payment.getByRole("button")).toHaveText("Following");
+  await expect(payment.getByRole("button", { name: /^View/ })).toHaveAttribute("aria-pressed", "true");
   const timeline = scenes.getByRole("list", { name: "Payment timeline" });
   await expectComplete(timeline, ["sent", "received", "credited", "webhook_received"]);
 
@@ -561,7 +566,7 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.screenshot({ path: testInfo.outputPath("usdc-quote.png") });
   await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
-  await expect(product.getByRole("status").first()).toHaveText("Payment credited: $5.00", { timeout: 60_000 });
+  await expect(product.getByTestId("payment-credited")).toContainText("$5.00", { timeout: 60_000 });
   await expect(product.getByTestId("balance")).toHaveText("$5.00", { timeout: 10_000 });
   await expect(product.getByTestId("bonus-credited")).toHaveCount(0);
   expect(await tokenBalance(env("PAYER_ADDRESS"), { token: env("USDC_ADDRESS") })).toBe(parseUnits("95", 6));
@@ -594,7 +599,7 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await expect(product.getByTestId("locked-rate")).toContainText("1 PHA = $0.06041");
   await expect(product.getByTestId("testnet-badge")).toBeVisible();
   await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
-  await expect(product.getByRole("status").first()).toHaveText("Payment credited: $20.00", { timeout: 60_000 });
+  await expect(product.getByTestId("payment-credited")).toContainText("$20.00", { timeout: 60_000 });
   await expect(product.getByTestId("bonus-credited")).toContainText("+$2.00", { timeout: 10_000 });
   await expect(product.getByTestId("balance")).toHaveText("$27.00", { timeout: 10_000 });
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
