@@ -173,7 +173,9 @@ pub enum ChainError {
         /// Inclusive range end.
         to_block: u64,
     },
-    /// The provider's finalized head moved backwards and it is now unhealthy.
+    /// The provider answered a finalized head below one it answered before: a load-balanced
+    /// gateway serving a node that has not caught up. The stale head is refused and the read is
+    /// retried; the next answer at or above the highest is used.
     #[error("provider finalized head regressed from {previous} to {current}")]
     FinalizedHeadRegressed {
         /// Highest finalized head previously observed.
@@ -181,10 +183,7 @@ pub enum ChainError {
         /// Lower finalized head returned by the provider.
         current: u64,
     },
-    /// A previous finalized-head regression permanently marked the provider unhealthy.
-    #[error("provider is unhealthy after a finalized-head regression")]
-    ProviderUnhealthy,
-    /// The provider health lock was poisoned.
+    /// The finalized-head guard lock was poisoned.
     #[error("provider health state unavailable")]
     HealthStateUnavailable,
     /// The chain moved between two reads that must describe the same block, such as a log and its
@@ -286,21 +285,22 @@ pub trait ChainReader: Send + Sync {
     ) -> impl Future<Output = Result<u64, ChainError>> + Send;
 }
 
+/// The highest finalized head a reader has returned, so it never returns a lower one.
+///
+/// A load-balanced gateway can answer from nodes that disagree on `finalized` for minutes (Base
+/// Sepolia's Tenderly gateway alternated between two heads 156 blocks apart), so a lower answer is
+/// a stale node, not a finality violation: it is refused each time, and never marks the provider
+/// unusable.
 #[derive(Debug, Default)]
-struct ProviderHealth {
+struct FinalizedGuard {
     last_finalized: Option<u64>,
-    unhealthy: bool,
 }
 
-impl ProviderHealth {
+impl FinalizedGuard {
     fn observe(&mut self, current: u64) -> Result<(), ChainError> {
-        if self.unhealthy {
-            return Err(ChainError::ProviderUnhealthy);
-        }
         if let Some(previous) = self.last_finalized
             && current < previous
         {
-            self.unhealthy = true;
             return Err(ChainError::FinalizedHeadRegressed { previous, current });
         }
         self.last_finalized = Some(current);
@@ -687,7 +687,7 @@ impl EvmClient {
 /// receipt position and its transaction's sender and nonce, read once per transaction.
 pub struct FinalizedReader {
     client: Arc<EvmClient>,
-    health: Mutex<ProviderHealth>,
+    finalized_guard: Mutex<FinalizedGuard>,
     block_times: Mutex<BlockTimes>,
     /// Block-wide log indexes of a receipt's logs, in receipt order, by `(tx_hash, block_hash)`.
     receipt_logs: Mutex<FifoCache<(B256, B256), Vec<u64>>>,
@@ -755,7 +755,7 @@ impl FinalizedReader {
     pub fn new(client: Arc<EvmClient>) -> Self {
         Self {
             client,
-            health: Mutex::new(ProviderHealth::default()),
+            finalized_guard: Mutex::new(FinalizedGuard::default()),
             block_times: Mutex::new(BlockTimes::default()),
             receipt_logs: Mutex::new(FifoCache::default()),
             origins: Mutex::new(FifoCache::default()),
@@ -1104,15 +1104,6 @@ fn is_transfer(log: &Log) -> bool {
 
 impl ChainReader for FinalizedReader {
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
-        {
-            let health = self
-                .health
-                .lock()
-                .map_err(|_| ChainError::HealthStateUnavailable)?;
-            if health.unhealthy {
-                return Err(ChainError::ProviderUnhealthy);
-            }
-        }
         let block = self
             .client
             .provider
@@ -1122,7 +1113,7 @@ impl ChainReader for FinalizedReader {
             .ok_or(ChainError::MissingField("finalized block"))?;
         let current = block.header.inner.number;
         let time = utc_timestamp(block.header.inner.timestamp)?;
-        self.health
+        self.finalized_guard
             .lock()
             .map_err(|_| ChainError::HealthStateUnavailable)?
             .observe(current)?;
@@ -1327,6 +1318,7 @@ fn block_windows(from_block: u64, to_block: u64) -> Result<Vec<(u64, u64)>, Chai
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{address, b256};
     use serde_json::Value;
 
     use super::*;
@@ -1355,19 +1347,152 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provider_is_permanently_unhealthy_after_finalized_head_regresses() {
-        let mut health = ProviderHealth::default();
-        assert_eq!(health.observe(100), Ok(()));
-        assert_eq!(health.observe(101), Ok(()));
-        assert_eq!(
-            health.observe(99),
-            Err(ChainError::FinalizedHeadRegressed {
-                previous: 101,
-                current: 99,
-            })
+    /// Answers recorded from Base Sepolia's provider A (the Tenderly gateway) on 2026-09-29.
+    fn base_sepolia(name: &str) -> Value {
+        let json = match name {
+            "block-47445875" => {
+                include_str!("../../../tests/fixtures/base-sepolia/block-47445875.json")
+            }
+            "finalized-47446540" => {
+                include_str!("../../../tests/fixtures/base-sepolia/finalized-47446540.json")
+            }
+            "finalized-47446696" => {
+                include_str!("../../../tests/fixtures/base-sepolia/finalized-47446696.json")
+            }
+            "receipt" => include_str!("../../../tests/fixtures/base-sepolia/receipt.json"),
+            "transaction" => include_str!("../../../tests/fixtures/base-sepolia/transaction.json"),
+            "transfer-logs" => {
+                include_str!("../../../tests/fixtures/base-sepolia/transfer-logs.json")
+            }
+            other => panic!("no fixture {other}"),
+        };
+        serde_json::from_str(json).expect("fixture is JSON")
+    }
+
+    /// Serves each JSON-RPC method its recorded answer, and the `finalized` block reads the
+    /// recorded heads in turn.
+    async fn replay_node(
+        answers: Vec<(&'static str, Value)>,
+        finalized: Vec<Value>,
+    ) -> (
+        FinalizedReader,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let answers = Arc::new(answers.into_iter().collect::<HashMap<_, _>>());
+        let finalized = Arc::new(Mutex::new(VecDeque::from(finalized)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let node = Router::new().route(
+            "/rpc",
+            post(move |Json(request): Json<Value>| async move {
+                let method = request["method"].as_str().unwrap_or_default();
+                let result =
+                    if method == "eth_getBlockByNumber" && request["params"][0] == "finalized" {
+                        finalized.lock().expect("finalized answers").pop_front()
+                    } else {
+                        answers.get(method).cloned()
+                    };
+                Json(match result {
+                    Some(result) => {
+                        serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+                    }
+                    None => serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "error": {
+                        "code": -32601, "message": format!("{method} not recorded")}}),
+                })
+            }),
         );
-        assert_eq!(health.observe(102), Err(ChainError::ProviderUnhealthy));
+        let server = tokio::spawn(async move { axum::serve(listener, node).await });
+        let client = EvmClient::new(&format!("http://{address}/rpc"))
+            .expect("production adapter accepts URL")
+            .with_provider("base-sepolia-a");
+        (FinalizedReader::new(Arc::new(client)), server)
+    }
+
+    // On 2026-09-29 the gateway answered `finalized` 47446696, then 47446540 for minutes, while
+    // provider B answered 47446696 with the same hash: a lagging node, not a finality violation.
+    // Marking the provider unusable for good stopped Base Sepolia's scanner.
+    #[tokio::test]
+    async fn a_gateway_flapping_between_finalized_heads_is_refused_then_used_again() {
+        let (reader, server) = replay_node(
+            Vec::new(),
+            vec![
+                base_sepolia("finalized-47446696"),
+                base_sepolia("finalized-47446540"),
+                base_sepolia("finalized-47446540"),
+                base_sepolia("finalized-47446696"),
+            ],
+        )
+        .await;
+        let mut heads = Vec::new();
+        for _ in 0..4 {
+            heads.push(reader.finalized_head().await.map(|head| head.number));
+        }
+        server.abort();
+
+        let stale = Err(ChainError::FinalizedHeadRegressed {
+            previous: 47_446_696,
+            current: 47_446_540,
+        });
+        assert_eq!(
+            heads,
+            vec![Ok(47_446_696), stale.clone(), stale, Ok(47_446_696)]
+        );
+    }
+
+    // The incident's payment, read as the per-block scan and the confirm step read it: a type-2
+    // transaction whose OP-stack receipt carries the L1 fee fields, with `blockTimestamp` on the log.
+    #[tokio::test]
+    async fn base_sepolia_transfer_decodes_from_recorded_answers() {
+        let answers = vec![
+            ("eth_getLogs", base_sepolia("transfer-logs")),
+            ("eth_getTransactionReceipt", base_sepolia("receipt")),
+            ("eth_getTransactionByHash", base_sepolia("transaction")),
+            ("eth_getBlockByHash", base_sepolia("block-47445875")),
+        ];
+        let (scanner, scanner_node) = replay_node(answers.clone(), Vec::new()).await;
+        let (confirm, confirm_node) = replay_node(answers, Vec::new()).await;
+        let recipient = address!("0xfa810b787da3f2ca13fc13082762e78c4104ab10");
+        let tx_hash = b256!("0x4b6cf1a33019535930118d535e51966a0405d78874213f5e34e5df2eb223902f");
+        let logs = scanner
+            .transfer_logs_to(&[recipient], 47_445_875, 47_445_875)
+            .await;
+        let lookup = confirm.receipt_transfer(tx_hash, 0).await;
+        scanner_node.abort();
+        confirm_node.abort();
+
+        let block_hash =
+            b256!("0xcac908304ca374430510276e42beb9f0f28596b6d925097e9b192913c6d195a2");
+        let payer = address!("0x1d49cc344c26be92c0f941064412dd258f026b96");
+        let transfer = TransferLog {
+            tx_hash,
+            receipt_log_index: 0,
+            log_index: 35,
+            block_number: 47_445_875,
+            block_hash,
+            block_time: DateTime::parse_from_rfc3339("2026-09-29T05:33:58Z")
+                .expect("time")
+                .into(),
+            tx_from: payer,
+            tx_nonce: 4,
+            token: address!("0x1a6f260377e42ead1418c7c1afdfd5de371a9284"),
+            from: payer,
+            to: recipient,
+            amount: AtomicAmount::new(U256::from(81_209_600_000_000_000_000_u128)),
+        };
+        assert_eq!(logs.expect("transfer logs"), vec![transfer.clone()]);
+        assert_eq!(
+            lookup.expect("receipt lookup"),
+            ReceiptLookup::Included {
+                block_number: 47_445_875,
+                block_hash,
+                transfer: Some(Box::new(transfer)),
+            }
+        );
     }
 
     #[test]

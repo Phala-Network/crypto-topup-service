@@ -515,7 +515,12 @@ deposits unswept. Every other factory event is ignored: anyone can call the fact
 advances after both are committed, so everything at or below it is indexed at finality. New
 addresses backfill from creation (the chain's committed cursor when the address is issued), all
 pending ones together in the same windows; quote, retired, and superseded addresses stay in the
-filter. Later
+filter. A `finalized` answer below one provider A gave before, or below the committed cursor, is a
+node behind the others (a load-balanced gateway can answer from both for minutes): the reader
+refuses it and the pass is retried, with the scanner's monitor unhealthy until the provider
+catches up. A chain's loops that stop on a failure they cannot retry stop the service, which the
+container restart policy restarts, so no chain goes unscanned while the others run; the scanner
+resumes from its committed cursor. Later
 option: Helios as one provider.
 
 **Not used, and why.** `eth_subscribe("newHeads")` bills per delivered header (Alchemy about 40
