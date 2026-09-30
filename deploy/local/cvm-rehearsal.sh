@@ -415,7 +415,9 @@ dc up -d --remove-orphans >/dev/null
     die "a changed configuration did not recreate topup"
 [[ "$(dc ps -q postgres)" == "$postgres_before" && "$(dc ps -q keys)" == "$keys_before" ]] ||
     die "a changed configuration recreated PostgreSQL or keys"
-dc exec -T topup cat /etc/topup/topup.yaml | jq -e '.admin_key.id == "rehearsal-admin/v1"' >/dev/null ||
+# The image is distroless (no `cat`): read the file through the API.
+docker cp "$(dc ps -q topup):/etc/topup/topup.yaml" - | tar -xO |
+    jq -e '.admin_key.id == "rehearsal-admin/v1"' >/dev/null ||
     die "topup does not read the re-rendered configuration"
 wait_for "GET /healthz after the upgrade" 90 healthy
 echo "ok: the changed configuration recreated topup only; PostgreSQL and keys kept their containers"
