@@ -240,7 +240,7 @@ mod tests {
             "ftp://rpc.example/v2",
             "rpc.example/v2",
             "https://user:pass@rpc.example/v2",
-            "https:///v2",
+            "https://:443/v2",
         ] {
             assert!(ProviderUrl::parse(template).is_err(), "{template}");
         }

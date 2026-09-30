@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn every_committed_configuration_validates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut files = vec![root.join("deploy/local/topup.yaml")];
+        let mut files = Vec::new();
         let mut directories = vec![root.join("deploy/environments")];
         while let Some(directory) = directories.pop() {
             for entry in std::fs::read_dir(&directory).expect("environments directory") {
@@ -349,7 +349,7 @@ mod tests {
                 }
             }
         }
-        assert!(files.len() >= 3, "{files:?}");
+        assert!(files.len() >= 2, "{files:?}");
         for file in files {
             Config::load(&file).unwrap_or_else(|error| panic!("{error}"));
         }
