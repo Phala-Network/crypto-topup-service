@@ -237,7 +237,7 @@ with the `images.json` and deploy kit (extracted to `kit/`) of the release to de
 docker run --rm -i "$(jq -r '."phala-pay"' images.json)" topup config check /dev/stdin \
   <production/topup/topup.yaml
 # applies deploy/compose-policy.jq
-kit/deploy/render.sh --images images.json --gateway-domain <the CVM's gateway> production/topup \
+kit/deploy/render.sh --images images.json --gateway-domain <gateway> production/topup \
   >/dev/null
 ```
 

@@ -145,12 +145,13 @@ Render with the live release (the `version` Deploy last deployed to the Environm
 [Verify a release](../docs/self-hosting.md#verify-a-release), the kit extracted to `kit/`. The
 environment directory is the live one, at the commit Deploy rendered: for example
 `production/topup` in the operator's environment repository, and for Phala's staging
-`deploy/environments/phala-network/staging/topup`. Pass a provisional origin: the instance's
-gateway host is known only after creation, and the variant needs no gateway domain.
+`deploy/environments/phala-network/staging/topup`; `ENV_DIR` below is that directory. Pass a
+provisional origin: the instance's gateway host is known only after creation, and the variant
+needs no gateway domain.
 
 ```sh
 kit/deploy/render.sh --restore-check --images images.json --origin https://pending.invalid \
-  <your environment directory> >restore-check.yml
+  "$ENV_DIR" >restore-check.yml
 ```
 
 The env holds the variant's sealed names, `RESTORE_AWS_ACCESS_KEY_ID` and
@@ -169,7 +170,7 @@ printf '%s\n' 'RESTORE_AWS_ACCESS_KEY_ID=<read-only key id>' \
   'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"
 docker pull <restore-check.yml's phala-pay image>   # --offline checks the configuration in it
 kit/deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
-  --environment-dir <your environment directory> --restore-check --offline
+  --environment-dir "$ENV_DIR" --restore-check --offline
 # after creating the instance:
 shred -u "$RESTORE_ENV_DIR/restore.env" && rm -rf "$RESTORE_ENV_DIR"
 ```
@@ -255,7 +256,7 @@ live_isolated() {
 
    ```sh
    kit/deploy/render.sh --restore-check --images images.json --origin "$RESTORE_URL" \
-     <your environment directory> >restore-check.yml
+     "$ENV_DIR" >restore-check.yml
    npx --yes phala@1.1.22 deploy --json --cvm-id "$RESTORE_CVM_ID" --compose restore-check.yml \
      --no-public-logs --no-public-sysinfo --wait
    ```
@@ -292,8 +293,7 @@ the failed instance, so only one instance holds the keys and archives into the p
 were sent the restore point in the reconciliation's step 2
 ([incident communication](runbooks/incident-communication.md)), and their API requests answer
 `503 service_restoring` until the unfreeze. Then render the service variant with the same kit
-(`kit/deploy/render.sh --images images.json --gateway-domain <the instance's gateway> <your
-environment directory>`).
+(`kit/deploy/render.sh --images images.json --gateway-domain <gateway> "$ENV_DIR"`).
 Its origin is the one merchants call and admin requests are signed for. Upgrade the instance to it
 (`phala deploy --cvm-id "$RESTORE_CVM_ID" --compose <file>`, no `-e`), and set `TOPUP_CVM_ID` to
 `$RESTORE_CVM_ID`. Then seal the service's names with the read-write credentials
