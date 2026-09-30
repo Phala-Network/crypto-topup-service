@@ -11,17 +11,16 @@ name: Deploy
 # on this repository's plan): whoever dispatches a run is accountable for it, and the run's
 # attested compose and verifier read-back are the audit trail. The images are those of a
 # successful Release images run on `main`, read from its `images.json` artifact, never typed in.
-# The CVM's env holds only the owner-sealed secrets (deploy/staging.env.example, or
-# deploy/product/staging.env.example: the product's Phala Pay API key), which never enter GitHub:
-# `provision` sends them empty, and the owner then seals them from their own machine (the run
-# summary prints the command); `upgrade` sends no env at all, so the sealed env stays. Every other
-# setting is public and attested: the target's render-compose.sh renders the Environment variables
-# below into the compose, so a changed value is a new compose hash and takes effect only through
-# `upgrade` (deploy/README.md, "Attested settings"). Each target's public origin is its custom
-# domain, https://vars.TOPUP_DOMAIN or https://vars.PRODUCT_DOMAIN, served by dstack-ingress in the
-# CVM (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for
-# it. The product's TOPUP_ORIGIN is topup's origin: it calls topup's API there and pins from there,
-# with its API key, its account's webhook key that verifies topup's webhooks.
+# Every setting is public, attested, and committed: the target's environment directory,
+# deploy/environments/<repository owner>/<Environment>/<target> (deploy/README.md, "Attested
+# settings"), which deploy/render.sh renders with the release's images and the CVM node's gateway.
+# A changed setting is a pull request and a new compose hash, in force only through `upgrade`. A
+# fork has no directory of Phala's owner, so it deploys nothing until it commits its own. The CVM's
+# env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references, which
+# never enter GitHub: `provision` sends them empty, and the owner then seals them from their own
+# machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed env
+# stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
+# (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for it.
 #
 # Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by
 # deploy/phala-cvm.sh:
@@ -87,78 +86,45 @@ jobs:
       RELEASE_RUN_ID: ${{ inputs.release_run_id }}
       # The owner-approved OS image (architecture §14); preflight refuses any other.
       DSTACK_OS_IMAGE: dstack-0.5.9
+      # Deployment state and the workspace preflight checks; not settings of the CVM.
       TOPUP_CVM_ID: ${{ vars.TOPUP_CVM_ID }}
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
-      # The attested settings (deploy/README.md, "Attested settings"); TOPUP_ORIGIN,
-      # PRODUCT_PUBLIC_URL, and the gateway domain come from step "Resolve the public URLs", and the
-      # RPC provider URLs from step "Take the RPC provider URLs from the Environment". The RPC URLs
-      # are published with the compose: a keyed provider's URL has `{key}` in place of the key,
-      # which the owner seals as TOPUP_RPC_<ID>_KEY. SENTRY_ENVIRONMENT is the Environment's name;
-      # an unset AWS_REGION, AWS_S3_FORCE_PATH_STYLE, or TOPUP_ADMIN_KID is derived in step "Check
-      # inputs and Environment settings". The product's RPC URLs, one per chain and keyless, are
-      # committed in deploy/product/docker-compose.yml, not settings.
-      AWS_ENDPOINT: ${{ vars.AWS_ENDPOINT }}
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_S3_FORCE_PATH_STYLE: ${{ vars.AWS_S3_FORCE_PATH_STYLE }}
-      WALG_S3_PREFIX: ${{ vars.WALG_S3_PREFIX }}
-      TOPUP_DOMAIN: ${{ vars.TOPUP_DOMAIN }}
-      PRODUCT_DOMAIN: ${{ vars.PRODUCT_DOMAIN }}
-      TOPUP_ADMIN_KID: ${{ vars.TOPUP_ADMIN_KID }}
-      TOPUP_ADMIN_PUBLIC_KEY: ${{ vars.TOPUP_ADMIN_PUBLIC_KEY }}
-      SENTRY_ENVIRONMENT: ${{ inputs.environment }}
-      PRODUCT_DRIVER_PUBLIC_KEY: ${{ vars.PRODUCT_DRIVER_PUBLIC_KEY }}
     steps:
-      # Fixes the target's files and settings for the later steps: DIR holds its compose,
-      # render-compose.sh, preflight.sh, and staging.env.example.
+      # Fixes the target's environment directory, preflight, and CVM for the later steps.
       - name: Check inputs and Environment settings
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           status=0
-          # Derived settings (deploy/README.md, "One-time setup", step 4); a set variable overrides.
-          if [[ "$AWS_ENDPOINT" =~ ^https://[0-9a-f]+\.r2\.cloudflarestorage\.com$ ]]; then
-            AWS_REGION=${AWS_REGION:-auto} AWS_S3_FORCE_PATH_STYLE=${AWS_S3_FORCE_PATH_STYLE:-true}
-          fi
-          TOPUP_ADMIN_KID=${TOPUP_ADMIN_KID:-admin/$DEPLOY_ENVIRONMENT-v1}
-          for name in AWS_REGION AWS_S3_FORCE_PATH_STYLE TOPUP_ADMIN_KID; do
-            echo "$name=${!name}" >>"$GITHUB_ENV"
-          done
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
+          [[ -n "$PHALA_WORKSPACE" ]] ||
+            { echo "::error::Environment variable PHALA_WORKSPACE is not set"; status=1; }
           case "$TARGET" in
             topup)
-              required="AWS_ENDPOINT AWS_REGION AWS_S3_FORCE_PATH_STYLE WALG_S3_PREFIX
-                TOPUP_DOMAIN TOPUP_ADMIN_KID TOPUP_ADMIN_PUBLIC_KEY"
-              dir=deploy cvm_id_variable=TOPUP_CVM_ID cvm_name=phala-pay-$DEPLOY_ENVIRONMENT
-              instance_type=tdx.medium domain_variable=TOPUP_DOMAIN
-              gateway_variable=TOPUP_GATEWAY_DOMAIN policy=""
-              images="TOPUP_IMAGE POSTGRES_WALG_IMAGE" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
+              preflight=deploy/preflight.sh variant=service cvm_id_variable=TOPUP_CVM_ID
+              cvm_name=phala-pay-$DEPLOY_ENVIRONMENT instance_type=tdx.medium
+              images="phala-pay postgres-walg" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
             product)
-              required="TOPUP_DOMAIN PRODUCT_DOMAIN PRODUCT_DRIVER_PUBLIC_KEY"
               [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
                 { echo "::error::the reference product deploys to staging only"; status=1; }
-              dir=deploy/product cvm_id_variable=STAGING_PRODUCT_CVM_ID cvm_name=phala-pay-staging-product
-              instance_type=tdx.small domain_variable=PRODUCT_DOMAIN
-              gateway_variable=PRODUCT_GATEWAY_DOMAIN policy=dstack-ingress:443
-              images=PRODUCT_IMAGE compose_name=docker-compose.product.yml ;;
+              preflight=deploy/product/preflight.sh variant=product cvm_id_variable=STAGING_PRODUCT_CVM_ID
+              cvm_name=phala-pay-staging-product instance_type=tdx.small
+              images=phala-pay-reference-product compose_name=docker-compose.product.yml ;;
             *) echo "::error::unknown target $TARGET"; exit 1 ;;
           esac
-          for name in PHALA_WORKSPACE $required; do
-            [[ -n "${!name}" ]] ||
-              { echo "::error::Environment variable $name is not set"; status=1; }
-          done
           existing=${!cvm_id_variable}
           {
-            echo "DIR=$dir"
+            # The owner's own settings; GHCR and GitHub names are lowercase.
+            echo "ENVIRONMENT_DIR=deploy/environments/${GITHUB_REPOSITORY_OWNER,,}/$DEPLOY_ENVIRONMENT/$TARGET"
+            echo "PREFLIGHT=$preflight"
+            echo "VARIANT=$variant"
             echo "CVM_ID_VARIABLE=$cvm_id_variable"
             echo "EXISTING_CVM_ID=$existing"
             echo "CVM_NAME=$cvm_name"
             echo "INSTANCE_TYPE=$instance_type"
-            echo "DOMAIN=${!domain_variable}"
-            echo "GATEWAY_VARIABLE=$gateway_variable"
-            echo "POLICY=$policy"
             echo "IMAGES=$images"
             echo "COMPOSE_NAME=$compose_name"
           } >>"$GITHUB_ENV"
@@ -214,10 +180,10 @@ jobs:
         run: |
           digest='^[a-z0-9]+([._/-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$'
           for name in $IMAGES; do
-            ref=$(jq -er --arg name "$name" '.[$name]' "$WORK/release/images.json")
+            ref=$(jq -er --arg name "$name" '.[$name]' "$WORK/release/images.json") ||
+              { echo "::error::the release's images.json has no $name"; exit 1; }
             [[ "$ref" =~ $digest ]] ||
               { echo "::error::$name of the release is not repository@sha256:<64 lowercase hex>"; exit 1; }
-            echo "$name=$ref" >>"$GITHUB_ENV"
           done
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -233,73 +199,42 @@ jobs:
         with:
           version: v1.8.3
 
-      # Every RPC provider the compose reads (deploy/README.md, "RPC providers") has its URL in the
-      # Environment variable of the same name, TOPUP_RPC_<ID>_URL, so a new chain's providers need
-      # no change here. Values are checked before they reach $GITHUB_ENV.
-      - name: Take the RPC provider URLs from the Environment
-        if: inputs.target == 'topup'
-        env:
-          ENVIRONMENT_VARIABLES: ${{ toJSON(vars) }}
-        run: |
-          status=0
-          names=$(grep -o '[$]{TOPUP_RPC_[A-Z0-9_]*_URL:-}' deploy/docker-compose.yml |
-            sed 's/^[$]{//; s/:-}$//' | sort -u)
-          for name in $names; do
-            value=$(jq -r --arg name "$name" '.[$name] // ""' <<<"$ENVIRONMENT_VARIABLES")
-            if [[ -z "$value" ]]; then
-              echo "::error::Environment variable $name is not set"
-              status=1
-            elif ! [[ "$value" =~ ^[[:graph:]]+$ ]]; then
-              echo "::error::Environment variable $name must be one URL, without spaces or line breaks"
-              status=1
-            else
-              echo "$name=$value" >>"$GITHUB_ENV"
-            fi
-          done
-          exit "$status"
-
-      # The public URL is the target's custom domain, whose CNAME target is the gateway of the CVM's
-      # node, which dstack-ingress names: from the existing CVM on an upgrade; a new CVM is rendered
-      # with a provisional value until its node is known (step "Set the values known only after
-      # provisioning"). The product also renders its own URL and topup's origin, the same
-      # Environment's domain.
-      - name: Resolve the public URLs
+      # The gateway of the CVM's node, the domain's CNAME target, which dstack-ingress names: from
+      # the existing CVM on an upgrade; a new CVM is rendered with a provisional value until its
+      # node is known (step "Set the values known only after provisioning").
+      - name: Resolve the gateway
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
+          [[ -d "$ENVIRONMENT_DIR" ]] || {
+            echo "::error::$ENVIRONMENT_DIR does not exist: commit this Environment's settings (docs/self-hosting.md)"
+            exit 1
+          }
           if [[ "$MODE" == provision ]]; then
             gateway=gateway.pending.invalid
           else
             deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
             gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm-before.json")
           fi
-          echo "$GATEWAY_VARIABLE=$gateway" | tee -a "$GITHUB_ENV"
-          echo "PUBLIC_URL=https://$DOMAIN" | tee -a "$GITHUB_ENV"
-          if [[ "$TARGET" == product ]]; then
-            echo "PRODUCT_PUBLIC_URL=https://$DOMAIN" | tee -a "$GITHUB_ENV"
-            echo "TOPUP_ORIGIN=https://$TOPUP_DOMAIN" | tee -a "$GITHUB_ENV"
-          fi
+          echo "GATEWAY=$gateway" | tee -a "$GITHUB_ENV"
 
-      # Exactly the names of the target's staging.env.example, all empty: the owner-sealed secrets.
-      # Database credentials are not inputs: the CVM derives them from dstack KMS. `upgrade` writes
-      # the file for preflight only and never sends it.
+      - name: Render the compose from this commit with the release's digests
+        run: |
+          deploy/render.sh --images "$WORK/release/images.json" --gateway-domain "$GATEWAY" \
+            "$ENVIRONMENT_DIR" >"$COMPOSE"
+          # The public URL is the domain dstack-ingress serves.
+          domain=$("$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --no-interpolate --format json |
+            jq -er '.services["dstack-ingress"].environment.DOMAIN')
+          { echo "DOMAIN=$domain"; echo "PUBLIC_URL=https://$domain"; } | tee -a "$GITHUB_ENV"
+
+      # The rendered compose's sealed names, all empty: the owner-sealed secrets. Database
+      # credentials are not inputs: the CVM derives them from dstack KMS. `upgrade` writes the file
+      # for preflight only and never sends it.
       - name: Write the unsealed env file
         run: |
-          if [[ "$TARGET" == product ]]; then
-            deploy/write-staging-env.sh --product "$ENV_FILE"
-          else
-            deploy/write-staging-env.sh "$ENV_FILE"
-          fi
-
-      - name: Render the compose from this commit with the release's digests and the settings
-        run: |
-          "$DIR/render-compose.sh" >"$COMPOSE"
-          # Every route's livemode must match its chain: production serves test mode on Sepolia
-          # beside live mode on mainnet, staging test mode only (deploy/check-route-modes.sh). Only
-          # topup's compose carries routes; the product target is staging-only.
-          if [[ "$TARGET" == topup ]]; then
-            deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
-          fi
+          "$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --variables |
+            awk 'NR > 1 && NF > 0 { print $1 "=" }' | sort >"$ENV_FILE"
+          echo "sealed names: $(cut -d= -f1 "$ENV_FILE" | tr '\n' ' ')"
 
       # topup: each route's contracts and asset on every RPC provider it names, anonymous image
       # pulls. product: each chain's RPC reports its chain and the chain's treasury is a contract,
@@ -308,8 +243,17 @@ jobs:
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" \
+          "$PREFLIGHT" --env "$ENV_FILE" --compose "$COMPOSE" --environment-dir "$ENVIRONMENT_DIR" \
             --workspace "$PHALA_WORKSPACE" --os-image "$DSTACK_OS_IMAGE" --unsealed
+
+      # Every route's livemode must match its chain: production serves test mode on Sepolia beside
+      # live mode on mainnet, staging test mode only. The check reads the routes as topup does, in
+      # the image preflight pulled, and takes this run's Environment, never the configuration's own
+      # name (deploy/check-route-modes.sh). Only topup's compose carries routes; the product
+      # target is staging-only.
+      - name: Check the routes' modes against the Environment
+        if: inputs.target == 'topup'
+        run: deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
 
       # The CLI output (JSON, no secrets: the key is only in the environment and env values are
       # encrypted client-side) goes to the log as well, so a failure shows its reason.
@@ -358,10 +302,10 @@ jobs:
             echo "| Commit | \`$GITHUB_SHA\` |"
             echo "| Release images run | $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID (\`$RELEASE_SHA\`) |"
             for name in $IMAGES; do
-              echo "| $name | \`${!name}\` |"
+              echo "| $name | \`$(jq -r --arg name "$name" '.[$name]' "$WORK/release/images.json")\` |"
             done
             echo "| OS image | \`$DSTACK_OS_IMAGE\` |"
-            [[ -z "${TOPUP_ORIGIN:-}" ]] || echo "| topup origin | $TOPUP_ORIGIN |"
+            echo "| Environment directory | \`$ENVIRONMENT_DIR\` |"
             echo
             if [[ "$MODE" == provision ]]; then
               # Written now, so a later failure still leaves the id for recovery (mode upgrade).
@@ -380,10 +324,12 @@ jobs:
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          name=$GATEWAY_VARIABLE value=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
-          env "$name=$value" "$DIR/render-compose.sh" >"$COMPOSE"
-          echo "$name=$value" | tee -a "$GITHUB_ENV"
-          "$DIR/preflight.sh" --env "$ENV_FILE" --compose "$COMPOSE" --offline --unsealed
+          gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
+          deploy/render.sh --images "$WORK/release/images.json" --gateway-domain "$gateway" \
+            "$ENVIRONMENT_DIR" >"$COMPOSE"
+          echo "GATEWAY=$gateway" | tee -a "$GITHUB_ENV"
+          "$PREFLIGHT" --env "$ENV_FILE" --compose "$COMPOSE" --environment-dir "$ENVIRONMENT_DIR" \
+            --offline --unsealed
           previous=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
           deploy/phala-cvm.sh deploy "$WORK/deploy-public-url.json" \
             --cvm-id "$CVM_ID" \
@@ -403,10 +349,8 @@ jobs:
           # The guest agent's public info (port 8090, public tcbinfo) carries the vm_config.
           curl -fsS --max-time 30 --retry 5 --retry-all-errors \
             "$(deploy/phala-cvm.sh url "$WORK/cvm.json" 8090)/prpc/Info" >"$WORK/info.json"
-          policy=()
-          [[ -z "$POLICY" ]] || policy=("$DIR/staging.env.example" "$POLICY")
           deploy/verify-attestation.sh "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
-            "$COMPOSE" "${policy[@]}" 2>&1 | tee "$WORK/verification.txt"
+            "$COMPOSE" "$VARIANT" 2>&1 | tee "$WORK/verification.txt"
           {
             echo "| | |"
             echo "|---|---|"
@@ -434,7 +378,7 @@ jobs:
             echo
             echo "| Type | Name | Content |"
             echo "|---|---|---|"
-            echo "| CNAME | \`$DOMAIN\` | \`${!GATEWAY_VARIABLE}\` |"
+            echo "| CNAME | \`$DOMAIN\` | \`$GATEWAY\` |"
             echo "| TXT | \`_dstack-app-address.$DOMAIN\` | \`$instance_id:443\` |"
             echo
             echo "Optional, once the certificate is issued: CAA \`$DOMAIN\`"
@@ -459,40 +403,46 @@ jobs:
       - name: Print the owner's sealing step
         if: inputs.mode == 'provision'
         run: |
+          compose_json=$("$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --no-interpolate --format json)
+          names=$(cut -d= -f1 "$ENV_FILE" | awk '{ printf "%s`%s`", (count++ ? ", " : ""), $0 }')
           {
             if [[ "$TARGET" == topup ]]; then
-              env_file=.env.$DEPLOY_ENVIRONMENT
+              owner_env=.env.$DEPLOY_ENVIRONMENT
+              image=$(jq -r '.services.topup.image' <<<"$compose_json")
               echo "### Owner: seal the runtime secrets"
               echo
-              names=$(awk '/^[[:space:]]*($|#)/ { next }
-                { sub(/=.*/, ""); printf "%s`%s`", (count++ ? ", " : ""), $0 }' deploy/staging.env.example)
               echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
               echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
-              echo "write \`$env_file\` (mode 0600) with exactly the staging.env.example names: $names."
+              echo "write \`$owner_env\` (mode 0600) with exactly the compose's sealed names: $names."
               echo "\`SENTRY_DSN\` may be empty; each \`TOPUP_RPC_<ID>_KEY\` is the key for the \`{key}\`"
               echo "in provider <ID>'s URL, empty for a keyless URL. The same name set keeps the compose hash."
             else
-              env_file=.env.product
+              owner_env=.env.product
+              image=$(jq -r '.services.product.image' <<<"$compose_json")
               echo "### Owner: seal the product's API key"
               echo
               echo "The product runs without its Phala Pay key: webhooks and fulfillment are served,"
-              echo "the account API answers 503. From your own machine, write \`$env_file\` with the"
+              echo "the account API answers 503. From your own machine, write \`$owner_env\` with the"
               echo "single line \`PRODUCT_API_KEY=<the account's restricted ppay_rk_test_ key>\` (mode 0600)."
             fi
-            echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact:"
+            echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact"
+            echo "(preflight --offline checks the configuration in the pinned image, pulled first):"
             echo
             echo '```sh'
-            echo "$DIR/preflight.sh --env $env_file --compose $COMPOSE_NAME --offline"
-            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e $env_file"
+            echo "docker pull $image"
+            echo "$PREFLIGHT --env $owner_env --compose $COMPOSE_NAME --environment-dir $ENVIRONMENT_DIR --offline"
+            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e $owner_env"
             echo '```'
             if [[ "$TARGET" == topup ]]; then
+              prefix=$(jq -r '.services.postgres.environment.WALG_S3_PREFIX' <<<"$compose_json")
+              endpoint=$(jq -r '.services.postgres.environment.AWS_ENDPOINT' <<<"$compose_json")
               echo
               echo "The service answers $PUBLIC_URL/healthz once the CVM has restarted with the"
               echo "secrets and the DNS records above resolve, and backups have started when the"
               echo "newest archived WAL segment is younger than two minutes:"
               echo
               echo '```sh'
-              echo "aws s3 ls \"${WALG_S3_PREFIX%/}/wal_005/\" --endpoint-url \"$AWS_ENDPOINT\" | tail -1"
+              echo "aws s3 ls \"${prefix%/}/wal_005/\" --endpoint-url \"$endpoint\" | tail -1"
               echo '```'
             fi
           } >>"$GITHUB_STEP_SUMMARY"

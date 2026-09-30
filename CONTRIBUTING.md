@@ -64,7 +64,8 @@ and login role, so any host and port will do:
 ```sh
 docker run -d --name phala-pay-test-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18.6-trixie
 export SQLX_OFFLINE=true   # compile against the committed .sqlx metadata, as CI does
-export MIGRATE_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+# The harness's database owner and application login (crates/topup/tests/support).
+export OWNER_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 export DATABASE_URL=postgres://topup_ci:topup_ci@localhost:5432/postgres
 cargo test --workspace --locked --all-features
 ```
@@ -85,8 +86,8 @@ with `SQLX_OFFLINE=true` still exported:
 ```sh
 cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres --locked
 # With any new migration added, but before editing a query (the committed metadata still matches):
-cargo run --locked -p topup -- migrate
-psql "$MIGRATE_DATABASE_URL" -c "CREATE ROLE topup_ci LOGIN PASSWORD 'topup_ci' IN ROLE topup_app"
+DATABASE_URL="$OWNER_DATABASE_URL" cargo run --locked -p topup -- migrate
+psql "$OWNER_DATABASE_URL" -c "CREATE ROLE topup_ci LOGIN PASSWORD 'topup_ci' IN ROLE topup_app"
 # Edit the queries, then:
 SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets --all-features
 ```

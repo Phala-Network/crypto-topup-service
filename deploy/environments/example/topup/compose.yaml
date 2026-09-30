@@ -1,0 +1,21 @@
+# A generic environment to copy to deploy/environments/<owner>/<environment>/topup/ (docs/self-hosting.md):
+# every value below is a placeholder that preflight refuses. WAL-G's backup location and
+# dstack-ingress's domain are env interfaces of their images; topup's settings are in topup.yaml.
+services:
+  postgres:
+    environment: &walg
+      WALG_S3_PREFIX: s3://BUCKET/PATH                            # a prefix no other app uses
+      AWS_ENDPOINT: https://ACCOUNT.r2.cloudflarestorage.com      # the object store's endpoint
+      AWS_REGION: auto                                            # R2: auto; others: the bucket's region
+      AWS_S3_FORCE_PATH_STYLE: "true"                             # R2: true
+  backup:
+    environment: *walg
+  dstack-ingress:
+    environment:
+      DOMAIN: pay-api.example.com                                 # the host of topup.yaml's public_origin
+  # One sealed key per keyed RPC provider of topup.yaml (a `{key}` in its URL), in both services.
+  topup:
+    environment: &rpc-keys
+      TOPUP_RPC_ALCHEMY_SEPOLIA_KEY: ${TOPUP_RPC_ALCHEMY_SEPOLIA_KEY:-}
+  restore-check:
+    environment: *rpc-keys

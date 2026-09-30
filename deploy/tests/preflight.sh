@@ -1,41 +1,44 @@
 #!/usr/bin/env bash
-# Local (offline) preflight checks: the example env file, a zero-address route, a stale render, a
-# source that does not render, the wrong variant, invalid settings, and an OS image other than the
-# approved one must be refused, an RPC key must fit its URL and never be published or printed,
-# every route's providers must be in the compose and each chain's its own, and a complete env file
-# with filled routes, alone or beside a second chain's, must pass.
+# Local (offline) preflight checks against Phala's staging environment rendered as Deploy renders
+# it: a complete env file passes, and every other case is refused with its reason. The cases are
+# an env file with other names, a placeholder, or empty secrets; a stale render; the wrong variant;
+# the example environment's values; RPC keys that do not fit their URLs; a URL with an embedded
+# key; a configuration topup refuses; another OS image; and a malformed Sentry DSN. No key or DSN
+# may be printed. TOPUP is the topup binary preflight runs its config checks with (cargo build).
 set -euo pipefail
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 preflight="$root/deploy/preflight.sh"
+: "${TOPUP:?set TOPUP to a topup binary, for example target/debug/topup}"
+export TOPUP
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-export TOPUP_IMAGE=ghcr.io/phala-network/phala-pay@sha256:1111111111111111111111111111111111111111111111111111111111111111
-export POSTGRES_WALG_IMAGE=ghcr.io/phala-network/postgres-walg@sha256:2222222222222222222222222222222222222222222222222222222222222222
-# The public settings, as Deploy passes them from the `staging` Environment variables.
-export AWS_ENDPOINT=https://account.r2.cloudflarestorage.com AWS_REGION=auto
-export AWS_S3_FORCE_PATH_STYLE=false WALG_S3_PREFIX=s3://topup-staging/postgres
-export TOPUP_ADMIN_KID=staging-admin/v1 TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
-export SENTRY_ENVIRONMENT=staging
-export TOPUP_DOMAIN=pay-api-staging.phala.com TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network
-export TOPUP_RPC_PROVIDER_A_URL=https://rpc-a.example/sepolia TOPUP_RPC_PROVIDER_B_URL=https://rpc-b.example/sepolia
-export TOPUP_RPC_BASE_SEPOLIA_A_URL=https://rpc-a.example/base-sepolia
-export TOPUP_RPC_BASE_SEPOLIA_B_URL=https://rpc-b.example/base-sepolia
-# A source compose whose inline route still has zero-address placeholders, as before the route PR.
-sed -E 's/((forwarder_factory|implementation|contract|sanctions_oracle): )"0x[0-9a-fA-F]{40}"/\1"0x0000000000000000000000000000000000000000"/' \
-    "$root/deploy/docker-compose.yml" >"$tmp/zero-source.yml"
-"$root/deploy/render-compose.sh" "$tmp/zero-source.yml" >"$tmp/zero-route.yml"
-# The committed compose carries the deployed route addresses.
-cp "$root/deploy/docker-compose.yml" "$tmp/filled-source.yml"
-"$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/filled-route.yml"
-
-awk -F= '
-    /^[[:space:]]*($|#)/ { next }
-    $2 == "replace-me" { print $1 "=staging-value"; next }
-    { print }
-' "$root/deploy/staging.env.example" >"$tmp/complete.env"
-
+jq -n '{"phala-pay": "ghcr.io/phala-network/phala-pay@sha256:\("1" * 64)",
+    "postgres-walg": "ghcr.io/phala-network/postgres-walg@sha256:\("2" * 64)"}' >"$tmp/images.json"
+staging="$root/deploy/environments/phala-network/staging/topup"
+gateway=gateway.dstack-pha-prod5.phala.network
+# render NAME ENV_DIR [--restore-check]
+render() {
+    local inputs=(--gateway-domain "$gateway")
+    [[ "${3:-}" != --restore-check ]] || inputs=(--restore-check --origin https://0123-8081.example.net)
+    "$root/deploy/render.sh" "${inputs[@]}" --images "$tmp/images.json" "$2" >"$tmp/$1.yml"
+}
+# env_file NAME COMPOSE [NAME=VALUE...]: the compose's sealed names, the storage ones filled.
+env_file() {
+    local file=$tmp/$1.env name
+    "$("$root/deploy/pinned-compose.sh")" -f "$2" config --variables |
+        awk 'NR > 1 && NF > 0 { print $1 }' | sort | while read -r name; do
+        case "$name" in
+            *AWS_ACCESS_KEY_ID | *AWS_SECRET_ACCESS_KEY) echo "$name=staging-value" ;;
+            *) echo "$name=" ;;
+        esac
+    done >"$file"
+    shift 2
+    for assignment in "$@"; do
+        sed -i "s|^${assignment%%=*}=.*|$assignment|" "$file"
+    done
+}
 # expect_failure NAME EXPECTED_MESSAGE ARGS...: preflight must fail and print the message.
 expect_failure() {
     local name=$1 message=$2
@@ -50,154 +53,124 @@ expect_failure() {
         exit 1
     }
 }
-
-expect_failure example-env "AWS_ACCESS_KEY_ID still contains replace-me" \
-    --env "$root/deploy/staging.env.example" --compose "$tmp/zero-route.yml" \
-    --source "$tmp/zero-source.yml"
-expect_failure zero-route \
-    "route phala-cloud-sepolia-pha-usd: forwarder_factory is the placeholder or zero address 0x0000000000000000000000000000000000000000" \
-    --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
-# Every attested route is checked, not only the first.
-grep -qF "route phala-cloud-sepolia-usdc-usd: contract is the placeholder or zero address" \
-    "$tmp/zero-route.err" || {
-    echo "preflight did not check the second route:" >&2
-    cat "$tmp/zero-route.err" >&2
-    exit 1
-}
-if grep -v 'placeholder or zero address' "$tmp/zero-route.err" | grep -q '^FAIL'; then
-    echo "the complete env file failed a check:" >&2
-    cat "$tmp/zero-route.err" >&2
-    exit 1
-fi
-echo "EXTRA_SECRET=x" >>"$tmp/extra.env"
-cat "$tmp/complete.env" >>"$tmp/extra.env"
-expect_failure extra-name "names outside staging.env.example: EXTRA_SECRET" \
-    --env "$tmp/extra.env" --compose "$tmp/zero-route.yml" --source "$tmp/zero-source.yml"
-# A render that does not match its source (stale or hand-edited) is refused.
-expect_failure stale-render "differs from a fresh render" \
-    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/zero-source.yml"
-# A source that does not render is reported with render-compose.sh's own error.
-grep -v '_RENDERED_SHA256:-' "$tmp/filled-source.yml" >"$tmp/unlabeled-source.yml"
-expect_failure bad-source "does not render with the settings of $tmp/filled-route.yml:" \
-    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/unlabeled-source.yml"
-grep -qF 'must carry exactly one ${..._RENDERED_SHA256:-} label' "$tmp/bad-source.err" || {
-    echo "preflight did not print render-compose.sh's error:" >&2
-    cat "$tmp/bad-source.err" >&2
-    exit 1
+passes() {
+    "$preflight" "$@" --offline >"$tmp/pass.out" 2>"$tmp/pass.err" || {
+        echo "preflight refused $*:" >&2
+        cat "$tmp/pass.err" >&2
+        exit 1
+    }
+    grep -Fq 'ok: configuration `/dev/stdin` is valid' "$tmp/pass.out" || {
+        echo "preflight passed without checking the configuration:" >&2
+        cat "$tmp/pass.out" >&2
+        exit 1
+    }
 }
 
-"$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
-    --source "$tmp/filled-source.yml" --offline >/dev/null
+render service "$staging"
+env_file complete "$tmp/service.yml"
+passes --env "$tmp/complete.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 
-# A provider serves one chain: a route on another chain that names no providers, and so uses
-# Sepolia's provider-a and provider-b, is refused.
-awk '/^        chain_id: 11155111$/ && ++seen == 2 { sub(/11155111/, "560048") } { print }' \
-    "$root/deploy/docker-compose.yml" >"$tmp/two-chains-source.yml"
-"$root/deploy/render-compose.sh" "$tmp/two-chains-source.yml" >"$tmp/two-chains.yml"
-expect_failure two-chains "RPC provider provider-a is named on chain 11155111 and chain 560048" \
-    --env "$tmp/complete.env" --compose "$tmp/two-chains.yml" --source "$tmp/two-chains-source.yml"
+# The env file names exactly the compose's sealed names, with no placeholder.
+{ cat "$tmp/complete.env"; echo "EXTRA_SECRET=x"; } >"$tmp/extra.env"
+expect_failure extra-name "must set exactly the compose's sealed names: > EXTRA_SECRET" \
+    --env "$tmp/extra.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+sed 's/^AWS_ACCESS_KEY_ID=.*/AWS_ACCESS_KEY_ID=replace-me/' "$tmp/complete.env" >"$tmp/example.env"
+expect_failure replace-me "AWS_ACCESS_KEY_ID still contains replace-me" \
+    --env "$tmp/example.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 
-# The restore-check variant passes only with --restore-check, and the service variant only without.
-"$root/deploy/render-compose.sh" --restore-check "$tmp/filled-source.yml" >"$tmp/restore-check.yml"
-expect_failure restore-check-as-service "the compose is not the service variant" \
-    --env "$tmp/complete.env" --compose "$tmp/restore-check.yml" --source "$tmp/filled-source.yml"
-"$preflight" --env "$tmp/complete.env" --compose "$tmp/restore-check.yml" \
-    --source "$tmp/filled-source.yml" --restore-check --offline >/dev/null
-expect_failure service-as-restore-check "the compose is not the --restore-check variant" \
-    --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml" \
+# Deploy's unsealed env file (every secret empty) passes only with --unsealed.
+env_file unsealed "$tmp/service.yml" AWS_ACCESS_KEY_ID= AWS_SECRET_ACCESS_KEY=
+expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
+    --env "$tmp/unsealed.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+passes --env "$tmp/unsealed.env" --compose "$tmp/service.yml" --environment-dir "$staging" --unsealed
+
+# A stale or hand-edited render is refused; so is a policy violation it carries.
+sed 's|s3://crypto-topup-test/staging-mt-20260928|s3://other/postgres|' "$tmp/service.yml" >"$tmp/edited.yml"
+expect_failure edited "differs from a fresh render" \
+    --env "$tmp/complete.env" --compose "$tmp/edited.yml" --environment-dir "$staging"
+sed 's|DOMAIN: pay-api-staging.phala.com|DOMAIN: other.phala.com|' "$tmp/service.yml" >"$tmp/other-domain.yml"
+expect_failure other-domain "dstack-ingress must serve the host of topup's public_origin" \
+    --env "$tmp/complete.env" --compose "$tmp/other-domain.yml" --environment-dir "$staging"
+
+# Each variant passes only as itself.
+render restore-check "$staging" --restore-check
+env_file restore-check "$tmp/restore-check.yml"
+passes --env "$tmp/restore-check.env" --compose "$tmp/restore-check.yml" --environment-dir "$staging" \
     --restore-check
+expect_failure restore-check-as-service "the service runs exactly" \
+    --env "$tmp/restore-check.env" --compose "$tmp/restore-check.yml" --environment-dir "$staging"
+expect_failure service-as-restore-check "restore-check runs exactly" \
+    --env "$tmp/complete.env" --compose "$tmp/service.yml" --environment-dir "$staging" --restore-check
 
-# Settings are checked in the rendered compose; a hand-edited value is also a stale render.
-TOPUP_RPC_PROVIDER_B_URL=$TOPUP_RPC_PROVIDER_A_URL "$root/deploy/render-compose.sh" \
-    "$tmp/filled-source.yml" >"$tmp/same-rpc.yml"
-expect_failure same-rpc "RPC providers provider-a and provider-b have the same URL" \
-    --env "$tmp/complete.env" --compose "$tmp/same-rpc.yml" --source "$tmp/filled-source.yml"
-# A keyed provider is attested with {key} and its key sealed; a URL with the key itself is refused
-# without printing it, and a key must fit its URL.
-TOPUP_RPC_PROVIDER_A_URL=https://eth-sepolia.g.alchemy.com/v2/aB3dEfGhIjKlMnOpQrStUvWxYz012345 \
-    "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/embedded-key.yml"
-expect_failure embedded-key "TOPUP_RPC_PROVIDER_A_URL seems to embed an API key" \
-    --env "$tmp/complete.env" --compose "$tmp/embedded-key.yml" --source "$tmp/filled-source.yml"
-TOPUP_RPC_PROVIDER_A_URL='https://eth-sepolia.g.alchemy.com/v2/{key}' \
-    "$root/deploy/render-compose.sh" "$tmp/filled-source.yml" >"$tmp/keyed.yml"
-sed 's|^TOPUP_RPC_PROVIDER_A_KEY=.*|TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789|' \
-    "$tmp/complete.env" >"$tmp/keyed.env"
-sed 's|^TOPUP_RPC_PROVIDER_A_KEY=.*|TOPUP_RPC_PROVIDER_A_KEY=sealed/key|' "$tmp/complete.env" >"$tmp/bad-key.env"
-"$preflight" --env "$tmp/keyed.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml" \
-    --offline >"$tmp/keyed.out"
-"$preflight" --env "$tmp/complete.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml" \
-    --offline --unsealed >/dev/null
+# The example environment's placeholders are refused.
+example="$root/deploy/environments/example/topup"
+render example "$example"
+env_file example-values "$tmp/example.yml" TOPUP_RPC_ALCHEMY_SEPOLIA_KEY=sealed-key-0123456789
+expect_failure example "still holds values of deploy/environments/example" \
+    --env "$tmp/example-values.env" --compose "$tmp/example.yml" --environment-dir "$example"
+
+# edited_environment NAME SED_SCRIPT: staging's environment with its topup.yaml edited.
+edited_environment() {
+    cp -r "$staging" "$tmp/$1"
+    sed -i "$2" "$tmp/$1/topup.yaml"
+    render "$1" "$tmp/$1"
+}
+# A keyed provider is attested with {key}, and its sealed key must fit it: checked with --secrets,
+# skipped with --unsealed, and never printed.
+edited_environment keyed 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/{key}|'
+env_file keyed "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789
+passes --env "$tmp/keyed.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
+env_file keyless "$tmp/keyed.yml"
 expect_failure missing-key "TOPUP_RPC_PROVIDER_A_KEY is required by the {key} placeholder" \
-    --env "$tmp/complete.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml"
-expect_failure unused-key "TOPUP_RPC_PROVIDER_A_KEY is set, but TOPUP_RPC_PROVIDER_A_URL has no {key}" \
-    --env "$tmp/keyed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+    --env "$tmp/keyless.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
+passes --env "$tmp/keyless.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed" --unsealed
+env_file stray-key "$tmp/service.yml" TOPUP_RPC_PROVIDER_B_KEY=sealed-key-0123456789
+expect_failure stray-key "TOPUP_RPC_PROVIDER_B_KEY is set, but the URL has no {key} placeholder" \
+    --env "$tmp/stray-key.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+env_file bad-key "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed/key
 expect_failure bad-key "TOPUP_RPC_PROVIDER_A_KEY must be at least 8 characters" \
-    --env "$tmp/bad-key.env" --compose "$tmp/keyed.yml" --source "$tmp/filled-source.yml"
+    --env "$tmp/bad-key.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
+# A URL that carries its key would publish it; a placeholder in the host is refused by topup.
+edited_environment embedded 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/aB3dEfGhIjKlMnOpQrStUvWxYz012345|'
+expect_failure embedded "RPC provider provider-a's URL seems to embed an API key" \
+    --env "$tmp/complete.env" --compose "$tmp/embedded.yml" --environment-dir "$tmp/embedded"
+edited_environment host-key 's|provider-a: .*|provider-a: https://{key}.example.net/rpc|'
+expect_failure host-key "may have {key} only as a whole path segment or a whole query value" \
+    --env "$tmp/complete.env" --compose "$tmp/host-key.yml" --environment-dir "$tmp/host-key"
 if grep -rqE 'aB3dEfGhIjKlMnOpQrStUvWxYz012345|sealed-key-0123456789|sealed/key' "$tmp"/*.out "$tmp"/*.err; then
     echo "preflight printed an RPC key" >&2
     exit 1
 fi
 
-# A second chain is configuration: the committed Base Sepolia routes name providers of their own,
-# and the complete env above passes with them. Each case below edits the committed source.
-# edited NAME SED_SCRIPT: renders the committed source edited by SED_SCRIPT.
-edited() {
-    sed "$2" "$tmp/filled-source.yml" >"$tmp/$1-source.yml"
-    "$root/deploy/render-compose.sh" "$tmp/$1-source.yml" >"$tmp/$1.yml"
-}
-export TOPUP_RPC_BASE_SEPOLIA_C_URL=https://rpc-c.example/base-sepolia
-edited undefined 's/rpc_providers: \[base-sepolia-a, base-sepolia-b\]/rpc_providers: [base-sepolia-a, base-sepolia-c]/'
-expect_failure undefined \
-    "route phala-cloud-base-sepolia-pha-usd names RPC provider base-sepolia-c, but the compose has no TOPUP_RPC_BASE_SEPOLIA_C_URL" \
-    --env "$tmp/complete.env" --compose "$tmp/undefined.yml" --source "$tmp/undefined-source.yml"
-edited unused '/^  TOPUP_RPC_BASE_SEPOLIA_B_URL:/a\
-  TOPUP_RPC_BASE_SEPOLIA_C_URL: "${TOPUP_RPC_BASE_SEPOLIA_C_URL:-}"'
-expect_failure unused "the compose has TOPUP_RPC_BASE_SEPOLIA_C_URL, but no route names provider base-sepolia-c" \
-    --env "$tmp/complete.env" --compose "$tmp/unused.yml" --source "$tmp/unused-source.yml"
-# A keyed provider needs a sealed TOPUP_RPC_<ID>_KEY, in staging.env.example.
-TOPUP_RPC_BASE_SEPOLIA_A_URL='https://base-sepolia.g.alchemy.com/v2/{key}' edited unsealable ''
-expect_failure unsealable \
-    "TOPUP_RPC_BASE_SEPOLIA_A_URL has a {key} placeholder, but staging.env.example and the compose have no TOPUP_RPC_BASE_SEPOLIA_A_KEY" \
-    --env "$tmp/complete.env" --compose "$tmp/unsealable.yml" --source "$tmp/unsealable-source.yml" \
-    --unsealed
+# Configurations topup refuses: a zero-address route, and a provider on two chains.
+edited_environment zero-route 's|forwarder_factory: "0x[0-9a-fA-F]*"|forwarder_factory: "0x0000000000000000000000000000000000000000"|'
+expect_failure zero-route "must not be the zero address" \
+    --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --environment-dir "$tmp/zero-route"
+edited_environment two-chains 's|rpc_providers: \[base-sepolia-a, base-sepolia-b\]|rpc_providers: [provider-a, base-sepolia-b]|'
+expect_failure two-chains "is named on chain 84532 and chain 11155111" \
+    --env "$tmp/complete.env" --compose "$tmp/two-chains.yml" --environment-dir "$tmp/two-chains"
 
-sed 's|s3://topup-staging/postgres|s3://other/postgres|' "$tmp/filled-route.yml" >"$tmp/edited.yml"
-expect_failure edited "differs from a fresh render" \
-    --env "$tmp/complete.env" --compose "$tmp/edited.yml" --source "$tmp/filled-source.yml"
-# The ingress must serve the domain topup verifies signatures against.
-sed 's|DOMAIN: "pay-api-staging.phala.com"|DOMAIN: "other.phala.com"|' \
-    "$tmp/filled-route.yml" >"$tmp/other-domain.yml"
-expect_failure other-domain "dstack-ingress must serve TOPUP_DOMAIN" \
-    --env "$tmp/complete.env" --compose "$tmp/other-domain.yml" --source "$tmp/filled-source.yml"
-
-# Only the approved production image passes; no Phala Cloud node offers dstack 0.6.0.
+# Only the approved production image passes.
 for image in dstack-0.6.0-rc5 dstack-dev-0.5.9 dstack-nvidia-0.5.9 dstack-0.5.8; do
     expect_failure "image-$image" "OS image $image is not the approved dstack-0.5.9" \
-        --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
-        --source "$tmp/filled-source.yml" --os-image "$image"
+        --env "$tmp/complete.env" --compose "$tmp/service.yml" --environment-dir "$staging" \
+        --os-image "$image"
 done
-"$preflight" --env "$tmp/complete.env" --compose "$tmp/filled-route.yml" \
-    --source "$tmp/filled-source.yml" --os-image dstack-0.5.9 --offline >/dev/null
 
 # A sealed Sentry DSN is accepted; a malformed one is refused without printing it.
-sed -E 's|^SENTRY_DSN=.*|SENTRY_DSN=https://0123456789abcdef0123456789abcdef@o1.ingest.us.sentry.io/2|' \
-    "$tmp/complete.env" >"$tmp/sentry.env"
-"$preflight" --env "$tmp/sentry.env" --compose "$tmp/filled-route.yml" \
-    --source "$tmp/filled-source.yml" --offline >/dev/null
-sed -E 's|^SENTRY_DSN=.*|SENTRY_DSN=http://sentry-secret@example|' "$tmp/complete.env" >"$tmp/bad-sentry.env"
+env_file sentry "$tmp/service.yml" \
+    SENTRY_DSN=https://0123456789abcdef0123456789abcdef@o1.ingest.us.sentry.io/2
+passes --env "$tmp/sentry.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+env_file bad-sentry "$tmp/service.yml" SENTRY_DSN=http://sentry-secret@example
 expect_failure bad-sentry "SENTRY_DSN must be empty or the project's DSN" \
-    --env "$tmp/bad-sentry.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
+    --env "$tmp/bad-sentry.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 if grep -q sentry-secret "$tmp/bad-sentry.out" "$tmp/bad-sentry.err"; then
     echo "preflight printed the SENTRY_DSN value" >&2
     exit 1
 fi
 
-# The CI-written env file has every owner-sealed secret empty: accepted only with --unsealed.
-: >"$tmp/unsealed.env"
-"$root/deploy/write-staging-env.sh" "$tmp/unsealed.env" >/dev/null
-expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
-    --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" --source "$tmp/filled-source.yml"
-"$preflight" --env "$tmp/unsealed.env" --compose "$tmp/filled-route.yml" \
-    --source "$tmp/filled-source.yml" --offline --unsealed >/dev/null
+# Without TOPUP, the configuration is checked in the pinned image, which offline never pulls.
+TOPUP='' expect_failure absent-image "the pinned image is not present locally; docker pull" \
+    --env "$tmp/complete.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 
 echo "preflight local checks test passed"

@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow, bail, ensure};
+use anyhow::{Context as _, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -20,7 +20,6 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
-use topup::routes::RouteSet;
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::ScreenStep;
 use topup_adapters::attestation::AttestedWebhookKey;
@@ -67,19 +66,52 @@ enum TopupCommand {
     ///
     /// Run only while the service, heartbeat, and backup processes are stopped: the post-restore
     /// round holds the lease-owner lock and may repair the restored ledger; it asks the product
-    /// nothing. It does nothing while TOPUP_RESTORE_FROM_BACKUP=off, and writes its report to
-    /// TOPUP_RESTORE_REPORT_FILE when that is set.
+    /// nothing. It writes its report to --report when that is given.
     RestoreCheck(RestoreCheckArgs),
+    /// Validate or print a service configuration file.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Validate the file without any secret; with --secrets, also check each provider's sealed
+    /// key (`TOPUP_RPC_<ID>_KEY`) against its URL. Nothing secret is printed.
+    Check {
+        #[arg(long)]
+        secrets: bool,
+        file: PathBuf,
+    },
+    /// Print the resolved configuration as JSON (also a valid configuration file): every route
+    /// default written out, and each keyed provider URL with its `{key}`.
+    Show { file: PathBuf },
 }
 
 #[derive(Args)]
 struct RunArgs {
+    /// The service configuration file (docs/configuration.md).
+    #[arg(long, value_name = "FILE")]
+    config: PathBuf,
     /// API socket address; defaults to the deployment port on all interfaces.
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind: std::net::SocketAddr,
-    /// Validated route file; repeat for every enabled route version.
-    #[arg(long = "route", required = true, value_name = "FILE")]
-    routes: Vec<PathBuf>,
+    /// The egress proxy every webhook delivery goes through (the smokescreen sidecar); required
+    /// unless the public origin is `http` (local stacks).
+    #[arg(long, value_name = "URL")]
+    webhook_proxy: Option<reqwest::Url>,
+    /// Serve only the read API of a database restored from backup (deploy/RESTORE.md): no loop,
+    /// no lease-owner lock, and every write refused.
+    #[arg(long)]
+    read_only: bool,
+    /// An origin replacing the configured one: the restore instance's own (deploy/RESTORE.md), or a
+    /// local stack's. deploy/compose-policy.jq keeps it out of the service's attested compose.
+    #[arg(long, value_name = "URL")]
+    public_origin: Option<String>,
+    /// The restore-check report served on /healthz.
+    #[arg(long, value_name = "FILE", requires = "read_only")]
+    restore_report: Option<PathBuf>,
     /// Delay before retrying an expected wait outcome.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     wait_interval_s: u64,
@@ -107,9 +139,9 @@ const IDEMPOTENCY_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Args)]
 struct ReconcileArgs {
-    /// Validated route file; repeat for every enabled route version.
-    #[arg(long = "route", required = true, value_name = "FILE")]
-    routes: Vec<PathBuf>,
+    /// The service configuration file.
+    #[arg(long, value_name = "FILE")]
+    config: PathBuf,
 }
 
 #[derive(Args)]
@@ -160,9 +192,12 @@ struct RestoreCheckArgs {
     /// exception; RPO is then proven by the heartbeat timestamp alone and flagged in the report.
     #[arg(long, value_name = "PG_LSN", requires = "expected_heartbeat_at")]
     expected_lsn: Option<String>,
-    /// Validated route file; repeat for every enabled route version.
-    #[arg(long = "route", required = true, value_name = "FILE")]
-    routes: Vec<PathBuf>,
+    /// The service configuration file.
+    #[arg(long, value_name = "FILE")]
+    config: PathBuf,
+    /// Where to publish the report, for the read-only service's /healthz.
+    #[arg(long, value_name = "FILE")]
+    report: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -198,9 +233,22 @@ enum RouteCommand {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    // `run` reports under its configuration's environment; the file is read again below, where a
+    // failure is logged.
+    let environment = match &cli.command {
+        TopupCommand::Run(args) => topup::config::Config::load(&args.config)
+            .ok()
+            .map(|config| (config.environment, args.read_only)),
+        _ => None,
+    };
     // Before the subscriber, which adds the Sentry layer only when reporting is enabled. The
     // guard flushes queued events when `main` returns.
-    let reporting = match topup::observability::init_reporting() {
+    let reporting = match topup::observability::init_reporting(
+        environment
+            .as_ref()
+            .map(|(environment, read_only)| (environment.as_str(), *read_only)),
+    ) {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("{error}");
@@ -212,8 +260,6 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let cli = Cli::parse();
-
     let result = match cli.command {
         TopupCommand::Run(args) => {
             // Only here: other commands print their result on stdout, which the log shares.
@@ -223,6 +269,12 @@ async fn main() -> ExitCode {
             );
             run(&args).await
         }
+        TopupCommand::Config {
+            command: ConfigCommand::Check { secrets, file },
+        } => return check_config(&file, secrets),
+        TopupCommand::Config {
+            command: ConfigCommand::Show { file },
+        } => return show_config(&file),
         TopupCommand::Migrate => migrate().await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
@@ -289,48 +341,8 @@ async fn keys(args: &KeysArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `TOPUP_SERVICE_ENABLED` of a replacement CVM that boots for a restore (`deploy/RESTORE.md`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ServiceMode {
-    On,
-    /// `topup run` serves only reads; nothing else runs.
-    ReadOnly,
-    Off,
-}
-
-impl ServiceMode {
-    fn from_env() -> anyhow::Result<Self> {
-        match std::env::var("TOPUP_SERVICE_ENABLED").as_deref() {
-            Err(_) | Ok("on") => Ok(Self::On),
-            Ok("read-only") => Ok(Self::ReadOnly),
-            Ok("off") => Ok(Self::Off),
-            Ok(_) => bail!("TOPUP_SERVICE_ENABLED must be on, read-only, or off"),
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::ReadOnly => "read-only",
-            Self::Off => "off",
-        }
-    }
-}
-
-/// Refuses a command in any `TOPUP_SERVICE_ENABLED` mode it does not run in.
-fn service_enabled(command: &str, allowed: &[ServiceMode]) -> anyhow::Result<ServiceMode> {
-    let mode = ServiceMode::from_env()?;
-    ensure!(
-        allowed.contains(&mode),
-        "{command} is disabled while TOPUP_SERVICE_ENABLED={}",
-        mode.name()
-    );
-    Ok(mode)
-}
-
 async fn heartbeat(args: &HeartbeatArgs) -> anyhow::Result<ExitCode> {
-    service_enabled("heartbeat", &[ServiceMode::On]).context("heartbeat refused to start")?;
-    let pool = connect("DATABASE_URL", "heartbeat", 1)
+    let pool = connect("heartbeat", 1)
         .await
         .context("failed to connect to database")?;
     let mut interval = tokio::time::interval(Duration::from_secs(args.interval_s));
@@ -389,15 +401,6 @@ async fn healthcheck(args: &HealthcheckArgs) -> ExitCode {
 }
 
 async fn restore_check(args: &RestoreCheckArgs) -> anyhow::Result<ExitCode> {
-    // In the compose, restore-check starts with every boot; it runs only after a restore.
-    match std::env::var("TOPUP_RESTORE_FROM_BACKUP").as_deref() {
-        Err(_) | Ok("on") => {}
-        Ok("off") => {
-            tracing::info!("restore-check skipped: TOPUP_RESTORE_FROM_BACKUP=off");
-            return Ok(ExitCode::SUCCESS);
-        }
-        Ok(_) => bail!("TOPUP_RESTORE_FROM_BACKUP must be on or off"),
-    }
     let result = run_restore_check(args).await;
     let encoded = match &result {
         Ok(report) => {
@@ -405,9 +408,8 @@ async fn restore_check(args: &RestoreCheckArgs) -> anyhow::Result<ExitCode> {
         }
         Err(error) => json!({ "status": "failed", "failures": [error.to_string()] }),
     };
-    if let Some(path) = std::env::var_os("TOPUP_RESTORE_REPORT_FILE") {
-        let path = PathBuf::from(path);
-        write_restore_report(&path, &encoded)
+    if let Some(path) = &args.report {
+        write_restore_report(path, &encoded)
             .with_context(|| format!("failed to write restore check report {}", path.display()))?;
     }
     let report = result?;
@@ -423,9 +425,12 @@ async fn restore_check(args: &RestoreCheckArgs) -> anyhow::Result<ExitCode> {
 async fn run_restore_check(
     args: &RestoreCheckArgs,
 ) -> anyhow::Result<topup::restore::RestoreReport> {
-    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
+    let routes = load_config(&args.config)?
+        .route_set()
+        .map_err(anyhow::Error::msg)
+        .context("failed to load the route configuration")?;
     // The post-restore gate reads and repairs with owner credentials, never the service login.
-    let pool = connect("MIGRATE_DATABASE_URL", "restore-check", 4)
+    let pool = connect_owner("restore-check", 4)
         .await
         .context("failed to connect to the restored database")?;
     let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
@@ -531,7 +536,11 @@ fn print_attestation(
 }
 
 async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
-    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
+    let config = load_config(&args.config)?;
+    let routes = config
+        .route_set()
+        .map_err(anyhow::Error::msg)
+        .context("failed to load the route configuration")?;
     let age_config =
         AgeAlertConfig::from_routes(routes.routes()).context("invalid age alert configuration")?;
     let rate_lock_quotes: Arc<dyn topup::locks::QuoteProvider> = Arc::new(
@@ -545,22 +554,18 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         ..PumpConfig::default()
     };
     // Checked before the on-chain contract check; `connect` reads it again below.
-    let mode = service_enabled("run", &[ServiceMode::On, ServiceMode::ReadOnly])
-        .and_then(|mode| required_env("DATABASE_URL").map(|_| mode))
-        .context("missing runtime configuration")?;
-    let admin_kid = required_env("TOPUP_ADMIN_KID").context("missing runtime configuration")?;
-    let admin_public_key =
-        required_env("TOPUP_ADMIN_PUBLIC_KEY").context("missing runtime configuration")?;
-    let admin_key = topup::api::VerificationKey::from_base64(admin_kid, &admin_public_key)
-        .map_err(anyhow::Error::msg)
-        .context("invalid administrative verification key")?;
-    let public_origin = required_env("TOPUP_PUBLIC_ORIGIN")
-        .and_then(|value| Ok(topup::api::PublicOrigin::parse(&value)?))
-        .context("invalid TOPUP_PUBLIC_ORIGIN")?;
-    if mode == ServiceMode::ReadOnly {
+    database_url("run").context("missing runtime configuration")?;
+    let admin_key = config.admin_key.clone();
+    let public_origin = match &args.public_origin {
+        Some(origin) => {
+            topup::api::PublicOrigin::parse(origin).context("invalid --public-origin")?
+        }
+        None => config.public_origin.clone(),
+    };
+    if args.read_only {
         const READ_ONLY_CONNECTIONS: u32 = 4;
         let state = topup::api::AppState {
-            pool: connect("DATABASE_URL", "run", READ_ONLY_CONNECTIONS)
+            pool: connect("run", READ_ONLY_CONNECTIONS)
                 .await
                 .context("failed to connect to database")?,
             routes: Arc::new(routes),
@@ -576,7 +581,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
-        return serve_read_only(args.bind, state).await;
+        return serve_read_only(args.bind, state, args.restore_report.clone()).await;
     }
     // Architecture §4: before the database is touched, every provider must show the route's
     // factory and implementation, so nothing issues addresses otherwise.
@@ -594,7 +599,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         // connection only for a statement at a time, never during a request.
         .and_then(|count| count.checked_add(10))
         .context("route count is too large")?;
-    let pool = connect("DATABASE_URL", "run", connection_count)
+    let pool = connect("run", connection_count)
         .await
         .context("failed to connect to database")?;
     // A restore from backup freezes the service until the operator reconciles it; one that booted
@@ -625,7 +630,7 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     }
     let signer = Arc::new(spawn_signer().context("failed to start signer actor")?);
     let delivery_config = topup::outbox::DeliveryConfig {
-        proxy: webhook_proxy(&public_origin)?,
+        proxy: webhook_proxy(args.webhook_proxy.as_ref(), &public_origin)?,
         ..topup::outbox::DeliveryConfig::default()
     };
     // Test and live events have separate workers, so test traffic cannot delay live deliveries.
@@ -894,14 +899,14 @@ async fn after_unfreeze<F>(
 async fn serve_read_only(
     bind: std::net::SocketAddr,
     state: topup::api::AppState,
+    report: Option<PathBuf>,
 ) -> anyhow::Result<ExitCode> {
     let pool = state.pool.clone();
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind API listener on {bind}"))?;
-    let report = std::env::var_os("TOPUP_RESTORE_REPORT_FILE").map(PathBuf::from);
     let application = topup::api::read_only_router(state, report);
-    tracing::warn!(%bind, "API listening read-only while TOPUP_SERVICE_ENABLED=read-only");
+    tracing::warn!(%bind, "API listening read-only (--read-only)");
     let served = axum::serve(listener, application)
         .with_graceful_shutdown(async {
             if let Err(error) = wait_for_shutdown_signal().await {
@@ -916,8 +921,11 @@ async fn serve_read_only(
 }
 
 async fn reconcile(args: &ReconcileArgs) -> anyhow::Result<ExitCode> {
-    let routes = load_routes(&args.routes).context("failed to load route configuration")?;
-    let pool = connect("DATABASE_URL", "reconcile", 4)
+    let routes = load_config(&args.config)?
+        .route_set()
+        .map_err(anyhow::Error::msg)
+        .context("failed to load the route configuration")?;
+    let pool = connect("reconcile", 4)
         .await
         .context("failed to connect to database")?;
     let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
@@ -1104,59 +1112,66 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-fn load_routes(paths: &[PathBuf]) -> anyhow::Result<RouteSet> {
-    let routes = paths
-        .iter()
-        .map(|path| {
-            let yaml = std::fs::read_to_string(path)
-                .map_err(|error| anyhow!("failed to read `{}`: {error}", path.display()))?;
-            route::parse_and_validate(&yaml, false)
-                .map_err(|error| anyhow!("invalid route `{}`: {error}", path.display()))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    RouteSet::new(routes).map_err(anyhow::Error::msg)
+fn load_config(path: &Path) -> anyhow::Result<topup::config::Config> {
+    topup::config::Config::load(path)
+        .map_err(anyhow::Error::msg)
+        .context("failed to load the service configuration")
 }
 
-/// The egress proxy of webhook deliveries, `TOPUP_WEBHOOK_PROXY`: the smokescreen sidecar, the
-/// only filter of the addresses a merchant's URL may reach (design §8). It is required unless the
+/// The egress proxy of webhook deliveries, `--webhook-proxy`: the smokescreen sidecar, the only
+/// filter of the addresses a merchant's URL may reach (design §8). It is required unless the
 /// service's own origin is `http`, which only local stacks use.
-fn webhook_proxy(public_origin: &topup::api::PublicOrigin) -> anyhow::Result<Option<reqwest::Url>> {
-    match std::env::var("TOPUP_WEBHOOK_PROXY")
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => reqwest::Url::parse(&value)
-            .map(Some)
-            .context("TOPUP_WEBHOOK_PROXY must be a URL such as http://smokescreen:4750"),
+fn webhook_proxy(
+    proxy: Option<&reqwest::Url>,
+    public_origin: &topup::api::PublicOrigin,
+) -> anyhow::Result<Option<reqwest::Url>> {
+    match proxy {
+        Some(proxy) => Ok(Some(proxy.clone())),
         None if public_origin.to_string().starts_with("http://") => Ok(None),
         None => bail!(
-            "TOPUP_WEBHOOK_PROXY is required for run: webhooks reach merchants only through the \
+            "--webhook-proxy is required for run: webhooks reach merchants only through the \
              egress proxy"
         ),
     }
 }
 
-fn required_env(name: &'static str) -> anyhow::Result<String> {
-    std::env::var(name)
+/// `DATABASE_URL`, the database login of this container (libpq reads its password from
+/// `PGPASSFILE`).
+fn database_url(command: &'static str) -> anyhow::Result<String> {
+    std::env::var("DATABASE_URL")
         .ok()
         .filter(|value| !value.is_empty())
-        .with_context(|| format!("{name} is required for run"))
+        .with_context(|| format!("DATABASE_URL is required for {command}"))
 }
 
-/// Connects a pool of at most `max_connections` to the database URL in `environment`.
-async fn connect(
-    environment: &'static str,
-    command: &'static str,
-    max_connections: u32,
-) -> anyhow::Result<PgPool> {
-    let url = std::env::var(environment)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .with_context(|| format!("{environment} is required for {command}"))?;
+/// Connects a pool of at most `max_connections` to `DATABASE_URL`.
+async fn connect(command: &'static str, max_connections: u32) -> anyhow::Result<PgPool> {
+    let url = database_url(command)?;
     Ok(PgPoolOptions::new()
         .max_connections(max_connections)
         .connect(&url)
         .await?)
+}
+
+/// [`connect`] for the commands that create roles and repair the ledger (`migrate`,
+/// `restore-check`): the login must own the database or be a superuser, so a container given the
+/// application login fails here rather than part-way through.
+async fn connect_owner(command: &'static str, max_connections: u32) -> anyhow::Result<PgPool> {
+    let pool = connect(command, max_connections).await?;
+    let (user, owner): (String, bool) = sqlx::query_as(
+        "SELECT current_user::text, \
+                pg_catalog.pg_get_userbyid(d.datdba) = current_user \
+                    OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user) \
+         FROM pg_catalog.pg_database d WHERE d.datname = current_database()",
+    )
+    .fetch_one(&pool)
+    .await
+    .context("failed to read the database login's role")?;
+    if !owner {
+        pool.close().await;
+        bail!("{command} requires the database owner; DATABASE_URL logs in as `{user}`");
+    }
+    Ok(pool)
 }
 
 /// Queue depth of every dstack signer actor.
@@ -1181,7 +1196,7 @@ fn spawn_signer() -> std::io::Result<SignerHandle> {
 }
 
 async fn migrate() -> anyhow::Result<ExitCode> {
-    let pool = connect("MIGRATE_DATABASE_URL", "migrate", 1)
+    let pool = connect_owner("migrate", 1)
         .await
         .context("failed to connect to database")?;
     topup::db::migrate(&pool)
@@ -1200,6 +1215,48 @@ fn show_route(file: &Path, template: bool) -> ExitCode {
         })
         .and_then(|route| route::resolved_json(&route));
     match resolved {
+        Ok(json) => {
+            print!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn check_config(file: &Path, secrets: bool) -> ExitCode {
+    let checked = topup::config::Config::load(file).and_then(|config| {
+        if secrets {
+            config.check_environment_secrets()?;
+        }
+        Ok(config)
+    });
+    match checked {
+        Ok(config) => {
+            println!(
+                "configuration `{}` is valid: {} routes, {} RPC providers{}",
+                file.display(),
+                config.routes.len(),
+                config.rpc_providers.len(),
+                if secrets {
+                    ", every provider key fits its URL"
+                } else {
+                    "; provider keys were not checked"
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn show_config(file: &Path) -> ExitCode {
+    match topup::config::Config::load(file).and_then(|config| config.resolved_json()) {
         Ok(json) => {
             print!("{json}");
             ExitCode::SUCCESS

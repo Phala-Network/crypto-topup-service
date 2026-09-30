@@ -1,6 +1,6 @@
 .PHONY: build build-topup test lint image up down verify-image \
 	restore-drill deploy-check runbook-check sdk-check sdk-generate sandbox-local \
-	cvm-rehearsal
+	cvm-rehearsal upgrade-rehearsal
 
 build:
 	cargo build --workspace --locked
@@ -23,9 +23,9 @@ image:
 	docker build --build-arg SOURCE_DATE_EPOCH="$${SOURCE_DATE_EPOCH:-0}" -t phala-pay:dev .
 	docker run --rm phala-pay:dev topup --help
 
-# The attested compose rendered with local settings, plus the local overlay (Garage S3, dstack
-# simulator, images built here).
-LOCAL_COMPOSE = deploy/local/compose.sh
+# The attested compose rendered from the local environment, plus the local overlay (Garage S3,
+# dstack simulator, images built here).
+LOCAL_COMPOSE = deploy/local/compose.sh -p phala-pay-local
 
 up:
 	$(LOCAL_COMPOSE) up --build -d postgres dstack-simulator backup
@@ -41,6 +41,10 @@ restore-drill:
 
 cvm-rehearsal:
 	deploy/local/cvm-rehearsal.sh
+
+# The staging cutover in place: the released stack with real data, upgraded on its own volumes.
+upgrade-rehearsal:
+	deploy/local/upgrade-rehearsal.sh
 
 deploy-check:
 	cd contracts && forge fmt --check

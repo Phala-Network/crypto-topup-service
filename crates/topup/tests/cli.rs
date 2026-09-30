@@ -17,34 +17,47 @@ fn help_and_version_succeed() {
     }
 }
 
-#[test]
-fn restore_check_requires_owner_credentials() {
-    let route = format!(
-        "{}/tests/fixtures/phala-cloud-pha.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .arg("restore-check")
-        .args([
-            "--expected-heartbeat-at",
-            "2026-09-22T00:00:00Z",
-            "--expected-lsn",
-            "0/0",
-            "--route",
-            &route,
-        ])
-        .env_remove("MIGRATE_DATABASE_URL")
-        // The service login is never a fallback for the owner-only restore gate.
-        .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
-        .output()
-        .expect("topup process should start");
-    assert!(!output.status.success());
-    let output_text = format!(
+/// A service configuration around the route fixture, written to a temporary file removed on drop.
+struct ConfigFile(std::path::PathBuf);
+
+impl ConfigFile {
+    fn new(origin: &str) -> Self {
+        let route = include_str!("fixtures/phala-cloud-pha.yaml")
+            .lines()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = std::env::temp_dir().join(format!("topup-cli-{}.yaml", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            format!(
+                "environment: test\npublic_origin: {origin}\nadmin_key:\n  id: admin/v1\n  \
+                 public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\nrpc_providers:\n  \
+                 alchemy: https://eth-mainnet.g.alchemy.com/v2/{{key}}\n  \
+                 quicknode: https://rpc.example/eth\nroutes:\n  -\n{route}\n"
+            ),
+        )
+        .expect("write the configuration");
+        Self(path)
+    }
+
+    fn path(&self) -> &str {
+        self.0.to_str().expect("UTF-8 temporary path")
+    }
+}
+
+impl Drop for ConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn output_text(output: &Output) -> String {
+    format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output_text.contains("MIGRATE_DATABASE_URL is required for restore-check"));
+    )
 }
 
 #[test]
@@ -55,113 +68,79 @@ fn heartbeat_requires_a_database_url() {
         .output()
         .expect("topup process should start");
     assert!(!output.status.success());
-    let output_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output_text.contains("required for heartbeat"));
+    assert!(output_text(&output).contains("required for heartbeat"));
 }
 
 #[test]
 fn run_requires_a_database_url() {
-    let route = format!(
-        "{}/tests/fixtures/phala-cloud-pha.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let config = ConfigFile::new("https://topup.example");
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["run", "--route", &route])
+        .args(["run", "--config", config.path()])
         .env_remove("DATABASE_URL")
-        .env_remove("TOPUP_ADMIN_KID")
-        .env_remove("TOPUP_ADMIN_PUBLIC_KEY")
         .output()
         .expect("topup process should start");
-
     assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stdout.contains("DATABASE_URL is required for run")
-            || stderr.contains("DATABASE_URL is required for run")
-    );
+    assert!(output_text(&output).contains("DATABASE_URL is required for run"));
 }
 
-/// A replacement CVM boots for a restore with `TOPUP_SERVICE_ENABLED=off`; `run` and `heartbeat`
-/// must stop before they touch the network or the database.
 #[test]
-fn service_commands_refuse_to_start_while_disabled_for_a_restore() {
-    let route = format!(
-        "{}/tests/fixtures/phala-cloud-pha.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    for (args, command) in [
-        (vec!["run", "--route", route.as_str()], "run"),
-        (vec!["heartbeat"], "heartbeat"),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-            .args(&args)
-            .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
-            .env("TOPUP_SERVICE_ENABLED", "off")
-            .output()
-            .expect("topup process should start");
-        assert!(!output.status.success());
-        let output_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output_text.contains(&format!(
-                "{command} is disabled while TOPUP_SERVICE_ENABLED=off"
-            )),
-            "{output_text}"
-        );
-    }
-}
-
-/// `read-only` serves the API of a restored database; the heartbeat writer stays stopped.
-#[test]
-fn heartbeat_refuses_to_start_while_read_only() {
+fn run_refuses_an_invalid_configuration_or_origin() {
+    let config = ConfigFile::new("https://topup.example/v1");
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .arg("heartbeat")
-        .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
-        .env("TOPUP_SERVICE_ENABLED", "read-only")
+        .args(["run", "--config", config.path()])
+        .env("DATABASE_URL", "postgres://unused@127.0.0.1:1/unused")
         .output()
         .expect("topup process should start");
     assert!(!output.status.success());
-    let output_text = String::from_utf8_lossy(&output.stdout);
+    let text = output_text(&output);
     assert!(
-        output_text.contains("heartbeat is disabled while TOPUP_SERVICE_ENABLED=read-only"),
-        "{output_text}"
+        text.contains("public origin must not include a path, query, or fragment"),
+        "{text}"
     );
+
+    let config = ConfigFile::new("https://topup.example");
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args([
+            "run",
+            "--config",
+            config.path(),
+            "--public-origin",
+            "ftp://topup.example",
+        ])
+        .env("DATABASE_URL", "postgres://unused@127.0.0.1:1/unused")
+        .output()
+        .expect("topup process should start");
+    assert!(!output.status.success());
+    assert!(output_text(&output).contains("invalid --public-origin"));
 }
 
-/// The compose starts restore-check on every boot; it acts only after a restore from backup and
-/// publishes even a failed check to TOPUP_RESTORE_REPORT_FILE for the read-only `/healthz`.
+/// The restore report is part of the read-only service only.
 #[test]
-fn restore_check_runs_only_after_a_restore_and_reports_failures() {
-    let route = format!(
-        "{}/tests/fixtures/phala-cloud-pha.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
+fn restore_report_requires_read_only() {
+    let output = topup(&[
+        "run",
+        "--config",
+        "unused.yaml",
+        "--restore-report",
+        "/tmp/report.json",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--read-only"));
+}
+
+/// A failed check is published to --report too, for the read-only `/healthz`.
+#[test]
+fn restore_check_reports_failures() {
+    let config = ConfigFile::new("https://topup.example");
     let report =
         std::env::temp_dir().join(format!("topup-restore-check-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&report);
-    let restore_check = |switch: &str| {
-        Command::new(env!("CARGO_BIN_EXE_topup"))
-            .args(["restore-check", "--route", &route])
-            .env_remove("MIGRATE_DATABASE_URL")
-            .env("TOPUP_RESTORE_FROM_BACKUP", switch)
-            .env("TOPUP_RESTORE_REPORT_FILE", &report)
-            .output()
-            .expect("topup process should start")
-    };
-
-    let output = restore_check("off");
-    assert!(output.status.success());
-    assert!(!report.exists());
-
-    let output = restore_check("on");
+    let output = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["restore-check", "--config", config.path(), "--report"])
+        .arg(&report)
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("topup process should start");
     assert!(!output.status.success());
     let written: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report).expect("report written"))
@@ -180,56 +159,61 @@ fn restore_check_needs_a_heartbeat_anchor_for_an_lsn() {
         "restore-check",
         "--expected-lsn",
         "0/0",
-        "--route",
+        "--config",
         "unused.yaml",
     ]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--expected-heartbeat-at"));
 }
 
+/// `config check` and `config show` need no secret; `--secrets` checks each key against its URL
+/// and prints no value.
 #[test]
-fn run_requires_a_valid_public_origin() {
-    let route = format!(
-        "{}/tests/fixtures/phala-cloud-pha.yaml",
+fn config_commands_validate_without_secrets_and_check_them_on_request() {
+    let config = ConfigFile::new("https://topup.example");
+    let checked = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["config", "check", config.path()])
+        .env_remove("TOPUP_RPC_ALCHEMY_KEY")
+        .output()
+        .expect("topup process should start");
+    assert!(checked.status.success(), "{}", output_text(&checked));
+
+    let shown = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["config", "show", config.path()])
+        .env("TOPUP_RPC_ALCHEMY_KEY", "sealed-key-0123456789")
+        .output()
+        .expect("topup process should start");
+    assert!(shown.status.success());
+    let resolved: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("JSON");
+    assert_eq!(
+        resolved["rpc_providers"]["alchemy"],
+        "https://eth-mainnet.g.alchemy.com/v2/{key}"
+    );
+    assert_eq!(resolved["routes"][0]["quote"]["window_s"], 900);
+    assert!(!String::from_utf8_lossy(&shown.stdout).contains("sealed-key"));
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["config", "check", "--secrets", config.path()])
+        .env_remove("TOPUP_RPC_ALCHEMY_KEY")
+        .output()
+        .expect("topup process should start");
+    assert!(!missing.status.success());
+    assert!(output_text(&missing).contains("TOPUP_RPC_ALCHEMY_KEY is required"));
+
+    let sealed = Command::new(env!("CARGO_BIN_EXE_topup"))
+        .args(["config", "check", "--secrets", config.path()])
+        .env("TOPUP_RPC_ALCHEMY_KEY", "sealed-key-0123456789")
+        .env_remove("TOPUP_RPC_QUICKNODE_KEY")
+        .output()
+        .expect("topup process should start");
+    assert!(sealed.status.success(), "{}", output_text(&sealed));
+    assert!(!output_text(&sealed).contains("sealed-key"));
+
+    let staging = format!(
+        "{}/../../deploy/environments/phala-network/staging/topup/topup.yaml",
         env!("CARGO_MANIFEST_DIR")
     );
-    for (origin, message) in [
-        (None, "TOPUP_PUBLIC_ORIGIN is required for run"),
-        (
-            Some("https://topup.example/v1"),
-            "public origin must not include a path, query, or fragment",
-        ),
-        (
-            Some("ftp://topup.example"),
-            "public origin scheme must be http or https",
-        ),
-    ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_topup"));
-        command
-            .args(["run", "--route", &route])
-            .env(
-                "DATABASE_URL",
-                "postgres://unused:unused@127.0.0.1:1/unused",
-            )
-            .env("TOPUP_ADMIN_KID", "admin/v1")
-            .env(
-                "TOPUP_ADMIN_PUBLIC_KEY",
-                "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
-            )
-            .env_remove("TOPUP_PUBLIC_ORIGIN");
-        if let Some(origin) = origin {
-            command.env("TOPUP_PUBLIC_ORIGIN", origin);
-        }
-        let output = command.output().expect("topup process should start");
-
-        assert!(!output.status.success(), "{origin:?}");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stdout.contains(message) || stderr.contains(message),
-            "{origin:?}: expected {message:?}\n{stdout}\n{stderr}"
-        );
-    }
+    assert!(topup(&["config", "check", &staging]).status.success());
 }
 
 const ACCOUNT: &str = "acct_0123456789abcdef0123456789abcdef";
@@ -371,17 +355,11 @@ fn dev_attestation_binds_the_nonce_account_mode_and_keys_like_the_api() {
 fn migrate_requires_a_database_url() {
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
         .arg("migrate")
-        .env_remove("MIGRATE_DATABASE_URL")
+        .env_remove("DATABASE_URL")
         .output()
         .expect("topup process should start");
-
     assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stdout.contains("MIGRATE_DATABASE_URL is required for migrate")
-            || stderr.contains("MIGRATE_DATABASE_URL is required for migrate")
-    );
+    assert!(output_text(&output).contains("DATABASE_URL is required for migrate"));
 }
 
 #[test]
@@ -416,17 +394,13 @@ fn route_validate_requires_template_mode_for_placeholders() {
 #[test]
 fn route_show_prints_the_resolved_route_as_json() {
     let route = format!(
-        "{}/../../deploy/config/routes/phala-cloud-sepolia-pha.yaml",
+        "{}/tests/fixtures/phala-cloud-pha.yaml",
         env!("CARGO_MANIFEST_DIR")
     );
     let output = topup(&["route", "show", &route]);
     assert!(output.status.success());
     let resolved: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("route show prints JSON");
-    assert_eq!(
-        resolved["chain"]["implementation"],
-        "0x49f2f1f1a25269ea0c6ff2ab1c7b09dcbe9c5ba9"
-    );
     assert_eq!(resolved["quote"]["window_s"], 900);
 
     let invalid = topup(&["route", "show", "/definitely/missing/route.yaml"]);
@@ -454,6 +428,6 @@ fn restore_check_help_requires_a_stopped_service() {
     let output = topup(&["restore-check", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("--route"));
+    assert!(help.contains("--config"));
     assert!(help.contains("processes are stopped"));
 }

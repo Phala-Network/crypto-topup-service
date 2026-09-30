@@ -1,0 +1,32 @@
+{
+  "service_url": "https://pay-api-staging.phala.com",
+  "account": "acct_52daedc4c68d4ea1a1c18472506b85f4",
+  "api_key_env": "PRODUCT_API_KEY",
+  "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
+  "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
+  "chains": [
+    {
+      "chain_id": 11155111,
+      "name": "Sepolia",
+      "rpc_url": "https://ethereum-sepolia-rpc.publicnode.com",
+      "treasury": "0x26430107887d4a691B340BdB887096B83E7a5844",
+      "test_tokens": [{"symbol": "PHA", "address": "0x8F40e7E99678F44c88158f049E62817580ab113B"}]
+    },
+    {
+      "chain_id": 84532,
+      "name": "Base Sepolia",
+      "rpc_url": "https://base-sepolia-rpc.publicnode.com",
+      "treasury": "0x26430107887d4a691B340BdB887096B83E7a5844",
+      "test_tokens": [{"symbol": "PHA", "address": "0x1a6F260377e42ead1418C7C1afDFD5DE371A9284"}]
+    }
+  ],
+  "bonus_bps": {"pha": 1000},
+  "listen_host": "0.0.0.0",
+  "listen_port": 8089,
+  "public_url": "https://pay-demo-api.phala.com",
+  "driver_public_key": "VRrLsnYWLAu6DiFfVKuem88c20EyOKE5v3CCTidUHQM=",
+  "ledger_path": "/data/ledger.sqlite3",
+  "per_deposit_cap_minor": 500000,
+  "per_period_cap_minor": 1000000,
+  "web_origin": "https://pay.phala.com"
+}

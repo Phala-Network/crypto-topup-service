@@ -1,26 +1,20 @@
 # Local overlay for the attested stack, applied by deploy/local/compose.sh after the compose
-# rendered with local settings (make up, the sandbox, and the restore drill). It adds
-# object storage (local/s3.compose.yml), the dstack simulator, and a mock product, builds the
-# images from this checkout, and replaces secrets, ports, and host paths with local values. It
-# never starts dstack-ingress: tls-alpn-01 needs a public DNS name and Let's Encrypt connecting
-# through the dstack gateway (the upstream TESTING.md tests it only on a real CVM), so topup is
-# published on a loopback port with that port as its origin.
-# Everything else, including the PostgreSQL init script (an inline config), comes from the rendered
-# deploy/docker-compose.yml. Database credentials need no local value: `keys` derives them from
-# the simulator exactly as in a CVM.
+# rendered for a local project (make up, the sandbox, and the restore drill), with local/service.yml
+# or local/restore-check.yml for the variant's own services. It adds object storage
+# (local/s3.compose.yml), the dstack simulator, and a mock product, builds the images from this
+# checkout, and replaces host paths and ports with local ones. Everything else, including the
+# configuration and the PostgreSQL init script (inline configs), comes from the rendered compose.
+# Database credentials need no local value: `keys` derives them from the simulator exactly as in a
+# CVM; compose.sh passes the local storage credentials.
 #
 # Paths here are relative to deploy/ (compose.sh's project directory). `!override` and `!reset`
 # need Compose 2.24.4 or newer.
-x-walg-environment: &walg-environment
-  # A restore phase switches to the read-only topup-restore-read key created by s3-init.
-  AWS_ACCESS_KEY_ID: ${TOPUP_LOCAL_S3_ACCESS_KEY_ID:-topup-s3}
-  AWS_SECRET_ACCESS_KEY: ${TOPUP_LOCAL_S3_SECRET_ACCESS_KEY:-topup-s3-secret-key}
-
 x-service-build: &service-build
   context: ..
   dockerfile: Dockerfile
   args:
     SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
+    BUILD_JOBS: ${CARGO_BUILD_JOBS:-}
 
 include:
   - local/s3.compose.yml
@@ -74,8 +68,6 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.postgres-walg
     image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
-    environment:
-      <<: *walg-environment
     healthcheck:
       interval: 2s
       timeout: 3s
@@ -93,20 +85,10 @@ services:
     image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
     environment:
       DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
-      TOPUP_PUBLIC_ORIGIN: http://127.0.0.1:${TOPUP_LOCAL_PORT:-18080}
-      # The attested file reads SENTRY_DSN from the shell; local stacks never report to Sentry.
-      SENTRY_DSN: ""
-      # Local receivers (the mock product, the sandbox's product) listen on the compose network's
-      # private addresses, which smokescreen refuses by design, so local stacks deliver directly;
-      # deploy/tests/smokescreen.sh tests the proxy's policy.
-      TOPUP_WEBHOOK_PROXY: ""
-    # Routes come from a directory so the sandbox and the restore drill can supply their own.
     volumes: !override
       - dstack_socket:/var/run
       - db_app:/run/db-app:ro
       - observability:/run/topup-observability:ro
-      - ${TOPUP_LOCAL_ROUTES_DIR:-./config/routes}:/etc/topup/routes:ro
-    configs: !reset []
     ports: !override
       - "127.0.0.1:${TOPUP_LOCAL_PORT:-18080}:8080"
     healthcheck:
@@ -114,46 +96,6 @@ services:
       retries: 5
     depends_on:
       dstack-simulator:
-        condition: service_healthy
-
-  # A profile no local stack enables (see the header).
-  dstack-ingress:
-    profiles: [cvm]
-
-  smokescreen:
-    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
-
-  heartbeat:
-    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
-
-  backup:
-    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
-    environment:
-      <<: *walg-environment
-      WALG_RETENTION_FULL: "2"
-    depends_on:
-      s3-init:
-        condition: service_completed_successfully
-
-  restore:
-    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
-    environment:
-      <<: *walg-environment
-
-  restore-check:
-    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
-    environment:
-      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
-    volumes: !override
-      - dstack_socket:/var/run
-      - db_owner:/run/db-owner:ro
-      - observability:/run/topup-observability
-      - ${TOPUP_LOCAL_ROUTES_DIR:-./config/routes}:/etc/topup/routes:ro
-    configs: !reset []
-    depends_on:
-      dstack-simulator:
-        condition: service_healthy
-      mock-product:
         condition: service_healthy
 
 volumes:

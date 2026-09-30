@@ -3,7 +3,7 @@
 For a merchant's backend team, who connect the merchant's Phala Pay account (`acct_…`) to the
 API. Phala Pay is open-source, self-hosted software: your **operator** runs its own instance
 ([self-hosting](self-hosting.md)), and you integrate with that instance, at the service URL the
-operator gives you (its `TOPUP_PUBLIC_ORIGIN`); Phala offers no hosted service. The samples write
+operator gives you (its public origin); Phala offers no hosted service. The samples write
 it as `https://api.phala-pay.example`. Phala Pay is API-only: the operator creates your account
 (§5.1), and you manage everything else with your API keys and the SDKs; there is no dashboard.
 Phala Cloud integrates exactly this way, as an ordinary account of Phala's own instance. Where
@@ -1058,15 +1058,12 @@ it offers are its routes, listed by `GET /v1/config`. One deployment serves both
 key selects the mode (§5.2): `ppay_*_test_` keys act on test routes (test networks such as
 Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live mode, on live
 routes. Integrate in test mode. The repository's test routes, with their forwarder factory and
-implementation, are
-[deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)
-(a test PHA token, a `MockERC20` whose `mint(address,uint256)` is public) and
-[deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)
-(Circle's testnet USDC, from [Circle's faucet](https://faucet.circle.com), credited at one dollar),
-and the same two tokens on Base Sepolia,
-[deploy/config/routes/phala-cloud-base-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-base-sepolia-pha.yaml)
-and
-[deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml),
+implementation, are the `routes` of
+[Phala's staging configuration](../deploy/environments/phala-network/staging/topup/topup.yaml):
+`phala-cloud-sepolia-pha-usd` (a test PHA token, a `MockERC20` whose `mint(address,uint256)` is
+public) and `phala-cloud-sepolia-usdc-usd` (Circle's testnet USDC, from
+[Circle's faucet](https://faucet.circle.com), credited at one dollar), and the same two tokens on
+Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and `phala-cloud-base-sepolia-usdc-usd`,
 credited once the block is `safe`, typically about 5 minutes; route files carry no treasury, so
 set your own on each chain first (§1.6).
 

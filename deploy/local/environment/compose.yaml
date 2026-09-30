@@ -1,0 +1,14 @@
+# The local stacks' environment (deploy/local/compose.sh): local object storage (s3.compose.yml) and
+# a placeholder domain; dstack-ingress never runs locally.
+services:
+  postgres:
+    environment: &walg
+      WALG_S3_PREFIX: s3://topup-backups/postgres
+      AWS_ENDPOINT: http://s3:3900
+      AWS_REGION: us-east-1
+      AWS_S3_FORCE_PATH_STYLE: "true"
+  backup:
+    environment: *walg
+  dstack-ingress:
+    environment:
+      DOMAIN: topup.localhost

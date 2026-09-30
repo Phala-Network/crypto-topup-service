@@ -1,0 +1,4 @@
+# The service variant, merged by deploy/render.sh after the environment's overlay: the live
+# instance runs every service but the post-restore gate (compose.restore-check.yaml has it).
+services:
+  restore-check: !reset null

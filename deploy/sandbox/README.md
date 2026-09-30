@@ -19,7 +19,6 @@ marked **HUMAN-ONLY**; agents and CI never run them.
 | `render-route.sh` | Renders the template from environment variables; refuses leftover placeholders. |
 | `set-treasury.sh` | Proves a test EOA as an account's treasury on a chain (`POST /v1/treasuries/challenge`, `personal_sign`, `POST /v1/treasuries`). |
 | `deploy-test-contracts.sh` | Deploys the test token (`MockERC20`, public `mint`), a second token for the unsupported-asset scenario, and `MockSanctionsOracle`. |
-| `docker-compose.sepolia.yml`, `render-sepolia-compose.sh` | Overlay for `deploy/docker-compose.yml` and the renderer that inlines the sandbox route into the attested compose. |
 | `docker-compose.local.yml`, `run-local.sh` | Local stack (the attested compose with the `deploy/local` overlay, plus Anvil) and the end-to-end driver. |
 | `scenarios/docker_restart.py` | The local `restart_command`: restarts the service container through the Docker API. |
 | `scenarios/` | Scripted scenarios; `run.py` runs them against any configured stack. |
@@ -120,30 +119,31 @@ sandbox-only contracts (a mintable test token, a second token for `unsupported_a
    FORWARDER_FACTORY=0x... TEST_TOKEN=0x... \
      SANCTIONS_ORACLE=0x... PRODUCT_SLUG=acme \
      deploy/sandbox/render-route.sh > sandbox-acme.yaml
-   docker run --rm -v "$PWD/sandbox-acme.yaml:/route.yaml:ro" "$TOPUP_IMAGE" \
-     topup route validate /route.yaml
+   docker run --rm -i "$PHALA_PAY_IMAGE" topup route validate /dev/stdin <sandbox-acme.yaml
    ```
 
-3. Render the sandbox compose with literal image digests, the sandbox's attested settings (the
-   names of the `staging` Environment variables in `deploy/README.md`, "Attested settings",
-   exported with the sandbox's values: its keyless Sepolia RPC URLs, its own backup prefix and
-   admin key, and `TOPUP_DOMAIN` and `TOPUP_GATEWAY_DOMAIN`: the sandbox's own custom domain, for
-   example `sandbox.topup.example`, which becomes `TOPUP_PUBLIC_ORIGIN`, and its gateway, with the
-   DNS records of [Custom domain](../README.md#custom-domain)), and the inlined route:
+3. Write the sandbox's environment directory: a copy of
+   [deploy/environments/example/topup](../environments/example/topup) with the sandbox's values.
+   Its `topup.yaml` holds its own `public_origin` (the sandbox's custom domain, for example
+   `https://sandbox.topup.example`, with the DNS records of
+   [Custom domain](../README.md#custom-domain)), its admin key, its keyless Sepolia providers as
+   `provider-a` and `provider-b`, and the rendered route as its only `routes` item. Its
+   `compose.yaml` holds its own backup prefix, and the domain as dstack-ingress's `DOMAIN`. Then
+   render it as Deploy renders an Environment, with a release's `images.json` and the sandbox
+   CVM's gateway (`$SANDBOX_GATEWAY_DOMAIN`, `gateway.<base domain>` of its node):
 
    ```sh
-   TOPUP_IMAGE=...@sha256:... POSTGRES_WALG_IMAGE=...@sha256:... \
-     deploy/sandbox/render-sepolia-compose.sh sandbox-acme.yaml > sandbox-compose.json
-   docker compose -f sandbox-compose.json config -q
+   deploy/render.sh --images images.json --gateway-domain "$SANDBOX_GATEWAY_DOMAIN" \
+     sandbox-environment >sandbox-compose.yml
    ```
 
-4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.json` exactly as the
+4. **HUMAN-ONLY:** deploy or update the sandbox CVM with `sandbox-compose.yml` exactly as the
    staging procedure in `deploy/README.md` describes, with a separate encrypted environment that
-   holds only the sandbox's own secrets (the `staging.env.example` names). The admin API verifies
-   `@target-uri` against the rendered `TOPUP_PUBLIC_ORIGIN`, so a wrong value makes every admin
-   request fail with `401`.
+   holds only the sandbox's own secrets (the compose's sealed names). The admin API verifies
+   `@target-uri` against the sandbox's `public_origin`, so a wrong value makes every admin request
+   fail with `401`.
 5. **HUMAN-ONLY, sandbox admin key holder:** create a test account with `POST /v1/admin/accounts`
-   against the sandbox's `TOPUP_PUBLIC_ORIGIN`, exactly as
+   against the sandbox's `public_origin`, exactly as
    [Account credentials](../README.md#account-credentials) describes, with
    `charges_enabled: false`; the request is audited. Then run `deploy/sandbox/smoke.py` and the
    scenarios with its test key, as below.
@@ -177,7 +177,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
 }
 ```
 
-- `service_url` is the operator's service URL (`https://$TOPUP_DOMAIN`), `account` your `acct_…`
+- `service_url` is the operator's service URL (its `public_origin`), `account` your `acct_…`
   id, and `api_key_file` holds your test key.
 - `chains` lists the networks the product takes payments on (the smoke example, the scenarios,
   and the deposit driver use the first; the driver's `--chain-id` picks another): each with its

@@ -1,0 +1,26 @@
+# The restore-check variant (deploy/RESTORE.md, "The restore-check variant"), merged by
+# `deploy/render.sh --restore-check` after the environment's overlay, instead of compose.service.yaml: a new instance of the app that
+# restores the newest base backup, verifies it read-only, and never writes the backup prefix or
+# takes live traffic. deploy/compose-policy.jq checks the merged result.
+services:
+  # No ingress (it would answer for the live domain), no webhook egress, heartbeat, or base backups.
+  dstack-ingress: !reset null
+  smokescreen: !reset null
+  heartbeat: !reset null
+  backup: !reset null
+
+  # A base backup is required and archiving is off. The storage credentials are the read-only ones
+  # sealed for this instance under their own names, so an instance created without its env file
+  # inherits no read-write credential.
+  postgres:
+    environment:
+      TOPUP_RESTORE_FROM_BACKUP: "on"
+      AWS_ACCESS_KEY_ID: ${RESTORE_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${RESTORE_AWS_SECRET_ACCESS_KEY:-}
+
+  # Read-only, on 8081 only (the gateway's `<app_id>-8081`), reporting as `<environment>-restore`;
+  # render.sh --origin appends its own origin.
+  topup:
+    command: [topup, run, --config, /etc/topup/topup.yaml, --read-only, --restore-report, /run/topup-observability/restore-check.json]
+    ports:
+      - "8081:8080"

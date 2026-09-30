@@ -70,7 +70,7 @@ pub async fn ensure_app_role(admin_pool: &PgPool) -> Result<()> {
 
 impl TestDatabase {
     pub async fn create() -> Result<Option<Self>> {
-        let Some(owner_template) = required_url("MIGRATE_DATABASE_URL")? else {
+        let Some(owner_template) = required_url("OWNER_DATABASE_URL")? else {
             return Ok(None);
         };
         let Some(app_template) = required_url("DATABASE_URL")? else {

@@ -1,0 +1,15 @@
+# The local overlay's part for the restore-check variant (deploy/local/compose.sh --restore-check).
+services:
+  restore-check:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
+    environment:
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack.sock
+    volumes: !override
+      - dstack_socket:/var/run
+      - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+      mock-product:
+        condition: service_healthy

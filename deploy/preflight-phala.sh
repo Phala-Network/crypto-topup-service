@@ -87,3 +87,73 @@ check_phala_cloud() {
                 "$tmp/nodes.json" 2>/dev/null)"
     fi
 }
+
+# check_artifact ENV_FILE COMPOSE ENV_DIR VARIANT: the checks every attested compose shares, run
+# with the pinned Compose (deploy/pinned-compose.sh, never downloaded here). Leaves the compose as
+# JSON in $tmp/compose.json, its images in $tmp/images, and the env file in the array `env`.
+# - The env file names exactly the compose's sealed names (the CLI makes them allowed_envs).
+# - The compose passes deploy/compose-policy.jq for VARIANT.
+# - It is byte for byte a fresh render of ENV_DIR with its own images and gateway or origin, so
+#   no stale render or hand edit reaches the CLI.
+check_artifact() {
+    local env_file=$1 compose=$2 env_dir=$3 variant=$4 compose_bin line violations inputs=()
+    compose_bin=$("$REPO_ROOT/deploy/pinned-compose.sh" --no-download 2>"$tmp/pinned.err") || {
+        fail "$(tool_error "$tmp/pinned.err")"
+        return
+    }
+    echo "== env file"
+    if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$env_file"; then
+        fail "$env_file has a line that is not KEY=VALUE"
+    fi
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
+        [[ -v "env[${line%%=*}]" ]] && fail "$env_file sets ${line%%=*} twice"
+        env[${line%%=*}]=${line#*=}
+    done <"$env_file"
+    echo "== compose"
+    if ! "$compose_bin" -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \
+        2>"$tmp/compose.err"; then
+        fail "docker compose cannot parse $compose: $(head -c 300 "$tmp/compose.err")"
+        : >"$tmp/images"
+        return
+    fi
+    jq -r '.services[].image' "$tmp/compose.json" | sort -u >"$tmp/images"
+    "$compose_bin" -f "$compose" config --variables 2>/dev/null |
+        awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$tmp/sealed"
+    printf '%s\n' "${!env[@]}" | sed '/^$/d' | sort >"$tmp/actual"
+    # An extra or missing name changes the CLI's allowed_envs and therefore the compose hash.
+    cmp -s "$tmp/sealed" "$tmp/actual" ||
+        fail "$env_file must set exactly the compose's sealed names:" \
+            "$(diff "$tmp/sealed" "$tmp/actual" | grep '^[<>]' | tr '\n' ' ')"
+    violations=$(jq -r -L "$REPO_ROOT/deploy" --arg variant "$variant" \
+        'include "compose-policy"; violations($variant; "dstack")[]' "$tmp/compose.json")
+    while IFS= read -r line; do
+        [[ -z "$line" ]] || fail "policy: $line"
+    done <<<"$violations"
+    # The images by name, as the release's images.json has them.
+    jq '[.services[].image | {key: (split("@")[0] | split("/")[-1]), value: .}
+        | select(.key | test("^[a-z0-9][a-z0-9._-]*$"))] | from_entries' \
+        "$tmp/compose.json" >"$tmp/release-images.json"
+    if [[ "$variant" == restore-check ]]; then
+        inputs=(--restore-check --origin "$(jq -r '.services.topup.command[-1]' "$tmp/compose.json")")
+    else
+        inputs=(--gateway-domain
+            "$(jq -r '.services["dstack-ingress"].environment.GATEWAY_DOMAIN // ""' "$tmp/compose.json")")
+    fi
+    if PINNED_COMPOSE=$compose_bin "$REPO_ROOT/deploy/render.sh" "${inputs[@]}" \
+        --images "$tmp/release-images.json" "$env_dir" >"$tmp/fresh.yml" 2>"$tmp/render.err"; then
+        cmp -s "$tmp/fresh.yml" "$compose" ||
+            fail "$compose differs from a fresh render of $env_dir with its images and inputs;" \
+                "render it again from the commit being deployed"
+    else
+        fail "$env_dir does not render with the inputs of $compose: $(tool_error "$tmp/render.err")"
+    fi
+}
+
+# refuse_example_values FILE...: the placeholders of deploy/environments/example.
+refuse_example_values() {
+    if grep -Eq 'example\.com|11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=|s3://BUCKET/|ACCOUNT\.r2\.' "$@"; then
+        fail "the compose still holds values of deploy/environments/example (example.com, the example" \
+            "admin key, s3://BUCKET/, or ACCOUNT.r2)"
+    fi
+}

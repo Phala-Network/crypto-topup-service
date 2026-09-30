@@ -1,16 +1,19 @@
-# CVM rehearsal overlay, applied by deploy/local/cvm-rehearsal.sh after the rendered staging
-# compose (deploy/render-compose.sh output with a real route inlined). It replaces only what a
+# CVM rehearsal overlay, applied by deploy/local/cvm-rehearsal.sh and upgrade-rehearsal.sh after
+# the compose deploy/render.sh rendered from a staging-shaped environment (the rehearsal's own
+# addresses and providers). It replaces only what a
 # CVM provides and a workstation does not: the dstack socket (the simulator), object storage
 # (s3.compose.yml), and the asset chains (an Anvil with Sepolia's chain id and one with Base
 # Sepolia's, for the committed routes of each). Images, commands,
 # settings, inline configs, and healthchecks all come from the rendered file, and the secrets from a
-# `.env` shaped like staging.env.example.
+# `.env` of the rendered compose's sealed names.
 #
 # The exception is the custom domain: dstack-ingress does not run, because tls-alpn-01 needs the
 # public DNS records and Let's Encrypt connecting through the dstack gateway (the upstream
 # TESTING.md tests it only on a real CVM), and running it here would register ACME accounts from
-# every rehearsal. Clients call topup on the compose network instead, so that is its origin;
-# validate-compose.sh checks the ingress definition.
+# every rehearsal. Clients call topup on the compose network instead, so that is its origin
+# (--public-origin), and webhooks go straight to the product's private address, which smokescreen
+# refuses by design (deploy/tests/smokescreen.sh tests the proxy); validate-compose.sh checks the
+# ingress definition.
 #
 # Like the restore drill, nothing here bind-mounts a host path (CI's Docker daemon cannot see
 # the checkout) and the workload publishes no host port; only the Anvils are published, on loopback
@@ -72,11 +75,7 @@ services:
         condition: service_completed_successfully
 
   topup:
-    environment:
-      TOPUP_PUBLIC_ORIGIN: http://topup:8080
-      # The reference product listens on a private compose address, which smokescreen refuses
-      # by design: the rehearsal delivers directly (deploy/tests/smokescreen.sh tests the proxy).
-      TOPUP_WEBHOOK_PROXY: ""
+    command: [topup, run, --config, /etc/topup/topup.yaml, --public-origin, "http://topup:8080"]
     volumes: !override
       - dstack_socket:/var/run
       - db_app:/run/db-app:ro
@@ -92,16 +91,6 @@ services:
   # A profile the rehearsal never enables (see the header).
   dstack-ingress:
     profiles: [cvm]
-
-  # Starts with every boot and, in the service variant, exits at once.
-  restore-check:
-    volumes: !override
-      - dstack_socket:/var/run
-      - db_owner:/run/db-owner:ro
-      - observability:/run/topup-observability
-    depends_on:
-      dstack-simulator:
-        condition: service_healthy
 
 volumes:
   dstack_socket:

@@ -1,0 +1,228 @@
+# Every service of a topup CVM (deploy/README.md, "What runs where"). Never deployed as is:
+# deploy/render.sh merges it with an environment directory (its compose.yaml overlay and topup.yaml)
+# and one variant, compose.service.yaml or compose.restore-check.yaml, each removing the services
+# it does not run, then pins the images (docs/design/deploy-config.md).
+# Env carries only the sealed secrets (`${NAME:-}`) and the env interfaces of libpq, WAL-G, and
+# dstack-ingress; every other setting is in topup.yaml.
+services:
+  # Derives the backup key and the database credentials into tmpfs (deploy/README.md, "Database
+  # credentials"); every other service mounts only the ones it needs.
+  keys:
+    image: phala-pay
+    user: "999:999"
+    command: [topup, keys, --backup-dir, /run/wal-g, --owner-dir, /run/db-owner, --app-dir, /run/db-app, --hold]
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - walg_key:/run/wal-g
+      - db_owner:/run/db-owner
+      - db_app:/run/db-app
+    healthcheck:
+      test: [CMD, topup, keys, --check, --backup-dir, /run/wal-g, --owner-dir, /run/db-owner, --app-dir, /run/db-app]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # PostgreSQL with WAL-G (deploy/RESTORE.md, "Bootstrap from backup"). Healthy only out of recovery;
+  # the start period is the restore's RTO.
+  postgres:
+    image: postgres-walg
+    environment:
+      WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+      WALG_LIBSODIUM_KEY_TRANSFORM: hex
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      POSTGRES_DB: topup
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/db-owner/postgres.password
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - walg_key:/run/wal-g:ro
+      - db_owner:/run/db-owner:ro
+      - db_app:/run/db-app:ro
+      - observability:/run/topup-observability
+    configs:
+      - source: postgres_init
+        target: /docker-entrypoint-initdb.d/10-topup-role.sh
+    healthcheck:
+      test: [CMD-SHELL, "psql -U postgres -d topup -XAtqc 'SELECT NOT pg_is_in_recovery()' | grep -qx t"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 3600s
+    depends_on:
+      keys:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migrate:
+    image: phala-pay
+    user: "999:999"
+    command: [topup, migrate]
+    environment:
+      DATABASE_URL: postgres://postgres@postgres:5432/topup
+      PGPASSFILE: /run/db-owner/postgres.pgpass
+    volumes:
+      - db_owner:/run/db-owner:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The service. It publishes no port: dstack-ingress is its only public ingress, and every webhook
+  # leaves through smokescreen (deploy/README.md, "Webhook egress").
+  topup:
+    image: phala-pay
+    user: "999:999"
+    command: [topup, run, --config, /etc/topup/topup.yaml, --webhook-proxy, "http://smokescreen:4750"]
+    environment:
+      DATABASE_URL: postgres://topup_service@postgres:5432/topup
+      PGPASSFILE: /run/db-app/topup_service.pgpass
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - db_app:/run/db-app:ro
+      - observability:/run/topup-observability:ro
+    configs:
+      - source: topup
+        target: /etc/topup/topup.yaml
+    healthcheck:
+      test: [CMD, topup, healthcheck]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # The single public ingress: the official dstack-ingress 2.6, TLS for the domain inside the CVM
+  # with a tls-alpn-01 certificate (deploy/README.md, "Custom domain").
+  dstack-ingress:
+    image: ghcr.io/dstack-tee/dstack-ingress:2.6@sha256:c212abb7bedec4d7b54a82bcf9972e58e39a4757cc811faeb6017eee6c0673b0
+    environment:
+      CHALLENGE_TYPE: tls-alpn-01
+      TARGET_ENDPOINT: topup:8080
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - ingress_certs:/etc/letsencrypt
+      - ingress_evidences:/evidences
+    depends_on:
+      topup:
+        condition: service_started
+    restart: unless-stopped
+
+  # The webhook egress proxy, Stripe's smokescreen from the phala-pay image: it refuses every
+  # address that is not publicly routable (deploy/README.md, "Webhook egress").
+  smokescreen:
+    image: phala-pay
+    command:
+      - smokescreen
+      - --listen-ip=0.0.0.0
+      - --listen-port=4750
+      - --timeout=10s
+      - --deny-range=0.0.0.0/8
+      - --deny-range=100.64.0.0/10
+      - --deny-range=169.254.0.0/16
+      - --deny-range=192.0.0.0/24
+      - --deny-range=198.18.0.0/15
+      - --deny-range=240.0.0.0/4
+    restart: unless-stopped
+
+  # The RPO heartbeat: one commit a minute (deploy/RESTORE.md).
+  heartbeat:
+    image: phala-pay
+    user: "999:999"
+    command: [topup, heartbeat]
+    environment:
+      DATABASE_URL: postgres://topup_service@postgres:5432/topup
+      PGPASSFILE: /run/db-app/topup_service.pgpass
+    volumes:
+      - db_app:/run/db-app:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  backup:
+    image: postgres-walg
+    user: postgres
+    command: [walg-cron, backup-push, "0 3 * * *"]
+    environment:
+      WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+      WALG_LIBSODIUM_KEY_TRANSFORM: hex
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      PGDATA: /var/lib/postgresql/data
+      PGHOST: postgres
+      PGDATABASE: topup
+      PGUSER: postgres
+      PGPASSFILE: /run/db-owner/postgres.pgpass
+      WALG_RETENTION_FULL: "7"
+    volumes:
+      - pgdata:/var/lib/postgresql:ro
+      - walg_key:/run/wal-g:ro
+      - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
+    depends_on:
+      keys:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The post-restore gate (deploy/RESTORE.md); the restore-check variant only.
+  restore-check:
+    image: phala-pay
+    user: "999:999"
+    entrypoint: [topup, restore-check, --config, /etc/topup/topup.yaml, --report, /run/topup-observability/restore-check.json]
+    command: []
+    environment:
+      DATABASE_URL: postgres://postgres@postgres:5432/topup
+      PGPASSFILE: /run/db-owner/postgres.pgpass
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - db_owner:/run/db-owner:ro
+      - observability:/run/topup-observability
+    configs:
+      - source: topup
+        target: /etc/topup/topup.yaml
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+volumes:
+  pgdata:
+  walg_key:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
+  db_owner:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
+  db_app:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=999,gid=999,mode=0700
+  observability:
+  ingress_certs:
+  ingress_evidences:
+
+# render.sh inlines both as content. `topup` stands for the environment's topup.yaml: render.sh and
+# the local overlays point it there.
+configs:
+  postgres_init:
+    file: ./postgres-init/10-topup-role.sh
+  topup:
+    file: ./topup.yaml

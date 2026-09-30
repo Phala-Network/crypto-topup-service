@@ -1,7 +1,8 @@
 # Database migrations
 
-Migrations run through the trusted database owner configured by `MIGRATE_DATABASE_URL`. The
-`topup migrate` command never falls back to `DATABASE_URL`. Migrations are additive: never edit an applied
+Migrations run as the trusted database owner: `topup migrate` reads `DATABASE_URL` and refuses to
+run unless that login owns the database (or is a superuser), so the application login never
+migrates. Migrations are additive: never edit an applied
 migration, and never squash again once any environment holds data.
 
 ## Roles and privileges

@@ -22,10 +22,10 @@ deterministic factory ([Contracts](README.md#contracts)); any test key quotes on
 
 | Route | Token | Pricing | Test tokens |
 |---|---|---|---|
-| `phala-cloud-sepolia-pha-usd` ([file](config/routes/phala-cloud-sepolia-pha.yaml)) | test PHA `0x8F40e7E99678F44c88158f049E62817580ab113B` (`MockERC20`, 18 decimals) | spot: Coin Metrics `pha`, checked against Binance `PHAUSDT` | `mint(address,uint256)` is public |
-| `phala-cloud-sepolia-usdc-usd` ([file](config/routes/phala-cloud-sepolia-usdc.yaml)) | Circle's testnet USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | stablecoin: 1.00 while Coin Metrics' `usdc` rate is within 1% | [Circle's faucet](https://faucet.circle.com) (Ethereum Sepolia) |
-| `phala-cloud-base-sepolia-pha-usd` ([file](config/routes/phala-cloud-base-sepolia-pha.yaml)) | test PHA `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284` (the same `MockERC20`, 18 decimals) | as on Sepolia | `mint(address,uint256)` is public |
-| `phala-cloud-base-sepolia-usdc-usd` ([file](config/routes/phala-cloud-base-sepolia-usdc.yaml)) | Circle's testnet USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | as on Sepolia | [Circle's faucet](https://faucet.circle.com) (Base Sepolia) |
+| `phala-cloud-sepolia-pha-usd` ([config](environments/phala-network/staging/topup/topup.yaml)) | test PHA `0x8F40e7E99678F44c88158f049E62817580ab113B` (`MockERC20`, 18 decimals) | spot: Coin Metrics `pha`, checked against Binance `PHAUSDT` | `mint(address,uint256)` is public |
+| `phala-cloud-sepolia-usdc-usd` ([config](environments/phala-network/staging/topup/topup.yaml)) | Circle's testnet USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | stablecoin: 1.00 while Coin Metrics' `usdc` rate is within 1% | [Circle's faucet](https://faucet.circle.com) (Ethereum Sepolia) |
+| `phala-cloud-base-sepolia-pha-usd` ([config](environments/phala-network/staging/topup/topup.yaml)) | test PHA `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284` (the same `MockERC20`, 18 decimals) | as on Sepolia | `mint(address,uint256)` is public |
+| `phala-cloud-base-sepolia-usdc-usd` ([config](environments/phala-network/staging/topup/topup.yaml)) | Circle's testnet USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e` ([Circle's list](https://developers.circle.com/stablecoins/usdc-contract-addresses), 6 decimals) | as on Sepolia | [Circle's faucet](https://faucet.circle.com) (Base Sepolia) |
 
 | Chain | `confirmations` | RPC providers | Sanctions oracle (a `MockSanctionsOracle`) |
 |---|---|---|---|
@@ -43,7 +43,7 @@ never a reset.
 
 ### RPC providers
 
-Staging's providers, in the `staging` Environment's `TOPUP_RPC_<ID>_URL` variables
+Staging's providers, in the `rpc_providers` of its [topup.yaml](environments/phala-network/staging/topup/topup.yaml)
 ([RPC providers](README.md#rpc-providers)); all four are keyless and free:
 
 | Chain | Slot | Provider |
@@ -88,9 +88,10 @@ of them. In order:
 4. **Stop the old service.** `npx --yes phala@1.1.22 cvms stop "$TOPUP_CVM_ID"` and the same for
    `$STAGING_PRODUCT_CVM_ID`. Keep both CVMs and the old backup prefix for the retention period: they
    restore only with an image built before the reset. Record their ids.
-5. **Point staging at an empty database.** Set the `staging` variable `WALG_S3_PREFIX` to a new,
-   empty prefix (PostgreSQL initializes a cluster only on a prefix that provably holds no backup,
-   [RESTORE.md](RESTORE.md#bootstrap-from-backup)); clear `TOPUP_CVM_ID` and
+5. **Point staging at an empty database.** Merge a PR setting `WALG_S3_PREFIX` in
+   [environments/phala-network/staging/topup/compose.yaml](environments/phala-network/staging/topup/compose.yaml)
+   to a new, empty prefix (PostgreSQL initializes a cluster only on a prefix that provably holds no
+   backup, [RESTORE.md](RESTORE.md#bootstrap-from-backup)); clear `TOPUP_CVM_ID` and
    `STAGING_PRODUCT_CVM_ID`.
 6. **Provision the service.** Deploy (`staging`, `topup`, `provision`, the release of step 1); set
    `TOPUP_CVM_ID` to the new id; [seal the secrets](README.md#sealing-the-secrets); update the
@@ -126,9 +127,21 @@ from an operator's machine, plays a customer and signs the product's account API
 driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
 
 - **Its key.** The sealed env holds only `PRODUCT_API_KEY`, the account's **restricted** test key
-  (`ppay_rk_test_…`) with exactly the permissions it uses, listed in
-  [product/staging.env.example](product/staging.env.example): `account.read`, `quotes.write`,
-  `deposit_addresses.write`, `deposits.read`, `refunds.write`, `sweeps.read`, `forwarders.read`.
+  (`ppay_rk_test_…`) with exactly the permissions it uses (a write grant includes its resource's
+  read). It needs no `account.write`, `api_keys.*`, `treasury.*`, `endpoints.*`, or `events.read`:
+  the webhook endpoint and the treasury are set once with the secret key, and the product sends no
+  transaction.
+
+  | Permission | What the product calls |
+  |---|---|
+  | `account.read` | `GET /v1/attestation` (pins the account's webhook keys; trust strip), `GET /v1/config` (the tokens the demo offers) |
+  | `quotes.write` | `POST /v1/quotes`, `GET /v1/quotes/{id}` |
+  | `deposit_addresses.write` | `POST /v1/deposit_addresses`, `GET /v1/deposit_addresses/{id}` |
+  | `deposits.read` | `GET /v1/deposits`, `GET /v1/deposits/{id}` |
+  | `refunds.write` | `POST /v1/refunds`, `POST /v1/refunds/{id}/mark_paid\|cancel`, `GET /v1/refunds` |
+  | `sweeps.read` | `GET /v1/balance`, `GET /v1/sweeps` |
+  | `forwarders.read` | `GET /v1/forwarders?sweepable=` (the flush the merchant signs) |
+
   Its preflight ([product/preflight.sh](product/preflight.sh)) accepts only a test key, restricted
   or secret. The account's secret key stays with the staging owner, offline.
 - **Its pins.** The attested product config names its `account` (`acct_…`), the forwarder factory
@@ -136,12 +149,14 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   Sepolia), the account's treasury there, from which the SDK recomputes every quote and
   deposit address before the product shows it; the placeholder `acct_000…` fails the online
   preflight until a PR sets the real id. It pins its account's test-mode webhook keys from the
-  authenticated attestation at `TOPUP_ORIGIN`, fetched with `PRODUCT_API_KEY`, at startup or on the
+  authenticated attestation at its `service_url`, fetched with `PRODUCT_API_KEY`, at startup or on the
   first webhook when the key is sealed later (until then it answers `503`, and topup retries).
-- **Attested settings.** `TOPUP_ORIGIN` (`https://$TOPUP_DOMAIN`), `PRODUCT_PUBLIC_URL`
-  (`https://$PRODUCT_DOMAIN`, its [custom domain](README.md#custom-domain)), `PRODUCT_DOMAIN` and
-  `PRODUCT_GATEWAY_DOMAIN` (dstack-ingress's), and `PRODUCT_DRIVER_PUBLIC_KEY`. The config itself
-  commits each chain's `rpc_url`, a keyless public RPC (publicnode's; the product seals no RPC key,
+- **Attested settings.** Every value is committed in its environment directory,
+  [environments/phala-network/staging/product](environments/phala-network/staging/product):
+  `config.json` holds `service_url` (staging topup's `public_origin`), `public_url`
+  (`https://$PRODUCT_DOMAIN`, its [custom domain](README.md#custom-domain)), and
+  `driver_public_key`. The overlay holds dstack-ingress's `DOMAIN`, and the CVM's gateway is
+  Deploy's input. The config also commits each chain's `rpc_url`, a keyless public RPC (publicnode's; the product seals no RPC key,
   and its preflight refuses a keyed URL and checks online that each reports its chain and that the
   chain's treasury is a contract), its test tokens, `bonus_bps` (the demo merchant's own +10% on
   credits paid in PHA, a promotion, not a Phala Pay feature), and `web_origin`,
@@ -185,7 +200,7 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
 
 The product serves the JSON API of the live demo on the public **Phala Pay website**
 ([pay.phala.com](https://pay.phala.com/), [product/web](product/web), served by Cloudflare:
-[Website](#website)) at `PRODUCT_PUBLIC_URL/api/`
+[Website](#website)) at `<public_url>/api/`
 ([reference_product/demo.py](product/reference_product/demo.py)); it serves no page. The page
 calls it cross-origin: the API answers CORS preflights and sends
 `Access-Control-Allow-Origin: https://pay.phala.com` with `Access-Control-Allow-Credentials: true`
@@ -221,8 +236,8 @@ demo runs cross-origin, with CORS and the cookie, as in production.
 Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1–8 (each step
 **HUMAN-ONLY** unless it is a workflow run):
 
-1. On the owner's machine (mode-0600 files, never committed), create the driver key and set the
-   `staging` variable `PRODUCT_DRIVER_PUBLIC_KEY` (the driver's printed `public_key`):
+1. On the owner's machine (mode-0600 files, never committed), create the driver key, and commit its
+   printed `public_key` as the product config's `driver_public_key` by PR:
 
    ```sh
    cd sdk/python
@@ -234,7 +249,7 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
    its `secret` for step 4:
 
    ```sh
-   curl -fsS "$TOPUP_PUBLIC_ORIGIN/v1/api_keys" -H "Authorization: Bearer $SECRET_KEY" \
+   curl -fsS "https://pay-api-staging.phala.com/v1/api_keys" -H "Authorization: Bearer $SECRET_KEY" \
      -H 'content-type: application/json' -d '{"name": "reference product", "type": "restricted",
      "permissions": ["account.read", "quotes.write", "deposit_addresses.write", "deposits.read",
      "refunds.write", "sweeps.read", "forwarders.read"]}'
@@ -242,14 +257,15 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
 
 3. **Treasury Safe owners**: set the account's treasury on each of its chains to the staging Safe
    ([Treasury setup](README.md#treasury-setup), Safe message; in test mode it applies at once). Open a PR
-   setting the product config's `account` in [product/docker-compose.yml](product/docker-compose.yml)
-   to the new `acct_…` id, and merge it.
+   setting the product config's `account` in
+   [config.json](environments/phala-network/staging/product/config.json) to the new `acct_…` id,
+   and merge it.
 4. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
    [DNS records](README.md#custom-domain) for `$PRODUCT_DOMAIN` the summary lists, seal `.env.product`
    holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and Deploy
    `upgrade` with the same release, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
    the certificate evidence. Then, with the secret key, register the product's endpoint:
-   `POST /v1/webhook_endpoints {"url": "<PRODUCT_PUBLIC_URL>/webhooks", "enabled_events": ["*"]}`
+   `POST /v1/webhook_endpoints {"url": "<public_url>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.
 5. Run a deposit. The payer is a Foundry keystore with a throwaway key and some testnet ETH; the
    test PHA token is a `MockERC20` with a public `mint`, so the driver mints the quoted amount and

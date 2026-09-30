@@ -121,7 +121,7 @@ class ProductConfig:
 
     The product's Phala Pay API key comes from `api_key_file`, or, in a CVM, from the sealed
     environment variable named by `api_key_env`: a restricted key (`ppay_rk_test_…`) holding only
-    the permissions the product uses (deploy/product/staging.env.example), or a secret key
+    the permissions the product uses (deploy/phala.md, "Staging reference product"), or a secret key
     (`ppay_sk_test_…`). `account` is the product's Phala Pay account id (`acct_…`): the account its
     webhooks must name and the first input of every address's salt. `account`, `factory`,
     `implementation`, and each of `chains`' `treasury` are the pins every quote and deposit address

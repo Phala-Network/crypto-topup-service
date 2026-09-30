@@ -34,17 +34,26 @@ async fn migrations_apply_from_scratch_and_are_idempotent() -> Result<()> {
     with_database(|context| {
         Box::pin(async move {
             db::migrate(&context.owner_pool).await?;
-            let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-                .arg("migrate")
-                .env("MIGRATE_DATABASE_URL", &context.owner_url)
-                .env_remove("DATABASE_URL")
-                .output()
-                .context("run topup migrate")?;
+            let migrate = |url: &str| {
+                Command::new(env!("CARGO_BIN_EXE_topup"))
+                    .arg("migrate")
+                    .env("DATABASE_URL", url)
+                    .output()
+                    .context("run topup migrate")
+            };
+            let output = migrate(&context.owner_url)?;
             ensure!(
                 output.status.success(),
                 "topup migrate failed: {}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+            // The application login is refused before it touches the schema.
+            let output = migrate(&context.app_url)?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            ensure!(
+                !output.status.success() && text.contains("migrate requires the database owner"),
+                "migrate must refuse the application login: {text}"
             );
             Ok(())
         })

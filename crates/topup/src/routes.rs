@@ -7,7 +7,7 @@ use alloy_primitives::Address;
 use topup_adapters::chain::evm::EvmClient;
 use topup_core::route::{ChainConfig, RouteFile};
 
-use crate::rpc_provider::{UnresolvedProvider, configured_provider_url, provider_label};
+use crate::rpc_provider::{ProviderUrl, environment_key, provider_label};
 
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
@@ -32,13 +32,11 @@ struct ChainEntry {
 /// A provider entry that cannot be used.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ProviderError {
-    /// The provider id's environment variable is unset or empty.
-    #[error("{environment} is required for `{label}`")]
+    /// The provider id has no URL in the configuration's `rpc_providers`.
+    #[error("`{label}` is not a configured RPC provider (rpc_providers)")]
     MissingUrl {
         /// Log-safe provider label.
         label: String,
-        /// Environment variable that must hold the URL.
-        environment: String,
     },
     /// The provider id's key does not fit its URL (`crate::rpc_provider`).
     #[error("{environment} {problem} for `{label}`")]
@@ -67,64 +65,51 @@ pub enum ProviderError {
 }
 
 impl RouteSet {
-    /// Validates the loaded routes and creates one client per chain provider.
-    ///
-    /// A provider whose URL is missing or invalid does not fail construction; the consumer that
-    /// needs it fails instead, so commands that use only provider A do not require provider B.
+    /// Validates the loaded routes and creates one client per chain provider, for routes whose
+    /// providers are inline URLs (tests). A provider id resolves to nothing here; the service
+    /// resolves ids through its configuration ([`RouteSet::with_providers`]).
     pub fn new(routes: Vec<RouteFile>) -> Result<Self, String> {
-        let mut versions = BTreeSet::new();
-        for route in &routes {
-            if !versions.insert((route.route.as_str(), route.version)) {
-                return Err(format!(
-                    "duplicate route `{}` version {}",
-                    route.route, route.version
-                ));
-            }
-        }
-        let mut current = BTreeMap::<(u64, Address), usize>::new();
-        let mut chains = BTreeMap::<u64, ChainEntry>::new();
-        for (index, route) in routes.iter().enumerate() {
-            route.validate().map_err(|error| {
-                format!(
-                    "route `{}` version {} failed validation: {error}",
-                    route.route, route.version
-                )
-            })?;
-            let chain_id = route.chain.chain_id;
-            let chain = chains.entry(chain_id).or_insert_with(|| ChainEntry {
-                config: route.chain.clone(),
-                providers: route
-                    .chain
-                    .rpc_providers
-                    .iter()
-                    .enumerate()
-                    .map(|(position, provider)| resolve_provider(provider, position, chain_id))
-                    .collect(),
-            });
-            let first = &chain.config;
-            if first.rpc_providers != route.chain.rpc_providers {
-                return Err(format!(
-                    "route `{}` version {} disagrees with another chain {chain_id} scanner configuration",
-                    route.route, route.version
-                ));
-            }
-            let asset = (chain_id, route.asset.contract);
-            match current
-                .get(&asset)
-                .and_then(|selected| routes.get(*selected))
-            {
-                Some(selected) if selected.route != route.route => {
-                    return Err(format!(
-                        "routes `{}` and `{}` both select chain {chain_id} asset {:#x}",
-                        selected.route, route.route, route.asset.contract
-                    ));
-                }
-                Some(selected) if selected.version >= route.version => {}
-                Some(_) | None => {
-                    current.insert(asset, index);
-                }
-            }
-        }
+        Self::from_resolver(routes, |_| None)
+    }
+
+    /// Validates the loaded routes and creates one client per chain provider, each id resolved
+    /// through `providers` (the configuration's `rpc_providers`) and its sealed key from the
+    /// environment (`TOPUP_RPC_<ID>_KEY`).
+    ///
+    /// A provider whose URL or key is missing or invalid does not fail construction; the consumer
+    /// that needs it fails instead, so commands that use only provider A do not require provider B.
+    /// `topup run` checks every provider at startup ([`crate::contracts::verify_routes`]).
+    pub fn with_providers(
+        routes: Vec<RouteFile>,
+        providers: &BTreeMap<String, ProviderUrl>,
+    ) -> Result<Self, String> {
+        Self::from_resolver(routes, |id| {
+            providers
+                .get(id)
+                .map(|url| (url.clone(), environment_key(id)))
+        })
+    }
+
+    /// Checks everything that must agree across routes, without creating a client or reading a
+    /// secret: the validation `topup config check` shares with the service.
+    pub fn check(routes: &[RouteFile]) -> Result<(), String> {
+        index(routes, |_| Vec::new()).map(drop)
+    }
+
+    fn from_resolver(
+        routes: Vec<RouteFile>,
+        resolve: impl Fn(&str) -> Option<(ProviderUrl, Option<String>)>,
+    ) -> Result<Self, String> {
+        let (current, chains) = index(&routes, |chain| {
+            chain
+                .rpc_providers
+                .iter()
+                .enumerate()
+                .map(|(position, provider)| {
+                    resolve_provider(provider, position, chain.chain_id, &resolve)
+                })
+                .collect()
+        })?;
         Ok(Self {
             routes,
             current,
@@ -174,28 +159,90 @@ impl RouteSet {
     }
 }
 
+/// Current route per chain asset, and each chain's settings with its providers.
+type Index = (BTreeMap<(u64, Address), usize>, BTreeMap<u64, ChainEntry>);
+
+/// Checks everything that must agree across routes: unique versions, each route's own
+/// validation, one finality rule and provider list per chain, and one route name per chain asset.
+/// `providers` builds a chain's clients (none when only checking).
+fn index(
+    routes: &[RouteFile],
+    providers: impl Fn(&ChainConfig) -> Vec<Result<Arc<EvmClient>, ProviderError>>,
+) -> Result<Index, String> {
+    let mut versions = BTreeSet::new();
+    for route in routes {
+        if !versions.insert((route.route.as_str(), route.version)) {
+            return Err(format!(
+                "duplicate route `{}` version {}",
+                route.route, route.version
+            ));
+        }
+    }
+    let mut current = BTreeMap::<(u64, Address), usize>::new();
+    let mut chains = BTreeMap::<u64, ChainEntry>::new();
+    for (index, route) in routes.iter().enumerate() {
+        route.validate().map_err(|error| {
+            format!(
+                "route `{}` version {} failed validation: {error}",
+                route.route, route.version
+            )
+        })?;
+        let chain_id = route.chain.chain_id;
+        let chain = chains.entry(chain_id).or_insert_with(|| ChainEntry {
+            config: route.chain.clone(),
+            providers: providers(&route.chain),
+        });
+        if chain.config.rpc_providers != route.chain.rpc_providers {
+            return Err(format!(
+                "route `{}` version {} disagrees with another chain {chain_id} scanner configuration",
+                route.route, route.version
+            ));
+        }
+        let asset = (chain_id, route.asset.contract);
+        match current
+            .get(&asset)
+            .and_then(|selected| routes.get(*selected))
+        {
+            Some(selected) if selected.route != route.route => {
+                return Err(format!(
+                    "routes `{}` and `{}` both select chain {chain_id} asset {:#x}",
+                    selected.route, route.route, route.asset.contract
+                ));
+            }
+            Some(selected) if selected.version >= route.version => {}
+            Some(_) | None => {
+                current.insert(asset, index);
+            }
+        }
+    }
+    Ok((current, chains))
+}
+
+/// One provider entry's client: an inline URL (tests) as is, or a configured id's URL with its
+/// sealed key in place of `{key}`.
 fn resolve_provider(
     provider: &str,
     index: usize,
     chain_id: u64,
+    resolve: &impl Fn(&str) -> Option<(ProviderUrl, Option<String>)>,
 ) -> Result<Arc<EvmClient>, ProviderError> {
     let label = provider_label(provider, index);
-    match configured_provider_url(provider) {
-        Ok(url) => EvmClient::new(&url)
-            .map(|client| Arc::new(client.with_provider(label.clone()).with_chain_id(chain_id)))
-            .map_err(|_| ProviderError::InvalidUrl { label }),
-        Err(UnresolvedProvider::MissingUrl(environment)) => {
-            Err(ProviderError::MissingUrl { label, environment })
-        }
-        Err(UnresolvedProvider::Key {
-            environment,
-            problem,
-        }) => Err(ProviderError::InvalidKey {
-            label,
-            environment,
-            problem,
-        }),
-    }
+    let url = if provider.contains("://") {
+        provider.to_owned()
+    } else {
+        let (url, key) = resolve(provider).ok_or_else(|| ProviderError::MissingUrl {
+            label: label.clone(),
+        })?;
+        url.resolve(key.as_deref())
+            .map_err(|problem| ProviderError::InvalidKey {
+                label: label.clone(),
+                environment: crate::rpc_provider::key_environment(provider),
+                problem,
+            })?
+    };
+    EvmClient::new(&url)
+        .map(|client| Arc::new(client.with_provider(label.clone()).with_chain_id(chain_id)))
+        .map_err(|_| ProviderError::InvalidUrl { label })
 }
 
 #[cfg(test)]
@@ -282,7 +329,6 @@ mod tests {
             set.provider(1, 1).map(|_| ()),
             Err(ProviderError::MissingUrl {
                 label: "r1-routeset-unset-provider".to_owned(),
-                environment: "TOPUP_RPC_R1_ROUTESET_UNSET_PROVIDER_URL".to_owned(),
             })
         );
         assert_eq!(

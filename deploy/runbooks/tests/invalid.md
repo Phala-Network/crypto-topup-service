@@ -5,15 +5,17 @@ not an operator runbook.
 
 ```sh
 topup bogus
-topup route bogus deploy/config/routes/phala-cloud-sepolia-pha.yaml
+topup route bogus deploy/environments/phala-network/staging/topup/topup.yaml
 topup route
 topup attest --bogus
 topup reconcile \
-  --no-such-flag --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
+  --no-such-flag --config deploy/environments/phala-network/staging/topup/topup.yaml
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check --once
 cargo run --locked -q -p topup -- restore
 curl -sS -X POST "$BASE_URL/v1/admin/not-a-route"
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh GET "$BASE_URL/v1/admin/routes/r/pause" /tmp/empty "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl -sS -X DELETE "$BASE_URL/v1/admin/reports/daily"
 admin PUT /v1/admin/products '{}'
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml
+deploy/render.sh --bogus --images images.json --origin https://x.example ENV_DIR OTHER
 ```

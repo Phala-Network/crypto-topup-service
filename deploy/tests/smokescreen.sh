@@ -18,9 +18,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# The command is literal in the compose source; rendering substitutes only variables.
-mapfile -t command < <(docker compose -f "$root/deploy/docker-compose.yml" config --format json \
-    2>/dev/null | jq -er '.services.smokescreen.command[]')
+# The command is literal in the compose source; rendering changes only images and configs.
+mapfile -t command < <(docker compose -f "$root/deploy/compose.yaml" config --no-interpolate \
+    --format json 2>/dev/null | jq -er '.services.smokescreen.command[]')
 [[ "${command[0]}" == smokescreen ]] || { echo "the compose does not run smokescreen" >&2; exit 1; }
 
 docker run -d --name "$name" -p 127.0.0.1::4750 "$image" "${command[@]}" >/dev/null

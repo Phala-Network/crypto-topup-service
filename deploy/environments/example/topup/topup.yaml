@@ -1,0 +1,35 @@
+# A generic topup configuration (docs/configuration.md): replace every placeholder; preflight
+# refuses `example.com` hosts and this admin key.
+environment: production                   # the Sentry environment
+public_origin: https://pay-api.example.com # the API's one public origin: dstack-ingress's DOMAIN
+admin_key:                                # from `topup-sdk keygen`; the seed never leaves its machine
+  id: admin/production-v1
+  public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
+# Two providers per chain, from different companies; the first a route names makes every log
+# request. A key goes in `{key}` and is sealed as TOPUP_RPC_<ID>_KEY (compose.yaml).
+rpc_providers:
+  alchemy-sepolia: https://eth-sepolia.g.alchemy.com/v2/{key}
+  publicnode-sepolia: https://ethereum-sepolia-rpc.publicnode.com
+# The fields and their defaults are in docs/architecture.md §14; `topup config show` prints them.
+routes:
+  - route: example-sepolia-pha-usd
+    version: 1
+    livemode: false
+    chain:
+      chain_id: 11155111
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      confirmations: 2
+      rpc_providers: [alchemy-sepolia, publicnode-sepolia]
+      sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
+    asset:
+      symbol: pha
+      contract: "0x8F40e7E99678F44c88158f049E62817580ab113B"
+      decimals: 18
+      backstop: token
+    pricing:
+      primary: { source: coinmetrics, asset: pha }
+      check: { source: binance, symbol: PHAUSDT }
+    limits:
+      min_credit_minor: 100
+      max_deposit_atomic: "200000000000000000000000"
+      min_refund_atomic: "20000000000000000000"

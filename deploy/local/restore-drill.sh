@@ -31,7 +31,7 @@ export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
 export TOPUP_LOCAL_PRODUCT_IMAGE="phala-pay-reference-product:$project"
 writer_pid=
 samples_file=
-routes_dir=
+env_dir=
 admin_dir=
 switch_lsn=
 seed_container="$project-seed"
@@ -43,8 +43,8 @@ if [ "$mode" = controlled ]; then
     profiles=(--profile merchant)
 fi
 dc() {
-    "$root/deploy/local/compose.sh" "${variant[@]}" -p "$project" -f "$drill_compose" \
-        "${profiles[@]}" "$@"
+    "$root/deploy/local/compose.sh" "${variant[@]}" --environment-dir "$env_dir" -p "$project" \
+        -f "$drill_compose" "${profiles[@]}" "$@"
 }
 
 cleanup() {
@@ -59,8 +59,8 @@ cleanup() {
     dc --profile tools down --volumes --remove-orphans >/dev/null 2>&1 || true
     docker image rm "$TOPUP_LOCAL_SERVICE_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
         "$TOPUP_LOCAL_DSTACK_IMAGE" "$TOPUP_LOCAL_PRODUCT_IMAGE" >/dev/null 2>&1 || true
-    if [ -n "$routes_dir" ]; then
-        rm -rf "$routes_dir"
+    if [ -n "$env_dir" ]; then
+        rm -rf "$env_dir"
     fi
     if [ -n "$admin_dir" ]; then
         rm -rf "$admin_dir"
@@ -707,7 +707,7 @@ print(response.read().decode())
 }
 
 # An admin-signed request with the drill's admin key (deploy/runbooks/sign-admin-request.sh), for
-# the replacement's TOPUP_PUBLIC_ORIGIN. A signature is single-use, so each is made in its own
+# the replacement's own origin (its --public-origin). A signature is single-use, so each is made in its own
 # second.
 admin_call() {
     sleep 1
@@ -771,7 +771,8 @@ treasuries_verified() {
 # Every record comes from the merchant's product: `merchant_records`.
 check_consistency_after_restore() {
     local answer key records request secret
-    public_origin=$(dc config --format json | jq -er '.services.topup.environment.TOPUP_PUBLIC_ORIGIN')
+    public_origin=$(dc config --format json |
+        jq -er '.services.topup.command as $c | $c[($c | index("--public-origin")) + 1]')
     answer=$(admin_call GET /v1/admin/restore)
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg id "$(jq -r .restore_id <<<"$restore_report")" \
@@ -971,23 +972,16 @@ storage_listing() {
     dc run --rm --no-deps restore 'wal-g st ls -r' | sort
 }
 
-# Creates the overlay's project volumes and copies the drill inputs into them through the API.
+# Creates the overlay's project volume and copies the mock product into it through the API.
 seed_drill_volumes() {
-    local volume route
-    for volume in drill_routes drill_mock_product; do
-        docker volume create \
-            --label "com.docker.compose.project=$project" \
-            --label "com.docker.compose.volume=$volume" \
-            "${project}_$volume" >/dev/null
-    done
+    docker volume create \
+        --label "com.docker.compose.project=$project" \
+        --label "com.docker.compose.volume=drill_mock_product" \
+        "${project}_drill_mock_product" >/dev/null
     docker create --name "$seed_container" \
         --label "com.docker.compose.project=$project" \
-        --volume "${project}_drill_routes:/seed/routes" \
         --volume "${project}_drill_mock_product:/seed/mock-product" \
         --entrypoint /bin/true "$TOPUP_LOCAL_POSTGRES_IMAGE" >/dev/null
-    for route in "$routes_dir"/*.yaml; do
-        docker cp "$route" "$seed_container:/seed/routes/"
-    done
     docker cp "$root/deploy/local/mock-product.py" "$seed_container:/seed/mock-product/"
     docker rm "$seed_container" >/dev/null
 }
@@ -1007,16 +1001,26 @@ remove_pgdata_volume() {
     remove_volume pgdata
 }
 
-# The heartbeat writer, booted in the restore-check variant (TOPUP_SERVICE_ENABLED=read-only),
-# must exit at its configuration check.
-failed_closed() {
-    dc logs --no-log-prefix "$1" 2>/dev/null |
-        grep -F "$2 is disabled while TOPUP_SERVICE_ENABLED=read-only"
+# The restore-check variant runs no background work: no heartbeat, base backups, webhook egress,
+# or ingress, and `up --remove-orphans` removed the source's.
+no_background_work() {
+    local running
+    running=$(dc ps --all --format '{{.Service}}' | sort | tr '\n' ' ')
+    case " $running" in
+        *" heartbeat "* | *" backup "* | *" smokescreen "* | *" dstack-ingress "*)
+            echo "the replacement runs background work: $running" >&2
+            return 1
+            ;;
+    esac
 }
 
-backup_idle() {
-    dc logs --no-log-prefix backup 2>/dev/null |
-        grep -Fx 'base backups are disabled while TOPUP_RESTORE_FROM_BACKUP=on'
+# The replacement's PostgreSQL reads the restore instance's own read-only credentials
+# (RESTORE_AWS_*), even with the live read-write names in its environment.
+restore_credentials_only() {
+    test "$(dc exec -T postgres printenv AWS_ACCESS_KEY_ID)" = topup-restore-read || {
+        echo "the replacement's PostgreSQL does not use the read-only restore credentials" >&2
+        return 1
+    }
 }
 
 # The drill publishes no ports; the mock product's Python reaches topup on the compose network.
@@ -1098,18 +1102,14 @@ test_restore_failures_are_fatal() {
 
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 
-routes_dir=$(mktemp -d)
-# The replacement's admin key, for the operator's restore reconciliation.
+# The replacement's admin key, for the operator's restore reconciliation, in the drill's local
+# environment (the committed routes; deploy/local/environment.sh).
 admin_dir=$(mktemp -d)
 openssl genpkey -algorithm ed25519 -out "$admin_dir/admin.pem" 2>/dev/null
-TOPUP_LOCAL_ADMIN_PUBLIC_KEY=$(openssl pkey -in "$admin_dir/admin.pem" -pubout -outform DER |
-    tail -c 32 | base64)
-export TOPUP_LOCAL_ADMIN_PUBLIC_KEY TOPUP_LOCAL_ADMIN_KID=local-admin/v1
-for route in "$root"/deploy/config/routes/*.yaml; do
-    sed -e 's/0x0000000000000000000000000000000000000000/0x3333333333333333333333333333333333333333/g' \
-        "$route" >"$routes_dir/$(basename "$route")"
-    chmod 0644 "$routes_dir/$(basename "$route")"
-done
+env_dir=$(mktemp -d)
+"$root/deploy/local/environment.sh" --admin-key-id local-admin/v1 --admin-public-key \
+    "$(openssl pkey -in "$admin_dir/admin.pem" -pubout -outform DER | tail -c 32 | base64)" \
+    "$env_dir"
 
 compose_version=$(docker compose version --short)
 if [ "$(printf '%s\n' 2.24.4 "$compose_version" | sort -V | head -1)" != 2.24.4 ]; then
@@ -1226,7 +1226,7 @@ dc stop backup >/dev/null
 # switches and archives the last segment (PostgreSQL's ShutdownXLOG with archiving on), which would
 # keep them.
 docker kill "${project}-postgres-1" >/dev/null
-dc rm -f backup postgres heartbeat migrate restore-check >/dev/null 2>&1 || true
+dc rm -f backup postgres heartbeat migrate >/dev/null 2>&1 || true
 remove_pgdata_volume
 # The key tmpfs volumes die with the source CVM; the replacement derives the backup key and
 # database credentials again, which only the same app id (here: the same simulator keys) reproduces.
@@ -1236,15 +1236,17 @@ for volume in walg_key db_owner db_app; do
 done
 
 # Replacement boot, exactly as dstack's app-compose.sh starts a CVM: the whole restore-check
-# variant of deploy/RESTORE.md comes up at once with read-only object-storage credentials, its only
-# sealed difference. PostgreSQL restores the newest base backup into the empty volume, replays
-# every archived segment, and never archives; `backup` idles; topup is read-only. No command runs
-# inside the stack. Nothing may reach object storage from here on.
+# variant of deploy/RESTORE.md comes up at once. Its PostgreSQL reads the read-only restore
+# credentials (RESTORE_AWS_*), while the live read-write names stay in the environment, as on an
+# instance created without its own env file. PostgreSQL restores the newest base backup into the
+# empty volume, replays every archived segment, and never archives; no heartbeat, backup, egress,
+# or ingress runs; topup is read-only. No command runs inside the stack. Nothing may reach object
+# storage from here on; the drill's own storage tool uses the replacement's read-only key.
 storage_before=$(storage_listing)
 test -n "$storage_before"
 variant=(--restore-check)
-export TOPUP_LOCAL_S3_ACCESS_KEY_ID=topup-restore-read
-export TOPUP_LOCAL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
+export TOPUP_DRILL_S3_ACCESS_KEY_ID=topup-restore-read
+export TOPUP_DRILL_S3_SECRET_ACCESS_KEY=topup-restore-read-secret
 dc up --remove-orphans -d
 dc logs --no-log-prefix postgres 2>&1 |
     grep -Fx "restoring base backup $backup_name" >/dev/null || {
@@ -1253,8 +1255,8 @@ dc logs --no-log-prefix postgres 2>&1 |
 }
 recovery_promoted
 test "$(psql_value 'SHOW archive_mode')" = off
-wait_for "heartbeat failing closed" failed_closed heartbeat heartbeat
-wait_for "backup idling" backup_idle
+no_background_work
+restore_credentials_only
 storage_is_read_only
 
 # The operator's only view of the replacement: /healthz and the read API on its restore URL (in a

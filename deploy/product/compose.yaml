@@ -1,0 +1,49 @@
+# The staging reference product's CVM (deploy/phala.md, "Staging reference product"). Never deployed
+# as is: deploy/render.sh merges it with an environment directory (its compose.yaml overlay and
+# config.json) and pins the image. Its only env value is the sealed PRODUCT_API_KEY.
+services:
+  product:
+    image: phala-pay-reference-product
+    environment:
+      PRODUCT_API_KEY: ${PRODUCT_API_KEY:-}
+    configs:
+      - source: product
+        target: /etc/product/config.json
+    volumes:
+      - ledger:/data
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: [CMD, /opt/venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # The single public ingress, as in topup's compose (deploy/README.md, "Custom domain").
+  dstack-ingress:
+    image: ghcr.io/dstack-tee/dstack-ingress:2.6@sha256:c212abb7bedec4d7b54a82bcf9972e58e39a4757cc811faeb6017eee6c0673b0
+    environment:
+      CHALLENGE_TYPE: tls-alpn-01
+      TARGET_ENDPOINT: product:8089
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - ingress_certs:/etc/letsencrypt
+      - ingress_evidences:/evidences
+    depends_on:
+      product:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  ledger:
+  ingress_certs:
+  ingress_evidences:
+
+# render.sh inlines it as content; it stands for the environment's config.json.
+configs:
+  product:
+    file: ./config.json

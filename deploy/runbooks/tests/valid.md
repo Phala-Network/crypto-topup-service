@@ -8,8 +8,8 @@ cargo test --locked -p topup --test refunds refund_flow -- --nocapture
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 docker compose -f deploy/docker-compose.staging.yml exec -T postgres psql -c "SELECT 'topup bogus'"
 topup reconcile \
-  --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
-cargo run --locked -q -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
+  --config deploy/environments/phala-network/staging/topup/topup.yaml
+cargo run --locked -q -p topup -- config check deploy/environments/phala-network/staging/topup/topup.yaml
 export TOPIC="$(cast keccak Flushed)"
 psql "$DATABASE_URL" <<'SQL'
 topup bogus --not-a-command
@@ -18,4 +18,7 @@ mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh POST "$BASE_URL/v1/
 curl --fail-with-body -sS -X POST -H "${headers[0]}" "$BASE_URL/v1/admin/deposits/$DEPOSIT_ID/nudge"
 curl --fail-with-body -sS "$BASE_URL/v1/attestation?nonce=00"
 admin POST "/v1/admin/routes/$ROUTE/pause" '{"scopes":["refunds"]}'
+deploy/render.sh --restore-check --images images.json --origin "$RESTORE_URL" \
+  deploy/environments/<owner>/<Environment>/topup >restore-check.yml
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml restore-check
 ```
