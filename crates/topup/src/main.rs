@@ -557,7 +557,9 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     database_url("run").context("missing runtime configuration")?;
     let admin_key = config.admin_key.clone();
     let public_origin = match &args.public_origin {
-        Some(origin) => topup::api::PublicOrigin::parse(origin).context("invalid --public-origin")?,
+        Some(origin) => {
+            topup::api::PublicOrigin::parse(origin).context("invalid --public-origin")?
+        }
         None => config.public_origin.clone(),
     };
     if args.read_only {

@@ -277,7 +277,7 @@ export FOUNDRY_BROADCAST="$tmp/broadcast"
 # deploy_chain RPC_URL NETWORK CHAIN_ID: the deterministic factory, and the mock token and
 # sanctions oracle's code at the staging routes' addresses of that chain.
 deploy_chain() {
-    local rpc=$1 network=$2 chain_id=$3 factory contracts token oracle
+    local rpc=$1 network=$2 chain_id=$3 factory token oracle
     "$DEPLOY_CONTRACTS_DIR/deploy-proxy.sh" --rpc-url "$rpc" --local-fund --broadcast >/dev/null
     PRIVATE_KEY="$ANVIL_PRIVATE_KEY" "$DEPLOY_CONTRACTS_DIR/deploy-factory.sh" \
         --rpc "$network/a=$rpc" --broadcast >/dev/null 2>&1 || die "deploy-factory.sh failed on $network"

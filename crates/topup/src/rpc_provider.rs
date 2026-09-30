@@ -99,13 +99,16 @@ impl ProviderUrl {
 /// the count differ from the template's single occurrence.
 fn placeholder_positions(url: &url::Url) -> usize {
     let serialized = url.as_str().matches(MARKER).count();
-    let segments = url
-        .path_segments()
-        .map_or(0, |segments| segments.filter(|segment| *segment == MARKER).count());
+    let segments = url.path_segments().map_or(0, |segments| {
+        segments.filter(|segment| *segment == MARKER).count()
+    });
     let values = url.query().map_or(0, |query| {
         query
             .split('&')
-            .filter(|pair| pair.split_once('=').is_some_and(|(_, value)| value == MARKER))
+            .filter(|pair| {
+                pair.split_once('=')
+                    .is_some_and(|(_, value)| value == MARKER)
+            })
             .count()
     });
     if serialized == segments + values {

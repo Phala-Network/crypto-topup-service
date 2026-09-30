@@ -143,15 +143,15 @@ while IFS=$'\t' read -r id url; do
     [[ -z "$key" ]] || url=${url//"{key}"/"$key"}
     provider_url[$id]=$url
 done < <(jq -r '.rpc_providers | to_entries[] | [.key, .value] | @tsv' "$tmp/config.json")
-while IFS=$'\t' read -r route livemode chain_id factory implementation; do
+while IFS=$'\t' read -r route factory implementation; do
     for key in "$factory" "$implementation"; do
         if ! is_address "$key" || grep -Eiq '^0x([0-9a-f])\1{39}$' <<<"$key"; then
             fail "route $route: $key is a placeholder or zero address; deploy the contracts" \
                 "(deploy/CONTRACTS.md) and commit the real address"
         fi
     done
-done < <(jq -r '.routes[] | [.route, .livemode, .chain.chain_id, .chain.forwarder_factory,
-    .chain.implementation] | @tsv' "$tmp/config.json")
+done < <(jq -r '.routes[] | [.route, .chain.forwarder_factory, .chain.implementation] | @tsv' \
+    "$tmp/config.json")
 
 if ((offline)); then
     if ((failures)); then

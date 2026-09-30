@@ -552,8 +552,8 @@ networks:
 YAML
 }
 product_overlay https://pending.invalid
-printf '%s=\n' $(docker compose -f "$tmp/product.yml" config --variables | awk 'NR > 1 && NF > 0 { print $1 }') \
-    >"$tmp/product.env"
+docker compose -f "$tmp/product.yml" config --variables |
+    awk 'NR > 1 && NF > 0 { print $1 "=" }' >"$tmp/product.env"
 [[ "$(<"$tmp/product.env")" == PRODUCT_API_KEY= ]] || die "the unsealed product env is not only an empty key"
 pc up -d >/dev/null
 product_healthy() {

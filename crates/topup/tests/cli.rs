@@ -100,7 +100,13 @@ fn run_refuses_an_invalid_configuration_or_origin() {
 
     let config = ConfigFile::new("https://topup.example");
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["run", "--config", config.path(), "--public-origin", "ftp://topup.example"])
+        .args([
+            "run",
+            "--config",
+            config.path(),
+            "--public-origin",
+            "ftp://topup.example",
+        ])
         .env("DATABASE_URL", "postgres://unused@127.0.0.1:1/unused")
         .output()
         .expect("topup process should start");

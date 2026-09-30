@@ -76,7 +76,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
         let yaml = std::fs::read_to_string(path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-        Self::parse(&yaml).map_err(|error| format!("invalid configuration `{}`: {error}", path.display()))
+        Self::parse(&yaml)
+            .map_err(|error| format!("invalid configuration `{}`: {error}", path.display()))
     }
 
     /// Parses and validates a configuration, with no secret: see the module documentation.
@@ -215,7 +216,10 @@ fn check_providers(
             }
         }
     }
-    if let Some(unused) = providers.keys().find(|id| !chain_of.contains_key(id.as_str())) {
+    if let Some(unused) = providers
+        .keys()
+        .find(|id| !chain_of.contains_key(id.as_str()))
+    {
         return Err(format!(
             "rpc_providers configures `{unused}`, but no route names it"
         ));
@@ -242,8 +246,7 @@ mod tests {
         )
     }
 
-    const PROVIDERS: &str =
-        "  alchemy: https://eth-mainnet.g.alchemy.com/v2/{key}\n  quicknode: https://rpc.example/eth\n";
+    const PROVIDERS: &str = "  alchemy: https://eth-mainnet.g.alchemy.com/v2/{key}\n  quicknode: https://rpc.example/eth\n";
 
     #[test]
     fn a_valid_configuration_parses_without_any_secret() {
@@ -259,8 +262,13 @@ mod tests {
     #[test]
     fn secrets_are_checked_only_on_request_and_by_the_same_rule() {
         let parsed = Config::parse(&config(PROVIDERS, "https://pay.example")).expect("valid");
-        let missing = parsed.check_secrets(|_| None).expect_err("the key is missing");
-        assert!(missing.contains("TOPUP_RPC_ALCHEMY_KEY is required"), "{missing}");
+        let missing = parsed
+            .check_secrets(|_| None)
+            .expect_err("the key is missing");
+        assert!(
+            missing.contains("TOPUP_RPC_ALCHEMY_KEY is required"),
+            "{missing}"
+        );
         assert!(!missing.contains("QUICKNODE"), "{missing}");
         parsed
             .check_secrets(|id| (id == "alchemy").then(|| "0123456789abcdef".to_owned()))
@@ -276,24 +284,40 @@ mod tests {
         for (yaml, reason) in [
             (config(PROVIDERS, "https://pay.example/v1"), "public_origin"),
             (
-                config("  alchemy: https://{key}/v2\n  quicknode: https://rpc.example/eth\n", "https://pay.example"),
+                config(
+                    "  alchemy: https://{key}/v2\n  quicknode: https://rpc.example/eth\n",
+                    "https://pay.example",
+                ),
                 "whole path segment",
             ),
-            (config("  alchemy: https://rpc.example/a\n", "https://pay.example"), "`quicknode`"),
             (
-                config(&format!("{PROVIDERS}  spare: https://spare.example\n"), "https://pay.example"),
+                config("  alchemy: https://rpc.example/a\n", "https://pay.example"),
+                "`quicknode`",
+            ),
+            (
+                config(
+                    &format!("{PROVIDERS}  spare: https://spare.example\n"),
+                    "https://pay.example",
+                ),
                 "no route names it",
             ),
             (
-                config("  alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/a\n", "https://pay.example"),
+                config(
+                    "  alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/a\n",
+                    "https://pay.example",
+                ),
                 "same URL",
             ),
             (
-                config("  Alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/b\n", "https://pay.example"),
+                config(
+                    "  Alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/b\n",
+                    "https://pay.example",
+                ),
                 "not a provider id",
             ),
             (
-                config(PROVIDERS, "https://pay.example").replace("environment: staging\n", "environment: staging\nextra: 1\n"),
+                config(PROVIDERS, "https://pay.example")
+                    .replace("environment: staging\n", "environment: staging\nextra: 1\n"),
                 "unknown field",
             ),
         ] {

@@ -98,7 +98,8 @@ fn client_options(
 /// A full hexadecimal commit id; anything else (an unset or malformed build argument) is no
 /// release.
 fn commit_release(commit: Option<&str>) -> Option<&str> {
-    commit.filter(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    commit
+        .filter(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// The Sentry tracing layer when reporting is enabled.
