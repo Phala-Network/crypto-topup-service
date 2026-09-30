@@ -1840,8 +1840,10 @@ pub struct DeliveredEventFinding {
     pub event_type: String,
     /// The deposit, `dep_…`.
     pub deposit: String,
-    /// `pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the
-    /// recorded transfer is not the one the delivered event names: the deposit is held, not
+    /// `rescanned` (a `deposit.reversed` whose receipt position the rescan recorded first, with a
+    /// deposit neither reversed nor the successor the delivery names: the reversed deposit could
+    /// not be restored; escalate), `pending` (the rescan has not re-derived or valued the deposit
+    /// yet), `contradicted` (the recorded transfer is not the one the delivered event names: the deposit is held, not
     /// credited, until the operator discards the delivered credit), or `mismatch` (the ledger's
     /// token amount or credit differs from what the merchant received; the delivered event is
     /// kept and never sent again).
@@ -1934,9 +1936,11 @@ pub struct TreasuryVerification {
     /// `matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,
     /// the restore undid it: cancel it with `reapply`); `application_lost` (the merchant received
     /// it `active` and the restore left it pending: restore it with its signed `treasury.updated`,
-    /// `POST /v1/admin/restore/treasuries/apply`); `missing` (created after the restore point: the
-    /// merchant creates it again after the unfreeze); or `differs` (another status, chain, or
-    /// address: escalate).
+    /// `POST /v1/admin/restore/treasuries/apply`); `replacement_lost` (the merchant received it
+    /// `replaced` and the restore left it current, with a change of its chain pending: the other
+    /// half of an `application_lost`, whose restore replaces it); `missing` (created after the
+    /// restore point: the merchant creates it again after the unfreeze); or `differs` (another
+    /// status, chain, or address: escalate).
     pub result: String,
     /// The merchant's crediting pause, when `crediting_paused_by` was sent: `matches`; `paused` or
     /// `resumed` (applied again now); `pause_lost` or `resume_lost` (without `reapply`); `missing`;
@@ -2068,7 +2072,10 @@ pub struct EventImport {
     /// For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,
     /// so the rescan records the transfer now at its receipt position as the deposit that
     /// replaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is
-    /// not issued: re-issue it, then import the event again); or `identity_missing` (the delivery
+    /// not issued in the event's account and mode: re-issue it, then import the event again);
+    /// `rescanned` (the rescan recorded its receipt position first, with a deposit neither
+    /// reversed nor the successor the delivery names: not restored; escalate); or
+    /// `identity_missing` (the delivery
     /// carries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not
     /// restored). `null` for other events.
     pub reversed_deposit: Option<String>,

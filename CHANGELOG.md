@@ -16,11 +16,14 @@ webhook receivers must ignore unknown fields. The format follows
 - Admin: `POST /v1/admin/restore/treasuries/apply` applies again, while frozen after a restore, a
   treasury change that applied after the restore point, from the merchant's delivery of its
   `treasury.updated`: only a delivery the service signed, of the restored pending change becoming
-  `active`, whose time-lock ended. It applies at the event's `created`.
-  `POST /v1/admin/restore/treasuries/verify` reports such a change as `application_lost` (it was
-  `differs`).
+  `active`, whose time-lock ended, and screened again when screening answers (a treasury a
+  sanctions list names now is refused). It applies at the event's `created`, audited in the same
+  transaction, and its events are not sent again. `POST /v1/admin/restore/treasuries/verify`
+  reports such a change as `application_lost`, and the treasury it replaced, received `replaced`,
+  as `replacement_lost` (both were `differs`); both are `matches` once the change is restored.
 - Admin: each result of `POST /v1/admin/restore/events` carries `reversed_deposit` for a
-  `deposit.reversed`: `restored`, `recorded`, `address_unknown`, or `identity_missing`.
+  `deposit.reversed`: `restored`, `recorded`, `address_unknown`, `rescanned` (the rescan recorded
+  its position first; also a finding status of `GET /v1/admin/restore`), or `identity_missing`.
 - Deposits carry `replaces` and `replaced_by` (`dep_…` or `null`), in the object and every
   `deposit.*` snapshot: a deposit recorded for the transfer that took a reversed deposit's receipt
   position after a reorganization names that deposit, and the reversed one names it (see Fixed).
@@ -666,13 +669,16 @@ happens only from two-provider finalized data.
 ### Fixed
 
 - Admin: a restore across a treasury change no longer deadlocks the reconciliation. Deposit
-  addresses and quotes are re-issued over the treasury in force when they were issued (any since
-  the restore point for a deposit address, the one at its `created` for a quote), not only the
-  current one, once the lost change is applied again with `POST
+  addresses and quotes are re-issued over a treasury in force when they were issued, within 5
+  minutes (any since the restore point for a deposit address, around its `created` for a quote),
+  not only the current one, once the lost change is applied again with `POST
   /v1/admin/restore/treasuries/apply`; before, they could be re-issued only over the restored
   current treasury, while the change would apply only after the unfreeze those re-issues must
-  precede. A deposit address given out over a treasury replaced since keeps that network,
-  superseded and still credited.
+  precede. Each re-issued deposit address version, by address or by version, keeps a superseded
+  network over every treasury in force since the restore point, still credited. A restore without
+  a restore point re-issues nothing, and a quote created well before the restore point is refused.
+- A quote's `created` is taken once its chain's treasury is read under the treasury lock, so it
+  falls while that treasury is in force.
 - Admin: a deposit reversed after the restore point because a re-included transaction put
   another transfer at its receipt position keeps its identity through the restore. Its imported
   `deposit.reversed` rebuilds it, reversed, at its revision, so the rescan records the final

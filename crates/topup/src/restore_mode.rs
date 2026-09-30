@@ -613,6 +613,11 @@ pub enum ReversedDeposit {
     /// No issued address of the event's account and mode is the deposit's: re-issue it, then
     /// import the event again.
     AddressUnknown,
+    /// The rescan recorded the deposit's receipt position first, with a deposit that is not
+    /// reversed and is not the successor the delivery names (under the reversed deposit's id, or
+    /// another): the reversed deposit is not restored over it. A finding `rescanned` until the
+    /// operator settles it.
+    Rescanned,
     /// The delivery predates the deposit object's receipt position and block, so the deposit
     /// cannot be restored from it.
     IdentityMissing,
@@ -626,6 +631,7 @@ impl ReversedDeposit {
             Self::Restored => "restored",
             Self::Recorded => "recorded",
             Self::AddressUnknown => "address_unknown",
+            Self::Rescanned => "rescanned",
             Self::IdentityMissing => "identity_missing",
         }
     }
@@ -766,15 +772,24 @@ async fn restore_reversed(
     event: &DeliveredEvent,
     identity: &DeliveredIdentity,
 ) -> Result<ReversedDeposit, sqlx::Error> {
-    let recorded: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM deposits WHERE id = $1)")
-        .bind(event.deposit_id)
-        .fetch_one(&mut *connection)
-        .await?;
-    if recorded {
-        return Ok(ReversedDeposit::Recorded);
+    if let Some(held) = position_held(connection, restore, event, identity).await? {
+        return Ok(held);
     }
     let encode = |error: std::num::TryFromIntError| sqlx::Error::Encode(Box::new(error));
     let chain_id = i64::try_from(identity.chain_id).map_err(encode)?;
+    let issued: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM addresses \
+         WHERE chain_id = $1 AND address = $2 AND account_id = $3 AND livemode = $4)",
+    )
+    .bind(chain_id)
+    .bind(format!("{:#x}", identity.address))
+    .bind(event.account_id)
+    .bind(event.livemode)
+    .fetch_one(&mut *connection)
+    .await?;
+    if !issued {
+        return Ok(ReversedDeposit::AddressUnknown);
+    }
     let route = routes
         .routes()
         .iter()
@@ -847,7 +862,10 @@ async fn restore_reversed(
     .rows_affected()
         > 0;
     if !inserted {
-        return Ok(ReversedDeposit::AddressUnknown);
+        // A concurrent rescan took the position or the id between the check and the insert.
+        return Ok(position_held(connection, restore, event, identity)
+            .await?
+            .unwrap_or(ReversedDeposit::Rescanned));
     }
     sqlx::query(
         "INSERT INTO transitions (id, deposit_id, from_state, to_state, attempt, evidence) \
@@ -889,6 +907,43 @@ async fn restore_reversed(
     .execute(&mut *connection)
     .await?;
     Ok(ReversedDeposit::Restored)
+}
+
+/// How the ledger holds the reversed deposit of `event`, or its receipt position, when it does:
+/// `Rescanned` when the rescan since `restore` recorded there a deposit that is not reversed, under
+/// the reversed deposit's id or another one than the successor the delivery names; otherwise
+/// `Recorded` when the deposit is there (from the backup, where the finality watch reverses it if
+/// it is not yet, or restored before).
+async fn position_held(
+    connection: &mut PgConnection,
+    restore: &Restore,
+    event: &DeliveredEvent,
+    identity: &DeliveredIdentity,
+) -> Result<Option<ReversedDeposit>, sqlx::Error> {
+    let encode = |error: std::num::TryFromIntError| sqlx::Error::Encode(Box::new(error));
+    let (recorded, rescanned): (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT EXISTS (SELECT 1 FROM deposits WHERE id = $1),
+               EXISTS (
+                   SELECT 1 FROM deposits
+                   WHERE chain_id = $2 AND tx_hash = $3 AND receipt_log_index = $4
+                     AND state <> 'reversed' AND id IS DISTINCT FROM $5 AND created_at >= $6
+               )
+        "#,
+    )
+    .bind(event.deposit_id)
+    .bind(i64::try_from(identity.chain_id).map_err(encode)?)
+    .bind(format!("{:#x}", identity.tx_hash))
+    .bind(i64::try_from(identity.receipt_log_index).map_err(encode)?)
+    .bind(identity.replaced_by)
+    .bind(restore.detected_at)
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(match (recorded, rescanned) {
+        (_, true) => Some(ReversedDeposit::Rescanned),
+        (true, false) => Some(ReversedDeposit::Recorded),
+        (false, false) => None,
+    })
 }
 
 /// Keeps the credit of an imported event for its deposit. A credited and a reversed event of one
@@ -1019,6 +1074,8 @@ pub struct DeliveredEventFinding {
     pub event_type: String,
     /// The deposit.
     pub deposit_id: Uuid,
+    /// `rescanned` (a `deposit.reversed` whose receipt position the rescan recorded first with a
+    /// deposit that is not reversed nor its successor: its deposit could not be restored),
     /// `pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the
     /// recorded transfer is not the delivered one: the deposit is held until the operator
     /// discards the delivered credit), or `mismatch` (the ledger's token amount or credit differs
@@ -1044,6 +1101,7 @@ struct ImportedRow {
     ledger_amount_atomic: Option<String>,
     ledger_amount: Option<String>,
     contradicted: bool,
+    rescanned: bool,
 }
 
 /// Imported events of `restore` compared with the ledger: the count, and each one whose deposit
@@ -1068,7 +1126,18 @@ pub async fn delivered_event_findings(
                         OR credit.address <> address.address
                         OR credit.asset_contract <> deposit.asset_contract
                         OR credit.from_address <> deposit.from_address
-                        OR credit.amount_atomic <> deposit.amount_atomic, false) AS contradicted
+                        OR credit.amount_atomic <> deposit.amount_atomic, false) AS contradicted,
+               -- ReversedDeposit::Rescanned: the rescan took the reversed deposit's position.
+               event.type = 'deposit.reversed' AND EXISTS (
+                   SELECT 1 FROM deposits AS holder
+                   WHERE holder.chain_id = (event.data #>> '{object,chain_id}')::bigint
+                     AND holder.tx_hash = event.data #>> '{object,tx_hash}'
+                     AND holder.receipt_log_index =
+                         (event.data #>> '{object,receipt_log_index}')::bigint
+                     AND holder.state <> 'reversed' AND holder.created_at >= $2
+                     AND 'dep_' || replace(holder.id::text, '-', '')
+                         IS DISTINCT FROM event.data #>> '{object,replaced_by}'
+               ) AS rescanned
         FROM restore_delivered_events AS imported
         JOIN events AS event ON event.id = imported.event_id
         LEFT JOIN deposits AS deposit ON deposit.id = event.object_id
@@ -1080,6 +1149,7 @@ pub async fn delivered_event_findings(
         "#,
     )
     .bind(restore.id)
+    .bind(restore.detected_at)
     .fetch_all(pool)
     .await?;
     let imported = i64::try_from(rows.len()).unwrap_or(i64::MAX);
@@ -1091,6 +1161,7 @@ pub async fn delivered_event_findings(
                 &row.delivered_amount,
                 &row.ledger_amount,
             ) {
+                _ if row.rescanned => "rescanned",
                 _ if row.contradicted => "contradicted",
                 (None, _, _) | (Some(_), Some(_), None) => "pending",
                 (Some(ledger), _, _) if Some(ledger) != row.delivered_amount_atomic.as_ref() => {

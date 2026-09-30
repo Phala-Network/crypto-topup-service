@@ -702,7 +702,7 @@
             ]
           },
           "status": {
-            "description": "`pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the\nrecorded transfer is not the one the delivered event names: the deposit is held, not\ncredited, until the operator discards the delivered credit), or `mismatch` (the ledger's\ntoken amount or credit differs from what the merchant received; the delivered event is\nkept and never sent again).",
+            "description": "`rescanned` (a `deposit.reversed` whose receipt position the rescan recorded first, with a\ndeposit neither reversed nor the successor the delivery names: the reversed deposit could\nnot be restored; escalate), `pending` (the rescan has not re-derived or valued the deposit\nyet), `contradicted` (the recorded transfer is not the one the delivered event names: the deposit is held, not\ncredited, until the operator discards the delivered credit), or `mismatch` (the ledger's\ntoken amount or credit differs from what the merchant received; the delivered event is\nkept and never sent again).",
             "type": "string"
           },
           "type": {
@@ -1520,7 +1520,7 @@
             "type": "string"
           },
           "reversed_deposit": {
-            "description": "For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,\nso the rescan records the transfer now at its receipt position as the deposit that\nreplaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is\nnot issued: re-issue it, then import the event again); or `identity_missing` (the delivery\ncarries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not\nrestored). `null` for other events.",
+            "description": "For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,\nso the rescan records the transfer now at its receipt position as the deposit that\nreplaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is\nnot issued in the event's account and mode: re-issue it, then import the event again);\n`rescanned` (the rescan recorded its receipt position first, with a deposit neither\nreversed nor the successor the delivery names: not restored; escalate); or\n`identity_missing` (the delivery\ncarries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not\nrestored). `null` for other events.",
             "type": [
               "string",
               "null"
@@ -3239,7 +3239,7 @@
             "type": "string"
           },
           "result": {
-            "description": "`matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,\nthe restore undid it: cancel it with `reapply`); `application_lost` (the merchant received\nit `active` and the restore left it pending: restore it with its signed `treasury.updated`,\n`POST /v1/admin/restore/treasuries/apply`); `missing` (created after the restore point: the\nmerchant creates it again after the unfreeze); or `differs` (another status, chain, or\naddress: escalate).",
+            "description": "`matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,\nthe restore undid it: cancel it with `reapply`); `application_lost` (the merchant received\nit `active` and the restore left it pending: restore it with its signed `treasury.updated`,\n`POST /v1/admin/restore/treasuries/apply`); `replacement_lost` (the merchant received it\n`replaced` and the restore left it current, with a change of its chain pending: the other\nhalf of an `application_lost`, whose restore replaces it); `missing` (created after the\nrestore point: the merchant creates it again after the unfreeze); or `differs` (another\nstatus, chain, or address: escalate).",
             "type": "string"
           },
           "status": {
@@ -5693,7 +5693,7 @@
                 }
               }
             },
-            "description": "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, or its time-lock had not ended; or `restore_not_frozen`",
+            "description": "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, its time-lock had not ended, or a sanctions list names it now; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5781,7 +5781,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Applies again a treasury change that applied after the restore point and was lost with it,\nfrom the merchant's delivery of its `treasury.updated`: only a delivery the service signed\n(with one of the account's webhook keys in its mode) of a pending treasury becoming `active`\nis accepted. The change applies as its time-lock applied it, at the event's `created`, so the\ndeposit addresses and quotes issued over it are re-issued over it while frozen, and those\nissued before it over the treasury it replaced. Audited.",
+        "summary": "Applies again a treasury change that applied after the restore point and was lost with it,\nfrom the merchant's delivery of its `treasury.updated`: only a delivery the service signed\n(with one of the account's webhook keys in its mode) of a pending treasury becoming `active`\nis accepted. The change applies as its time-lock applied it, at the event's `created`, so the\ndeposit addresses and quotes issued over it are re-issued over it while frozen, and those\nissued before it over the treasury it replaced. It is screened again when screening is\navailable; no event is sent again. Audited in the transaction that applies it.",
         "tags": [
           "admin"
         ]

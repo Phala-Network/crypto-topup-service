@@ -272,6 +272,14 @@ pub(crate) async fn verify_treasuries(
         {
             // Restored from its signed application, not from this unsigned object.
             "application_lost"
+        } else if treasury.status == TreasuryStatus::Replaced.code()
+            && current.status == TreasuryStatus::Active
+            && treasuries::pending_on(&state.pool, scope, current.chain_id)
+                .await
+                .map_err(super::treasuries::map_error)?
+        {
+            // The other half of that lost application: restoring it replaces this one.
+            "replacement_lost"
         } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending {
             if request.reapply {
                 current = treasuries::cancel(&state.pool, scope, &actor, id)
@@ -358,7 +366,7 @@ pub(crate) async fn verify_treasuries(
     request_body = RestoreTreasuryApplyRequest,
     responses(
         (status = 200, description = "OK: applied, or in force already", body = RestoreTreasuryApplyResponse),
-        (status = 400, description = "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, or its time-lock had not ended; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, its time-lock had not ended, or a sanctions list names it now; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found: no account has the event's `account`, or the restored database lacks the treasury (proven after the restore point: the merchant proves it again after the unfreeze)", body = ErrorResponse),
         (status = 503, description = "Service Unavailable: the webhook keys cannot be derived; retry", body = ErrorResponse)
@@ -371,7 +379,8 @@ pub(crate) async fn verify_treasuries(
 /// (with one of the account's webhook keys in its mode) of a pending treasury becoming `active`
 /// is accepted. The change applies as its time-lock applied it, at the event's `created`, so the
 /// deposit addresses and quotes issued over it are re-issued over it while frozen, and those
-/// issued before it over the treasury it replaced. Audited.
+/// issued before it over the treasury it replaced. It is screened again when screening is
+/// available; no event is sent again. Audited in the transaction that applies it.
 pub(crate) async fn apply_treasury(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -408,27 +417,17 @@ pub(crate) async fn apply_treasury(
     let (treasury, applied_now) = treasuries::restore_application(
         &state.pool,
         &state.routes,
+        state.screening.as_ref(),
         scope,
         applied.application,
         &actor,
+        &format!("restore {}: {}", restore.id, request.reason.trim()),
     )
     .await
     .map_err(|error| match error {
         treasuries::RestoreApplicationError::Refused(message) => invalid(message),
         treasuries::RestoreApplicationError::Treasury(error) => super::treasuries::map_error(error),
     })?;
-    if applied_now {
-        record(
-            &state,
-            &restore,
-            Some(scope.account_id()),
-            &actor,
-            "restore.treasury_apply",
-            &format!("treasury:{}", treasuries::public_id(treasury.id)),
-            &request.reason,
-        )
-        .await?;
-    }
     Ok(Json(RestoreTreasuryApplyResponse {
         applied: applied_now,
         treasury: super::treasuries::treasury_object(&treasury),
@@ -722,8 +721,7 @@ pub(crate) async fn reissue_quote(
         request.livemode,
         route,
         &terms,
-        (restore.id, restore.detected_at),
-        &restore.restored_cursors,
+        &restore,
         &actor,
         &request.reason,
     )

@@ -841,11 +841,12 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     operator re-applies its own pauses), applies again a treasury change that applied after the
     restore point from its `treasury.updated` delivery the service signed (restore closure
     amendment of 2026-09-30: the change still pending in the restored database, its time-lock
-    ended, applied at the event's time), deletes again the endpoints it deleted,
+    ended, screened again when screening answers, applied at the event's time and not announced
+    again), deletes again the endpoints it deleted,
     re-issues the deposit addresses it gave out (the salt formula of §5a gives the same address
     over a treasury in force since the restore point, backfilled from the restored cursor) and the
     quotes it created (the quote salt gives the same address from the `qt_` id; only that address
-    over the treasury in force at the quote's creation is accepted, backfilled from the restored
+    over a treasury in force within minutes of the quote's creation is accepted, backfilled from the restored
     cursor, with the recorded terms kept but never applied and a `client_secret` accepted only
     with the service's tag and its owner tag of the account: an id is unique across accounts, and
     only the secret proves which one the service issued it to), and imports the deposit events it received

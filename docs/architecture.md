@@ -1461,12 +1461,17 @@ action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury canc
 merchant's treasury crediting pauses, and endpoint deletions applied again; a treasury change that
 applied after the restore point applied again while frozen, from its signed `treasury.updated`
 (the `v1a` signature verified with the account's webhook keys; the change still pending in the
-restored database, its time-lock ended; its screening at application is what the event attests,
-and the daily screening checks it again after the unfreeze), at the event's `created`, so each treasury
-is in force when it was; deposit addresses and quotes given out after the restore point re-issued
-identically from their deterministic salts over the treasury in force when each was issued (any
-since the restore point for a deposit address, whose network over a replaced treasury is kept
-superseded; the one at its `created` for a quote), backfilled from the restored cursor, with the
+restored database, its time-lock ended, screened again when screening answers, otherwise by the
+daily screening after the unfreeze), at the event's `created`, audited in its transaction and not
+announced again (the merchant has its events; new ones would carry the restore's time), so each
+treasury is in force when it was; deposit addresses and quotes given out after the restore point
+re-issued identically from their deterministic salts over a treasury in force when each was issued,
+within 5 minutes since recorded application times are when the time-lock's pass started or the
+event's second (every candidate is the merchant's own, and the salt binds the address): for a
+deposit address, every one since the restore point, each re-issued version keeping a superseded
+network over each, whether it is sent by address or by version; for a quote, around its `created`,
+and none created well before the restore point, which the restored database holds (a restore
+without a restore point re-issues nothing), backfilled from the restored cursor, with the
 client secrets the merchant holds when the service issued them for those ids to that account
 (§12); and the events merchants received imported from their signed deliveries, so a deposit
 rebuilt from the chain keeps its `deposit.credited` event id and delivered body and is never
@@ -1492,9 +1497,10 @@ delivered credit if it had one. The rescan then records the final transfer at th
 under the successor's id, and links it to the reversed deposit the delivery named (`replaces`), so
 it is valued at the successor's delivered credit and its events are recorded already. A delivery
 rendered before the deposit object carried its position cannot rebuild it, and neither can an
-import after the rescan reached the position: the rescan then records the final transfer under
-the reversed deposit's id, whose imported credit contradicts it, so it is held as `contradicted`
-until the operator discards the credit and settles both with the merchant. The reversal and its
+import after the rescan reached the position (the import never rebuilds it over a deposit the
+rescan recorded there, and reports it `rescanned`, as does the restore's status): the rescan then
+records the final transfer under the reversed deposit's id, whose imported credit contradicts it,
+so it is held until the operator discards the credit and settles both with the merchant. The reversal and its
 successor commit in one transaction, so a backup holding the reversed deposit holds its successor
 too. The restore drill runs weekly in CI
 on a local stack, including the freeze and the reconciliation; the staging drill restores

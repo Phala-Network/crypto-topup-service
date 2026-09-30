@@ -352,10 +352,6 @@ pub async fn create_in(
     } = *priced;
     let scope = Scope::new(account.id, customer.livemode);
     let window = i64::try_from(route.rate_lock.window_s).map_err(|_| RateLockError::Arithmetic)?;
-    let now = Utc::now();
-    let expires_at = now
-        .checked_add_signed(chrono::Duration::seconds(window))
-        .ok_or(RateLockError::Arithmetic)?;
 
     lock_customer(transaction, customer).await?;
     check_creation_rate(transaction, customer.id, route).await?;
@@ -365,6 +361,11 @@ pub async fn create_in(
     // does.
     crate::treasuries::lock(transaction, scope, false).await?;
     let treasury = treasury(transaction, scope, route.chain.chain_id).await?;
+    // Taken under the treasury lock, so `created` falls while `treasury` is in force.
+    let now = Utc::now();
+    let expires_at = now
+        .checked_add_signed(chrono::Duration::seconds(window))
+        .ok_or(RateLockError::Arithmetic)?;
     let id = Uuid::new_v4();
     let address_id = Uuid::new_v4();
     let client_secret = client_secrets
@@ -481,11 +482,13 @@ pub struct ReissuedTerms {
 
 /// Re-issues after a restore a quote the merchant created after the restore point and lost with
 /// it (docs/design/multi-tenant.md §13), from its record: the address salt is derived from the
-/// account, customer, and quote id, so only the quote's own address over the account's treasury of
-/// `route`'s chain in force when the quote was created is accepted (a change that applied since,
-/// or was restored since, does not move it: `crate::treasuries::in_force`). The address is
-/// backfilled from the chain's cursor in `backfill_from` (the restored cursor), so the rescan finds
-/// payments made to it since.
+/// account, customer, and quote id, so only the quote's own address over a treasury of the
+/// account on `route`'s chain in force within `crate::treasuries::IN_FORCE_TOLERANCE` of the quote's
+/// `created` is accepted (a change that applied since, or was restored since, does not move it:
+/// `crate::treasuries::in_force`). A quote created more than that before `restore_point` is not
+/// one the restore lost: the restored database holds it. The address is backfilled from the
+/// chain's cursor in `backfill_from` (the restored cursor), so the rescan finds payments made to it
+/// since.
 ///
 /// The terms are the merchant's record, not the service's, so they are stored as recorded but
 /// never applied: the quote is marked re-issued by `restore`, a payment to it is credited at spot
@@ -503,8 +506,7 @@ pub async fn reissue(
     livemode: bool,
     route: &RouteFile,
     terms: &ReissuedTerms,
-    restore: (Uuid, DateTime<Utc>),
-    backfill_from: &BTreeMap<u64, u64>,
+    restore: &crate::restore_mode::Restore,
     actor: &Actor,
     reason: &str,
 ) -> Result<(RateLock, bool), RateLockError> {
@@ -513,15 +515,25 @@ pub async fn reissue(
             "the route's mode differs from the quote's",
         ));
     }
-    let (restore_id, detected_at) = restore;
+    let (restore_id, detected_at, backfill_from) =
+        (restore.id, restore.detected_at, &restore.restored_cursors);
+    let restore_point = restore.restore_point.ok_or(RateLockError::InvalidInput(
+        "the restore has no restore point (the restored database has no heartbeat): escalate",
+    ))?;
+    let tolerance = crate::treasuries::IN_FORCE_TOLERANCE;
+    if terms.created_at < restore_point - tolerance {
+        return Err(RateLockError::InvalidInput(
+            "the quote was created before the restore point, so the restored database holds it",
+        ));
+    }
     let scope = Scope::new(account.id, livemode);
     let mut transaction = pool.begin().await?;
     crate::treasuries::lock(&mut transaction, scope, false).await?;
     let in_force = crate::treasuries::in_force(
         &mut transaction,
         scope,
-        Some(terms.created_at),
-        terms.created_at,
+        Some(terms.created_at - tolerance),
+        terms.created_at + tolerance,
     )
     .await
     .map_err(|error| match error {
