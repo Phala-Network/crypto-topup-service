@@ -722,6 +722,62 @@ def test_the_export_is_the_admin_requests_bodies() -> None:
         )
 
 
+def _treasury(status: str, number: int = 1) -> dict[str, Any]:
+    return {
+        "id": f"trs_{number:032x}",
+        "object": "treasury",
+        "livemode": False,
+        "chain_id": 11155111,
+        "address": "0x" + f"{number:02x}" * 20,
+        "kind": "eoa",
+        "status": status,
+        "crediting_paused_by": [],
+    }
+
+
+def test_the_export_verifies_the_latest_treasuries_and_restores_signed_applications() -> None:
+    fulfillment = _fulfillment()
+    pending = _delivery("treasury.created", _treasury("pending"), created=100)
+    applied = _delivery("treasury.updated", _treasury("active"), created=300)
+    # The application's event names the change becoming active from pending.
+    applied_body = json.loads(applied[1])
+    applied_body["data"]["previous_attributes"] = {"status": "pending"}
+    body = json.dumps(applied_body).encode()
+    applied = sign_webhook(SERVICE_KEY, applied_body["id"], int(time.time()), body), body
+    paused = _delivery("treasury.updated", _treasury("active", 2), created=200)
+    # Delivered out of order: the latest by `created` wins.
+    for delivery in (applied, paused, pending):
+        assert fulfillment.handle(*delivery).status == 204
+
+    records = export_restore_records(CONFIG.account, fulfillment.ledger)
+    assert records["treasuries"] == [
+        {
+            "account": CONFIG.account,
+            "livemode": False,
+            "treasuries": [
+                {
+                    name: _treasury(status, number)[name]
+                    for name in ("id", "status", "chain_id", "address", "crediting_paused_by")
+                }
+                for status, number in (("active", 1), ("active", 2))
+            ],
+        }
+    ]
+    # Only the signed pending-to-active change is an application, exactly as received.
+    headers, _ = applied
+    assert records["treasury_applications"] == [
+        {
+            "delivery": {
+                "webhook_id": headers["webhook-id"],
+                "webhook_timestamp": headers["webhook-timestamp"],
+                "webhook_signature": headers["webhook-signature"],
+                "body": body.decode(),
+            }
+        }
+    ]
+    assert records["events"] == []
+
+
 def test_the_export_starts_at_the_restore_point_and_batches_deliveries() -> None:
     fulfillment = _fulfillment()
     ledger = fulfillment.ledger

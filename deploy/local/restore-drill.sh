@@ -259,6 +259,26 @@ consistency_address_v2=0xfbf725ff86da685728ec7275c9fc155b4443ea35
 consistency_address_v2_id=da_99999999999999999999999999999992
 consistency_address_v2_created=1790000000
 consistency_event=c371cbc5-44c4-5e44-a795-6242ab4606d9
+# A change of the chain's treasury to T2, pending in the backup with its time-lock ended, applies
+# after the last archived WAL (at treasury_applied_at, set then); the customer's version 3 is
+# issued over T2 after it.
+consistency_treasury_v2=0x0000000000000000000000000000000000007ea7
+consistency_treasury_v2_id=trs_77777777777777777777777777777775
+consistency_salt_v3=0x022d0f0b136e5721ff46ee4522a0b741609049f8f67b9345f2c6cb368368942d
+consistency_address_v3=0x2ab8636aa082933ff69e28dcb938ca8dc8fae00b
+consistency_address_v3_id=da_99999999999999999999999999999993
+treasury_applied_at=
+# Deposits to the version 2 address the merchant was told of after the backup, by their
+# deterministic ids (chain 11155111, receipt position 0): an unsupported-token transfer
+# (transaction 0x6b…6b) rejected, never valued, then reversed; and a transfer (transaction 0x7c…7c)
+# credited as D0, reversed by a reorganization, and recorded again as D1 (revision 1), which
+# replaces it.
+unvalued_deposit=bcd5eacf-3542-5175-9502-cbbf70ec9baa
+unvalued_event=evt_40c4dfa74e6053a494d88c8fb32cacf3
+reorged_deposit=dd1da4cd-1092-5496-8382-ca14b8734919
+reorged_event=evt_9760e10d32995d689263ea3c4de08055
+successor_deposit=5e0d5b86-cde2-5a86-885b-a4d8122337ae
+successor_event=evt_80ee71be371554f0b955be8bacabd517
 # A quote the merchant created after the backup, for another customer; its address is the quote
 # salt formula's for this account, customer, and id over the route factory and treasury.
 consistency_quote=qt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -440,7 +460,7 @@ seed_consistency_fixture() {
     lost_key=$(new_api_key)
     dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
         -v account="$consistency_account" -v treasury="$consistency_treasury" \
-        -v kept="$kept_key" -v lost="$lost_key" \
+        -v treasury_v2="$consistency_treasury_v2" -v kept="$kept_key" -v lost="$lost_key" \
         -v salt="$consistency_salt_v1" -v address="$consistency_address_v1" <<'SQL'
 INSERT INTO accounts (id, name) VALUES (:'account', 'restore-drill-consistency');
 INSERT INTO api_keys (id, account_id, livemode, kind, prefix, last4, key_hash, created_by)
@@ -453,7 +473,17 @@ INSERT INTO treasuries (
     verified_at, effective_at, screened_at, applied_at, created_by
 )
 VALUES ('77777777-7777-7777-7777-777777777773', :'account', false, 11155111, :'treasury', 'eoa',
-        'restore drill', '0x', now(), now(), now(), now(), 'key_77777777777777777777777777777771');
+        'restore drill', '0x', to_timestamp(1789000000), to_timestamp(1789000000), now(),
+        to_timestamp(1789000000), 'key_77777777777777777777777777777771');
+-- In force since before the quote's `created`, which re-issue derives its address over; then a
+-- change to T2 whose time-lock ended, pending until it applies after the backup.
+INSERT INTO treasuries (
+    id, account_id, livemode, chain_id, address, kind, proof_message, proof_signature,
+    verified_at, effective_at, screened_at, created_by
+)
+VALUES ('77777777-7777-7777-7777-777777777775', :'account', false, 11155111, :'treasury_v2',
+        'eoa', 'restore drill', '0x', to_timestamp(1789500000), to_timestamp(1789500000), now(),
+        'key_77777777777777777777777777777771');
 INSERT INTO webhook_endpoints (id, account_id, livemode, url)
 VALUES ('77777777-7777-7777-7777-777777777774', :'account', false,
         'http://product:8089/webhooks');
@@ -470,14 +500,56 @@ VALUES ('99999999-9999-9999-9999-9999999999a1', :'account', false, 11155111,
 SQL
 }
 
+# An event of the consistency account in test mode, as the service renders it: `event_envelope
+# TYPE ID CREATED`, its `data` on stdin.
+event_envelope() {
+    jq -c --arg type "$1" --arg id "$2" --argjson created "$3" \
+        --arg account "$consistency_account_id" \
+        '{id: $id, object: "event", account: $account, livemode: false, type: $type,
+          created: $created, actor: "system", request: null, data: .}'
+}
+
+# Signs the event on stdin as the service does and delivers it to the merchant's receiver, which
+# must keep it.
+deliver_event() {
+    local delivery
+    delivery=$(sign_delivery)
+    test "$(deliver_webhook <<<"$delivery")" = 204
+}
+
+# A deposit snapshot to the version 2 address (transfer fields and identity), with FIELDS (JSON)
+# over it: `deposit_snapshot ID TX REVISION FIELDS`.
+deposit_snapshot() {
+    jq -cn --arg id "$1" --arg tx "$2" --argjson revision "$3" --argjson fields "$4" \
+        --arg address "$consistency_address_v2" --arg da "$consistency_address_v2_id" '{
+        id: $id, object: "deposit", livemode: false, client_reference_id: "restore-drill-da",
+        quote: null, deposit_address: $da, status: "credited", rejection_reason: null,
+        final: false, swept: false, chain_id: 11155111, asset: "pha",
+        asset_contract: "0x8f40e7e99678f44c88158f049e62817580ab113b",
+        address: $address, from_address: "0x00000000000000000000000000000000000000f7",
+        tx_hash: $tx, log_index: 0, receipt_log_index: 0, revision: $revision,
+        block_number: 200,
+        block_hash: "0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+        block_time: 1790000100, amount_atomic: "4000000000000000000", amount: 100,
+        currency: "usd", exchange_rate: "0.25000000", price_source: "spot",
+        valued_at: 1790000110, amount_refunded: 0, amount_reversed: 0, replaces: null,
+        replaced_by: null, metadata: {}, created: 1790000100} + $fields'
+}
+
 # After the last archived WAL: the merchant revokes a key, rotates the customer's deposit address,
-# creates a quote, and receives deposit.credited, whose delivery its receiver keeps. None of it
-# reaches object storage.
+# creates a quote, and receives deposit.credited; the treasury change to T2 applies and the
+# customer's address rotates again over T2; and the merchant is told of the rejected and the
+# reorganized deposits. Its receiver keeps every delivery. None of it reaches object storage; the
+# source's rows for the events after deposit.credited are left out, since the restore loses them
+# all the same.
 lose_consistency_changes() {
     local secret
+    treasury_applied_at=$(date +%s)
     dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
         -v account="$consistency_account" -v treasury="$consistency_treasury" \
         -v salt="$consistency_salt_v2" -v address="$consistency_address_v2" \
+        -v treasury_v2="$consistency_treasury_v2" -v salt_v3="$consistency_salt_v3" \
+        -v address_v3="$consistency_address_v3" -v applied="$treasury_applied_at" \
         -v event="$consistency_event" -v data="$(jq -c .data <<<"$delivered_event")" <<'SQL'
 UPDATE api_keys SET revoked_at = now() WHERE id = '77777777-7777-7777-7777-777777777772';
 UPDATE deposit_addresses SET status = 'retired', retired_at = now()
@@ -494,11 +566,54 @@ INSERT INTO events (id, account_id, livemode, type, object_type, object_id, acto
 VALUES (:'event', :'account', false, 'deposit.credited', 'deposit',
         'e2facb38-9b5c-57c6-9f75-01e57d34b8d5', 'system', :'data'::jsonb,
         to_timestamp(1790000000));
+UPDATE treasuries SET replaced_at = to_timestamp(:applied)
+WHERE id = '77777777-7777-7777-7777-777777777773';
+UPDATE treasuries SET applied_at = to_timestamp(:applied)
+WHERE id = '77777777-7777-7777-7777-777777777775';
+UPDATE deposit_addresses SET status = 'retired', retired_at = now()
+WHERE id = '99999999-9999-9999-9999-999999999992';
+INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version)
+VALUES ('99999999-9999-9999-9999-999999999993', :'account', false,
+        '88888888-8888-8888-8888-888888888888', 3);
+INSERT INTO addresses (
+    id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address
+)
+VALUES ('99999999-9999-9999-9999-9999999999a3', :'account', false, 11155111,
+        '99999999-9999-9999-9999-999999999993', :'salt_v3', :'treasury_v2', :'address_v3');
 SQL
-    # The event's delivery reaches the merchant's receiver, which verifies it and keeps it as
-    # received in its webhook inbox.
+    # Each event's delivery reaches the merchant's receiver, which verifies it and keeps it as
+    # received in its webhook inbox: deposit.credited, then the treasury.updated that announced
+    # T2 applying (at its `created`), then the rejected deposit's reversal (unvalued), and D0's
+    # reversal and D1's credit.
     delivered_delivery=$(sign_delivery <<<"$delivered_event")
     test "$(deliver_webhook <<<"$delivered_delivery")" = 204
+    jq -cn --arg id "$consistency_treasury_v2_id" --arg address "$consistency_treasury_v2" \
+        '{object: {id: $id, object: "treasury", livemode: false, chain_id: 11155111,
+            address: $address, kind: "eoa", status: "active", effective_at: 1789500000,
+            created: 1789500000, replaced_at: null, canceled_at: null,
+            cancellation_reason: null, crediting_paused: false, crediting_paused_by: []},
+          previous_attributes: {status: "pending"}}' |
+        event_envelope treasury.updated "evt_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')" \
+            "$treasury_applied_at" | deliver_event
+    deposit_snapshot "dep_${unvalued_deposit//-/}" "0x$(printf '6b%.0s' {1..32})" 0 \
+        "$(jq -cn '{status: "reversed", rejection_reason: "unsupported_asset", asset: null,
+          asset_contract: "0x287e3577c66866a3f5cb7a8dac6761eb43608392", amount_atomic: "5",
+          amount: null, exchange_rate: null, price_source: null, valued_at: null}')" |
+        jq -c '{object: .}' | event_envelope deposit.reversed "$unvalued_event" 1790000200 |
+        deliver_event
+    deposit_snapshot "dep_${reorged_deposit//-/}" "0x$(printf '7c%.0s' {1..32})" 0 \
+        "$(jq -cn --arg successor "dep_${successor_deposit//-/}" \
+            '{status: "reversed", amount_reversed: 100, replaced_by: $successor}')" |
+        jq -c '{object: .}' | event_envelope deposit.reversed "$reorged_event" 1790000300 |
+        deliver_event
+    deposit_snapshot "dep_${successor_deposit//-/}" "0x$(printf '7c%.0s' {1..32})" 1 \
+        "$(jq -cn --arg reorged "dep_${reorged_deposit//-/}" \
+            '{amount_atomic: "3600000000000000000", amount: 90, block_number: 201,
+              block_hash: "0x3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+              block_time: 1790000400, valued_at: 1790000410, replaces: $reorged,
+              created: 1790000400}')" |
+        jq -c '{object: .}' | event_envelope deposit.credited "$successor_event" 1790000410 |
+        deliver_event
     # The product records the rotated address and the quote as the service returned them, each with
     # a client secret the service's key tags for the account and id (a merchant created the quote,
     # for which no service runs here).
@@ -509,6 +624,17 @@ SQL
         --arg secret "$secret" --argjson created "$consistency_address_v2_created" \
         '{id: $id, object: "deposit_address", livemode: false,
           client_reference_id: "restore-drill-da", version: 2, status: "active", salt: $salt,
+          address: $address, networks: [{chain_id: 11155111, address: $address,
+            treasury: $treasury, assets: [{asset: "pha"}]}],
+          payments: [], metadata: {}, created: $created, retired_at: null,
+          client_secret: $secret}' | product_record deposit_address restore-drill-da
+    secret=$(dstack_key secret client-secret/v1 "$consistency_account_id" \
+        "$consistency_address_v3_id")
+    jq -n --arg id "$consistency_address_v3_id" --arg address "$consistency_address_v3" \
+        --arg salt "$consistency_salt_v3" --arg treasury "$consistency_treasury_v2" \
+        --arg secret "$secret" --argjson created "$treasury_applied_at" \
+        '{id: $id, object: "deposit_address", livemode: false,
+          client_reference_id: "restore-drill-da", version: 3, status: "active", salt: $salt,
           address: $address, networks: [{chain_id: 11155111, address: $address,
             treasury: $treasury, assets: [{asset: "pha"}]}],
           payments: [], metadata: {}, created: $created, retired_at: null,
@@ -579,15 +705,9 @@ merchant_records() {
 }
 
 # The replacement is frozen; the operator's reconciliation brings back the lost security change,
-# deposit address, and quote from the merchant's records, and keeps the delivered event as
-# delivered (deploy/runbooks/restore.md).
-#
-# Extension points, in runbook order: a treasury change lost with the restore is re-applied while
-# frozen with `POST /v1/admin/restore/treasuries/verify` after the key revocation below (step 3),
-# from the latest `treasury.*` event object in the product's inbox (lose it in
-# lose_consistency_changes, deliver its event with deliver_webhook); a replayed revision of a
-# delivered event is one more delivery the product keeps and exports, imported with the one below
-# (step 5).
+# treasury application, deposit addresses, and quote from the merchant's records, and keeps the
+# delivered events as delivered, the reversed deposits restored (deploy/runbooks/restore.md).
+# Every record comes from the merchant's product: `merchant_records`.
 check_consistency_after_restore() {
     local answer key records request secret
     public_origin=$(dc config --format json | jq -er '.services.topup.environment.TOPUP_PUBLIC_ORIGIN')
@@ -632,15 +752,16 @@ check_consistency_after_restore() {
     call_body "$answer" | jq -e '.status == "revoked"' >/dev/null
     test "$(psql_value "$lost_revoked")" = t
 
-    # The merchant's product exports what it recorded: the address and quote as the service
-    # returned them, and the delivery as its receiver got it.
+    # The merchant's product exports what it recorded: the treasuries of its treasury events, the
+    # addresses and quote as the service returned them, and the deliveries as its receiver got
+    # them.
     records=$(merchant_records)
 
     # The address given out after the backup is re-issued identically from the merchant's record,
     # with its client secret, so the payer's page reads it again.
     test "$(psql_value "SELECT count(*) FROM deposit_addresses WHERE version = 2")" = 0
     request=$(jq -ce --arg id "$consistency_address_v2_id" \
-        '.deposit_addresses | select(length == 1) | .[0] | select(.id == $id)
+        '[.deposit_addresses[] | select(.id == $id)] | select(length == 1) | .[0]
          | .reason = "restore drill: issued after the backup"' <<<"$records")
     answer=$(admin_call POST /v1/admin/restore/deposit_addresses "$request")
     expect_call 200 "$answer"
@@ -652,6 +773,53 @@ check_consistency_after_restore() {
     secret=$(jq -er .client_secret <<<"$request")
     expect_call 200 "$(topup_call GET \
         "/v1/deposit_addresses/$consistency_address_v2_id?client_secret=$secret" </dev/null)"
+
+    # The treasury change that applied after the backup is pending again: the merchant's latest
+    # treasury object shows the application lost, and the address it issued over T2 is refused
+    # until the operator restores the application from its signed treasury.updated (step 3); a
+    # body changed after signing is refused. It applies at the event's time, once.
+    local treasuries_request address_request application
+    treasuries_request=$(jq -ce --arg id "$consistency_treasury_v2_id" \
+        --arg address "$consistency_treasury_v2" \
+        '.treasuries | select(length == 1) | .[0]
+         | select(.treasuries == [{id: $id, status: "active", chain_id: 11155111,
+             address: $address, crediting_paused_by: []}])
+         | .reason = "restore drill: applied after the backup"' <<<"$records")
+    answer=$(admin_call POST /v1/admin/restore/treasuries/verify "$treasuries_request")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e --arg id "$consistency_treasury_v2_id" \
+        '.data == [{id: $id, received_status: "active", status: "pending",
+          result: "application_lost", crediting: "matches"}]' >/dev/null
+    address_request=$(jq -ce --arg id "$consistency_address_v3_id" \
+        '[.deposit_addresses[] | select(.id == $id)] | select(length == 1) | .[0]
+         | .reason = "restore drill: issued over the treasury applied after the backup"' \
+        <<<"$records")
+    expect_call 400 "$(admin_call POST /v1/admin/restore/deposit_addresses "$address_request")"
+    application=$(jq -ce --arg id "$consistency_treasury_v2_id" \
+        '.treasury_applications | select(length == 1) | .[0]
+         | select(.delivery.body | fromjson | .data.object.id == $id)
+         | .reason = "restore drill: applied after the backup"' <<<"$records")
+    answer=$(admin_call POST /v1/admin/restore/treasuries/apply "$(jq -c \
+        '.delivery.body |= (fromjson | .created -= 1 | tojson)' <<<"$application")")
+    expect_call 400 "$answer"
+    call_body "$answer" | jq -e '.error.param == "delivery"' >/dev/null
+    for applied in true false; do
+        answer=$(admin_call POST /v1/admin/restore/treasuries/apply "$application")
+        expect_call 200 "$answer"
+        call_body "$answer" | jq -e --argjson applied "$applied" \
+            --arg id "$consistency_treasury_v2_id" \
+            '.applied == $applied and .treasury.id == $id and .treasury.status == "active"' \
+            >/dev/null
+    done
+    test "$(psql_value "SELECT extract(epoch FROM applied_at)::bigint FROM treasuries \
+        WHERE address = '$consistency_treasury_v2'")" = "$treasury_applied_at"
+    answer=$(admin_call POST /v1/admin/restore/deposit_addresses "$address_request")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e --arg address "$consistency_address_v3" \
+        --arg id "$consistency_address_v3_id" \
+        '.reissued and .deposit_address.id == $id and .deposit_address.version == 3
+         and .deposit_address.address == $address and .deposit_address.status == "active"' \
+        >/dev/null
 
     # The quote created after the backup is re-issued from the merchant's record with the client
     # secret the service tagged, so the payer's page reads it again; a secret of another quote, or
@@ -678,17 +846,28 @@ check_consistency_after_restore() {
     test "$(psql_value "SELECT backfilled FROM addresses \
         WHERE address = '$consistency_quote_address'")" = f
 
-    # The event delivered after the backup is imported from the delivery the merchant's receiver
-    # kept, byte for byte as the service sent it, as delivered, and never sent again; a body
-    # changed after signing is refused and changes nothing.
+    # The events delivered after the backup are imported from the deliveries the merchant's
+    # receiver kept, the first byte for byte as the service sent it, as delivered, and never sent
+    # again; a body changed after signing is refused and changes nothing. Each reversed deposit,
+    # to the re-issued version 2 address, is restored reversed at its revision: the unvalued
+    # rejected one, and D0, whose successor is D1.
     test "$(psql_value "SELECT count(*) FROM events WHERE id = '$consistency_event'")" = 0
     request=$(jq -ce --argjson delivered "$delivered_delivery" \
-        '.events | select(length == 1) | .[0] | select(.deliveries == [$delivered])
+        '.events | select(length == 1) | .[0] | select(.deliveries[0] == $delivered)
          | .reason = "restore drill: delivered after the backup"' <<<"$records")
     answer=$(admin_call POST /v1/admin/restore/events "$request")
     expect_call 200 "$answer"
-    call_body "$answer" | jq -e '.data == [{id: "evt_c371cbc544c45e44a7956242ab4606d9",
-        result: "imported"}]' >/dev/null
+    call_body "$answer" | jq -e --arg unvalued "$unvalued_event" --arg reorged "$reorged_event" \
+        --arg successor "$successor_event" \
+        '.data == [
+          {id: "evt_c371cbc544c45e44a7956242ab4606d9", result: "imported", reversed_deposit: null},
+          {id: $unvalued, result: "imported", reversed_deposit: "restored"},
+          {id: $reorged, result: "imported", reversed_deposit: "restored"},
+          {id: $successor, result: "imported", reversed_deposit: null}]' >/dev/null
+    test "$(psql_value "SELECT string_agg(state, ',' ORDER BY revision) FROM deposits \
+        WHERE id IN ('$unvalued_deposit', '$reorged_deposit')")" = reversed,reversed
+    test "$(psql_value "SELECT successor_id FROM restore_deposit_tombstones \
+        WHERE deposit_id = '$reorged_deposit'")" = "$successor_deposit"
     # Its credit is kept for the deposit the rescan re-derives, which is valued at it.
     test "$(psql_value "SELECT credit_minor || '|' || price_scaled || '|' || price_source \
         FROM restore_delivered_credits WHERE deposit_id = 'e2facb38-9b5c-57c6-9f75-01e57d34b8d5'")" \
@@ -1079,6 +1258,6 @@ printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 if [ "$mode" = controlled ]; then
-    echo 'restore_mode=frozen, merchant reads refused; attested by the admin API; lost key revoked again; lost deposit address and quote re-issued identically from the product'"'"'s records; the delivery its receiver kept imported, its credit kept as delivered'
+    echo 'restore_mode=frozen, merchant reads refused; attested by the admin API; lost key revoked again; lost treasury application restored from its signed event; lost deposit addresses and quote re-issued identically; the deliveries its receiver kept imported, credit kept, reversed deposits restored; all from the product'"'"'s records'
 fi
 echo "restore drill $mode passed"

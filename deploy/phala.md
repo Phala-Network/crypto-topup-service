@@ -154,7 +154,9 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   included. A client secret is a capability: the ledger file is its owner's alone (mode 0600),
   and nothing logs one. `python -m reference_product export-restore-records --config FILE`, next
   to the ledger (in the product container), prints them as the bodies of the operator's
-  `POST /v1/admin/restore/deposit_addresses`, `/quotes`, and `/events` requests (the events in
+  `POST /v1/admin/restore/treasuries/verify` (each treasury's latest object among its `treasury.*`
+  deliveries), `/treasuries/apply` (each signed `treasury.updated` of a pending change becoming
+  `active`), `/deposit_addresses`, `/quotes`, and `/events` requests (treasuries and events in
   batches of 100), without `reason`; `--since` takes the restore point, and `--output` writes a
   new mode-0600 file instead. A ledger from before the inbox is migrated in place when the product
   starts; the events it stored earlier have no raw delivery, so they are not exported. The
