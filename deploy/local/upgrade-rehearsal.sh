@@ -102,6 +102,7 @@ leftovers() {
 cleanup() {
     status=$?
     set +e
+    trap - ERR # cleanup is best effort: a missing image is not a failure
     if ((status != 0)) && [[ -f "$tmp/cvm/.side" ]]; then
         echo "--- topup and postgres logs (last 40 lines each) ---" >&2
         dc "$(<"$tmp/cvm/.side")" logs --no-color --tail 40 topup postgres >&2
