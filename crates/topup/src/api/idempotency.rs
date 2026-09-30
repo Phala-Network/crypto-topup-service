@@ -33,11 +33,16 @@
 //! response was just saved. Under REPEATABLE READ or SERIALIZABLE the takeover would fail with a
 //! serialization error instead.
 //!
+//! A key older than 24 hours is free for any request: a claim that meets it replaces it, and
+//! [`IdempotencyKeyPruner`] deletes the rest in the background, so no request pays for pruning
+//! other accounts' keys.
+//!
 //! An API key's `secret` is never stored: a replayed key creation or roll returns the key without
 //! it. A quote's `client_secret` is stored with its response; it reads only the quote's public
 //! view, which anyone holding the database can read anyway.
 
 use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{FromRequestParts, Request, State};
@@ -48,6 +53,8 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
+use tokio::time::{MissedTickBehavior, interval};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::AppState;
@@ -59,6 +66,8 @@ use crate::tenancy::Scope;
 /// Largest request or response body the layer reads.
 const MAX_BODY_BYTES: usize = 1_048_576;
 const REPLAYED_HEADER: &str = "idempotent-replayed";
+/// Expired keys one pruning statement deletes at most, so each holds its row locks briefly.
+const PRUNE_BATCH: u16 = 1000;
 
 /// Marks a response whose top-level `secret` must not be stored for replay.
 #[derive(Clone, Copy, Debug)]
@@ -268,14 +277,11 @@ async fn acquire(
     claim: &Claim,
     fingerprint: &[u8; 32],
 ) -> Result<Acquired, sqlx::Error> {
-    sqlx::query("DELETE FROM idempotency_keys WHERE created_at < now() - interval '24 hours'")
-        .execute(pool)
-        .await?;
     // A key whose request never saved a response is taken over by the same request after a
-    // minute, under the new owner; an expired row not yet pruned by a concurrent request is
-    // replaced. A takeover waits for the row lock of a transaction still committing, and then
-    // finds its saved response; `lock_timeout` bounds the wait, so a long transaction cannot pin
-    // the repeats' connections.
+    // minute, under the new owner; an expired row `IdempotencyKeyPruner` has not deleted yet is
+    // replaced, whatever its request. A takeover waits for the row lock of a transaction still
+    // committing, and then finds its saved response; `lock_timeout` bounds the wait, so a long
+    // transaction cannot pin the repeats' connections.
     let mut transaction = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '5s'")
         .execute(&mut *transaction)
@@ -398,6 +404,66 @@ async fn release(pool: &PgPool, claim: &Claim) {
     .await;
     if let Err(error) = result {
         tracing::error!(%error, "idempotency key was not released; it frees after a minute");
+    }
+}
+
+/// Deletes the idempotency keys of every account older than 24 hours, off the request path: a
+/// claim replaces an expired key it meets itself, so pruning only bounds the table.
+pub struct IdempotencyKeyPruner {
+    pool: PgPool,
+    interval: Duration,
+}
+
+impl IdempotencyKeyPruner {
+    /// Creates a pruner that runs every `interval`.
+    #[must_use]
+    pub const fn new(pool: PgPool, interval: Duration) -> Self {
+        Self { pool, interval }
+    }
+
+    /// Prunes until cancellation, logging failures without stopping the task.
+    pub async fn run(&self, cancellation: CancellationToken) {
+        let mut ticker = interval(self.interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return,
+                _ = ticker.tick() => match self.prune_once().await {
+                    Ok(0) => {}
+                    Ok(pruned) => tracing::info!(pruned, "expired idempotency keys pruned"),
+                    Err(error) => tracing::error!(%error, "idempotency key pruning failed"),
+                },
+            }
+        }
+    }
+
+    /// Deletes every expired key, [`PRUNE_BATCH`] rows per statement, and returns how many. A row
+    /// a claim is taking over is locked, so it is skipped rather than waited for; a claim that
+    /// took a row over first leaves it fresh, and the batch's lock re-reads it and passes it by.
+    pub async fn prune_once(&self) -> Result<u64, sqlx::Error> {
+        let mut pruned = 0_u64;
+        loop {
+            let deleted = sqlx::query(
+                r#"
+                DELETE FROM idempotency_keys
+                WHERE (account_id, livemode, key) IN (
+                    SELECT account_id, livemode, key FROM idempotency_keys
+                    WHERE created_at < now() - interval '24 hours'
+                    ORDER BY created_at
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                )
+                "#,
+            )
+            .bind(i64::from(PRUNE_BATCH))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            pruned = pruned.saturating_add(deleted);
+            if deleted < u64::from(PRUNE_BATCH) {
+                return Ok(pruned);
+            }
+        }
     }
 }
 

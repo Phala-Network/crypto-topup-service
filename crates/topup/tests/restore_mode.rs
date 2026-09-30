@@ -784,8 +784,14 @@ async fn frozen_merchant_requests_answer_service_restoring_and_admin_and_health_
                 ensure!(refused.body["error"]["code"] == "service_restoring");
                 ensure!(refused.retry_after.as_deref() == Some("300"));
             }
-            // Refused before authentication, so no idempotency key stores the refusal.
-            let anonymous = harness
+            // Refused before the key is looked up, so no idempotency key stores the refusal; a
+            // key that is not well-formed is refused in memory, before the freeze is read.
+            let unknown = topup::api_keys::generate(topup::api_keys::KeyKind::Secret, true)?;
+            let unknown = harness
+                .merchant_with(&harness.app, Method::POST, "/v1/api_keys", &body, &unknown)
+                .await?;
+            ensure!(unknown.body["error"]["code"] == "service_restoring");
+            let malformed = harness
                 .merchant_with(
                     &harness.app,
                     Method::POST,
@@ -794,7 +800,8 @@ async fn frozen_merchant_requests_answer_service_restoring_and_admin_and_health_
                     "ppay_sk_live_invalid",
                 )
                 .await?;
-            ensure!(anonymous.body["error"]["code"] == "service_restoring");
+            ensure!(malformed.status == StatusCode::UNAUTHORIZED);
+            ensure!(malformed.body["error"]["code"] == "api_key_invalid");
             let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency_keys")
                 .fetch_one(&harness.pool)
                 .await?;

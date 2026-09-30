@@ -825,10 +825,11 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     The freeze is a row of the database, so it survives the upgrade from the restore-check variant
     to the service. While frozen, the admin API and health stay up; every merchant request with an
     API key answers `503 service_restoring` with `Retry-After`, reads included, because the
-    restored `api_keys` can hold a key revoked after the restore point as valid (writes are
-    refused before authentication: key creation, restricted ones included, key and webhook key
-    rolls, treasury proofs, cancellations, and crediting pauses and resumes, endpoint, quote,
-    deposit address, and refund changes alike); nothing credits, settles, expires a quote, applies
+    restored `api_keys` can hold a key revoked after the restore point as valid (the one gate is
+    authentication, after the key's form and checksum and before its lookup, authorization, and
+    the idempotency layer, so writes are refused alike: key creation, restricted ones included,
+    key and webhook key rolls, treasury proofs, cancellations, and crediting pauses and resumes,
+    endpoint, quote, deposit address, and refund changes); nothing credits, settles, expires a quote, applies
     a treasury change, verifies a refund, or delivers an event. The scanner and the reconciler run: the
     rescan from the restored cursor re-derives every deposit, deduplicated by its deterministic id.
   - **Reconciliation, operator-driven and audited** (`/v1/admin/restore/…`, runbook

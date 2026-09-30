@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::future::{Fuse, FusedFuture as _, FutureExt as _};
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
@@ -833,9 +833,9 @@ fn reach(notice: bool, outcome: &Outcome) -> Reach {
 }
 
 /// The wait a `429` or `503` asks for in `Retry-After` (Standard Webhooks; RFC 9110 §10.2.3),
-/// delay-seconds or an HTTP date after `now`, at most [`MAX_RETRY_AFTER`]: a value too large to
-/// represent is the maximum, a past date no wait. A malformed value or any other status asks for
-/// nothing, and the backoff alone applies.
+/// delay-seconds or an HTTP date after `now` (IMF-fixdate, RFC 850, or asctime), at most
+/// [`MAX_RETRY_AFTER`]: a value too large to represent is the maximum, a past date no wait. A
+/// malformed value or any other status asks for nothing, and the backoff alone applies.
 fn retry_after(status: StatusCode, headers: &HeaderMap, now: DateTime<Utc>) -> Option<Duration> {
     if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE {
         return None;
@@ -844,23 +844,12 @@ fn retry_after(status: StatusCode, headers: &HeaderMap, now: DateTime<Utc>) -> O
     let wait = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
         value.parse().map_or(MAX_RETRY_AFTER, Duration::from_secs)
     } else {
-        let date = http_date(value)?;
+        let date = DateTime::<Utc>::from(httpdate::parse_http_date(value).ok()?);
         date.signed_duration_since(now)
             .to_std()
             .unwrap_or(Duration::ZERO)
     };
     Some(wait.min(MAX_RETRY_AFTER))
-}
-
-/// An HTTP date in any of RFC 9110's three formats: IMF-fixdate, RFC 850, or asctime.
-fn http_date(value: &str) -> Option<DateTime<Utc>> {
-    if let Ok(date) = DateTime::parse_from_rfc2822(value) {
-        return Some(date.with_timezone(&Utc));
-    }
-    ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
-        .iter()
-        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
-        .map(|date| date.and_utc())
 }
 
 fn retry_delay(attempts: i32, entropy: &dyn JitterSource) -> Duration {

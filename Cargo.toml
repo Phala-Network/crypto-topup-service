@@ -34,6 +34,7 @@ ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["all
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 hex = "=0.4.3"
 hmac = "=0.13.0"
+httpdate = "=1.0.3"
 proptest = "=1.11.0"
 rand = "=0.10.3"
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "query", "rustls"] }

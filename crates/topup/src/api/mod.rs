@@ -53,6 +53,7 @@ pub use attestation::{
 };
 pub use auth::VerificationKey;
 pub use client_limit::ClientReadLimiter;
+pub use idempotency::IdempotencyKeyPruner;
 pub(crate) use keys::api_key_object;
 pub use rate_limit::{ApiRateLimiter, RateLimits};
 pub use topup_adapters::http_signature::PublicOrigin;
@@ -445,15 +446,11 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
             idempotency::idempotent_post,
         ))
         .route_layer(middleware::from_fn(auth::authorize))
+        // Also the freeze gate: while frozen after a restore, a request with a key is refused
+        // here, before authorization and the idempotency layer.
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
-        ))
-        // Outermost: while frozen after a restore, a write is refused before anything else runs,
-        // so no idempotency key stores the refusal.
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            refuse_writes_while_frozen,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let client_secret = client_secret_routes()
@@ -490,31 +487,13 @@ async fn unrecognized_request() -> Response {
     error::ApiError::unrecognized_request().into_response()
 }
 
-/// Seconds `Retry-After` asks a client to wait before retrying a write refused while the service
+/// Seconds `Retry-After` asks a client to wait before retrying a request refused while the service
 /// is frozen after a restore: reconciliation takes minutes to hours.
 const RESTORE_RETRY_AFTER_SECONDS: u64 = 300;
 
 /// `503 service_restoring` with `Retry-After`.
 fn restoring() -> Response {
     error::ApiError::service_restoring(RESTORE_RETRY_AFTER_SECONDS).into_response()
-}
-
-/// Refuses every merchant write while the service is frozen after a restore
-/// (`crate::restore_mode`), before authentication; reads are refused by authentication
-/// (`auth::authenticate_merchant`).
-async fn refuse_writes_while_frozen(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if matches!(*request.method(), Method::GET | Method::HEAD) {
-        return next.run(request).await;
-    }
-    match crate::restore_mode::is_frozen(&state.pool).await {
-        Ok(false) => next.run(request).await,
-        Ok(true) => restoring(),
-        Err(error) => error::ApiError::from(error).into_response(),
-    }
 }
 
 /// Builds the router of an instance restored from backup (`TOPUP_SERVICE_ENABLED=read-only`,
@@ -660,13 +639,14 @@ mod tests {
         assert_eq!(routes, declared);
     }
 
-    #[tokio::test]
-    async fn unknown_paths_are_not_found_with_a_request_id() {
+    /// A state whose database is unreachable: a request that reads it fails.
+    fn offline_state() -> AppState {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .expect("lazy pool URL is valid");
         let admin_key = SigningKey::from_bytes(&[1; 32]);
-        let state = AppState {
+        AppState {
             pool,
             routes: Arc::default(),
             admin_key: VerificationKey::from_base64(
@@ -682,7 +662,53 @@ mod tests {
             rate_limits: Arc::default(),
             screening: Arc::new(crate::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(crate::treasuries::UnavailableContractSignatures),
+        }
+    }
+
+    /// A merchant request without a well-formed key is refused before the freeze gate or any
+    /// other database read: it answers `401` though the database is unreachable, while a
+    /// well-formed key reaches the database and fails there.
+    #[tokio::test]
+    async fn a_request_without_a_well_formed_key_reads_no_database() {
+        let router = super::router(offline_state()).0;
+        let send = |method: &str, uri: &str, authorization: Option<&str>| {
+            let mut request = Request::builder().method(method).uri(uri);
+            if let Some(authorization) = authorization {
+                request = request.header("authorization", authorization);
+            }
+            let request = request.body(Body::empty()).expect("request builds");
+            let router = router.clone();
+            async move {
+                let response = router.oneshot(request).await.expect("request is served");
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("response body reads");
+                let body: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+                (status, body["error"]["code"].clone())
+            }
         };
+        assert_eq!(
+            send("POST", "/v1/api_keys", None).await,
+            (StatusCode::UNAUTHORIZED, "api_key_missing".into())
+        );
+        assert_eq!(
+            send("GET", "/v1/account", Some("Bearer ppay_sk_live_invalid")).await,
+            (StatusCode::UNAUTHORIZED, "api_key_invalid".into())
+        );
+        assert_eq!(
+            send("GET", "/v1/account", Some("Basic dXNlcjpwYXNz")).await,
+            (StatusCode::UNAUTHORIZED, "api_key_invalid".into())
+        );
+        let key = crate::api_keys::generate(crate::api_keys::KeyKind::Secret, true)
+            .expect("a key generates");
+        let (status, _) = send("GET", "/v1/account", Some(&format!("Bearer {}", *key))).await;
+        assert!(status.is_server_error(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn unknown_paths_are_not_found_with_a_request_id() {
+        let state = offline_state();
         let response = super::router(state)
             .0
             .oneshot(

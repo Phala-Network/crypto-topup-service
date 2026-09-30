@@ -303,6 +303,14 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- While the service is frozen after a restore, a merchant request without a well-formed API key
+  answers `401 api_key_missing` or `401 api_key_invalid`, as when not frozen (it answered
+  `503 service_restoring`): the key's form and checksum are checked first, without a database
+  read. A well-formed key still answers `503 service_restoring`, reads included, and nothing is
+  saved for its `Idempotency-Key`.
+- An `Idempotency-Key` older than 24 hours is pruned in the background, not while a `POST` claims
+  its own key, so no request pays for pruning every account's keys; such a key is still free for
+  any request.
 - **Breaking** (nothing is live): A key rolling itself (`POST /v1/api_keys/{id}/roll` with the
   requesting key's own id) must keep working for at least an hour: `expires_in` under `3600`,
   including the default `0`, is `400 parameter_invalid`. A replay never returns the new key's

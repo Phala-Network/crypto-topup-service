@@ -5,6 +5,7 @@ mod support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use axum::body::to_bytes;
@@ -946,6 +947,93 @@ async fn posts_are_idempotent_per_account_and_mode() -> Result<()> {
         .fetch_one(pool)
         .await?;
         ensure!(pruned == 0);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// Keys older than 24 hours are pruned in the background, every account's, not by a request's
+/// claim; a key a claim holds is skipped, not waited for.
+#[tokio::test]
+async fn expired_idempotency_keys_are_pruned_off_the_request_path() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits::default())?;
+        let (account, key) = seed_test_account(pool, "pruned").await?;
+        let (other, _) = seed_test_account(pool, "other").await?;
+        for (owner, key, age) in [
+            (account, "old", "25 hours"),
+            (other, "old", "25 hours"),
+            (other, "held", "25 hours"),
+            (other, "fresh", "23 hours"),
+        ] {
+            sqlx::query(
+                "INSERT INTO idempotency_keys (account_id, livemode, key, fingerprint, created_at) \
+                 VALUES ($1, false, $2, $3, now() - $4::interval)",
+            )
+            .bind(owner)
+            .bind(key)
+            .bind(vec![0_u8; 32])
+            .bind(age)
+            .execute(pool)
+            .await?;
+        }
+        let keys = || async {
+            let mut keys = sqlx::query_scalar::<_, String>(
+                "SELECT account_id::text || '/' || key FROM idempotency_keys",
+            )
+            .fetch_all(pool)
+            .await?;
+            keys.sort();
+            anyhow::Ok(keys)
+        };
+
+        // A claim leaves the other account's expired keys alone.
+        let created = harness
+            .merchant(
+                Method::POST,
+                "/v1/api_keys",
+                Some(&json!({"name": "a"})),
+                &key,
+                Some("new"),
+            )
+            .await?;
+        ensure!(created.status == StatusCode::OK, "{}", created.body);
+        let mut expected = vec![
+            format!("{account}/new"),
+            format!("{account}/old"),
+            format!("{other}/fresh"),
+            format!("{other}/held"),
+            format!("{other}/old"),
+        ];
+        expected.sort();
+        ensure!(keys().await? == expected);
+
+        let pruner = topup::api::IdempotencyKeyPruner::new(pool.clone(), Duration::from_secs(600));
+        let mut claim = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM idempotency_keys WHERE account_id = $1 AND key = 'held' FOR UPDATE",
+        )
+        .bind(other)
+        .execute(&mut *claim)
+        .await?;
+        let pruned = tokio::time::timeout(Duration::from_secs(5), pruner.prune_once()).await??;
+        ensure!(pruned == 2, "{pruned}");
+        let mut expected = vec![
+            format!("{account}/new"),
+            format!("{other}/fresh"),
+            format!("{other}/held"),
+        ];
+        expected.sort();
+        ensure!(keys().await? == expected);
+        claim.rollback().await?;
+        ensure!(pruner.prune_once().await? == 1);
+        ensure!(keys().await?.len() == 2);
         Ok(())
     }
     .await;

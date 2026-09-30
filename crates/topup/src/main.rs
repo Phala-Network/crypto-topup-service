@@ -102,6 +102,8 @@ const PUMPS: usize = 1;
 const STEP_TIMEOUT: Duration = Duration::from_secs(240);
 /// Interval between deposit state-age scans.
 const AGE_ALERT_INTERVAL: Duration = Duration::from_secs(60);
+/// Interval between prunings of the idempotency keys older than 24 hours.
+const IDEMPOTENCY_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
 #[derive(Args)]
 struct ReconcileArgs {
@@ -603,9 +605,10 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     if let Some(restore) = &restore {
         tracing::error!(
             restore_id = %restore.id,
-            "frozen after a restore from backup: merchant writes answer 503 service_restoring, \
-             and crediting, settlement, quote expiry, treasury changes, refund verification, and \
-             event delivery wait for POST /v1/admin/restore/unfreeze (deploy/RESTORE.md)"
+            "frozen after a restore from backup: merchant requests with an API key answer 503 \
+             service_restoring, and crediting, settlement, quote expiry, treasury changes, refund \
+             verification, and event delivery wait for POST /v1/admin/restore/unfreeze \
+             (deploy/RESTORE.md)"
         );
     }
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
@@ -760,6 +763,12 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         })
     });
     tasks.spawn("backup monitor", topup::observability::monitor_backup);
+    // Housekeeping only, so it runs while frozen too: a claim replaces an expired key itself.
+    let idempotency_pruner =
+        topup::api::IdempotencyKeyPruner::new(pool.clone(), IDEMPOTENCY_PRUNE_INTERVAL);
+    tasks.spawn("idempotency key pruner", |cancellation| async move {
+        idempotency_pruner.run(cancellation).await;
+    });
     let expiry_worker =
         topup::locks::ExpiryWorker::new(pool.clone(), Arc::clone(&routes), Duration::from_secs(5));
     tasks.spawn("rate-lock expiry worker", |cancellation| {

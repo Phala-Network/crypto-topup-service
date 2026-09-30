@@ -76,23 +76,29 @@ impl Merchant {
 /// request.
 ///
 /// While the service is frozen after a restore (`crate::restore_mode`) no key authenticates,
-/// reads included: `503 service_restoring`. The restored database may hold a key the merchant
-/// revoked after the restore point as valid; keys work again once the operator has revoked such
-/// keys again and unfrozen the service.
+/// reads and writes alike: `503 service_restoring`. The restored database may hold a key the
+/// merchant revoked after the restore point as valid; keys work again once the operator has
+/// revoked such keys again and unfrozen the service. This is the service's one freeze gate for
+/// merchant requests: it runs before authorization and the idempotency layer, so a refusal is
+/// neither replayed nor saved, and after the key's form and checksum are checked in memory, so a
+/// request without a well-formed key is refused without a database read.
 pub async fn authenticate_merchant(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    let presented = match bearer_key(request.headers()) {
+        Ok(presented) => presented,
+        Err(error) => return unauthorized(error),
+    };
+    if api_keys::check_format(&presented).is_none() {
+        return unauthorized(ApiError::api_key_invalid());
+    }
     match crate::restore_mode::is_frozen(&state.pool).await {
         Ok(false) => {}
         Ok(true) => return super::restoring(),
         Err(error) => return ApiError::from(error).into_response(),
     }
-    let presented = match bearer_key(request.headers()) {
-        Ok(presented) => presented,
-        Err(error) => return unauthorized(error),
-    };
     let authenticated = match api_keys::authenticate(&state.pool, &presented).await {
         Ok(Ok(authenticated)) => authenticated,
         Ok(Err(Rejection::Expired)) => return unauthorized(ApiError::api_key_expired()),
