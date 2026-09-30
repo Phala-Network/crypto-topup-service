@@ -1133,15 +1133,30 @@ pub async fn delivered_event_findings(
                -- ReversedDeposit::Rescanned: the rescan took the reversed deposit's position.
                event.type = 'deposit.reversed' AND EXISTS (
                    SELECT 1 FROM deposits AS holder
-                   WHERE holder.chain_id = (event.data #>> '{object,chain_id}')::bigint
+                   WHERE holder.chain_id = position.chain_id
                      AND holder.tx_hash = event.data #>> '{object,tx_hash}'
-                     AND holder.receipt_log_index =
-                         (event.data #>> '{object,receipt_log_index}')::bigint
+                     AND holder.receipt_log_index = position.receipt_log_index
                      AND holder.state <> 'reversed' AND holder.created_at >= $2
-                     AND holder.revision <= (event.data #>> '{object,revision}')::bigint
+                     AND holder.revision <= position.revision
                ) AS rescanned
         FROM restore_delivered_events AS imported
         JOIN events AS event ON event.id = imported.event_id
+        -- The delivered receipt position, each field NULL unless it is an integer: a delivery
+        -- rendered before the deposit object carried it (ReversedDeposit::IdentityMissing) was
+        -- imported with whatever it holds there.
+        CROSS JOIN LATERAL (
+            SELECT
+                CASE WHEN jsonb_typeof(object -> 'chain_id') = 'number'
+                          AND pg_input_is_valid(object ->> 'chain_id', 'bigint')
+                     THEN (object ->> 'chain_id')::bigint END AS chain_id,
+                CASE WHEN jsonb_typeof(object -> 'receipt_log_index') = 'number'
+                          AND pg_input_is_valid(object ->> 'receipt_log_index', 'bigint')
+                     THEN (object ->> 'receipt_log_index')::bigint END AS receipt_log_index,
+                CASE WHEN jsonb_typeof(object -> 'revision') = 'number'
+                          AND pg_input_is_valid(object ->> 'revision', 'bigint')
+                     THEN (object ->> 'revision')::bigint END AS revision
+            FROM (SELECT event.data -> 'object' AS object) AS delivered
+        ) AS position
         LEFT JOIN deposits AS deposit ON deposit.id = event.object_id
         LEFT JOIN addresses AS address ON address.id = deposit.address_id
         LEFT JOIN restore_delivered_credits AS credit

@@ -1997,7 +1997,8 @@ pub struct RestoreDepositAddressRequest {
     pub livemode: bool,
     /// The customer's `client_reference_id`.
     pub client_reference_id: String,
-    /// The address's `version`; with `address`, both must agree.
+    /// The address's `version`; with `address`, both must agree. At most 32 past the customer's
+    /// latest version: re-issue one further behind in steps (32, 64, ...).
     #[serde(default)]
     pub version: Option<u64>,
     /// The address the merchant holds (the top-level `address` or a network's); the version is

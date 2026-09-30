@@ -29,6 +29,7 @@ use topup::api::{
     VerificationKey, WebhookKeysFuture,
 };
 use topup::db::{self, NewDeposit};
+use topup::deposit_addresses::REISSUE_VERSIONS_AHEAD;
 use topup::finality::FinalityWatch;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, StepSet};
 use topup::restore_mode;
@@ -1457,6 +1458,61 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
             .fetch_one(&harness.pool)
             .await?;
             ensure!(audited == 2);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_version_far_past_the_latest_is_refused_and_reissued_in_steps() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let first = harness
+                .merchant(
+                    Method::POST,
+                    "/v1/deposit_addresses",
+                    &json!({"client_reference_id": "team-42"}),
+                )
+                .await?;
+            ensure!(first.status == StatusCode::OK && first.body["version"] == 1);
+            harness.restore().await?;
+            let path = "/v1/admin/restore/deposit_addresses";
+            let request = |version: u64| {
+                json!({
+                    "account": harness.account_id(),
+                    "livemode": true,
+                    "client_reference_id": "team-42",
+                    "version": version,
+                    "reason": "the merchant's export",
+                })
+            };
+            let latest = 1 + REISSUE_VERSIONS_AHEAD;
+            // A version more than the step past the latest one is refused before anything is
+            // issued, however large.
+            for version in [latest + 1, u64::MAX] {
+                let refused = harness.admin(Method::POST, path, &request(version)).await?;
+                ensure!(
+                    refused.status == StatusCode::BAD_REQUEST,
+                    "{}",
+                    refused.body
+                );
+                let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM deposit_addresses")
+                    .fetch_one(&harness.pool)
+                    .await?;
+                ensure!(versions == 1, "{versions} versions");
+            }
+            // In steps of at most that many versions, the restore reaches it.
+            for version in [
+                latest,
+                2 * REISSUE_VERSIONS_AHEAD,
+                3 * REISSUE_VERSIONS_AHEAD,
+            ] {
+                let reissued = harness.admin(Method::POST, path, &request(version)).await?;
+                ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
+                ensure!(reissued.body["deposit_address"]["version"] == version);
+            }
             Ok(())
         })
     })
@@ -3744,6 +3800,63 @@ async fn a_reversed_deposit_is_restored_only_on_its_own_account_and_untaken_posi
                     .is_some_and(|findings| findings.iter().any(|finding| {
                         finding["type"] == "deposit.reversed" && finding["status"] == "rescanned"
                     })),
+                "{}",
+                status.body
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_legacy_reversed_event_with_malformed_evidence_is_a_finding() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-legacy").await?;
+            harness.restore().await?;
+            // The rescan recorded another deposit, so the listing compares positions against it.
+            record_deposit(
+                &harness,
+                B256::repeat_byte(0x77),
+                address_id,
+                U256::from(1_000_u64),
+            )
+            .await?;
+            // A delivery rendered before the deposit object carried its receipt position, whose
+            // chain and revision are not integers.
+            let mut legacy = reversed_event(&harness, 0, forwarder, None);
+            let object = legacy["data"]["object"]
+                .as_object_mut()
+                .context("a deposit object")?;
+            for field in ["receipt_log_index", "block_hash", "block_time"] {
+                object.remove(field);
+            }
+            object.insert("chain_id".to_owned(), json!("eip155:1"));
+            object.insert("revision".to_owned(), json!(1.5));
+            let answer = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [harness.delivered(&legacy)], "reason": "receiver log"}),
+                )
+                .await?;
+            ensure!(
+                answer.body["data"][0]["reversed_deposit"] == "identity_missing",
+                "{}",
+                answer.body
+            );
+            let status = harness
+                .admin(Method::GET, "/v1/admin/restore", &Value::Null)
+                .await?;
+            ensure!(status.status == StatusCode::OK, "{}", status.body);
+            let findings = &status.body["delivered_events"]["findings"];
+            ensure!(
+                findings.as_array().is_some_and(|findings| findings
+                    .iter()
+                    .any(|finding| finding["type"] == "deposit.reversed"
+                        && finding["status"] == "pending")),
                 "{}",
                 status.body
             );

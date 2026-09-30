@@ -21,13 +21,6 @@ CREATE TABLE IF NOT EXISTS teams (
     id TEXT PRIMARY KEY,
     suspended INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS team_addresses (
-    address TEXT PRIMARY KEY,
-    team_id TEXT NOT NULL REFERENCES teams (id),
-    kind TEXT NOT NULL,
-    version INTEGER,
-    lock_ref TEXT
-);
 -- team_id is NULL only for credits held because they name no known workspace.
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
@@ -128,6 +121,11 @@ MIGRATIONS = (
     ALTER TABLE webhook_events ADD COLUMN body BLOB;
     ALTER TABLE webhook_events ADD COLUMN webhook_timestamp TEXT;
     ALTER TABLE webhook_events ADD COLUMN webhook_signature TEXT;
+    """,
+    # 2: each quote's and network's address was also written to `team_addresses`, never read: the
+    # quote and deposit address records hold them.
+    """
+    DROP TABLE IF EXISTS team_addresses;
     """,
 )
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -263,9 +261,8 @@ class ProductLedger:
 
     def record_quote(self, team_id: str, quote: Mapping[str, Any]) -> None:
         """Records a quote the service created for the workspace, as it returned it (with its
-        `client_secret`), and its address (history only: credits name the account)."""
+        `client_secret`)."""
         with self.transaction() as db:
-            self._record_address(db, quote["address"], team_id, quote["id"])
             db.execute(
                 "INSERT INTO quote_records (id, team_id, response, recorded_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
@@ -273,25 +270,15 @@ class ProductLedger:
             )
 
     def record_deposit_address(self, team_id: str, address: Mapping[str, Any]) -> None:
-        """Records a deposit address the service returned for the workspace, as it returned it,
-        and each network's address. A later response (a fresh `client_secret`) replaces it."""
+        """Records a deposit address the service returned for the workspace, as it returned it.
+        A later response (a fresh `client_secret`) replaces it."""
         with self.transaction() as db:
-            for network in address["networks"]:
-                self._record_address(db, network["address"], team_id, address["id"])
             db.execute(
                 "INSERT INTO deposit_address_records (id, team_id, response, recorded_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
                 "response = excluded.response, recorded_at = excluded.recorded_at",
                 (address["id"], team_id, json.dumps(address, sort_keys=True), time.time()),
             )
-
-    @staticmethod
-    def _record_address(db: sqlite3.Connection, address: str, team_id: str, ref: str) -> None:
-        db.execute(
-            "INSERT OR IGNORE INTO team_addresses (address, team_id, kind, version, lock_ref) "
-            "VALUES (?, ?, 'lock', NULL, ?)",
-            (address.lower(), team_id, ref),
-        )
 
     def quote_records(self) -> list[tuple[dict[str, Any], float]]:
         """Every recorded quote response, with when it was recorded, oldest first."""

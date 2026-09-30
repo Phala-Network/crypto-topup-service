@@ -2281,7 +2281,7 @@
             "type": "string"
           },
           "version": {
-            "description": "The address's `version`; with `address`, both must agree.",
+            "description": "The address's `version`; with `address`, both must agree. At most 32 past the customer's\nlatest version: re-issue one further behind in steps (32, 64, ...).",
             "format": "int64",
             "minimum": 0,
             "type": [
