@@ -10,7 +10,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from topup_client.models import Deposit, Quote, Refund
-from topup_sdk import SignatureError, load_public_key, verify_webhook_signature
+from topup_sdk import SignatureError, load_webhook_public_key, verify_webhook_signature
 
 DEFAULT_TOLERANCE = 300
 
@@ -46,15 +46,17 @@ class Event:
     account event (`account.updated`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`). Its `id`
     is stable across retries and replays; process each id once. Claw back the credit of a
     `deposit.reversed` deposit as for `deposit.refunded`. `request` is the API request that
-    caused it, or `None` when the service's own workers did."""
+    caused it, or `None` when the service's own workers did; `actor` who caused it: an API key id
+    (`key_…`), `admin`, or `system`."""
 
     id: str
     account: str
     livemode: bool
     type: str
     created: int
+    actor: str
+    request: EventRequest | None
     data: EventData
-    request: EventRequest | None = None
 
     @property
     def deposit(self) -> Deposit:
@@ -93,10 +95,9 @@ class Webhook:
 
         `payload` is the raw request body, before any JSON parsing; `headers` are the request
         headers (`webhook-id`, `webhook-timestamp`, `webhook-signature`); `public_key` is your
-        account's webhook key in the mode you receive (hex, base64, or Standard Webhooks'
-        `whpk_` and base64), pinned from
-        `GET /v1/attestation`, or a list of keys while a rotation overlaps. `expected_account` is
-        your `acct_…` id and `expected_livemode` the mode of the endpoint.
+        account's webhook key in the mode you receive, in Standard Webhooks' `whpk_` form as
+        pinned from `GET /v1/attestation`, or a list of keys while a rotation overlaps.
+        `expected_account` is your `acct_…` id and `expected_livemode` the mode of the endpoint.
 
         Raises `SignatureVerificationError` when no signature verifies with a given key, the
         timestamp is more than `tolerance` seconds away, the body's id differs from `webhook-id`,
@@ -107,7 +108,7 @@ class Webhook:
             raise ValueError("expected_account is required")
         body = payload.encode() if isinstance(payload, str) else payload
         candidates = [public_key] if isinstance(public_key, str | Ed25519PublicKey) else public_key
-        keys = [load_public_key(key) if isinstance(key, str) else key for key in candidates]
+        keys = [load_webhook_public_key(key) if isinstance(key, str) else key for key in candidates]
         try:
             webhook_id = verify_webhook_signature(headers, body, keys, tolerance_seconds=tolerance)
         except SignatureError as error:
@@ -122,6 +123,7 @@ class Webhook:
             envelope.get("created"),
         )
         account, livemode = envelope.get("account"), envelope.get("livemode")
+        actor, request = envelope.get("actor"), envelope.get("request")
         data = envelope.get("data")
         if (
             not isinstance(event_id, str)
@@ -131,6 +133,9 @@ class Webhook:
             or type(livemode) is not bool
             or not isinstance(data, dict)
             or not isinstance(data.get("object"), dict)
+            or not isinstance(actor, str)
+            or "request" not in envelope
+            or not (request is None or _is_request(request))
         ):
             raise ValueError("webhook body is not an event")
         if event_id != webhook_id:
@@ -146,19 +151,22 @@ class Webhook:
             livemode,
             event_type,
             created,
+            actor,
+            None if request is None else EventRequest(request["id"], request["idempotency_key"]),
             EventData(
                 _resource(event_type, data["object"]),
                 previous if isinstance(previous, dict) else None,
             ),
-            _request(envelope.get("request")),
         )
 
 
-def _request(value: object) -> EventRequest | None:
+def _is_request(value: object) -> bool:
+    """Whether `value` is an event's `request`: a `Request-Id` and the `Idempotency-Key` sent,
+    or `null` for none."""
     if not isinstance(value, dict) or not isinstance(value.get("id"), str):
-        return None
-    key = value.get("idempotency_key")
-    return EventRequest(value["id"], key if isinstance(key, str) else None)
+        return False
+    key = value.get("idempotency_key", False)
+    return key is None or isinstance(key, str)
 
 
 def _resource(event_type: str, value: dict[str, Any]) -> Deposit | Quote | Refund | dict[str, Any]:

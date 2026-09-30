@@ -38,7 +38,14 @@ from .sweeps import (
     write_safe_batch,
 )
 from .treasury import sign_treasury_challenge
-from .webhooks import WebhookEvent, sign_webhook, verify_webhook, verify_webhook_signature
+from .webhooks import (
+    WebhookEvent,
+    load_webhook_public_key,
+    sign_webhook,
+    verify_webhook,
+    verify_webhook_signature,
+    webhook_public_key_bytes,
+)
 
 __all__ = [
     "CREDITED_EVENT",
@@ -66,6 +73,7 @@ __all__ = [
     "flush_transactions",
     "forwarder_address",
     "load_public_key",
+    "load_webhook_public_key",
     "quote_address",
     "quote_salt",
     "safe_batch",
@@ -75,5 +83,6 @@ __all__ = [
     "verify_request",
     "verify_webhook",
     "verify_webhook_signature",
+    "webhook_public_key_bytes",
     "write_safe_batch",
 ]

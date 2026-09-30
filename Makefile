@@ -1,6 +1,6 @@
 .PHONY: build build-topup test lint image up down verify-image \
 	restore-drill deploy-check runbook-check sdk-check sdk-generate sandbox-local \
-	cvm-rehearsal upgrade-rehearsal
+	cvm-rehearsal
 
 build:
 	cargo build --workspace --locked
@@ -41,10 +41,6 @@ restore-drill:
 
 cvm-rehearsal:
 	deploy/local/cvm-rehearsal.sh
-
-# The staging cutover in place: the released stack with real data, upgraded on its own volumes.
-upgrade-rehearsal:
-	deploy/local/upgrade-rehearsal.sh
 
 deploy-check:
 	cd contracts && forge fmt --check

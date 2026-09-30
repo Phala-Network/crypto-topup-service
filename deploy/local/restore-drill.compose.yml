@@ -68,9 +68,9 @@ volumes:
   drill_mock_product:
   drill_product_ledger:
 
-# The product's account, its treasury, and the account's test-mode webhook key (hex), which the
-# drill sets once the simulator derives it; the driver key signs nothing here. Only the webhook
-# receiver is exercised: nothing calls the service or a chain.
+# The product's account, its treasury, and the account's test-mode webhook key (`whpk_…`), which
+# the drill sets once the simulator derives it; the driver key signs nothing here. Only the
+# webhook receiver is exercised: nothing calls the service or a chain.
 configs:
   drill_product_config:
     content: |

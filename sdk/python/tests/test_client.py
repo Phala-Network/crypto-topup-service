@@ -297,8 +297,12 @@ def _deposit(index: int) -> dict[str, object]:
         "address": "0x" + "11" * 20,
         "from_address": "0x" + "33" * 20,
         "tx_hash": "0x" + "ab" * 32,
+        "receipt_log_index": index,
+        "revision": 0,
         "log_index": index,
         "block_number": 1,
+        "block_hash": "0x" + "cd" * 32,
+        "block_time": NOW,
         "amount_refunded_atomic": "0",
         "refunded": False,
         "amount_refunded": 0,
@@ -445,8 +449,6 @@ def test_errors_carry_the_request_id_and_doc_url() -> None:
     def respond(request: httpx.Request, count: int) -> httpx.Response:
         response = _error(404, "resource_missing")
         response.headers["request-id"] = f"req_{count}"
-        # The pre-Stripe name is not read.
-        response.headers["x-request-id"] = "req_old"
         return response
 
     with _client(FakeService(respond)) as client:

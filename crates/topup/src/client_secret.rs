@@ -190,12 +190,6 @@ mod tests {
             .finalize()
             .into_bytes();
         assert_eq!(owner, hex::encode(&expected[..OWNER_TAG_BYTES]));
-        // A secret with a random nonce, as issued before owner tags, verifies but proves no owner.
-        let signed = format!("{ID}{SEPARATOR}{}", "7".repeat(2 * NONCE_BYTES));
-        let tag = key(1).mac(&signed).finalize().into_bytes();
-        let unbound = format!("{signed}{}", hex::encode(&tag[..TAG_BYTES]));
-        assert!(key(1).verify(ID, &unbound));
-        assert!(!key(1).verify_owner(ACCOUNT, ID, &unbound));
     }
 
     #[test]

@@ -167,7 +167,7 @@ topup_arguments() {
                 *) index=$((index + 1)) ;;
             esac
         done
-        # The restore-check service's entrypoint is `topup restore-check --route FILE`, so its
+        # The restore-check service's entrypoint is `topup restore-check --config FILE`, so its
         # run arguments are restore-check flags.
         if [[ "${words[index]:-}" == restore-check && "${words[index + 1]:-}" != topup ]]; then
             printf 'topup restore-check %s\n' "${words[*]:index+1}"

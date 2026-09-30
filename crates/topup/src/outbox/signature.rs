@@ -6,7 +6,7 @@ use topup_core::{Ed25519PublicKey, Signer, SignerError, WebhookKeyId};
 /// Standard Webhooks metadata and asymmetric `v1a` signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedWebhook {
-    /// Stable event identifier: the `evt_` id, or the bare UUID of a format-1 event.
+    /// Stable event identifier, the `evt_` id.
     pub id: String,
     /// Attempt timestamp as integer Unix seconds.
     pub timestamp: String,
@@ -126,24 +126,20 @@ mod tests {
     #[tokio::test]
     async fn asymmetric_header_matches_fixed_standard_webhooks_vector() {
         let signer = FixedSigner;
-        let event_id = Uuid::parse_str("018d5f8e-8a7b-7d65-bc44-2c4f5f0a6d31")
-            .expect("fixed UUID should parse");
+        let event_id = crate::outbox::webhook_id(
+            Uuid::parse_str("018d5f8e-8a7b-7d65-bc44-2c4f5f0a6d31")
+                .expect("fixed UUID should parse"),
+        );
         let body = br#"{"type":"deposit.confirmed","data":{"deposit_id":"dep_123"}}"#;
-        let signed = SignedWebhook::new(
-            &signer,
-            &[key(1)],
-            &event_id.to_string(),
-            1_674_087_231,
-            body,
-        )
-        .await
-        .expect("fixed signer should sign");
+        let signed = SignedWebhook::new(&signer, &[key(1)], &event_id, 1_674_087_231, body)
+            .await
+            .expect("fixed signer should sign");
 
-        assert_eq!(signed.id, event_id.to_string());
+        assert_eq!(signed.id, event_id);
         assert_eq!(signed.timestamp, "1674087231");
         assert_eq!(
             signed.signature,
-            "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw=="
+            "v1a,YuPb4kzXzDJqX8EcTFjrfDziMBFmzlPS3V/ISzdG/7R3KS7G1TVLRBF7DOJGnAtOjjvfeFm1G32KO67JiiY0BQ=="
         );
     }
 

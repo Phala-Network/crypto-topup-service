@@ -43,17 +43,11 @@ pub fn parse(prefix: &str, value: &str) -> Option<Uuid> {
     canonical.then(|| Uuid::try_parse(hex).ok()).flatten()
 }
 
-/// Parses an id of `prefix`, or the bare UUID that logs and responses carried before prefixed
-/// ids. Operator input takes either form.
+/// Parses an id of `prefix`, or the bare UUID the service's logs carry. Operator input takes
+/// either form.
 #[must_use]
 pub fn parse_or_uuid(prefix: &str, value: &str) -> Option<Uuid> {
     parse(prefix, value).or_else(|| Uuid::try_parse(value).ok())
-}
-
-/// Parses a `webhook-id`: an `evt_` id, or the bare UUID of an event written before prefixed ids.
-#[must_use]
-pub fn parse_event(value: &str) -> Option<Uuid> {
-    parse_or_uuid(EVENT, value)
 }
 
 #[cfg(test)]

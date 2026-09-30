@@ -328,8 +328,7 @@
           "webhook_keys": [
             {
               "expires_at": null,
-              "public_key": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
-              "standard_webhooks_public_key": "whpk_O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+              "public_key": "whpk_O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
               "version": 1
             }
           ]
@@ -572,11 +571,8 @@
         },
         "properties": {
           "exposure_minor": {
-            "description": "Open rate-lock credit across all accounts in destination minor units: the sum the global\nexposure cap is enforced against. This service always sends it; it is optional in the\nschema so clients also parse reports from servers that predate it.",
-            "type": [
-              "string",
-              "null"
-            ]
+            "description": "Open rate-lock credit across all accounts in destination minor units: the sum the global\nexposure cap is enforced against.",
+            "type": "string"
           },
           "failing_for_hours": {
             "description": "The threshold of `failing_webhook_endpoints`, in hours.",
@@ -624,6 +620,7 @@
         },
         "required": [
           "generated_at",
+          "exposure_minor",
           "routes",
           "reconciliation_blocks",
           "failing_for_hours",
@@ -982,7 +979,7 @@
             ]
           },
           "receipt_log_index": {
-            "description": "Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,\nand `revision`, what `id` is derived from. Absent from an event rendered before it was\nadded, as are `revision`, `block_hash`, and `block_time`.",
+            "description": "Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,\nand `revision`, what `id` is derived from.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1054,8 +1051,12 @@
           "address",
           "from_address",
           "tx_hash",
+          "receipt_log_index",
+          "revision",
           "log_index",
           "block_number",
+          "block_hash",
+          "block_time",
           "amount_refunded_atomic",
           "refunded",
           "amount_refunded",
@@ -1520,7 +1521,7 @@
             "type": "string"
           },
           "reversed_deposit": {
-            "description": "For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,\nso the rescan records the transfer now at its receipt position as the deposit that\nreplaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is\nnot issued in the event's account and mode: re-issue it, then import the event again);\n`rescanned` (the rescan recorded its receipt position first, with a deposit that is not\nreversed at its revision or below: not restored; escalate); or\n`identity_missing` (the delivery\ncarries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not\nrestored). `null` for other events.",
+            "description": "For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,\nso the rescan records the transfer now at its receipt position as the deposit that\nreplaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is\nnot issued in the event's account and mode: re-issue it, then import the event again);\nor `rescanned` (the rescan recorded its receipt position first, with a deposit that is not\nreversed at its revision or below: not restored; escalate). `null` for other events.",
             "type": [
               "string",
               "null"
@@ -3382,11 +3383,7 @@
             ]
           },
           "public_key": {
-            "description": "Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:\nevery delivery carries a `v1a` signature by it.",
-            "type": "string"
-          },
-          "standard_webhooks_public_key": {
-            "description": "`public_key` in Standard Webhooks' serialization, `whpk_` and the standard base64 of its\nraw bytes, for a Standard Webhooks library. It is derived from `public_key` and not bound\nby `report_data`: check that it encodes the attested `public_key` before pinning it.\nAlways present; optional in the schema so clients read a service that predates it.",
+            "description": "The ed25519 public key in Standard Webhooks' form: `whpk_` and the standard base64 of its\n32 raw bytes, which `report_data` binds. Pin it after verifying the attestation: every\ndelivery carries a `v1a` signature by it.",
             "type": "string"
           },
           "version": {

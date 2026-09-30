@@ -1319,7 +1319,7 @@ pub async fn daily_report(
 
     Ok(DailyReportResponse {
         generated_at,
-        exposure_minor: Some(exposure_minor),
+        exposure_minor,
         routes: reports.into_values().collect(),
         reconciliation: None,
         reconciliation_blocks,

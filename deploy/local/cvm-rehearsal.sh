@@ -75,6 +75,15 @@ mkdir "$environment"
         sed -e 's|WALG_S3_PREFIX: .*|WALG_S3_PREFIX: s3://topup-backups/postgres|' \
             -e 's|AWS_ENDPOINT: .*|AWS_ENDPOINT: http://s3:3900|' \
             -e 's|AWS_REGION: .*|AWS_REGION: us-east-1|'
+    # Staging's providers are keyless; the rehearsal's provider B is keyed (below), so its
+    # environment declares that key's sealed name, as a keyed provider's environment does.
+    cat <<'OVERLAY'
+  topup:
+    environment: &rpc-keys
+      TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
+  restore-check:
+    environment: *rpc-keys
+OVERLAY
 } >"$environment/compose.yaml"
 cp "$root/deploy/environments/phala-network/staging/topup/topup.yaml" "$environment/topup.yaml"
 
@@ -323,7 +332,6 @@ declare -A values=(
     # Empty: the rehearsal proves the service runs unchanged with Sentry reporting off.
     [SENTRY_DSN]=''
     # Provider A's URL is keyless; topup reaches provider B only with its key in place of `{key}`.
-    [TOPUP_RPC_PROVIDER_A_KEY]=''
     [TOPUP_RPC_PROVIDER_B_KEY]=rehearsal-rpc-key
 )
 ((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and the compose's sealed names differ"

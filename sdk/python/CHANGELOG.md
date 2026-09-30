@@ -6,19 +6,37 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in `docs/integration.md`
 (section 5.9); versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - Unreleased
+
+### Changed (breaking)
+
+- `Webhook.construct_event` takes webhook public keys only in Standard Webhooks' `whpk_` form
+  (`whpk_` and the standard base64 of the key), as `GET /v1/attestation` lists them; a hex or bare
+  base64 key is refused. `load_webhook_public_key` and `webhook_public_key_bytes` parse that form.
+- `load_public_key` parses a request-signing key only, the standard base64 of its raw bytes
+  (`RequestSigner.public_key_base64`).
+- `WebhookKeyObject.public_key` is the key in the `whpk_` form, and
+  `standard_webhooks_public_key` is gone (`topup_client`); `verify_attestation_binding` decodes
+  each key from it.
+- `Deposit.receipt_log_index`, `revision`, `block_hash`, and `block_time` are required
+  (`topup_client`).
+- `ClientQuote.confirmations` and `ClientDepositAddressPayment.confirmations` are required, an
+  integer or `None` (`topup_client`), as the service always sends them.
+- `Webhook.construct_event` requires the event's `actor` and `request` (`null` or the causing
+  request), as the service always sends them, and refuses an envelope without them. `Event` gains
+  `actor`, and its fields are in envelope order: `request` follows `actor` and has no default.
 
 ### Added
 
 - `Deposit.replaces` and `replaced_by` (`topup_client`): the deposit a reorganization's new
   transfer at the same receipt position replaced, and the reverse link.
-- `Webhook.construct_event` and `load_public_key` accept a public key in Standard Webhooks' `whpk_`
-  form (`whpk_` and base64), beside hex and base64.
-- `WebhookKeyObject.standard_webhooks_public_key`, the attested key in that form;
-  `verify_attestation_binding` refuses a response where it is not the bound `public_key`, which
-  `report_data` covers alone.
+- `topup-sdk keygen` and `public-key` also print `webhook_public_key`, the key in the `whpk_`
+  form, for a test instance's webhook key.
 
 ### Fixed
+
+- `topup-sdk send-test-event` sends a deposit with every required field (`swept`, its receipt
+  position, revision, and block), so `construct_event` accepts it.
 
 - The client module's docstring no longer says nothing is credited until a deposit is final: a
   deposit is credited at its route's confirmations, within the account's
@@ -329,5 +347,5 @@ Generated from OpenAPI `info.version` 0.1.0.
   rate locks, deposits, limits, refunds, and attestation.
 - `topup-sdk keygen` and `topup-sdk public-key` for credential issuance.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.2.0...HEAD
+[0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.2.0...HEAD
 [0.2.0]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-py-v0.2.0

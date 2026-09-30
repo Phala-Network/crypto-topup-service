@@ -540,9 +540,6 @@ where
     /// Returns the `webhook-id` and body. The event's `data` was rendered when the event was
     /// recorded, so every endpoint, retry, and resend sends it unchanged.
     fn event_body(event: &ClaimedEvent) -> Result<(String, Vec<u8>), &'static str> {
-        if event.data.get("object").is_none() {
-            return Err("missing_object");
-        }
         let data = event.data.clone();
         let id = webhook_id(event.id);
         let envelope = Event {

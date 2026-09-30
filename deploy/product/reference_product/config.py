@@ -148,7 +148,7 @@ class ProductConfig:
     payer: str | None = None
     payer_account: str | None = None
     unsupported_token: str | None = None
-    # The account's webhook public keys (hex) in the API key's mode, current first; unset, the
+    # The account's webhook public keys (`whpk_…`) in the API key's mode, current first; unset, the
     # product pins them from `GET /v1/attestation` with its API key.
     webhook_public_keys: list[str] | None = None
     per_deposit_cap_minor: int = 100_000

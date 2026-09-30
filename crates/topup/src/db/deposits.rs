@@ -50,9 +50,10 @@ pub struct Deposit {
     pub from_address: Address,
     /// Atomic token amount.
     pub amount_atomic: AtomicAmount,
-    /// Transaction sender; absent on deposits recorded before fast credit.
+    /// Transaction sender; absent only on a reversed deposit restored from a delivered event
+    /// ([`crate::restore_mode::import_delivered_event`]), which does not carry it.
     pub tx_from: Option<Address>,
-    /// Transaction nonce; absent on deposits recorded before fast credit.
+    /// Transaction nonce; absent only where `tx_from` is.
     pub tx_nonce: Option<u64>,
     /// When both providers showed the transfer at or below `finalized`; `None` while it can still
     /// be reversed.

@@ -677,8 +677,7 @@ pub const TYPICAL_SAFE_SECONDS: u64 = 300;
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s.
 pub const TYPICAL_FINALIZED_SECONDS: u64 = 900;
-/// Provider ids of a route that names none, whose URLs are `TOPUP_RPC_PROVIDER_A_URL` and
-/// `TOPUP_RPC_PROVIDER_B_URL`.
+/// Provider ids of a route that names none: the configuration's `provider-a` and `provider-b`.
 pub const DEFAULT_RPC_PROVIDERS: [&str; 2] = ["provider-a", "provider-b"];
 /// Two Coin Metrics one-minute reference-rate intervals.
 pub const DEFAULT_PRICE_MAX_AGE_S: u64 = 120;
@@ -1012,9 +1011,9 @@ fn validate_positive(field: &'static str, value: u64) -> Result<(), RouteError> 
     Ok(())
 }
 
-/// Each entry is a provider id, which names the provider's attested URL `TOPUP_RPC_<ID>_URL` and
-/// sealed key `TOPUP_RPC_<ID>_KEY` (the id upper-cased, `-` as `_`), or, for local development and
-/// tests, an inline URL. Ids are lowercase letters, digits, and `-`, so distinct ids never share
+/// Each entry is a provider id, which names the provider's attested URL in the configuration's
+/// `rpc_providers` and sealed key `TOPUP_RPC_<ID>_KEY` (the id upper-cased, `-` as `_`), or, for
+/// local development and tests, an inline URL. Ids are lowercase letters, digits, and `-`, so distinct ids never share
 /// a variable.
 fn validate_rpc_providers(providers: &[String]) -> Result<(), RouteError> {
     if providers.len() < 2 {
@@ -1120,7 +1119,7 @@ mod tests {
                 .to_string()
                 .contains("must not be empty")
         );
-        // `provider-a` and `provider_a` would both name TOPUP_RPC_PROVIDER_A_URL.
+        // `provider-a` and `provider_a` would both name TOPUP_RPC_PROVIDER_A_KEY.
         assert!(
             validate_rpc_providers(&["provider-a".to_owned(), "provider_a".to_owned()])
                 .expect_err("an id outside the charset must fail")

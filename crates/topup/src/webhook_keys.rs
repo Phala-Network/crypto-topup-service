@@ -13,14 +13,23 @@
 //! own `account.updated` notice is signed by the version it retires whenever it is delivered
 //! (`events.signing_key_version`), even after the overlap.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{Acquire, PgConnection, Postgres};
-use topup_core::WebhookKeyId;
+use topup_core::{Ed25519PublicKey, WebhookKeyId};
 
 use crate::audit::{self, Actor};
 use crate::db::{self, EventObject, NewOutboxEvent};
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
+
+/// A webhook public key as the service publishes it: Standard Webhooks' `whpk_` and the standard
+/// base64 of its 32 raw bytes.
+#[must_use]
+pub fn standard_webhooks_public_key(key: &Ed25519PublicKey) -> String {
+    format!("whpk_{}", STANDARD.encode(key.0))
+}
 
 /// The longest overlap a roll may keep the previous key signing: 7 days, as an API key roll.
 pub const MAX_ROLL_OVERLAP: Duration = Duration::days(7);

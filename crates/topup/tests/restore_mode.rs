@@ -20,7 +20,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, TimeDelta, Utc};
 use ed25519_dalek::{Signer as _, SigningKey};
-use hmac::{Hmac, KeyInit, Mac as _};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
@@ -104,19 +103,6 @@ struct Answer {
     status: StatusCode,
     retry_after: Option<String>,
     body: Value,
-}
-
-/// A client secret of `id` as issued before owner tags: a random nonce under the harness's key,
-/// so a read accepts its tag but it proves no account.
-fn legacy_secret(id: &str) -> String {
-    let signed = format!("{id}_secret_{}", hex::encode(Uuid::new_v4().as_bytes()));
-    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&CLIENT_SECRET_KEY)
-        .expect("HMAC takes a key of any length");
-    mac.update(signed.as_bytes());
-    format!(
-        "{signed}{}",
-        hex::encode(&mac.finalize().into_bytes()[..16])
-    )
 }
 
 impl Harness {
@@ -481,6 +467,16 @@ fn credited_event(
             "exchange_rate": exchange_rate,
             "price_source": price_source,
             "valued_at": 1_790_000_000,
+            "receipt_log_index": 0,
+            "revision": 0,
+            "log_index": 0,
+            "block_number": 120,
+            "block_hash": format!("{:#x}", B256::repeat_byte(0xb1)),
+            "block_time": 1_789_999_990,
+            "replaces": null,
+            "replaced_by": null,
+            "created": 1_789_999_995,
+            "metadata": {},
         }},
     })
 }
@@ -1310,9 +1306,8 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
                 .fetch_one(&harness.pool)
                 .await?;
             ensure!(versions == 1);
-            // A client secret the service did not issue for the id, issued for it to another
-            // account (another merchant's record of the id), or issued before owner tags (it
-            // reads, but proves no account), is refused.
+            // A client secret the service did not issue for the id, or issued for it to another
+            // account (another merchant's record of the id), is refused.
             let key = harness.client_reads.key();
             for secret in [
                 key.issue(
@@ -1320,7 +1315,6 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
                     &topup::ids::format(topup::ids::DEPOSIT_ADDRESS, Uuid::new_v4()),
                 )?,
                 key.issue("acct_other", &held_id)?,
-                legacy_secret(&held_id),
             ] {
                 let mut other_secret = request.clone();
                 other_secret["client_secret"] = json!(secret);
@@ -1382,25 +1376,24 @@ async fn a_deposit_address_given_out_after_the_restore_point_is_reissued_identic
             let repeated = harness.admin(Method::POST, path, &request).await?;
             ensure!(repeated.body["reissued"] == false);
             ensure!(repeated.body["deposit_address"]["id"] == held_id);
-            // A repeat with a secret of the id issued to another account, or without an owner
-            // tag, is refused and adds nothing: the secret held was kept once, audited.
-            for secret in [key.issue("acct_other", &held_id)?, legacy_secret(&held_id)] {
-                let mut other_secret = request.clone();
-                other_secret["client_secret"] = json!(secret);
-                let refused = harness.admin(Method::POST, path, &other_secret).await?;
-                ensure!(
-                    refused.status == StatusCode::BAD_REQUEST
-                        && refused.body["error"]["param"] == "client_secret",
-                    "{}",
-                    refused.body
-                );
-                let read = anonymous(
-                    &harness.app,
-                    &format!("/v1/deposit_addresses/{held_id}?client_secret={secret}"),
-                )
-                .await?;
-                ensure!(read.status == StatusCode::NOT_FOUND, "{}", read.body);
-            }
+            // A repeat with a secret of the id issued to another account is refused and adds
+            // nothing: the secret held was kept once, audited.
+            let secret = key.issue("acct_other", &held_id)?;
+            let mut other_secret = request.clone();
+            other_secret["client_secret"] = json!(secret);
+            let refused = harness.admin(Method::POST, path, &other_secret).await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST
+                    && refused.body["error"]["param"] == "client_secret",
+                "{}",
+                refused.body
+            );
+            let read = anonymous(
+                &harness.app,
+                &format!("/v1/deposit_addresses/{held_id}?client_secret={secret}"),
+            )
+            .await?;
+            ensure!(read.status == StatusCode::NOT_FOUND, "{}", read.body);
             let (secrets, audited): (i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM deposit_address_client_secrets \
                          WHERE deposit_address_id = $1), \
@@ -1632,9 +1625,9 @@ async fn a_delivered_event_is_kept_as_delivered_and_never_sent_again() -> Result
             let mut rolled = delivered.clone();
             rolled["id"] = json!(topup::ids::format(
                 topup::ids::EVENT,
-                topup_core::identity::event_id("deposit.reversed", deposit)
+                topup_core::identity::event_id("deposit.rejected", deposit)
             ));
-            rolled["type"] = json!("deposit.reversed");
+            rolled["type"] = json!("deposit.rejected");
             let answer = harness
                 .admin(
                     Method::POST,
@@ -2025,7 +2018,6 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                     "client_secret",
                     json!(harness.client_reads.key().issue("acct_other", &qt)?),
                 ),
-                ("client_secret", json!(legacy_secret(&qt))),
                 (
                     "client_secret",
                     json!(format!("{qt}_secret_{}", "0".repeat(64))),
@@ -2071,24 +2063,20 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 quote["expires_at"] == restore.detected_at.timestamp(),
                 "{quote}"
             );
-            // A repeat with a secret of the quote issued to another account, or without an owner
-            // tag, is refused and adds nothing, though a read accepts its tag.
-            for other in [
-                harness.client_reads.key().issue("acct_other", &qt)?,
-                legacy_secret(&qt),
-            ] {
-                ensure!(harness.client_reads.key().verify(&qt, &other));
-                let mut other_secret = request.clone();
-                other_secret["client_secret"] = json!(other);
-                let refused = harness.admin(Method::POST, path, &other_secret).await?;
-                ensure!(
-                    refused.status == StatusCode::BAD_REQUEST
-                        && refused.body["error"]["param"] == "client_secret",
-                    "{}",
-                    refused.body
-                );
-                ensure!(public_read(other).await?.status == StatusCode::NOT_FOUND);
-            }
+            // A repeat with a secret of the quote issued to another account is refused and adds
+            // nothing, though a read accepts its tag.
+            let other = harness.client_reads.key().issue("acct_other", &qt)?;
+            ensure!(harness.client_reads.key().verify(&qt, &other));
+            let mut other_secret = request.clone();
+            other_secret["client_secret"] = json!(other);
+            let refused = harness.admin(Method::POST, path, &other_secret).await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST
+                    && refused.body["error"]["param"] == "client_secret",
+                "{}",
+                refused.body
+            );
+            ensure!(public_read(other).await?.status == StatusCode::NOT_FOUND);
             // A repeat with its secret adds it; the payer's page reads the quote again.
             let repeated = harness.admin(Method::POST, path, &request).await?;
             ensure!(repeated.body["reissued"] == false, "{}", repeated.body);
@@ -2378,7 +2366,7 @@ async fn the_operator_attests_a_frozen_instance_that_merchant_keys_cannot() -> R
                 let key = webhook_key(harness.account_id(), true, 1);
                 ensure!(
                     attested.body["webhook_keys"][0]["public_key"]
-                        == hex::encode(key.verifying_key().to_bytes())
+                        == format!("whpk_{}", STANDARD.encode(key.verifying_key().to_bytes()))
                 );
                 let expected = topup_adapters::attestation::report_data(
                     &hex::decode(nonce)?,
@@ -3800,63 +3788,6 @@ async fn a_reversed_deposit_is_restored_only_on_its_own_account_and_untaken_posi
                     .is_some_and(|findings| findings.iter().any(|finding| {
                         finding["type"] == "deposit.reversed" && finding["status"] == "rescanned"
                     })),
-                "{}",
-                status.body
-            );
-            Ok(())
-        })
-    })
-    .await
-}
-
-#[tokio::test]
-async fn a_legacy_reversed_event_with_malformed_evidence_is_a_finding() -> Result<()> {
-    support::with_database(|database| {
-        Box::pin(async move {
-            let harness = Harness::new(database).await?;
-            let (forwarder, address_id) = harness.deposit_address("team-legacy").await?;
-            harness.restore().await?;
-            // The rescan recorded another deposit, so the listing compares positions against it.
-            record_deposit(
-                &harness,
-                B256::repeat_byte(0x77),
-                address_id,
-                U256::from(1_000_u64),
-            )
-            .await?;
-            // A delivery rendered before the deposit object carried its receipt position, whose
-            // chain and revision are not integers.
-            let mut legacy = reversed_event(&harness, 0, forwarder, None);
-            let object = legacy["data"]["object"]
-                .as_object_mut()
-                .context("a deposit object")?;
-            for field in ["receipt_log_index", "block_hash", "block_time"] {
-                object.remove(field);
-            }
-            object.insert("chain_id".to_owned(), json!("eip155:1"));
-            object.insert("revision".to_owned(), json!(1.5));
-            let answer = harness
-                .admin(
-                    Method::POST,
-                    "/v1/admin/restore/events",
-                    &json!({"deliveries": [harness.delivered(&legacy)], "reason": "receiver log"}),
-                )
-                .await?;
-            ensure!(
-                answer.body["data"][0]["reversed_deposit"] == "identity_missing",
-                "{}",
-                answer.body
-            );
-            let status = harness
-                .admin(Method::GET, "/v1/admin/restore", &Value::Null)
-                .await?;
-            ensure!(status.status == StatusCode::OK, "{}", status.body);
-            let findings = &status.body["delivered_events"]["findings"];
-            ensure!(
-                findings.as_array().is_some_and(|findings| findings
-                    .iter()
-                    .any(|finding| finding["type"] == "deposit.reversed"
-                        && finding["status"] == "pending")),
                 "{}",
                 status.body
             );

@@ -113,6 +113,8 @@ def _delivery(
             "livemode": False,
             "type": event_type,
             "created": 1_790_000_321,
+            "actor": "system",
+            "request": None,
             "data": {"object": _deposit() | deposit},
         }
     ).encode()

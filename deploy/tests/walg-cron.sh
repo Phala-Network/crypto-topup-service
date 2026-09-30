@@ -3,11 +3,25 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
+built_image=
 
 cleanup() {
     find "$tmp" -depth -delete
+    if [ -n "$built_image" ]; then
+        docker image rm "$built_image" >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
+
+# The archive_command cases run in the postgres-walg image (CI passes the one it just built);
+# otherwise a per-run tag is built from this checkout.
+if [ "$#" -ge 1 ]; then
+    image=$1
+else
+    built_image="phala-pay-postgres-walg:walg-cron-$$"
+    docker build -q -f "$root/deploy/Dockerfile.postgres-walg" -t "$built_image" "$root" >/dev/null
+    image=$built_image
+fi
 
 touch "$tmp/alpha" "$tmp/beta"
 output=$(
@@ -27,53 +41,7 @@ printf '%s\n' "$output" | grep -F \
 printf '%s\n' "$output" | grep -F \
     'dry-run: wal-g delete retain FULL 3 --use-sentinel-time --confirm' >/dev/null
 
-mkdir -p "$tmp/bin" "$tmp/marker"
-cat > "$tmp/bin/wal-g" <<'FAKE'
-#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$WALG_TEST_CALL"
-if [ "$1" = wal-push ] && [ -n "${WALG_TEST_FAIL_PUSH:-}" ]; then
-    exit 1
-fi
-FAKE
-chmod +x "$tmp/bin/wal-g"
-touch "$tmp/segment"
-# archive_command runs wal-push, then refreshes the marker.
-PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
-    WALG_TEST_CALL="$tmp/wal-g.call" \
-    AWS_ACCESS_KEY_ID=test \
-    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
-    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment"
-grep -Fx "wal-push $tmp/segment" "$tmp/wal-g.call" >/dev/null
-grep -E '^[0-9]+$' "$tmp/marker/last-success" >/dev/null
-[ "$(stat -c %a "$tmp/marker/last-success")" = 644 ]
-
-# A failed upload must leave the marker untouched.
-rm "$tmp/marker/last-success"
-if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
-    WALG_TEST_CALL="$tmp/wal-g.call" \
-    WALG_TEST_FAIL_PUSH=1 \
-    AWS_ACCESS_KEY_ID=test \
-    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
-    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
-    echo "failed WAL upload unexpectedly succeeded" >&2
-    exit 1
-fi
-[ ! -e "$tmp/marker/last-success" ]
-
-# Unsealed (no S3 key): archive_command fails at once, without calling WAL-G.
-: >"$tmp/wal-g.call"
-if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
-    WALG_TEST_CALL="$tmp/wal-g.call" \
-    AWS_ACCESS_KEY_ID='' \
-    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
-    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
-    echo "WAL archiving without S3 credentials unexpectedly succeeded" >&2
-    exit 1
-fi
-[ ! -s "$tmp/wal-g.call" ] && [ ! -e "$tmp/marker/last-success" ]
-
-# A restored instance neither archives nor pushes base backups into the prefix it restores from.
+# A restored instance pushes no base backup into the prefix it restores from.
 output=$(
     WALG_CRON_DRY_RUN=1 TOPUP_RESTORE_FROM_BACKUP=on \
         "$root/deploy/scripts/walg-cron" backup-push "0 3 * * *"
@@ -84,17 +52,54 @@ if printf '%s\n' "$output" | grep -F 'dry-run:' >/dev/null; then
     echo "walg-cron scheduled a base backup while TOPUP_RESTORE_FROM_BACKUP=on" >&2
     exit 1
 fi
-: >"$tmp/wal-g.call"
-if PATH="$root/deploy/scripts:$tmp/bin:$PATH" \
-    WALG_TEST_CALL="$tmp/wal-g.call" \
-    TOPUP_RESTORE_FROM_BACKUP=on \
-    AWS_ACCESS_KEY_ID=test \
-    TOPUP_BACKUP_TIMESTAMP_FILE="$tmp/marker/last-success" \
-    "$root/deploy/scripts/walg-cron" wal-push "$tmp/segment" 2>/dev/null; then
+
+# archive_command: in the image, so the marker is the fixed path topup reads.
+docker run --rm -i --entrypoint sh "$image" -s <<'CASES'
+set -eu
+marker=/run/topup-observability/last-backup-unix-seconds
+mkdir -p /tmp/bin
+cat >/tmp/bin/wal-g <<'FAKE'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>/tmp/wal-g.call
+if [ "$1" = wal-push ] && [ -n "${WALG_TEST_FAIL_PUSH:-}" ]; then
+    exit 1
+fi
+FAKE
+chmod +x /tmp/bin/wal-g
+touch /tmp/segment
+export PATH="/tmp/bin:$PATH"
+
+# wal-push, then the marker is refreshed.
+AWS_ACCESS_KEY_ID=test walg-cron wal-push /tmp/segment
+grep -Fx "wal-push /tmp/segment" /tmp/wal-g.call >/dev/null
+grep -E '^[0-9]+$' "$marker" >/dev/null
+[ "$(stat -c %a "$marker")" = 644 ]
+
+# A failed upload must leave the marker untouched.
+rm "$marker"
+if WALG_TEST_FAIL_PUSH=1 AWS_ACCESS_KEY_ID=test walg-cron wal-push /tmp/segment 2>/dev/null; then
+    echo "failed WAL upload unexpectedly succeeded" >&2
+    exit 1
+fi
+[ ! -e "$marker" ]
+
+# Unsealed (no S3 key): archive_command fails at once, without calling WAL-G.
+: >/tmp/wal-g.call
+if AWS_ACCESS_KEY_ID='' walg-cron wal-push /tmp/segment 2>/dev/null; then
+    echo "WAL archiving without S3 credentials unexpectedly succeeded" >&2
+    exit 1
+fi
+[ ! -s /tmp/wal-g.call ] && [ ! -e "$marker" ]
+
+# A restored instance does not archive into the prefix it restores from.
+if TOPUP_RESTORE_FROM_BACKUP=on AWS_ACCESS_KEY_ID=test \
+    walg-cron wal-push /tmp/segment 2>/dev/null; then
     echo "WAL archiving while TOPUP_RESTORE_FROM_BACKUP=on unexpectedly succeeded" >&2
     exit 1
 fi
-[ ! -s "$tmp/wal-g.call" ] && [ ! -e "$tmp/marker/last-success" ]
+[ ! -s /tmp/wal-g.call ] && [ ! -e "$marker" ]
+CASES
 
 # walg-timeline-backup: a base backup is taken at start only when none is on the current timeline.
 mkdir -p "$tmp/timeline-bin"

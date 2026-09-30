@@ -41,8 +41,7 @@ own changelogs in `sdk/js` and `sdk/python`.
   valid host and port, and `AWS_REGION`.
 - Deposits carry `receipt_log_index` and `revision`, the position and revision their `id` is
   derived from, and `block_hash` and `block_time` (Unix seconds), in the object and every
-  `deposit.*` snapshot. A snapshot rendered before this release lacks them, so they are optional
-  in the OpenAPI schema.
+  `deposit.*` snapshot.
 - Admin: `POST /v1/admin/restore/treasuries/apply` applies again, while frozen after a restore, a
   treasury change that applied after the restore point, from the merchant's delivery of its
   `treasury.updated`: only a delivery the service signed, of the restored pending change becoming
@@ -54,15 +53,12 @@ own changelogs in `sdk/js` and `sdk/python`.
   `differs`); both are `matches` once the change is restored. A change on a chain without a current
   route stays pending, as the time-lock leaves it.
 - Admin: each result of `POST /v1/admin/restore/events` carries `reversed_deposit` for a
-  `deposit.reversed`: `restored`, `recorded`, `address_unknown`, `rescanned` (the rescan recorded
-  its position first; also a finding status of `GET /v1/admin/restore`), or `identity_missing`.
+  `deposit.reversed`: `restored`, `recorded`, `address_unknown`, or `rescanned` (the rescan recorded
+  its position first; also a finding status of `GET /v1/admin/restore`).
 - Deposits carry `replaces` and `replaced_by` (`dep_…` or `null`), in the object and every
   `deposit.*` snapshot: a deposit recorded for the transfer that took a reversed deposit's receipt
   position after a reorganization names that deposit, and the reversed one names it (see Fixed).
   Both are `null` when the other deposit is in another account or mode.
-- `GET /v1/attestation`'s webhook keys carry `standard_webhooks_public_key`, `public_key` as
-  Standard Webhooks' `whpk_` and base64. `report_data` binds `public_key` only: pin the derived
-  form only if it encodes the attested key (`verify_attestation_binding` checks it).
 - Webhook delivery honors a receiver's `Retry-After` on `429` and `503`, in seconds or as an HTTP
   date: the retry waits at least that long, at most an hour.
 - Admin: `POST /v1/admin/deposits/{id}/nudge` answers `400 deposit_unexpected_state` for a deposit
@@ -83,7 +79,7 @@ own changelogs in `sdk/js` and `sdk/python`.
 - The reference product (`deploy/product`) keeps a webhook inbox (each verified delivery as
   received, with its processing state, committed with its ledger effect; a redelivery with another
   body keeps the first and is logged) and each quote and deposit address response it gets, client
-  secret included, in its ledger, now mode 0600; an existing ledger is migrated in place.
+  secret included, in its ledger, now mode 0600.
   `python -m reference_product export-restore-records` (from the ledger, read-only) or
   `fetch-restore-records` (from its account API, `GET /accounts/restore-records`, signed with the
   driver key) prints them as the bodies of `POST /v1/admin/restore/treasuries/verify`,
@@ -103,10 +99,9 @@ own changelogs in `sdk/js` and `sdk/python`.
   (it had an empty body). The error object's `doc_url` is optional in the OpenAPI schema, as in
   Stripe's; every error of the service still carries it.
 
-- Staging is reset (deploy/README.md, "Staging reset"): its route `phala-cloud-sepolia-pha-usd`
-  is version 3 on the deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`
-  (implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`. Update
-  the forwarder you pin; accounts, keys, treasuries, endpoints, and webhook keys are created anew.
+- Staging's route `phala-cloud-sepolia-pha-usd` is version 3 on the deterministic factory
+  `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` (implementation
+  `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`), with `confirmations: 2`.
 - Staging adds a second test-mode route, `phala-cloud-sepolia-usdc-usd`: Circle's testnet USDC on
   Sepolia (`0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, 6 decimals; <https://faucet.circle.com>),
   valued at one dollar (pricing mode `stablecoin`) with no quote spread, so a $10 quote asks 10 USDC.
@@ -367,6 +362,28 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ### Changed
 
+- **Breaking**: the SDKs of this release are `@phala/pay` 0.3.0 and `phala-pay` 0.3.0
+  ([sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md), [sdk/python/CHANGELOG.md](sdk/python/CHANGELOG.md)):
+  webhook keys only as `whpk_…`, and the event envelope's `actor` and `request`, a deposit's
+  receipt position, revision, and block, and a client view's `confirmations` required.
+- **Breaking**: `GET /v1/attestation` lists each webhook key's `public_key` in Standard Webhooks'
+  form, `whpk_` and the standard base64 of its 32 raw bytes, which `report_data` binds; it was
+  lowercase hex, and `standard_webhooks_public_key` is gone. Pin the keys in this form: both SDKs'
+  verifiers take no other. `topup attest` prints them the same way.
+- **Breaking**: a deposit's `receipt_log_index`, `revision`, `block_hash`, and `block_time` are
+  required in the OpenAPI schema, and `POST /v1/admin/restore/events` refuses a deposit event whose
+  snapshot lacks them; `reversed_deposit` is never `identity_missing`.
+- **Breaking**: Admin: `POST /v1/admin/restore/events` and `/treasuries/apply` take event ids only
+  as `evt_…`, as every delivery's `webhook-id` is.
+- **Breaking** for operators: the database enforces what the service reads as constraints
+  (`20261023000000_current_invariants`): a deposit carries its transaction's `tx_from` and
+  `tx_nonce` unless it is a reversed deposit restored from a delivered event, every event's `data`
+  holds its `object`, and a deposit event's snapshot its `receipt_log_index`, `revision`,
+  `block_hash`, and `block_time`. A row that breaks one fails `topup migrate`.
+- **Breaking**: a client quote's `confirmations`, and a client deposit address payment's, are
+  required in the OpenAPI schema, an integer or `null`, as the service always sends them.
+- The reference product applies a `deposit.*` event only with a valid deposit snapshot: a
+  `deposit.credited` without one is logged and credits nothing.
 - **Breaking** for operators: Deploy is a reusable workflow that deploys a release (`version`),
   not a Release images run (`release_run_id`), from the caller's `environment_dir`; Phala's
   instance deploys through "Deploy Phala's instance". Images are published only by the Release
@@ -376,11 +393,6 @@ own changelogs in `sdk/js` and `sdk/python`.
   (`reference-manifest.sh --check`), so it needs no Solidity build and runs from the kit.
 - The example environment's header no longer names a value preflight refuses, so a filled-in copy
   that keeps its comments passes.
-- The attested compose of a deployment takes a new form: its public settings sit in one inline
-  configuration file (routes, RPC provider URLs, origin, admin key), and it is written in
-  Compose's canonical form. The API is unchanged, and so is every account's webhook key, which
-  derives from the same app id. The first upgrade to it has a new compose hash, like any upgrade:
-  re-pin it as in integration.md §5.3.
 - While the service is frozen after a restore, a merchant request without a well-formed API key
   answers `401 api_key_missing` or `401 api_key_invalid`, as when not frozen (it answered
   `503 service_restoring`): the key's form and checksum are checked first, without a database
@@ -389,24 +401,20 @@ own changelogs in `sdk/js` and `sdk/python`.
 - An `Idempotency-Key` older than 24 hours is pruned in the background, not while a `POST` claims
   its own key, so no request pays for pruning every account's keys; such a key is still free for
   any request.
-- **Breaking** (nothing is live): A key rolling itself (`POST /v1/api_keys/{id}/roll` with the
+- **Breaking**: A key rolling itself (`POST /v1/api_keys/{id}/roll` with the
   requesting key's own id) must keep working for at least an hour: `expires_in` under `3600`,
   including the default `0`, is `400 parameter_invalid`. A replay never returns the new key's
   secret, so an immediate self-roll whose response was lost locked the account out; now the old
   key rolls the new one (its id is in the replay) to recover. To stop the old key sooner, revoke
   it with the new key. Another key may still roll a key with `expires_in: 0`.
-- **Breaking** (nothing is live): A `client_secret` is `{id}_secret_{nonce}{tag}`, 64 lowercase hex
+- **Breaking**: A `client_secret` is `{id}_secret_{nonce}{tag}`, 64 lowercase hex
   digits after `_secret_` (was 48), where `tag` is the service's HMAC of everything before it. A
   forged or malformed secret is refused in memory (`404`) without touching the database or any
   budget, so forgeries can no longer throttle checkout polling; a genuine secret is limited to 120
-  reads per minute of its quote or deposit address, with `Retry-After`. Secrets issued before this
-  release no longer read anything, on staging included: start the checkout from a new quote, and
-  call `POST /v1/deposit_addresses` again for a customer's page (it returns the same active
-  address with a new secret).
-- **Breaking** (nothing is live): Route files no longer take `unit_decimals`: credit is always USD
-  cents, the API's `amount`. A route file that sets it is refused, including a `topup route show`
-  output saved before this release, which carries `"unit_decimals": 2`: delete that key.
-- **Breaking** (nothing is live): Open-quote caps are per account and mode only (design §12), set by the operator per account
+  reads per minute of its quote or deposit address, with `Retry-After`.
+- **Breaking**: Route files no longer take `unit_decimals`: credit is always USD
+  cents, the API's `amount`. A route file that sets it is refused.
+- **Breaking**: Open-quote caps are per account and mode only (design §12), set by the operator per account
   and mode (defaults: 1 000 open quotes, $50 000 of open quotes per account, $5 000 per customer
   in live mode; 100, $10 000, and $5 000 in test mode). There is no global cap, and test-mode
   quotes never count against live mode. `GET /v1/config` reports the effective caps:
@@ -414,20 +422,20 @@ own changelogs in `sdk/js` and `sdk/python`.
   is now the account's cap in the mode (it was the per-customer cap). `400 exposure_cap_exceeded`
   also answers a quote past `max_open_quotes`. Route files no longer take
   `limits.max_open_minor`.
-- **Breaking** (nothing is live): Admin: `POST /v1/admin/accounts/{account}` takes `limits {livemode, max_open_quotes,
+- **Breaking**: Admin: `POST /v1/admin/accounts/{account}` takes `limits {livemode, max_open_quotes,
   max_open_amount_per_account, max_open_amount_per_customer, max_active_deposit_addresses}`, and
   the admin account response carries the effective `limits` of both modes.
-- **Breaking** (nothing is live): Deploy runs one production deployment for both modes: every route's `livemode` must match its
+- **Breaking**: Deploy runs one production deployment for both modes: every route's `livemode` must match its
   chain (live on a mainnet, test on a test network), and staging takes no live route
   (`deploy/check-route-modes.sh`); production no longer requires every route to be on chain 1.
-- **Breaking** (nothing is live): while the service is frozen after a restore from backup, no API
+- **Breaking**: while the service is frozen after a restore from backup, no API
   key authenticates, reads included: every request with a key answers `503 service_restoring`
   with `Retry-After` (only writes did). The restored database can hold a key you revoked after the
   restore point as valid; keys work again once the operator has revoked such keys again and
   unfrozen the service. A quote's or deposit address's `client_secret` read, the admin API, and
   `/healthz` are unaffected. A restore-check instance refuses every merchant key, whether or not
   the freeze is recorded yet.
-- **Breaking** (nothing is live): Admin: `POST /v1/admin/restore/events` takes `deliveries`, each
+- **Breaking**: Admin: `POST /v1/admin/restore/events` takes `deliveries`, each
   delivery as the merchant's receiver got it (`webhook_id`, `webhook_timestamp`,
   `webhook_signature`, and the raw `body`), instead of bare event objects, and imports only
   deliveries whose `v1a` signature verifies with the account's webhook keys.
@@ -520,21 +528,18 @@ own changelogs in `sdk/js` and `sdk/python`.
   `limits.min_flush_atomic`, and `alerts.stuck_after_s.credited` (a credited deposit waits for
   its merchant's sweep); the pause scope `flush` is gone. The daily report drops `flush_planning`,
   and its `unflushed_balance_atomic` is deposits not reversed minus finalized `Flushed` amounts.
-- **Breaking:** one squashed database migration builds the multi-tenant schema on an empty
-  database; staging is reset (HUMAN-ONLY, deploy/README.md "Staging reset") and nothing is
-  migrated. Route files drop `product` and require `livemode`, checked against the chain.
+- **Breaking:** route files drop `product` and require `livemode`, checked against the chain.
 - **Breaking:** products are gone. `POST /v1/admin/products`, `PUT /v1/admin/products/{slug}`,
   and `POST /v1/admin/products/{slug}/accounts/{account_id}/pause | resume` are replaced by the
   account endpoints above; the quote address salt's first input is the `acct_…` id instead of the
   product slug.
 - A quote's `account_id` holds 1 to 200 characters (was 255 bytes).
 
-- **Breaking** for deposits recorded from now on: a deposit id is `uuid_v5(NS,
+- **Breaking**: a deposit id is `uuid_v5(NS,
   "{chain_id}:{tx_hash}:{receipt_log_index}")`, the transfer's position among its transaction's
   receipt logs (0 for a plain token transfer), instead of the block-wide `log_index`, so a
   re-included transaction keeps its id. `log_index` and `block_number` stay on the deposit as
-  evidence and change when the transaction is re-included. Deposits recorded before keep their
-  ids; staging is reset before multi-tenancy.
+  evidence and change when the transaction is re-included.
 - Deposit `status` gains `reversed`; the quote's `payment.status` `final` now means recorded at
   the route's confirmation, and the payer's `payment_status` `confirming` likewise.
 
@@ -566,8 +571,7 @@ own changelogs in `sdk/js` and `sdk/python`.
   `events` (`id`, `event_type`, `created_at`, `delivered_at`).
 
 - `GET /v1/admin/report/daily` returns `exposure_minor`, the global open rate-lock credit in
-  destination minor units (#94). The field is optional in the schema so clients also parse reports
-  from servers that predate it.
+  destination minor units (#94).
 
 - **Breaking**: webhooks are Stripe's Event object, `{"id": "evt_…", "object": "event", "type",
   "created", "data": {"object": …}}`, where `data.object` is the deposit (`deposit.credited`,
@@ -575,8 +579,7 @@ own changelogs in `sdk/js` and `sdk/python`.
   `rate_lock.expired`) as the API returns it, rendered at the first delivery attempt. The
   `webhook-id` is the `evt_` id, derived for every type from the event type and its object, so
   every re-emission deduplicates. `deposit.pending` and `deposit.confirmed` are no longer sent:
-  the quote's `payment` shows a transfer before finality. Events delivered before this change
-  keep their old envelope when replayed. The admin outbox replay and deposit view take and show
+  the quote's `payment` shows a transfer before finality. The admin outbox replay and deposit view take and show
   `evt_` ids.
 - **Breaking**: quotes replace rate locks (docs/architecture.md §9, §12). `POST /v1/quotes
   {account_id, amount, currency, chain_id, asset}`, `GET /v1/quotes/{id}`, and
@@ -589,8 +592,7 @@ own changelogs in `sdk/js` and `sdk/python`.
   address creates the account).
 - **Breaking**: quotes are the only flow. `GET|POST …/accounts/{ext}/deposit-address`,
   `…/deposit-address/rotate`, `GET …/accounts/{ext}/pending-deposits`, and the `addresses` pause
-  scope are removed. Persistent addresses issued before stay watched by the finalized scanner;
-  their payments are credited at spot, with `quote: null` on the deposit.
+  scope are removed.
 - **Breaking**: deposits and refunds are top-level resources. `GET /v1/deposits` (a Stripe list
   object with `starting_after`/`ending_before`/`limit` and filters `account_id`, `quote`, `status`,
   `tx_hash`, `created[gte|lte]`) and `GET /v1/deposits/{id}` return `Deposit` objects (`dep_` ids,
@@ -623,7 +625,7 @@ own changelogs in `sdk/js` and `sdk/python`.
 - A new quote's `amount_atomic` (and its `payment_uri`) is rounded up to the route's
   `quote.amount_decimals` token decimals, default 4, so the payer is asked for `273.9185` PHA
   rather than 18 decimals. The rounding overpays by less than one unit of the last decimal; the
-  quote's `amount` credit is unchanged. Quotes created before keep their amount.
+  quote's `amount` credit is unchanged.
 - The admin deposit `nudge` and refund `approve`/`record` paths take the `dep_` and `re_` ids the
   product API returns, as the admin deposit view and outbox replay already did; the bare UUID
   still works. Their responses (`AdminRefundResponse.id`, `NudgeResponse.deposit_id`, and the
@@ -716,9 +718,9 @@ happens only from two-provider finalized data.
 - The Release images workflow and the fork requirement: nobody needs a fork or their own image
   build to deploy (building from source stays possible and yields the same `phala-pay` digest).
 - The reference product's `team_addresses` table, written with each quote and deposit address but
-  never read: the quote and deposit address records hold them. Its ledger (`PRAGMA user_version`
-  2) drops the table when the product starts; start it once before a read-only
-  `export-restore-records`.
+  never read: the quote and deposit address records hold them.
+- The reference product's ledger migrations: it creates its one current schema in a new ledger
+  and reads no older one, so an existing ledger is reset (Phala's staging's is).
 - Webhook events written before Stripe-style events (outbox format 1) and their old envelope;
   every event is `{id: "evt_…", object: "event", type, created, data: {object}}`.
 - The retired `rejected(product_refused)` reason and `cleared` state, and addresses issued before
@@ -732,8 +734,7 @@ happens only from two-provider finalized data.
 - **Breaking (administrative API):** `GET /v1/admin/report/daily` route entries no longer carry
   `exposure_minor`, `exposure_minor_reason`, `pnl_minor`, or `pnl_minor_reason` (#94). They were
   always null placeholders; route exposure now comes from the report-level `exposure_minor`, and
-  PnL is not defined precisely enough in the design to compute. Allowed as a pre-GA exception:
-  the endpoint is admin-only and no service has been deployed.
+  PnL is not defined precisely enough in the design to compute.
 
 ### Fixed
 
@@ -746,10 +747,6 @@ happens only from two-provider finalized data.
   transaction, however many, so a huge `version` held its connection and locks until it exhausted
   them. A customer further behind is re-issued in steps (`version` 32, 64, …); an `address` was
   already looked for only that far.
-- Admin: `GET /v1/admin/restore` no longer answers `500` for an imported `deposit.reversed` whose
-  delivery predates the receipt position (`identity_missing`) and holds a `chain_id` or `revision`
-  that is not an integer: the position is read only from integers, and the event is a finding as
-  any other.
 - Admin: a restore across a treasury change no longer deadlocks the reconciliation. Deposit
   addresses and quotes are re-issued over a treasury in force when they were issued, within 5
   minutes (any since the restore point for a deposit address, around its `created` for a quote),
@@ -789,8 +786,7 @@ happens only from two-provider finalized data.
   when the service issued it for that id to that account. The secret's nonce now carries an owner
   tag of the account (its length and format are unchanged, and it is still opaque): before, any
   account's record of a lost id with the owner's secret, which the payer's page holds, re-issued
-  it under that account and address, and the owner's payer page showed that address. A secret
-  issued before this change reads as before but proves no account, so a re-issue refuses it.
+  it under that account and address, and the owner's payer page showed that address.
 - Authorization runs before the idempotency lookup, as Stripe's: a restricted key no longer
   replays a response to a request its permissions refuse, and a `401` or `403` is no longer saved,
   so the same request by a key that holds the permission then runs.

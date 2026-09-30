@@ -76,22 +76,21 @@ CREATE TABLE IF NOT EXISTS bonus_credits (
 -- The webhook inbox: every verified delivery once, by its `webhook-id` (the event's `evt_` id),
 -- committed with its ledger effect. `data` is the event's parsed `data`, for the product's own
 -- reads; `body` and the three Standard Webhooks headers are the delivery exactly as received, the
--- evidence a service restore imports (deploy/runbooks/restore.md, step 5). They are NULL on events
--- stored before the inbox (MIGRATIONS[0]) until one is delivered again.
+-- evidence a service restore imports (deploy/runbooks/restore.md, step 5).
 CREATE TABLE IF NOT EXISTS webhook_events (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     data TEXT NOT NULL,
     received_at REAL NOT NULL,
-    body BLOB,
-    webhook_timestamp TEXT,
-    webhook_signature TEXT
+    body BLOB NOT NULL,
+    webhook_timestamp TEXT NOT NULL,
+    webhook_signature TEXT NOT NULL
 );
 -- Each quote and deposit address the product created, as the service returned it, its
 -- `client_secret` included: the merchant's records a service restore re-issues them from
 -- (deploy/runbooks/restore.md, step 4). A client secret is a capability: the ledger file is
 -- readable by its owner only, and nothing logs it. `recorded_at` is when the product last got
--- the response. Quotes and addresses created before these tables existed are not recorded.
+-- the response.
 CREATE TABLE IF NOT EXISTS quote_records (
     id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL REFERENCES teams (id),
@@ -104,35 +103,34 @@ CREATE TABLE IF NOT EXISTS deposit_address_records (
     response TEXT NOT NULL,
     recorded_at REAL NOT NULL
 );
--- Orders credited before prefixed ids were keyed `deposit:<uuid>`; the key is now the deposit's
--- `dep_` id, the same UUID in 32 hex digits, so a replayed old credit is still recognized.
-UPDATE orders
-SET provider_order_id = 'dep_' || replace(substr(provider_order_id, 9), '-', '')
-WHERE provider_order_id LIKE 'deposit:%';
+-- The demo console's (reference_product.demo): each visitor's quotes, with the quote's creation
+-- request in `api` for the developer view; its deposit address; and its refunds.
+CREATE TABLE IF NOT EXISTS demo_quotes (
+    id TEXT PRIMARY KEY,
+    account TEXT NOT NULL REFERENCES teams (id),
+    amount INTEGER NOT NULL,
+    amount_atomic TEXT NOT NULL,
+    exchange_rate TEXT NOT NULL,
+    address TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    api TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    chain_id INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS demo_quotes_account ON demo_quotes (account, created);
+CREATE TABLE IF NOT EXISTS demo_deposit_addresses (
+    account TEXT PRIMARY KEY REFERENCES teams (id),
+    id TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS demo_refunds (
+    id TEXT PRIMARY KEY,
+    account TEXT NOT NULL REFERENCES teams (id),
+    deposit TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
 """
-
-
-# Changes to a ledger created before them, in order: migration `i` takes `PRAGMA user_version`
-# from `i` to `i + 1`. SCHEMA creates the latest tables, so a new ledger starts at
-# `SCHEMA_VERSION`; a ledger at 0 that already has tables predates versioning.
-MIGRATIONS = (
-    # 1: the webhook inbox keeps each delivery as received.
-    """
-    ALTER TABLE webhook_events ADD COLUMN body BLOB;
-    ALTER TABLE webhook_events ADD COLUMN webhook_timestamp TEXT;
-    ALTER TABLE webhook_events ADD COLUMN webhook_signature TEXT;
-    """,
-    # 2: each quote's and network's address was also written to `team_addresses`, never read: the
-    # quote and deposit address records hold them.
-    """
-    DROP TABLE IF EXISTS team_addresses;
-    """,
-)
-SCHEMA_VERSION = len(MIGRATIONS)
-
-
-class LedgerVersionError(Exception):
-    """A read-only ledger is not at `SCHEMA_VERSION`: start the product once to migrate it."""
 
 
 @dataclass(frozen=True)
@@ -193,20 +191,14 @@ class ProductLedger:
     """SQLite stand-in for the product database; every write is one serialized transaction."""
 
     def __init__(self, path: str = ":memory:", *, read_only: bool = False) -> None:
-        """Opens the ledger at `path`, creating and migrating it; with `read_only`, opens an
-        existing ledger for reading only (the restore export next to a running product): no file
-        is created, changed, or migrated."""
+        """Opens the ledger at `path`, creating its tables if it has none; with `read_only`, opens
+        an existing ledger for reading only (the restore export next to a running product): no
+        file is created or changed."""
         self._lock = threading.RLock()
         self.events_changed = threading.Condition(self._lock)
         if read_only:
             uri = Path(path).absolute().as_uri() + "?mode=ro"
             self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
-            version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-            if version != SCHEMA_VERSION:
-                raise LedgerVersionError(
-                    f"the ledger is at version {version}, not {SCHEMA_VERSION}: start the "
-                    "product once to migrate it"
-                )
             return
         if path != ":memory:":
             # The ledger holds client secrets: owner-only, and SQLite gives its journal the
@@ -215,19 +207,13 @@ class ProductLedger:
             os.chmod(path, 0o600)
         self._connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._connection.execute("PRAGMA foreign_keys = ON")
-        self._migrate()
+        self._create()
 
-    def _migrate(self) -> None:
-        """Brings the ledger to `SCHEMA_VERSION` in one transaction."""
+    def _create(self) -> None:
+        """Creates the tables the ledger lacks, in one transaction."""
         db = self._connection
-        version = db.execute("PRAGMA user_version").fetchone()[0]
-        existing = db.execute(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'webhook_events'"
-        ).fetchone()[0]
-        pending = MIGRATIONS[version:] if existing else ()
-        script = "".join(pending) + SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION};"
         try:
-            db.executescript("BEGIN IMMEDIATE;" + script + "COMMIT;")
+            db.executescript("BEGIN IMMEDIATE;" + SCHEMA + "COMMIT;")
         except sqlite3.Error:
             if db.in_transaction:
                 db.execute("ROLLBACK")
@@ -407,10 +393,9 @@ class ProductLedger:
 
     @staticmethod
     def stored_body(db: sqlite3.Connection, webhook_id: str) -> bytes | None:
-        """The raw body of the delivery recorded as `webhook_id`: `None` when there is none, and
-        empty for an event recorded before the inbox kept bodies."""
+        """The raw body of the delivery recorded as `webhook_id`, or `None` when there is none."""
         row = db.execute("SELECT body FROM webhook_events WHERE id = ?", (webhook_id,)).fetchone()
-        return None if row is None else bytes(row[0] or b"")
+        return None if row is None else bytes(row[0])
 
     def record_delivery(
         self, db: sqlite3.Connection, delivery: Delivery, event_type: str, data: Mapping[str, Any]
@@ -431,42 +416,18 @@ class ProductLedger:
         )
         self.events_changed.notify_all()
 
-    @staticmethod
-    def keep_evidence(db: sqlite3.Connection, delivery: Delivery) -> None:
-        """Keeps the evidence of a redelivered event stored before the inbox kept deliveries."""
-        db.execute(
-            "UPDATE webhook_events SET body = ?, webhook_timestamp = ?, webhook_signature = ? "
-            "WHERE id = ? AND body IS NULL",
-            (
-                delivery.body,
-                delivery.webhook_timestamp,
-                delivery.webhook_signature,
-                delivery.webhook_id,
-            ),
-        )
-
     def deliveries(self, event_types: Sequence[str]) -> list[tuple[Delivery, float]]:
         """The inbox's deliveries of `event_types` with their raw evidence and when each was
-        received, oldest first; events stored before the inbox kept it are left out."""
+        received, oldest first."""
         with self._lock:
             rows = self._connection.execute(
                 "SELECT id, webhook_timestamp, webhook_signature, body, received_at "
                 "FROM webhook_events "
-                "WHERE body IS NOT NULL AND type IN (SELECT value FROM json_each(?)) "
+                "WHERE type IN (SELECT value FROM json_each(?)) "
                 "ORDER BY received_at, id",
                 (json.dumps(list(event_types)),),
             ).fetchall()
         return [(Delivery(row[0], row[1], row[2], bytes(row[3])), float(row[4])) for row in rows]
-
-    def events_without_evidence(self, event_types: Sequence[str]) -> int:
-        """How many stored events of `event_types` predate the inbox, so have no raw delivery."""
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT count(*) FROM webhook_events "
-                "WHERE body IS NULL AND type IN (SELECT value FROM json_each(?))",
-                (json.dumps(list(event_types)),),
-            ).fetchone()
-        return int(row[0])
 
     def events(self, event_type: str) -> list[dict[str, Any]]:
         with self._lock:

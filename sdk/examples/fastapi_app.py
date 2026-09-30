@@ -27,8 +27,8 @@ Run it against staging (install with `uv add phala-pay fastapi uvicorn`):
     PHALA_PAY_ACCOUNT=acct_... \\
     PHALA_PAY_FORWARDER=<factory>,<implementation> of the attested deployment \\
     PHALA_PAY_TREASURIES=<chain_id>:<your treasury>,... as you proved them \\
-    PHALA_PAY_WEBHOOK_KEYS=<your account's webhook public key in this mode, pinned from \\
-        GET /v1/attestation; comma-separated while a rotation overlaps> \\
+    PHALA_PAY_WEBHOOK_KEYS=<your account's webhook public key in this mode, whpk_…, pinned \\
+        from GET /v1/attestation; comma-separated while a rotation overlaps> \\
     uvicorn --factory fastapi_app:app_from_env
 """
 

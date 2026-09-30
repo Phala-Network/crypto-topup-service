@@ -207,8 +207,8 @@ VALUES (
 INSERT INTO deposits (
     id, account_id, livemode, customer_id, chain_id, tx_hash, log_index, receipt_log_index,
     block_number, block_hash, block_time, address_id, route, route_version, asset_contract,
-    from_address, amount_atomic, state, next_attempt_at, valuation_at, price_scaled,
-    price_source, credit_minor, final_at
+    from_address, tx_from, tx_nonce, amount_atomic, state, next_attempt_at, valuation_at,
+    price_scaled, price_source, credit_minor, final_at
 )
 VALUES (
     '44444444-4444-4444-4444-444444444444',
@@ -227,6 +227,8 @@ VALUES (
     1,
     '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
     '0xcccccccccccccccccccccccccccccccccccccccc',
+    '0xcccccccccccccccccccccccccccccccccccccccc',
+    0,
     1000,
     'credited',
     now(),
@@ -304,6 +306,10 @@ delivered_event=$(jq -cn --arg address "$consistency_address_v2" '{
         tx_hash: "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         asset_contract: "0x8f40e7e99678f44c88158f049e62817580ab113b",
         from_address: "0x00000000000000000000000000000000000000f7",
+        receipt_log_index: 0, revision: 0, log_index: 0, block_number: 199,
+        block_hash: "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        block_time: 1789999990, replaces: null, replaced_by: null, created: 1789999995,
+        metadata: {},
         amount_atomic: "1000000000000000000", amount: 25, currency: "usd",
         exchange_rate: "0.25000000", price_source: "spot", valued_at: 1790000000}}}')
 kept_key=
@@ -374,11 +380,11 @@ sign_delivery() {
     rm -f "$admin_dir/webhook.pem" "$admin_dir/webhook-content"
 }
 
-# The hex public key of that webhook key, as an attestation lists it.
+# The public key of that webhook key in Standard Webhooks' form, as an attestation lists it.
 webhook_public_key() {
     dstack_key pem "$webhook_key_path" >"$admin_dir/webhook.pem"
-    openssl pkey -in "$admin_dir/webhook.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 |
-        tr -d ' \n'
+    printf 'whpk_%s' "$(openssl pkey -in "$admin_dir/webhook.pem" -pubout -outform DER | tail -c 32 |
+        openssl base64 -A)"
     rm -f "$admin_dir/webhook.pem"
 }
 

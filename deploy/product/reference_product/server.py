@@ -31,6 +31,7 @@ from topup_sdk import (
     SignatureError,
     TopupClient,
     load_public_key,
+    load_webhook_public_key,
     verify_attestation_binding,
     verify_request,
 )
@@ -369,7 +370,9 @@ def pin_webhook_keys(config: ProductConfig, *, wait_s: float = 0) -> PinnedKeys:
     """
     livemode = config.livemode()
     if config.webhook_public_keys:
-        return PinnedKeys(livemode, [load_public_key(key) for key in config.webhook_public_keys])
+        return PinnedKeys(
+            livemode, [load_webhook_public_key(key) for key in config.webhook_public_keys]
+        )
     deadline = time.monotonic() + wait_s
     while True:
         nonce = secrets.token_bytes(32)

@@ -1383,7 +1383,7 @@ async fn admin_nudge_reschedules_only_a_deposit_the_pump_claims() -> Result<()> 
             ))
         };
 
-        // The `dep_` id and the bare UUID of older logs both name the deposit.
+        // The `dep_` id and the bare UUID the logs carry both name the deposit.
         for (path, created) in [
             (
                 format!("/v1/admin/deposits/dep_{}/nudge", detected.simple()),
@@ -1486,7 +1486,9 @@ async fn admin_daily_report_uses_seeded_integer_facts() -> Result<()> {
                 INSERT INTO events (id, account_id, livemode, type, object_type, object_id,
                                     created, actor, data)
                 VALUES ($1, $2, true, 'deposit.credited', 'deposit', $3, now() - interval '1 hour',
-                        'system', '{"object": {}}')
+                        'system',
+                        '{"object": {"receipt_log_index": 0, "revision": 0,
+                                     "block_hash": "0x", "block_time": 0}}')
                 RETURNING id, account_id
             )
             INSERT INTO webhook_deliveries (event_id, endpoint_id, next_attempt_at)

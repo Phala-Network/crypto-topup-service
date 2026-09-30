@@ -219,7 +219,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       listen_port: productPort,
       ledger_path: join(work, "ledger.sqlite3"),
       driver_public_key: rawPublicKey(generateKeyPairSync("ed25519").publicKey.export({ format: "der", type: "spki" })),
-      webhook_public_keys: [rawPublicKey(publicKeyOf(webhookSeed))],
+      webhook_public_keys: [`whpk_${rawPublicKey(publicKeyOf(webhookSeed))}`],
       web_origin: origin,
     };
     writeFileSync(join(work, "product.json"), JSON.stringify(config));
@@ -274,8 +274,9 @@ function publicKeyOf(seed: Buffer): Buffer {
   return createPublicKey(key).export({ format: "der", type: "spki" });
 }
 
+/** The raw ed25519 key of an SPKI encoding, as standard base64. */
 function rawPublicKey(spki: Buffer): string {
-  return spki.subarray(-32).toString("hex");
+  return spki.subarray(-32).toString("base64");
 }
 
 async function fetchOk(url: string): Promise<void> {

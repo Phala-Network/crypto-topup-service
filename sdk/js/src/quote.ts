@@ -70,7 +70,7 @@ export function parseClientQuote(value: unknown): ClientQuote {
     typeof v["payment_uri"] !== "string" ||
     !isSafeInteger(v["expires_at"]) ||
     !oneOf(v["payment_status"], PAYMENT_STATUSES) ||
-    !(confirmations === null || confirmations === undefined || isSafeInteger(confirmations))
+    !(confirmations === null || isSafeInteger(confirmations))
   ) {
     throw new TypeError("quote response does not match the public quote view");
   }
@@ -89,7 +89,7 @@ export function parseClientQuote(value: unknown): ClientQuote {
     payment_uri: v["payment_uri"],
     expires_at: v["expires_at"],
     payment_status: v["payment_status"],
-    confirmations: confirmations ?? null,
+    confirmations,
   };
 }
 

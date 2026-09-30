@@ -108,34 +108,6 @@ VERIFY_DOCS = (
     "https://github.com/Phala-Network/phala-pay/blob/main/deploy/README.md"
     "#attestation-ingress-and-egress"
 )
-# `demo_quotes.api` keeps the quote's creation request for the developer view.
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS demo_quotes (
-    id TEXT PRIMARY KEY,
-    account TEXT NOT NULL REFERENCES teams (id),
-    amount INTEGER NOT NULL,
-    amount_atomic TEXT NOT NULL,
-    exchange_rate TEXT NOT NULL,
-    address TEXT NOT NULL,
-    expires_at INTEGER NOT NULL,
-    created INTEGER NOT NULL,
-    api TEXT NOT NULL,
-    asset TEXT,
-    chain_id INTEGER
-);
-CREATE INDEX IF NOT EXISTS demo_quotes_account ON demo_quotes (account, created);
-CREATE TABLE IF NOT EXISTS demo_deposit_addresses (
-    account TEXT PRIMARY KEY REFERENCES teams (id),
-    id TEXT NOT NULL,
-    created INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS demo_refunds (
-    id TEXT PRIMARY KEY,
-    account TEXT NOT NULL REFERENCES teams (id),
-    deposit TEXT NOT NULL,
-    created INTEGER NOT NULL
-);
-"""
 # A refund's `failure_reason`, explained to the visitor.
 REFUND_FAILURES = {
     "sender_mismatch": "The transfer was not sent from the treasury the deposit's address pays.",
@@ -248,16 +220,6 @@ class DemoConsole:
         self._sweeps: tuple[float, dict[str, Any]] | None = None
         self._block_times: dict[tuple[int, str], tuple[int, int]] = {}
         self._chain_ids = set(config.treasuries())
-        with ledger.transaction() as db:
-            for statement in SCHEMA.split(";"):
-                if statement.strip():
-                    db.execute(statement)
-            # A ledger from before quotes kept their asset, then their chain.
-            columns = {row[1] for row in db.execute("PRAGMA table_info(demo_quotes)")}
-            if "asset" not in columns:
-                db.execute("ALTER TABLE demo_quotes ADD COLUMN asset TEXT")
-            if "chain_id" not in columns:
-                db.execute("ALTER TABLE demo_quotes ADD COLUMN chain_id INTEGER")
 
     # Routing ------------------------------------------------------------------------------------
 
@@ -429,9 +391,6 @@ class DemoConsole:
             }
             for deposit in deposits
         ]
-        # Quotes from before they kept their asset and chain were test PHA on the first chain.
-        first = self.config.chain()
-        legacy_asset = first.test_tokens[0].symbol.lower() if first.test_tokens else None
         for quote_id, amount, amount_atomic, rate, asset, chain_id, expires_at, created in quotes:
             if quote_id in paid_quotes:
                 continue
@@ -443,8 +402,8 @@ class DemoConsole:
                     "created": created,
                     "amount": amount,
                     "amount_atomic": amount_atomic,
-                    "chain_id": chain_id or first.chain_id,
-                    "asset": asset or legacy_asset,
+                    "chain_id": chain_id,
+                    "asset": asset,
                     "exchange_rate": rate,
                     "status": "expired" if now >= expires_at else "awaiting_payment",
                     "final": False,

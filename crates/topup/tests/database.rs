@@ -12,7 +12,7 @@ use alloy_primitives::{Address, B256, U256};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use topup::db::{
     self, ApplyTransitionResult, EventObject, NewDeposit, OutboxEvent, TransitionUpdate,
@@ -406,6 +406,66 @@ async fn restore_check_asks_the_product_nothing_and_keeps_recorded_credits() -> 
                 .context("credited deposit")?;
             ensure!(deposit.state == DepositState::Credited);
             ensure!(deposit.credit_minor.map(|value| value.value()) == Some(250));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A deposit without its transaction's origin, or a deposit event without its snapshot's identity,
+/// fails its write: only a reversed deposit restored from a delivery lacks its origin.
+#[tokio::test]
+async fn rows_keep_the_invariants_the_service_reads() -> Result<()> {
+    with_database(|context| {
+        Box::pin(async move {
+            let seed = seed_account(&context.app_pool, 1).await?;
+            let deposit = new_deposit(seed.address_id, 1, 1, 0);
+            let id = deposit_id(deposit.chain_id, deposit.tx_hash, deposit.log_index);
+            ensure!(db::insert_deposit(&context.app_pool, &deposit).await?);
+            for statement in [
+                "UPDATE deposits SET tx_from = NULL, tx_nonce = NULL WHERE id = $1",
+                "UPDATE deposits SET tx_nonce = NULL WHERE id = $1",
+            ] {
+                assert_sqlstate(
+                    sqlx::query(statement)
+                        .bind(id)
+                        .execute(&context.owner_pool)
+                        .await
+                        .err(),
+                    "23514",
+                )?;
+            }
+
+            let insert_event = |object_type: &'static str, data: Value| {
+                let pool = context.app_pool.clone();
+                async move {
+                    sqlx::query(
+                        "INSERT INTO events (id, account_id, livemode, type, object_type, \
+                         object_id, actor, data) VALUES ($1, $2, true, $3, $4, $5, 'system', $6)",
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(seed.account_id)
+                    .bind(format!("{object_type}.test"))
+                    .bind(object_type)
+                    .bind(Uuid::new_v4())
+                    .bind(data)
+                    .execute(&pool)
+                    .await
+                }
+            };
+            let identity = json!({"object": {"receipt_log_index": 0, "revision": 0,
+                "block_hash": format!("{:#x}", b256(1)), "block_time": 1_790_000_000}});
+            insert_event("deposit", identity.clone()).await?;
+            insert_event("quote", json!({"object": {}})).await?;
+            let mut without_block = identity;
+            without_block["object"]["block_hash"] = Value::Null;
+            for (object_type, data) in [
+                ("deposit", json!({"object": {}})),
+                ("deposit", without_block),
+                ("quote", json!({})),
+            ] {
+                assert_sqlstate(insert_event(object_type, data).await.err(), "23514")?;
+            }
             Ok(())
         })
     })

@@ -270,6 +270,7 @@ pub struct ClientQuote {
     /// not happen, and the credit is taken back).
     pub payment_status: String,
     /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
+    #[schema(required = true)]
     pub confirmations: Option<u64>,
 }
 
@@ -408,23 +409,18 @@ pub struct Deposit {
     /// Transaction hash.
     pub tx_hash: String,
     /// Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,
-    /// and `revision`, what `id` is derived from. Absent from an event rendered before it was
-    /// added, as are `revision`, `block_hash`, and `block_time`.
-    #[schema(required = false)]
+    /// and `revision`, what `id` is derived from.
     pub receipt_log_index: u64,
     /// How many deposits at the same receipt position were reversed before this one: `0`, or
     /// the revision of the deposit it `replaces` plus one.
-    #[schema(required = false)]
     pub revision: u64,
     /// Block-wide log index of the transfer; it changes if the transaction is re-included.
     pub log_index: u64,
     /// Number of the block the transfer is in; it changes if the transaction is re-included.
     pub block_number: u64,
     /// Hash of the block the transfer is in; it changes if the transaction is re-included.
-    #[schema(required = false)]
     pub block_hash: String,
     /// Time of the block the transfer is in, Unix seconds.
-    #[schema(required = false)]
     pub block_time: i64,
     /// Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.
     pub amount_refunded_atomic: String,
@@ -577,6 +573,7 @@ pub struct ClientDepositAddressPayment {
     /// Transaction hash.
     pub tx_hash: String,
     /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
+    #[schema(required = true)]
     pub confirmations: Option<u64>,
     /// When the payment was first seen or recorded, Unix seconds.
     pub created: i64,
@@ -1294,9 +1291,8 @@ pub struct DailyReportResponse {
     /// Report snapshot time.
     pub generated_at: DateTime<Utc>,
     /// Open rate-lock credit across all accounts in destination minor units: the sum the global
-    /// exposure cap is enforced against. This service always sends it; it is optional in the
-    /// schema so clients also parse reports from servers that predate it.
-    pub exposure_minor: Option<String>,
+    /// exposure cap is enforced against.
+    pub exposure_minor: String,
     /// SQL-computed metrics for each configured route.
     pub routes: Vec<RouteDailyReport>,
     /// Latest reconciliation round of the serving process; absent until the first round after a
@@ -1390,15 +1386,10 @@ pub struct AttestationResponse {
 pub struct WebhookKeyObject {
     /// Key version, from 1; it grows by one per roll.
     pub version: u32,
-    /// Raw ed25519 public key as lowercase hexadecimal. Pin it after verifying the attestation:
-    /// every delivery carries a `v1a` signature by it.
+    /// The ed25519 public key in Standard Webhooks' form: `whpk_` and the standard base64 of its
+    /// 32 raw bytes, which `report_data` binds. Pin it after verifying the attestation: every
+    /// delivery carries a `v1a` signature by it.
     pub public_key: String,
-    /// `public_key` in Standard Webhooks' serialization, `whpk_` and the standard base64 of its
-    /// raw bytes, for a Standard Webhooks library. It is derived from `public_key` and not bound
-    /// by `report_data`: check that it encodes the attested `public_key` before pinning it.
-    /// Always present; optional in the schema so clients read a service that predates it.
-    #[schema(required = false)]
-    pub standard_webhooks_public_key: String,
     /// When a rolled key stops signing, Unix seconds; `null` for the current key.
     pub expires_at: Option<i64>,
 }
@@ -2075,11 +2066,8 @@ pub struct EventImport {
     /// so the rescan records the transfer now at its receipt position as the deposit that
     /// replaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is
     /// not issued in the event's account and mode: re-issue it, then import the event again);
-    /// `rescanned` (the rescan recorded its receipt position first, with a deposit that is not
-    /// reversed at its revision or below: not restored; escalate); or
-    /// `identity_missing` (the delivery
-    /// carries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not
-    /// restored). `null` for other events.
+    /// or `rescanned` (the rescan recorded its receipt position first, with a deposit that is not
+    /// reversed at its revision or below: not restored; escalate). `null` for other events.
     pub reversed_deposit: Option<String>,
 }
 

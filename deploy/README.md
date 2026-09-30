@@ -89,7 +89,7 @@ through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workfl
    - An alert for the environments `staging` and `production` (not `*-restore`) that notifies the
      on-call owner when an issue is created or regresses, with no level filter (most alert lines are
      `warning` events). Confirm that the Crons and Uptime monitors are listed as connected.
-   - One Uptime monitor per Environment (UI only): `GET https://<TOPUP_DOMAIN>/healthz`, interval
+   - One Uptime monitor per Environment (UI only): `GET https://<domain>/healthz`, interval
      1 minute, timeout 10 seconds, environment = the Environment's name.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
@@ -180,8 +180,7 @@ references, which are also its `allowed_envs`:
 - `SENTRY_DSN`, which may be empty to turn Sentry off;
 - a `TOPUP_RPC_<ID>_KEY` per keyed [RPC provider](#rpc-providers), declared in the environment's
   `compose.yaml` overlay. It is the API key topup puts in place of `{key}` in the provider's
-  attested URL. Phala's staging declares `TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY`,
-  empty for its keyless URLs, so its sealed names stay the ones it was provisioned with.
+  attested URL. Phala's staging has keyless providers and declares none.
 
 A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`. topup refuses a provider whose URL and key
 disagree: a `{key}` without a key, or a key without a `{key}`. Redaction keeps the URL and the key
@@ -354,7 +353,8 @@ on it.
 
 ### Custom domain
 
-The API has one public origin, `public_origin` (`https://$TOPUP_DOMAIN`), a stable name the owner controls, not
+The API has one public origin, `public_origin` (`https://$DOMAIN`, where `$DOMAIN` is
+dstack-ingress's `DOMAIN` in the environment overlay), a stable name the owner controls, not
 the CVM's gateway URL, which changes with the node and the app id: merchants call it and pin its
 attestation, treasury challenges (EIP-4361) name it as their `domain` and `uri`, and the admin
 API verifies every signed `@target-uri` against it. The official [dstack-ingress](https://github.com/Dstack-TEE/dstack-examples/tree/dstack-ingress-v2.6/custom-domain/dstack-ingress)
@@ -368,12 +368,12 @@ unset because the account document is published. Like `keys` and `topup` it moun
 socket (its instance id and the evidence quote), which is why it is pinned by digest and attested
 with the compose.
 
-A reference-product CVM is served the same way on `$PRODUCT_DOMAIN`
+A reference-product CVM is served the same way on its own overlay's `DOMAIN`
 ([Phala's instance, "Staging reference product"](phala.md#staging-reference-product)).
 
 **HUMAN-ONLY, owner of the domain's DNS zone** (any DNS provider; the Deploy summary's
 wording assumes Cloudflare, as in Phala's instance), once per CVM instance. Every Deploy run
-lists the records for its target's domain (`$DOMAIN`: `$TOPUP_DOMAIN` or `$PRODUCT_DOMAIN`), in
+lists the records for its target's domain (`$DOMAIN`, the `DOMAIN` of its environment overlay), in
 the tls-alpn-01 format of the pinned README:
 
 | Type | Name | Content |
@@ -394,7 +394,7 @@ the tls-alpn-01 format of the pinned README:
   [verify-ingress-evidence.sh](verify-ingress-evidence.sh) prints also means that losing the
   `ingress_certs` volume (a new account) blocks renewal until the record is updated.
 
-**Certificate evidence.** dstack-ingress publishes, at `https://$TOPUP_DOMAIN/evidences/`, the
+**Certificate evidence.** dstack-ingress publishes, at `https://$DOMAIN/evidences/`, the
 ACME account, the certificate, `sha256sum.txt` over both, and a TDX quote whose `report_data` is
 the hash of `sha256sum.txt`. Its evidence server listens on the ingress container's loopback (port
 80) and is reached only through 443, where HAProxy routes `GET /evidences` to it, so there is no
@@ -403,7 +403,7 @@ chain with the official verifier (the quote is app `APP_ID`'s and binds the file
 domain serves exactly that certificate; Deploy runs it after every topup upgrade:
 
 ```sh
-kit/deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+kit/deploy/verify-ingress-evidence.sh "$DOMAIN" "$APP_ID"
 ```
 
 The quote dates from the last issuance, so its compose hash can be an earlier compose of the app.
@@ -514,7 +514,8 @@ compare the prediction with the counters before relying on it.
 
 **HUMAN-ONLY, verifier**, before onboarding any account. Deploy already verifies the attested
 compose; to re-check a CVM with the deployed release's verified kit in `kit/`, the run's rendered
-compose, and `PHALA_CLOUD_API_KEY` exported:
+compose, and `PHALA_CLOUD_API_KEY` and `DOMAIN` (the host of `topup.yaml`'s `public_origin`)
+exported:
 
 ```sh
 kit/deploy/phala cvms get "$CVM_ID" --json > cvm.json
@@ -522,8 +523,8 @@ kit/deploy/phala cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
 kit/deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
-export ORIGIN="https://$TOPUP_DOMAIN"   # topup.yaml's public_origin
-kit/deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+export ORIGIN="https://$DOMAIN"   # topup.yaml's public_origin
+kit/deploy/verify-ingress-evidence.sh "$DOMAIN" "$APP_ID"
 ```
 
 [verify-attestation.sh](verify-attestation.sh) runs the official dstack verifier
@@ -708,7 +709,7 @@ with the recorded contact ([API key compromise and key recovery](runbooks/api-ke
 ## Merchant setup
 
 These are the merchant's steps, done with its own secret key against the operator's
-`https://$TOPUP_DOMAIN`. An operator that is also a merchant of its own instance does them as the
+`https://$DOMAIN`. An operator that is also a merchant of its own instance does them as the
 merchant, never with the admin key (Phala's staff, for Phala Cloud and the staging reference
 product).
 The [integration guide](../docs/integration.md) is the full reference.
@@ -800,10 +801,6 @@ resumed, any re-valued deposit flagged, and events after the restore point deliv
   the unsealed boot through sealing, a configuration upgrade (topup recreated, PostgreSQL not),
   operator onboarding of the product's account, its treasury proof and webhook endpoint, and one
   credited deposit.
-- `make upgrade-rehearsal`: the staging cutover in place. Staging's released images and compose
-  run with real data, are upgraded to this checkout on the same volumes, and are rolled back. It
-  asserts the same database, rows, keys, and identities, WAL archiving, and that no bootstrap or
-  recovery path ran ([local/upgrade-rehearsal.sh](local/upgrade-rehearsal.sh)).
 - `make restore-drill`: [RESTORE.md](RESTORE.md#local-and-ci-drills).
 - `make sandbox-local`: the integrator sandbox ([sandbox/README.md](sandbox/README.md)).
 - `deploy/validate-compose.sh`: every committed environment rendered and checked against

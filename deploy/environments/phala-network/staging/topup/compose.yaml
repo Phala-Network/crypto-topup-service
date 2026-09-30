@@ -1,5 +1,6 @@
 # Phala's staging instance: the environment's public settings that are third-party env interfaces
-# (WAL-G's backup location, dstack-ingress's domain) and the sealed key names of its RPC providers.
+# (WAL-G's backup location, dstack-ingress's domain). Its RPC providers are keyless, so it declares
+# no TOPUP_RPC_<ID>_KEY; a keyed provider adds its name here, to topup and restore-check.
 # topup's own settings are in topup.yaml.
 services:
   postgres:
@@ -13,11 +14,3 @@ services:
   dstack-ingress:
     environment:
       DOMAIN: pay-api-staging.phala.com
-  # Staging's providers are keyless; these two names stay sealed (empty) so the CVM's allowed names
-  # are unchanged. A keyed provider adds its TOPUP_RPC_<ID>_KEY here, to both services.
-  topup:
-    environment: &rpc-keys
-      TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
-      TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
-  restore-check:
-    environment: *rpc-keys

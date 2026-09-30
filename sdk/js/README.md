@@ -232,6 +232,7 @@ const expectedAddress = verifyQuoteAddress(pins, quote); // pass it to <Checkout
 
 // Standard Webhooks v1a (ed25519, WebCrypto: Node 20+, Deno, Bun, edge runtimes). Fails closed
 // unless the signature verifies with a pinned key and the event is your account's in this mode.
+// WEBHOOK_PUBLIC_KEYS: your account's keys in this mode, `whpk_…`, pinned from GET /v1/attestation.
 const event = await constructEvent(rawBody, request.headers, WEBHOOK_PUBLIC_KEYS, {
   expectedAccount: "acct_…",
   expectedLivemode: false,

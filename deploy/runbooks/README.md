@@ -90,9 +90,9 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 The exercises of Phala's instance; an operator records its own. Local exercises ran against
 PostgreSQL and Anvil with the `topup` CLI or the integration tests; Safe, Compliance, and
 publication steps are human-only and were never exercised. Except the restore drills, every
-exercise ran the earlier, database-level form of these runbooks. The full CVM restore drill of
-2026-09-30 ran [RESTORE.md](../RESTORE.md) and [Reconciliation after a restore](restore.md) in their
-current form, on the release of `e39b06b` (#247), in a drill app isolated from staging.
+exercise ran a database-level form of these runbooks. The full CVM restore drill of 2026-09-30 ran
+[RESTORE.md](../RESTORE.md) and [Reconciliation after a restore](restore.md) as they were at
+`e39b06b` (#247), in a drill app isolated from staging.
 
 | Runbook | Last run | Outcome | Evidence |
 |---|---|---|---|

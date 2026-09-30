@@ -473,7 +473,7 @@ fn delivered_application(event: &Value) -> Option<DeliveredApplication> {
         return None;
     }
     Some(DeliveredApplication {
-        event_id: ids::parse_event(&text(event, "id")?)?,
+        event_id: ids::parse(ids::EVENT, &text(event, "id")?)?,
         account_id: ids::parse(ids::ACCOUNT, &text(event, "account")?)?,
         livemode,
         application: treasuries::Application {
@@ -840,13 +840,7 @@ pub(crate) async fn import_events(
     }
     // A reversed deposit is restored after the one it replaced, so it links to it at once.
     let mut order: Vec<usize> = (0..events.len()).collect();
-    order.sort_by_key(|&index| {
-        events[index]
-            .1
-            .identity
-            .as_ref()
-            .map_or(0, |identity| identity.revision)
-    });
+    order.sort_by_key(|&index| events[index].1.identity.revision);
     let mut data = vec![None; events.len()];
     for index in order {
         let event = &events[index].1;
@@ -1057,7 +1051,8 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
             .and_then(Value::as_str)
             .ok_or_else(|| invalid(&format!("each event needs a string `{field}`")))
     };
-    let id = ids::parse_event(text("id")?).ok_or_else(|| invalid("an event id is not evt_"))?;
+    let id =
+        ids::parse(ids::EVENT, text("id")?).ok_or_else(|| invalid("an event id is not evt_"))?;
     let event_type = text("type")?;
     if !restore_mode::REDERIVED_EVENT_TYPES.contains(&event_type) {
         return Err(invalid(
@@ -1095,10 +1090,7 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
             "an event's id is not the one its type and deposit derive",
         ));
     }
-    let actor = event
-        .get("actor")
-        .and_then(Value::as_str)
-        .unwrap_or(crate::db::SYSTEM_ACTOR);
+    let actor = text("actor")?;
     // A credited deposit was valued; a reversed one was credited, and valued, or rejected, maybe
     // unvalued (an unsupported token).
     let valued = ["amount", "exchange_rate", "price_source", "valued_at"]
@@ -1129,12 +1121,8 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
 }
 
 /// The identity and chain evidence of a deposit's snapshot, whose id must be the one its receipt
-/// position and revision derive; `None` for a snapshot rendered before the deposit object carried
-/// them.
-fn delivered_identity(object: &Value, deposit_id: Uuid) -> ApiResult<Option<DeliveredIdentity>> {
-    if object.get("receipt_log_index").is_none_or(Value::is_null) {
-        return Ok(None);
-    }
+/// position and revision derive.
+fn delivered_identity(object: &Value, deposit_id: Uuid) -> ApiResult<DeliveredIdentity> {
     let invalid = || {
         ApiError::invalid_param(
             "events",
@@ -1193,7 +1181,7 @@ fn delivered_identity(object: &Value, deposit_id: Uuid) -> ApiResult<Option<Deli
             "an event's deposit id is not the one its receipt position and revision derive",
         ));
     }
-    Ok(Some(identity))
+    Ok(identity)
 }
 
 /// The transfer and valuation of a credited deposit's snapshot, as the deposit object renders
@@ -1291,13 +1279,28 @@ mod tests {
                 "exchange_rate": "0.25000000",
                 "price_source": "quote",
                 "valued_at": 1_790_000_000,
+                "receipt_log_index": 0,
+                "revision": 0,
+                "log_index": 40,
+                "block_number": 120,
+                "block_hash": format!("{:#x}", B256::repeat_byte(0xb1)),
+                "block_time": 1_789_999_990,
+                "replaces": null,
+                "replaced_by": null,
+                "created": 1_789_999_995,
+                "metadata": {},
             }},
         })
     }
 
+    /// The deposit at the snapshot's receipt position, revision 0.
+    fn deposit() -> Uuid {
+        deposit_revision_id(1, B256::repeat_byte(0x5a), 0, 0)
+    }
+
     #[test]
     fn a_delivered_event_is_read_with_its_derived_identity_and_credit() {
-        let deposit = Uuid::from_u128(7);
+        let deposit = deposit();
         let event = delivered_event(&credited(deposit)).unwrap();
         assert_eq!(event.id, event_id("deposit.credited", deposit));
         assert_eq!(event.deposit_id, deposit);
@@ -1343,7 +1346,7 @@ mod tests {
 
     #[test]
     fn a_reversed_event_carries_a_credit_only_when_its_deposit_was_valued() {
-        let deposit = Uuid::from_u128(7);
+        let deposit = deposit();
         // A rejected deposit of an unsupported token was never valued: its reversal carries no
         // credit but is imported.
         let unvalued = delivered_event(&reversed(deposit, false)).unwrap();
@@ -1364,18 +1367,12 @@ mod tests {
         let object = &mut event["data"]["object"];
         object["receipt_log_index"] = json!(2);
         object["revision"] = json!(1);
-        object["log_index"] = json!(40);
-        object["block_number"] = json!(120);
-        object["block_hash"] = json!(format!("{:#x}", B256::repeat_byte(0xb1)));
-        object["block_time"] = json!(1_789_999_990);
         object["replaces"] = json!(ids::format(
             ids::DEPOSIT,
             deposit_revision_id(1, tx_hash, 2, 0)
         ));
-        object["replaced_by"] = Value::Null;
-        object["created"] = json!(1_789_999_995);
         object["metadata"] = json!({"order": "o-1"});
-        let identity = delivered_event(&event).unwrap().identity.unwrap();
+        let identity = delivered_event(&event).unwrap().identity;
         assert_eq!((identity.receipt_log_index, identity.revision), (2, 1));
         assert_eq!(
             identity.replaces,
@@ -1383,26 +1380,23 @@ mod tests {
         );
         assert_eq!(identity.block_time.timestamp(), 1_789_999_990);
 
-        // Another revision, or a position without its block, is refused.
+        // Another revision, or a snapshot without its position or block, is refused.
         let mut other_revision = event.clone();
         other_revision["data"]["object"]["revision"] = json!(2);
-        let mut no_block = event.clone();
-        no_block["data"]["object"]["block_hash"] = Value::Null;
-        for refused in [other_revision, no_block] {
+        let mut refused = vec![other_revision];
+        for field in ["receipt_log_index", "revision", "block_hash", "block_time"] {
+            let mut missing = event.clone();
+            missing["data"]["object"][field] = Value::Null;
+            refused.push(missing);
+        }
+        for refused in refused {
             assert!(delivered_event(&refused).is_err(), "{refused}");
         }
-        // A snapshot rendered before the deposit carried its position has no identity.
-        assert!(
-            delivered_event(&reversed(deposit, false))
-                .unwrap()
-                .identity
-                .is_none()
-        );
     }
 
     #[test]
     fn events_that_a_rescan_does_not_derive_are_refused() {
-        let deposit = Uuid::from_u128(7);
+        let deposit = deposit();
         let mut other_type = credited(deposit);
         other_type["type"] = json!("deposit.rejected");
         let mut other_deposit = credited(deposit);

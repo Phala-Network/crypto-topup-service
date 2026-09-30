@@ -415,8 +415,8 @@ pub struct DeliveredEvent {
     /// The credit its deposit snapshot carries: always for `deposit.credited`, and for a
     /// `deposit.reversed` of a deposit that was valued (a rejected deposit may never have been).
     pub credit: Option<DeliveredCredit>,
-    /// The deposit's identity and chain evidence, when its snapshot carries its receipt position.
-    pub identity: Option<DeliveredIdentity>,
+    /// The deposit's identity and chain evidence.
+    pub identity: DeliveredIdentity,
 }
 
 /// A deposit's identity and chain evidence as its delivered snapshot shows them: enough to restore
@@ -618,9 +618,6 @@ pub enum ReversedDeposit {
     /// reversed deposit is not restored over it. A finding `rescanned` until the operator settles
     /// it.
     Rescanned,
-    /// The delivery predates the deposit object's receipt position and block, so the deposit
-    /// cannot be restored from it.
-    IdentityMissing,
 }
 
 impl ReversedDeposit {
@@ -632,7 +629,6 @@ impl ReversedDeposit {
             Self::Recorded => "recorded",
             Self::AddressUnknown => "address_unknown",
             Self::Rescanned => "rescanned",
-            Self::IdentityMissing => "identity_missing",
         }
     }
 }
@@ -727,12 +723,7 @@ pub async fn import_delivered_event(
         }
     };
     let reversed = if event.event_type == "deposit.reversed" {
-        Some(match &event.identity {
-            Some(identity) => {
-                restore_reversed(&mut transaction, routes, restore, event, identity).await?
-            }
-            None => ReversedDeposit::IdentityMissing,
-        })
+        Some(restore_reversed(&mut transaction, routes, restore, event, &event.identity).await?)
     } else {
         None
     };
@@ -1133,30 +1124,15 @@ pub async fn delivered_event_findings(
                -- ReversedDeposit::Rescanned: the rescan took the reversed deposit's position.
                event.type = 'deposit.reversed' AND EXISTS (
                    SELECT 1 FROM deposits AS holder
-                   WHERE holder.chain_id = position.chain_id
+                   WHERE holder.chain_id = (event.data #>> '{object,chain_id}')::bigint
                      AND holder.tx_hash = event.data #>> '{object,tx_hash}'
-                     AND holder.receipt_log_index = position.receipt_log_index
+                     AND holder.receipt_log_index
+                         = (event.data #>> '{object,receipt_log_index}')::bigint
                      AND holder.state <> 'reversed' AND holder.created_at >= $2
-                     AND holder.revision <= position.revision
+                     AND holder.revision <= (event.data #>> '{object,revision}')::bigint
                ) AS rescanned
         FROM restore_delivered_events AS imported
         JOIN events AS event ON event.id = imported.event_id
-        -- The delivered receipt position, each field NULL unless it is an integer: a delivery
-        -- rendered before the deposit object carried it (ReversedDeposit::IdentityMissing) was
-        -- imported with whatever it holds there.
-        CROSS JOIN LATERAL (
-            SELECT
-                CASE WHEN jsonb_typeof(object -> 'chain_id') = 'number'
-                          AND pg_input_is_valid(object ->> 'chain_id', 'bigint')
-                     THEN (object ->> 'chain_id')::bigint END AS chain_id,
-                CASE WHEN jsonb_typeof(object -> 'receipt_log_index') = 'number'
-                          AND pg_input_is_valid(object ->> 'receipt_log_index', 'bigint')
-                     THEN (object ->> 'receipt_log_index')::bigint END AS receipt_log_index,
-                CASE WHEN jsonb_typeof(object -> 'revision') = 'number'
-                          AND pg_input_is_valid(object ->> 'revision', 'bigint')
-                     THEN (object ->> 'revision')::bigint END AS revision
-            FROM (SELECT event.data -> 'object' AS object) AS delivered
-        ) AS position
         LEFT JOIN deposits AS deposit ON deposit.id = event.object_id
         LEFT JOIN addresses AS address ON address.id = deposit.address_id
         LEFT JOIN restore_delivered_credits AS credit

@@ -5,8 +5,8 @@ if [ "$#" -eq 0 ]; then
     set -- postgres
 fi
 
-# The fixed path topup reads; the variable is a seam for deploy/tests/walg-cron.sh only.
-marker=${TOPUP_BACKUP_TIMESTAMP_FILE:-/run/topup-observability/last-backup-unix-seconds}
+# The fixed path topup reads.
+marker=/run/topup-observability/last-backup-unix-seconds
 marker_dir=$(dirname "$marker")
 mkdir -p "$marker_dir"
 if [ "$(id -u)" -eq 0 ]; then

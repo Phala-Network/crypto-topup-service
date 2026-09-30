@@ -36,6 +36,7 @@ helpers, so the product checks them exactly as it checks the real service.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import secrets
@@ -225,7 +226,9 @@ class FakeTopup:
                         "from": _address(log["topics"][1]),
                         "amount_atomic": str(int(log["data"], 16)),
                         "tx_hash": log["transactionHash"],
+                        "receipt_log_index": position,
                         "block": int(log["blockNumber"], 16),
+                        "block_hash": log["blockHash"],
                         "log_index": int(log["logIndex"], 16),
                         "created": int(time.time()),
                     },
@@ -273,12 +276,18 @@ class FakeTopup:
             "address": transfer["address"],
             "from_address": transfer["from"],
             "tx_hash": transfer["tx_hash"],
+            "receipt_log_index": transfer["receipt_log_index"],
+            "revision": 0,
             "log_index": transfer["log_index"],
             "block_number": transfer["block"],
+            "block_hash": transfer["block_hash"],
+            "block_time": transfer["created"],
             "amount_refunded_atomic": "0",
             "refunded": False,
             "amount_refunded": 0,
             "amount_reversed": 0,
+            "replaces": None,
+            "replaced_by": None,
             "created": transfer["created"],
         }
         self.deposits[deposit["id"]] = deposit
@@ -418,6 +427,7 @@ class FakeTopup:
                 "livemode": False,
                 "type": event_type,
                 "created": int(time.time()),
+                "actor": "system",
                 "request": None,
                 "data": {"object": json.loads(json.dumps(_public(obj)))},
                 "_delivered": False,
@@ -879,7 +889,13 @@ class FakeTopup:
             "object": "attestation",
             "account": self.args.account,
             "livemode": False,
-            "webhook_keys": [{"version": 1, "public_key": public.hex(), "expires_at": None}],
+            "webhook_keys": [
+                {
+                    "version": 1,
+                    "public_key": "whpk_" + base64.b64encode(public).decode(),
+                    "expires_at": None,
+                }
+            ],
             "report_data": report.hex(),
             "tdx_quote": "00" * 1024,
         }
