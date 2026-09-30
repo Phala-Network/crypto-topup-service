@@ -202,10 +202,14 @@ live_isolated() {
    ```
 
 2. **Verify its attestation**, addressing the guest agent by the instance id from the attested
-   event log:
+   event log. Fetch the attestation from the Phala Cloud API by `vm_uuid`: CLI 1.1.22's
+   `cvms attestation` looks the CVM up and then requests `cvms/app_<app id>/attestation`, which
+   the API refuses (`Multiple CVMs match this identifier`) while the app has two instances, as it
+   does here and in a drill (seen in the full drill of 2026-09-30):
 
    ```sh
-   npx --yes phala@1.1.22 cvms attestation "$RESTORE_CVM_ID" --json >attestation.json
+   curl -fsS -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
+     "https://cloud-api.phala.com/api/v1/cvms/$RESTORE_CVM_ID/attestation" >attestation.json
    npx --yes phala@1.1.22 cvms get "$RESTORE_CVM_ID" --json >restore-cvm.json
    INSTANCE_ID="$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
      | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
@@ -237,7 +241,9 @@ live_isolated() {
      --no-public-logs --no-public-sysinfo --wait
    ```
 
-   Wait until `/healthz` is `ok` again.
+   Wait until `/healthz` is `ok` again. The report keeps its `restore_id` (the restore is
+   recorded once); an admin-signed `admin GET /v1/admin/restore` answering `200` at `$RESTORE_URL`
+   shows the new origin is in force (it answers `401` under the provisional one).
 5. **Verify the application identity** with a nonce-bound quote from `$RESTORE_URL`. Merchant
    keys are refused on this instance, so fetch it with the admin API (the
    [runbook environment](runbooks/README.md#environment) with `BASE_URL=$RESTORE_URL`), for any

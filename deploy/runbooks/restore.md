@@ -164,6 +164,22 @@ audit row commit together. `applied` is `false` when it is in force already. The
 object is never enough: a merchant without the delivery proves the treasury again after the
 unfreeze, and the addresses and quotes issued over it meanwhile cannot be re-issued (escalate).
 
+**A lost change that applied at once.** Any test-mode change, and a chain's first treasury in
+either mode, applies when it is proven, with no pending state: the merchant received a
+`treasury.created` with the object `active` (and a `treasury.updated` of the treasury it replaced,
+`replaced`), never a pending change becoming `active`. When such a change applied after the restore
+point, the restored database holds nothing of it: `treasuries/verify` answers `missing` for it and
+`differs` for the treasury it replaced (received `replaced`, restored `active`), the merchant's
+export has no `treasury_applications`, and `treasuries/apply` refuses each of its deliveries (`400`,
+not the `treasury.updated` of a pending change becoming active). Record both results: that
+`differs` needs no escalation of its own when the merchant's `missing` treasury of the same chain
+is the one that replaced it. After the unfreeze the merchant proves the treasury again
+(it applies at once, under a new `trs_` id) and pins it again. Deposit addresses and quotes issued
+over it after the restore point cannot be re-issued (`400` in step 4), and payments to them are not
+credited: escalate and settle them with the merchant. A live change of a chain that already has a
+treasury is always time-locked for 48 hours, so with an RPO below that it is in the backup, pending,
+and is restored with `treasuries/apply` as above.
+
 Delete again every endpoint the merchant deleted, before deliveries resume:
 
 ```sh
