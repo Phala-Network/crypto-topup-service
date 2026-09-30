@@ -272,11 +272,12 @@ non-zero with the reason.
 Builds**, connected to this repository, with Cloudflare's [`cf` CLI](https://github.com/cloudflare/cf)
 pinned in [product/web/package.json](product/web/package.json). `main` deploys to production and
 every other branch to its own [Worker Preview](https://developers.cloudflare.com/workers/previews/).
-Its dashboard build settings, the same for production and the Previews Base: root directory
-`deploy/product/web` and build command `npm run build:cloudflare`; the deploy command is
-`npm run deploy` for production and `npm run deploy:preview` for Previews. A branch's Preview
-copies the Previews Base when it is created, so changing the Base leaves existing Previews on
-their old settings until each is edited too.
+Each build runs once and its deploy only uploads it. Its dashboard build settings: root directory
+`deploy/product/web` for both; for production the build command `npm run build:cloudflare` and the
+deploy command `npm run deploy`; for the Previews Base the build command
+`npm run build:cloudflare:preview` and the deploy command `npm run deploy:preview`. A branch's
+Preview copies the Previews Base when it is created, so changing the Base leaves existing Previews
+on their old settings until each is edited too.
 
 - **Build.** `build:cloudflare` builds `sdk/js` (the page depends on it through `file:`) and then
   the page, each from its own lockfile with `npx -y pnpm@12.6.0`, on the Node of
@@ -285,10 +286,11 @@ their old settings until each is edited too.
   `VITE_DEMO_API_ORIGIN` in `product/web/.env.production`, `https://pay-demo-api.phala.com`.
 - **Production.** `deploy` runs `cf deploy --prebuilt`, which uploads that Build Output and
   deploys it. CI checks the config and the Build Output with `cf deploy --prebuilt --dry-run`.
-- **Previews.** `deploy:preview` rebuilds the page as a Preview build
-  (`CLOUDFLARE_PREVIEW_BUILD=true`, which `cf previews deploy --prebuilt` requires) and runs
-  `cf previews deploy --prebuilt`, which creates or updates the Preview named after the branch
-  (`WORKERS_CI_BRANCH`, set by Workers Builds). Its Preview URL,
+- **Previews.** `build:cloudflare:preview` runs `build:cloudflare` as a Preview build
+  (`CLOUDFLARE_PREVIEW_BUILD=true`, which `cf previews deploy --prebuilt` requires; the Build
+  Output then records `isPreview` and leaves out the custom domain), and `deploy:preview` runs
+  `cf previews deploy --prebuilt`, which uploads it and creates or updates the Preview named after
+  the branch (`WORKERS_CI_BRANCH`, set by Workers Builds). Its Preview URL,
   `https://<branch slug>-phala-pay-web.phala-dev.workers.dev`, always serves the branch's latest
   build; each deployment also has its own URL. Its demo API calls are refused by CORS by design:
   the API allows only `https://pay.phala.com`.

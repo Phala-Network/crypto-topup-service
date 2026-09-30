@@ -6,8 +6,9 @@
   "scripts": {
     "build": "vite build",
     "build:cloudflare": "(cd ../../../sdk/js && npx -y pnpm@12.6.0 install --frozen-lockfile --ignore-scripts && npx -y pnpm@12.6.0 run build) && npx -y pnpm@12.6.0 install --frozen-lockfile && npx -y pnpm@12.6.0 run build",
+    "build:cloudflare:preview": "CLOUDFLARE_PREVIEW_BUILD=true npm run build:cloudflare",
     "deploy": "cf deploy --prebuilt",
-    "deploy:preview": "CLOUDFLARE_PREVIEW_BUILD=true vite build && cf previews deploy --prebuilt",
+    "deploy:preview": "cf previews deploy --prebuilt",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

@@ -1447,7 +1447,7 @@ the admin API and `/healthz` stay up, every merchant request with an API key ans
 `503 service_restoring` with `Retry-After`, reads included (the restored `api_keys` can hold a key
 revoked after the restore point as valid, so no key authenticates until the operator has revoked
 such keys again and unfrozen), and the pumps, finality watch, refund verification, quote expiry,
-treasury time-lock, and webhook delivery wait; the scanner rescans from the restored cursor and
+treasury time-lock, webhook delivery, and idempotency key pruning wait; the scanner rescans from the restored cursor and
 the reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
 action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations, the
 merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses and

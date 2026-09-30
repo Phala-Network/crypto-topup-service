@@ -5672,6 +5672,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac 0.13.0",
+ "httpdate",
  "rand 0.10.3",
  "reqwest 0.13.5",
  "sentry",
