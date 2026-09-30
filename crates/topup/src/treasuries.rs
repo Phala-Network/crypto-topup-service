@@ -929,9 +929,17 @@ pub async fn apply_due(
             )
             .await?;
         } else if still_due {
+            // Recorded when this change applies, under its scope's lock, not when the pass
+            // started: a pass screens up to a batch of changes first, and a restore's re-issue
+            // takes a change as in force from here (`in_force`).
+            let applied_at: DateTime<Utc> =
+                sqlx::query_scalar("SELECT GREATEST($1::timestamptz, clock_timestamp())")
+                    .bind(now)
+                    .fetch_one(&mut *transaction)
+                    .await?;
             sqlx::query("UPDATE treasuries SET screened_at = $2 WHERE id = $1")
                 .bind(id)
-                .bind(now)
+                .bind(applied_at)
                 .execute(&mut *transaction)
                 .await?;
             let before = snapshot(&mut transaction, scope, id).await?;
@@ -940,7 +948,7 @@ pub async fn apply_due(
                 routes,
                 scope,
                 id,
-                now,
+                applied_at,
                 &actor,
                 Announcement::Updated(&before),
             )
@@ -979,8 +987,8 @@ pub struct Application {
     pub chain_id: u64,
     /// Its address.
     pub address: Address,
-    /// When it applied, the event's `created`: when the time-lock's transaction started, a
-    /// little after the start of its pass, which it records as `applied_at`.
+    /// When it applied, the event's `created`: when the time-lock's transaction started, at most
+    /// seconds before the `applied_at` it recorded under the scope's lock.
     pub applied_at: DateTime<Utc>,
 }
 
@@ -993,11 +1001,12 @@ pub struct Application {
 /// The change's own rules hold: it is the restored treasury of that chain and address, proven
 /// when it was submitted and still pending (a cancellation the merchant made after the restore
 /// point is re-applied first, so its change never applied), and its time-lock ended by
-/// `applied_at`. It is screened again when a current route of the chain can screen it: a
-/// sanctions list naming it now refuses it (at the unfreeze [`apply_due`] cancels it), and a clear
-/// answer records `screened_at`. When screening is unavailable, the screening [`apply_due`] made
-/// before applying it, which the signed event attests, stands, and `screened_at` keeps its
-/// restored value, so [`rescreen_due`] screens it again once the service is unfrozen.
+/// `applied_at`. Like [`apply_due`], it needs a current route of the chain to screen it with (it
+/// stays pending otherwise), and it is screened again: a sanctions list naming it now refuses it
+/// (at the unfreeze [`apply_due`] cancels it), and a clear answer records `screened_at`. When
+/// screening is unavailable, the screening [`apply_due`] made before applying it, which the signed
+/// event attests, stands, and `screened_at` keeps its restored value, so [`rescreen_due`] screens
+/// it again once the service is unfrozen.
 ///
 /// It applies as [`apply_due`] applies it, at `applied_at`, so the treasury it replaced was in
 /// force until then ([`in_force`]), audited with `audit_reason` as `restore.treasury_apply` in the
@@ -1039,18 +1048,22 @@ pub async fn restore_application(
     if treasury.effective_at.timestamp() > applied_at.timestamp() || applied_at > Utc::now() {
         return refused("the delivery does not show the change applying after its time-lock");
     }
-    let screened = match chain_route(routes, scope.livemode(), chain_id) {
-        Some(route) => match screening.screen(route, address).await {
-            DestinationScreening::Clear => true,
-            DestinationScreening::Sanctioned => {
-                return refused(
-                    "a sanctions list names the treasury now: escalate; at the unfreeze its \
-                     change is canceled",
-                );
-            }
-            DestinationScreening::Unavailable => false,
-        },
-        None => false,
+    // As `apply_due`, which leaves a change pending while no current route can screen it.
+    let Some(route) = chain_route(routes, scope.livemode(), chain_id) else {
+        return refused(
+            "no current route of the mode is on the treasury's chain to screen it: it stays \
+             pending, as the time-lock leaves it",
+        );
+    };
+    let screened = match screening.screen(route, address).await {
+        DestinationScreening::Clear => true,
+        DestinationScreening::Sanctioned => {
+            return refused(
+                "a sanctions list names the treasury now: escalate; at the unfreeze its change is \
+                 canceled",
+            );
+        }
+        DestinationScreening::Unavailable => false,
     };
     let mut transaction = pool.begin().await?;
     lock(&mut transaction, scope, true).await?;
@@ -1459,8 +1472,9 @@ pub async fn current(
 
 /// How far from a moment a treasury may have been in force for a restore's re-issue to derive an
 /// address issued at that moment over it ([`in_force`]). A treasury's recorded application time
-/// is when the time-lock's pass started, or the event's `created` in whole seconds for one applied
-/// again after a restore, so it can differ from the moment an issuer saw it by seconds. Every
+/// is when [`apply_due`] applied it under the scope's lock, or the event's `created` in whole
+/// seconds for one applied again after a restore, and an issuer's time is read on another clock,
+/// so they can differ by clock and rounding skew, seconds at most. Every
 /// candidate is the merchant's own proven treasury, and a salt binds the address to its customer
 /// and `qt_` id or version, so the window widens nothing else.
 pub const IN_FORCE_TOLERANCE: Duration = Duration::minutes(5);
@@ -1493,18 +1507,28 @@ pub async fn in_force(
         .collect()
 }
 
-/// Whether a change of the scope's treasury of `chain_id` is pending.
-pub async fn pending_on(pool: &PgPool, scope: Scope, chain_id: u64) -> Result<bool, TreasuryError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM treasuries \
+/// The scope's pending change of its treasury of `chain_id`, if any: its id and address.
+pub async fn pending_on(
+    pool: &PgPool,
+    scope: Scope,
+    chain_id: u64,
+) -> Result<Option<(Uuid, Address)>, TreasuryError> {
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, address FROM treasuries \
          WHERE account_id = $1 AND livemode = $2 AND chain_id = $3 \
-           AND applied_at IS NULL AND canceled_at IS NULL)",
+           AND applied_at IS NULL AND canceled_at IS NULL",
     )
     .bind(scope.account_id())
     .bind(scope.livemode())
     .bind(i64::try_from(chain_id).map_err(|_| TreasuryError::DatabaseInvariant)?)
-    .fetch_one(pool)
-    .await?)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|(id, address)| {
+        Address::from_str(&address)
+            .map(|address| (id, address))
+            .map_err(|_| TreasuryError::DatabaseInvariant)
+    })
+    .transpose()
 }
 
 /// The scope's current treasury of `chain_id`, if it has one.

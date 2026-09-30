@@ -3752,3 +3752,418 @@ async fn a_reversed_deposit_is_restored_only_on_its_own_account_and_untaken_posi
     })
     .await
 }
+
+/// The merchant's record of quote `id` for `customer` at `address`, created at `created`.
+fn quote_record(
+    harness: &Harness,
+    id: Uuid,
+    customer: &str,
+    address: Address,
+    created: i64,
+) -> Value {
+    json!({
+        "account": harness.account_id(),
+        "livemode": true,
+        "id": topup::ids::format(topup::ids::QUOTE, id),
+        "client_reference_id": customer,
+        "chain_id": 1,
+        "asset": "pha",
+        "amount": 1_000,
+        "amount_atomic": "100000000000000000000",
+        "exchange_rate": "0.10000000",
+        "address": format!("{address:#x}"),
+        "created": created,
+        "expires_at": created + 900,
+        "reason": "the merchant's quote log",
+    })
+}
+
+#[tokio::test]
+async fn a_quote_the_backup_holds_is_reissued_idempotently_whenever_it_was_created() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            // A quote the service issued before the backup.
+            let customer = seed::create_customer(
+                &harness.pool,
+                &seed::NewCustomer {
+                    id: Uuid::new_v4(),
+                    account_id: harness.account.id,
+                    livemode: true,
+                    client_reference_id: "team-held".to_owned(),
+                    paused_scopes: Vec::new(),
+                },
+            )
+            .await?;
+            let held = seed::insert_address(
+                &harness.pool,
+                &seed::NewAddress {
+                    id: Uuid::new_v4(),
+                    customer_id: customer.id,
+                    chain_id: 1,
+                    route: harness.route.route.clone(),
+                    salt: B256::repeat_byte(0x4e),
+                    address: Address::repeat_byte(0x4e),
+                },
+            )
+            .await?;
+            let quote: Uuid = sqlx::query_scalar("SELECT quote_id FROM addresses WHERE id = $1")
+                .bind(held.id)
+                .fetch_one(&harness.pool)
+                .await?;
+            let restore = harness.restore().await?;
+            let restore_point = restore.restore_point.context("restore point")?.timestamp();
+            // Sent again, even as created long before the restore point, it is returned as it is.
+            let record = quote_record(
+                &harness,
+                quote,
+                "team-held",
+                Address::repeat_byte(0x4e),
+                restore_point - 3_600,
+            );
+            let answer = harness
+                .admin(Method::POST, "/v1/admin/restore/quotes", &record)
+                .await?;
+            ensure!(answer.status == StatusCode::OK, "{}", answer.body);
+            ensure!(answer.body["reissued"] == false, "{}", answer.body);
+            // A quote the restored database does not hold, created that long before the restore
+            // point, is not one the restore lost.
+            let contracts = &harness.route.chain.contracts;
+            let other = Uuid::new_v4();
+            let address = forwarder_address(
+                contracts.forwarder_factory,
+                contracts.implementation,
+                seed::FIXTURE_TREASURY,
+                quote_salt(
+                    harness.account_id(),
+                    "team-old",
+                    &topup::ids::format(topup::ids::QUOTE, other),
+                ),
+            );
+            let answer = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/quotes",
+                    &quote_record(&harness, other, "team-old", address, restore_point - 3_600),
+                )
+                .await?;
+            ensure!(answer.status == StatusCode::BAD_REQUEST, "{}", answer.body);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_restore_without_a_restore_point_reissues_nothing() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            // A restored database without a heartbeat.
+            let mut transaction = harness.owner.begin().await?;
+            sqlx::query("SET LOCAL session_replication_role = replica")
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM heartbeat")
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            let restore = harness.restore().await?;
+            ensure!(restore.restore_point.is_none());
+            let address = harness.derived_address("team-np", 1);
+            let answer = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/deposit_addresses",
+                    &json!({
+                        "account": harness.account_id(),
+                        "livemode": true,
+                        "client_reference_id": "team-np",
+                        "address": format!("{address:#x}"),
+                        "reason": "the merchant's export",
+                    }),
+                )
+                .await?;
+            ensure!(
+                answer.status == StatusCode::BAD_REQUEST
+                    && answer.body["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("no restore point")),
+                "{}",
+                answer.body
+            );
+            let quote = Uuid::new_v4();
+            let answer = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/quotes",
+                    &quote_record(
+                        &harness,
+                        quote,
+                        "team-np",
+                        Address::repeat_byte(0x51),
+                        Utc::now().timestamp(),
+                    ),
+                )
+                .await?;
+            ensure!(
+                answer.status == StatusCode::BAD_REQUEST
+                    && answer.body["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("no restore point")),
+                "{}",
+                answer.body
+            );
+            let (addresses, quotes): (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM deposit_addresses), (SELECT count(*) FROM quotes)",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!((addresses, quotes) == (0, 0));
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_time_lock_change_records_when_it_applied_not_when_its_pass_began() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let pending = seed::schedule_treasury(
+                &harness.pool,
+                harness.account.id,
+                true,
+                1,
+                Address::repeat_byte(0xb5),
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await?;
+            let routes = Arc::new(
+                topup::routes::RouteSet::new(vec![harness.route.clone()])
+                    .map_err(anyhow::Error::msg)?,
+            );
+            // A pass that began half an hour ago, screening a batch, reaches the change now.
+            let pass_began = Utc::now() - TimeDelta::minutes(30);
+            ensure!(
+                topup::treasuries::apply_due(
+                    &harness.pool,
+                    &routes,
+                    &support::ClearScreener,
+                    pass_began
+                )
+                .await?
+                    == 1
+            );
+            let (applied_late, replaced_late): (bool, bool) = sqlx::query_as(
+                "SELECT (SELECT applied_at > now() - interval '1 minute' FROM treasuries \
+                         WHERE id = $1), \
+                        (SELECT replaced_at > now() - interval '1 minute' FROM treasuries \
+                         WHERE account_id = $2 AND replaced_at IS NOT NULL)",
+            )
+            .bind(pending)
+            .bind(harness.account.id)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(applied_late && replaced_late);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_successor_the_reversal_did_not_name_is_not_a_rescan_conflict() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-unnamed").await?;
+            harness.restore().await?;
+            // The reversal recorded no successor: the transfer that took the position paid no
+            // issued address then.
+            let reversed = harness.delivered(&reversed_event(&harness, 0, forwarder, None));
+            let import = |delivery: Value| {
+                let harness = &harness;
+                async move {
+                    harness
+                        .admin(
+                            Method::POST,
+                            "/v1/admin/restore/events",
+                            &json!({"deliveries": [delivery], "reason": "receiver log"}),
+                        )
+                        .await
+                }
+            };
+            let answer = import(reversed.clone()).await?;
+            ensure!(
+                answer.body["data"][0]["reversed_deposit"] == "restored",
+                "{}",
+                answer.body
+            );
+            // The rescan records the final transfer at the next revision: a successor, not a
+            // conflict, though no delivery named it.
+            record_deposit(
+                &harness,
+                ROUTER_TX,
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            let successor = topup_core::identity::deposit_revision_id(1, ROUTER_TX, 0, 1);
+            let state: String = sqlx::query_scalar("SELECT state FROM deposits WHERE id = $1")
+                .bind(successor)
+                .fetch_one(&harness.pool)
+                .await?;
+            ensure!(state == "detected");
+            let again = import(reversed).await?;
+            ensure!(
+                again.body["data"][0]["reversed_deposit"] == "recorded",
+                "{}",
+                again.body
+            );
+            let status = harness
+                .admin(Method::GET, "/v1/admin/restore", &Value::Null)
+                .await?;
+            ensure!(
+                status.body["delivered_events"]["findings"]
+                    .as_array()
+                    .is_some_and(|findings| findings
+                        .iter()
+                        .all(|finding| finding["status"] != "rescanned")),
+                "{}",
+                status.body
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_replaced_treasury_is_a_lost_replacement_only_beside_its_lost_application() -> Result<()>
+{
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let changed = Address::repeat_byte(0xb6);
+            let pending = seed::schedule_treasury(
+                &harness.pool,
+                harness.account.id,
+                true,
+                1,
+                changed,
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await?;
+            let former: Uuid = sqlx::query_scalar(
+                "SELECT id FROM treasuries WHERE account_id = $1 AND applied_at IS NOT NULL",
+            )
+            .bind(harness.account.id)
+            .fetch_one(&harness.pool)
+            .await?;
+            harness.restore().await?;
+            let object = |id: Uuid, address: Address, status: &str| {
+                json!({
+                    "id": topup::ids::format(topup::ids::TREASURY, id),
+                    "status": status,
+                    "chain_id": 1,
+                    "address": format!("{address:#x}"),
+                })
+            };
+            let verify = |treasuries: Vec<Value>| {
+                let harness = &harness;
+                async move {
+                    let answer = harness
+                        .admin(
+                            Method::POST,
+                            "/v1/admin/restore/treasuries/verify",
+                            &json!({
+                                "account": harness.account_id(),
+                                "livemode": true,
+                                "treasuries": treasuries,
+                                "reason": "treasury events",
+                            }),
+                        )
+                        .await?;
+                    ensure!(answer.status == StatusCode::OK, "{}", answer.body);
+                    Ok::<_, anyhow::Error>(
+                        answer.body["data"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|row| row["result"].as_str().unwrap_or_default().to_owned())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            };
+            let replaced = object(former, seed::FIXTURE_TREASURY, "replaced");
+            // Beside its application, in either order.
+            ensure!(
+                verify(vec![replaced.clone(), object(pending, changed, "active")]).await?
+                    == ["replacement_lost", "application_lost"]
+            );
+            // Alone, beside the pending change received canceled, or beside another address
+            // received active, it is not explained: `differs`.
+            ensure!(verify(vec![replaced.clone()]).await? == ["differs"]);
+            ensure!(
+                verify(vec![replaced.clone(), object(pending, changed, "canceled")]).await?
+                    == ["differs", "cancellation_lost"]
+            );
+            ensure!(
+                verify(vec![
+                    replaced,
+                    object(pending, Address::repeat_byte(0xb7), "active")
+                ])
+                .await?
+                    == ["differs", "differs"]
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_treasury_change_on_a_chain_without_a_route_stays_pending() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let changed = Address::repeat_byte(0xb8);
+            let pending = seed::schedule_treasury(
+                &harness.pool,
+                harness.account.id,
+                true,
+                8453,
+                changed,
+                Utc::now() - TimeDelta::hours(1),
+            )
+            .await?;
+            harness.restore().await?;
+            harness.screening.answer(Some(false));
+            let event = application_event(
+                &harness,
+                pending,
+                8453,
+                changed,
+                Utc::now().timestamp() - 60,
+            );
+            let answer = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/treasuries/apply",
+                    &json!({"delivery": harness.delivered(&event), "reason": "INC-1"}),
+                )
+                .await?;
+            ensure!(answer.status == StatusCode::BAD_REQUEST, "{}", answer.body);
+            let applied: Option<chrono::DateTime<Utc>> =
+                sqlx::query_scalar("SELECT applied_at FROM treasuries WHERE id = $1")
+                    .bind(pending)
+                    .fetch_one(&harness.pool)
+                    .await?;
+            ensure!(applied.is_none());
+            Ok(())
+        })
+    })
+    .await
+}

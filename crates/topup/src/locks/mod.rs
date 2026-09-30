@@ -485,8 +485,9 @@ pub struct ReissuedTerms {
 /// account, customer, and quote id, so only the quote's own address over a treasury of the
 /// account on `route`'s chain in force within `crate::treasuries::IN_FORCE_TOLERANCE` of the quote's
 /// `created` is accepted (a change that applied since, or was restored since, does not move it:
-/// `crate::treasuries::in_force`). A quote created more than that before `restore_point` is not
-/// one the restore lost: the restored database holds it. The address is backfilled from the
+/// `crate::treasuries::in_force`). A quote the restored database holds is returned as it is
+/// (idempotent), whenever it was created; any other created more than that before the restore
+/// point is refused, since the restore would not have lost it. The address is backfilled from the
 /// chain's cursor in `backfill_from` (the restored cursor), so the rescan finds payments made to it
 /// since.
 ///
@@ -520,52 +521,9 @@ pub async fn reissue(
     let restore_point = restore.restore_point.ok_or(RateLockError::InvalidInput(
         "the restore has no restore point (the restored database has no heartbeat): escalate",
     ))?;
-    let tolerance = crate::treasuries::IN_FORCE_TOLERANCE;
-    if terms.created_at < restore_point - tolerance {
-        return Err(RateLockError::InvalidInput(
-            "the quote was created before the restore point, so the restored database holds it",
-        ));
-    }
     let scope = Scope::new(account.id, livemode);
     let mut transaction = pool.begin().await?;
     crate::treasuries::lock(&mut transaction, scope, false).await?;
-    let in_force = crate::treasuries::in_force(
-        &mut transaction,
-        scope,
-        Some(terms.created_at - tolerance),
-        terms.created_at + tolerance,
-    )
-    .await
-    .map_err(|error| match error {
-        crate::treasuries::TreasuryError::Database(error) => RateLockError::Database(error),
-        _ => RateLockError::DatabaseInvariant,
-    })?;
-    let salt = quote_salt(
-        &account.public_id,
-        &terms.client_reference_id,
-        &quote_id(terms.id),
-    );
-    let treasury = in_force
-        .into_iter()
-        .filter(|(chain_id, _)| *chain_id == route.chain.chain_id)
-        .map(|(_, treasury)| treasury)
-        .find(|treasury| {
-            forwarder_address(
-                route.chain.contracts.forwarder_factory,
-                route.chain.contracts.implementation,
-                *treasury,
-                salt,
-            ) == terms.address
-        });
-    let Some(treasury) = treasury else {
-        // `treasury_not_set` when the chain has no treasury at all.
-        self::treasury(&mut transaction, scope, route.chain.chain_id).await?;
-        return Err(RateLockError::InvalidInput(
-            "the address is not the quote's over the account's treasury in force when it was \
-             created",
-        ));
-    };
-    let address = terms.address;
     if let Some(existing) = get(&mut *transaction, scope, terms.id).await? {
         if existing.address != terms.address
             || existing.client_reference_id != terms.client_reference_id
@@ -604,6 +562,50 @@ pub async fn reissue(
         transaction.commit().await?;
         return Ok((existing, false));
     }
+    let tolerance = crate::treasuries::IN_FORCE_TOLERANCE;
+    // A quote the restored database holds was returned above, whenever it was created.
+    if terms.created_at < restore_point - tolerance {
+        return Err(RateLockError::InvalidInput(
+            "the quote was created before the restore point, so the restored database holds it",
+        ));
+    }
+    let in_force = crate::treasuries::in_force(
+        &mut transaction,
+        scope,
+        Some(terms.created_at - tolerance),
+        terms.created_at + tolerance,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::treasuries::TreasuryError::Database(error) => RateLockError::Database(error),
+        _ => RateLockError::DatabaseInvariant,
+    })?;
+    let salt = quote_salt(
+        &account.public_id,
+        &terms.client_reference_id,
+        &quote_id(terms.id),
+    );
+    let treasury = in_force
+        .into_iter()
+        .filter(|(chain_id, _)| *chain_id == route.chain.chain_id)
+        .map(|(_, treasury)| treasury)
+        .find(|treasury| {
+            forwarder_address(
+                route.chain.contracts.forwarder_factory,
+                route.chain.contracts.implementation,
+                *treasury,
+                salt,
+            ) == terms.address
+        });
+    let Some(treasury) = treasury else {
+        // `treasury_not_set` when the chain has no treasury at all.
+        self::treasury(&mut transaction, scope, route.chain.chain_id).await?;
+        return Err(RateLockError::InvalidInput(
+            "the address is not the quote's over the account's treasury in force when it was \
+             created",
+        ));
+    };
+    let address = terms.address;
     let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM quotes WHERE id = $1)")
         .bind(terms.id)
         .fetch_one(&mut *transaction)

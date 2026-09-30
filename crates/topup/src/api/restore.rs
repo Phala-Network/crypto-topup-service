@@ -243,6 +243,12 @@ pub(crate) async fn verify_treasuries(
             .map_err(|_| ApiError::invalid_param("treasuries", "address must be an address"))?;
         received.push((id, treasury, address));
     }
+    // The changes the merchant received applied, whatever their order in the request.
+    let received_active: BTreeSet<(Uuid, u64, EvmAddress)> = received
+        .iter()
+        .filter(|(_, treasury, _)| treasury.status == TreasuryStatus::Active.code())
+        .map(|(id, treasury, address)| (*id, treasury.chain_id, *address))
+        .collect();
     let mut data = Vec::new();
     for (id, treasury, address) in received {
         let current = treasuries::get(&state.pool, scope, id)
@@ -277,8 +283,12 @@ pub(crate) async fn verify_treasuries(
             && treasuries::pending_on(&state.pool, scope, current.chain_id)
                 .await
                 .map_err(super::treasuries::map_error)?
+                .is_some_and(|(pending, pending_address)| {
+                    received_active.contains(&(pending, current.chain_id, pending_address))
+                })
         {
-            // The other half of that lost application: restoring it replaces this one.
+            // The other half of an `application_lost` in this request: restoring that change,
+            // the chain's pending one, replaces this one.
             "replacement_lost"
         } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending {
             if request.reapply {

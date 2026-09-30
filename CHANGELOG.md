@@ -20,7 +20,9 @@ webhook receivers must ignore unknown fields. The format follows
   sanctions list names now is refused). It applies at the event's `created`, audited in the same
   transaction, and its events are not sent again. `POST /v1/admin/restore/treasuries/verify`
   reports such a change as `application_lost`, and the treasury it replaced, received `replaced`,
-  as `replacement_lost` (both were `differs`); both are `matches` once the change is restored.
+  as `replacement_lost` when that change is sent in the same request as `active` (both were
+  `differs`); both are `matches` once the change is restored. A change on a chain without a current
+  route stays pending, as the time-lock leaves it.
 - Admin: each result of `POST /v1/admin/restore/events` carries `reversed_deposit` for a
   `deposit.reversed`: `restored`, `recorded`, `address_unknown`, `rescanned` (the rescan recorded
   its position first; also a finding status of `GET /v1/admin/restore`), or `identity_missing`.
@@ -676,9 +678,11 @@ happens only from two-provider finalized data.
   current treasury, while the change would apply only after the unfreeze those re-issues must
   precede. Each re-issued deposit address version, by address or by version, keeps a superseded
   network over every treasury in force since the restore point, still credited. A restore without
-  a restore point re-issues nothing, and a quote created well before the restore point is refused.
-- A quote's `created` is taken once its chain's treasury is read under the treasury lock, so it
-  falls while that treasury is in force.
+  a restore point re-issues nothing, and a quote the restored database does not hold, created well
+  before the restore point, is refused (one it holds is returned, `reissued: false`).
+- A quote's `created` is taken once its chain's treasury is read under the treasury lock, and a
+  time-locked treasury change records `applied_at` as it applies under that lock rather than when
+  the time-lock's pass started, so each falls while the other's treasury is in force.
 - Admin: a deposit reversed after the restore point because a re-included transaction put
   another transfer at its receipt position keeps its identity through the restore. Its imported
   `deposit.reversed` rebuilds it, reversed, at its revision, so the rescan records the final

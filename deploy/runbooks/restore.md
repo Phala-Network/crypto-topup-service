@@ -113,8 +113,10 @@ admin POST /v1/admin/restore/treasuries/verify \
 
 Each `result` is `matches`, `canceled` (canceled again now), `cancellation_lost` (without
 `reapply`), `application_lost` (a change that applied after the restore point: restore it below),
-`replacement_lost` (the treasury that change replaced, which the merchant received `replaced`:
-restoring the change replaces it, so it needs nothing of its own), `missing` (proven after the
+`replacement_lost` (the treasury that change replaced, which the merchant received `replaced`,
+reported only when the chain's pending change is sent in the same request as `active`, with the
+same id and address, in any order: restoring the change replaces it, so it needs nothing of its
+own), `missing` (proven after the
 restore point: the merchant proves it again after the unfreeze), or `differs` (another chain,
 address, or status: escalate). Send both treasuries of a lost change, each object as the
 merchant's latest `treasury.updated` of it shows it; once the change is restored, both are
@@ -140,12 +142,14 @@ Only a delivery the service signed is accepted (verified with the account's webh
 step 5), of the restored treasury with the same chain and address. The change's own rules hold: it
 was proven when it was submitted, it is still pending (cancel again first what the merchant
 canceled, above), and its time-lock ended by the event's `created`. It is screened again when a
-route of its chain can screen it: `400` if a sanctions list names it now (escalate; at the unfreeze
-its change is canceled). When screening is unavailable, the screening the time-lock made before
-applying it stands (the signed event attests it: a sanctioned change is canceled, never applied),
-and the daily screening checks it again after the unfreeze. It applies at the event's `created`:
-the time-lock recorded the start of its pass, and the event's `created` is when its transaction
-started, a few seconds later at most, so re-issue allows for the difference (step 4). The treasury
+route of its chain can screen it; as the time-lock, it stays pending while its chain has no current
+route (`400`). `400` if a sanctions list names it now (escalate; at the unfreeze its change is
+canceled). When screening is unavailable, the screening the time-lock made before applying it
+stands (the signed event attests it: a sanctioned change is canceled, never applied), and the daily
+screening checks it again after the unfreeze. It applies at the event's `created`: the time-lock
+recorded `applied_at` when the change applied, under its account's lock, and the event's `created`
+is when that transaction started, at most seconds earlier and in whole seconds, so re-issue allows
+for clock and rounding skew (step 4). The treasury
 it replaced stays in force until then, and the account's deposit address networks on the chain
 move to it. Its `treasury.updated` events are not sent again: the merchant received them when it
 first applied, and new ones would carry the restore's time. The apply and its `restore.treasury_apply`
@@ -195,8 +199,9 @@ Re-issue every quote the merchant created after the restore point the same way. 
 is derived from the account, `client_reference_id`, and `qt_` id ([architecture
 §9](../../docs/architecture.md#9-quotes)), so only the quote's own address over a treasury of the
 chain in force within 5 minutes of its `created` is accepted (every one is the merchant's own, and
-the salt binds the `qt_` id), and a quote created more than 5 minutes before the restore point is
-refused: the restored database holds it:
+the salt binds the `qt_` id). A quote the restored database holds, same id and account, is returned
+as it is, `reissued: false`, whenever it was created; any other quote created more than 5 minutes
+before the restore point is refused, since the restore did not lose it:
 
 ```sh
 admin POST /v1/admin/restore/quotes \
@@ -272,7 +277,9 @@ there, and the rescan records the transfer now at the position under its success
 resumes (step 6): a rescan that reaches the position first records the transfer under the reversed
 deposit's id. The import then never restores the reversed deposit over it: its event is imported,
 its `reversed_deposit` is `rescanned`, and `GET /v1/admin/restore` lists it as a `rescanned`
-finding (step 8).
+finding (step 8). Only a deposit the rescan recorded at the reversed deposit's revision or below is
+such a conflict; one at a higher revision is its successor, whether the reversal named it or
+not.
 
 ## 6. Resume and wait for the rescan
 

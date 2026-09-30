@@ -1841,8 +1841,8 @@ pub struct DeliveredEventFinding {
     /// The deposit, `dep_…`.
     pub deposit: String,
     /// `rescanned` (a `deposit.reversed` whose receipt position the rescan recorded first, with a
-    /// deposit neither reversed nor the successor the delivery names: the reversed deposit could
-    /// not be restored; escalate), `pending` (the rescan has not re-derived or valued the deposit
+    /// deposit that is not reversed at its revision or below: the reversed deposit could not be
+    /// restored; escalate), `pending` (the rescan has not re-derived or valued the deposit
     /// yet), `contradicted` (the recorded transfer is not the one the delivered event names: the deposit is held, not
     /// credited, until the operator discards the delivered credit), or `mismatch` (the ledger's
     /// token amount or credit differs from what the merchant received; the delivered event is
@@ -1937,8 +1937,9 @@ pub struct TreasuryVerification {
     /// the restore undid it: cancel it with `reapply`); `application_lost` (the merchant received
     /// it `active` and the restore left it pending: restore it with its signed `treasury.updated`,
     /// `POST /v1/admin/restore/treasuries/apply`); `replacement_lost` (the merchant received it
-    /// `replaced` and the restore left it current, with a change of its chain pending: the other
-    /// half of an `application_lost`, whose restore replaces it); `missing` (created after the
+    /// `replaced` and the restore left it current, while the chain's pending change is one sent
+    /// here as `active`, same id and address: the other half of that `application_lost`, whose
+    /// restore replaces it); `missing` (created after the
     /// restore point: the merchant creates it again after the unfreeze); or `differs` (another
     /// status, chain, or address: escalate).
     pub result: String,
@@ -2073,8 +2074,8 @@ pub struct EventImport {
     /// so the rescan records the transfer now at its receipt position as the deposit that
     /// replaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is
     /// not issued in the event's account and mode: re-issue it, then import the event again);
-    /// `rescanned` (the rescan recorded its receipt position first, with a deposit neither
-    /// reversed nor the successor the delivery names: not restored; escalate); or
+    /// `rescanned` (the rescan recorded its receipt position first, with a deposit that is not
+    /// reversed at its revision or below: not restored; escalate); or
     /// `identity_missing` (the delivery
     /// carries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not
     /// restored). `null` for other events.

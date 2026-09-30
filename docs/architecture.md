@@ -1466,8 +1466,9 @@ daily screening after the unfreeze), at the event's `created`, audited in its tr
 announced again (the merchant has its events; new ones would carry the restore's time), so each
 treasury is in force when it was; deposit addresses and quotes given out after the restore point
 re-issued identically from their deterministic salts over a treasury in force when each was issued,
-within 5 minutes since recorded application times are when the time-lock's pass started or the
-event's second (every candidate is the merchant's own, and the salt binds the address): for a
+within 5 minutes for clock and rounding skew between the issuer's clock and the recorded
+application time, which the time-lock takes under the account's lock as the change applies, or the
+event's second for a restored change (every candidate is the merchant's own, and the salt binds the address): for a
 deposit address, every one since the restore point, each re-issued version keeping a superseded
 network over each, whether it is sent by address or by version; for a quote, around its `created`,
 and none created well before the restore point, which the restored database holds (a restore

@@ -614,9 +614,9 @@ pub enum ReversedDeposit {
     /// import the event again.
     AddressUnknown,
     /// The rescan recorded the deposit's receipt position first, with a deposit that is not
-    /// reversed and is not the successor the delivery names (under the reversed deposit's id, or
-    /// another): the reversed deposit is not restored over it. A finding `rescanned` until the
-    /// operator settles it.
+    /// reversed at its revision or below (under the reversed deposit's id, or an earlier one): the
+    /// reversed deposit is not restored over it. A finding `rescanned` until the operator settles
+    /// it.
     Rescanned,
     /// The delivery predates the deposit object's receipt position and block, so the deposit
     /// cannot be restored from it.
@@ -910,8 +910,11 @@ async fn restore_reversed(
 }
 
 /// How the ledger holds the reversed deposit of `event`, or its receipt position, when it does:
-/// `Rescanned` when the rescan since `restore` recorded there a deposit that is not reversed, under
-/// the reversed deposit's id or another one than the successor the delivery names; otherwise
+/// `Rescanned` when the rescan since `restore` recorded there a deposit that is not reversed at the
+/// reversed deposit's revision or below (under its id, or an earlier one): the transfer it holds
+/// is the reversed deposit's successor, recorded without its identity. A deposit at a higher
+/// revision is a successor, whether the delivery named it or not (a reversal records none when
+/// the transfer that took the position paid no issued address then). Otherwise
 /// `Recorded` when the deposit is there (from the backup, where the finality watch reverses it if
 /// it is not yet, or restored before).
 async fn position_held(
@@ -927,7 +930,7 @@ async fn position_held(
                EXISTS (
                    SELECT 1 FROM deposits
                    WHERE chain_id = $2 AND tx_hash = $3 AND receipt_log_index = $4
-                     AND state <> 'reversed' AND id IS DISTINCT FROM $5 AND created_at >= $6
+                     AND state <> 'reversed' AND revision <= $5 AND created_at >= $6
                )
         "#,
     )
@@ -935,7 +938,7 @@ async fn position_held(
     .bind(i64::try_from(identity.chain_id).map_err(encode)?)
     .bind(format!("{:#x}", identity.tx_hash))
     .bind(i64::try_from(identity.receipt_log_index).map_err(encode)?)
-    .bind(identity.replaced_by)
+    .bind(i64::try_from(identity.revision).map_err(encode)?)
     .bind(restore.detected_at)
     .fetch_one(&mut *connection)
     .await?;
@@ -1135,8 +1138,7 @@ pub async fn delivered_event_findings(
                      AND holder.receipt_log_index =
                          (event.data #>> '{object,receipt_log_index}')::bigint
                      AND holder.state <> 'reversed' AND holder.created_at >= $2
-                     AND 'dep_' || replace(holder.id::text, '-', '')
-                         IS DISTINCT FROM event.data #>> '{object,replaced_by}'
+                     AND holder.revision <= (event.data #>> '{object,revision}')::bigint
                ) AS rescanned
         FROM restore_delivered_events AS imported
         JOIN events AS event ON event.id = imported.event_id
