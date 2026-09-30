@@ -1,6 +1,10 @@
 # Design: a lean, standard deployment configuration
 
-Status: proposed, for the owner's review (Phase 1 of the refactor; nothing is implemented yet).
+Status: proposed, in review (Phase 1 of the refactor; nothing is implemented yet). The owner's
+decisions of 2026-09-30 are applied: staging's values are the current `staging` Environment values
+(they match the last attested compose); the Sentry release is the compiled source commit;
+`DATABASE_URL` is the only database variable, and `migrate` and `restore-check` check in code that
+the login owns the database; and the renderer uses a Compose binary pinned by sha256.
 Scope: the attested compose, its variants, every setting of `topup` and of the deployment, and the
 scripts, workflows, and docs around them. Owner's rules: "精简优雅重构compose和各种配置项"; use a
 standard mechanism wherever one exists; don't abuse env.
@@ -52,11 +56,10 @@ its process environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
 | `deploy.yml` | 524 lines: 11 settings in the job `env`, 1 step that copies `TOPUP_RPC_*_URL` from `vars`, 1 step that derives R2 and key-id defaults |
 | Adding a chain | 6 places: the route file, its compose copy with its `--route` args in two services, `x-rpc-providers`, GitHub variables, and, for a keyed provider, `staging.env.example` and `allowed_envs` |
 
-The model also drifts. The `staging` Environment no longer has `WALG_S3_PREFIX`,
-`TOPUP_RPC_PROVIDER_A_URL`, or `TOPUP_RPC_PROVIDER_B_URL`, yet the last deploy (run 36670873413,
-2026-09-30 04:53 UTC) attested all three. The next Deploy would fail at its input check, and nobody
-reviewed the removal. Settings that live in mutable GitHub variables have no history and no
-review, although they fix the money-relevant RPC endpoints and the admin key.
+Settings that live in GitHub variables can change without a pull request, a review, or a
+history, although they fix the money-relevant RPC endpoints, the backup prefix, and the admin key.
+Today's values are consistent: the `staging` Environment's 13 variables match the compose attested
+by the last topup deploy (run 36670873413). The problem is the model, not a current mistake.
 
 ## 3. Principle: four kinds of input, each with one home
 
@@ -259,7 +262,7 @@ from 13 (+3 optional) to 3, and the fixed environment variables `topup` reads fr
   the secret references too (to empty strings), and escaping them as `$${…}` survives the render as
   literals. Verified. Deploy-time values therefore go through three explicit jq edits instead.
 - **Keeping public settings in GitHub variables.** They are mutable without review or history
-  (§2 shows the drift), and the renderer, the derivations, and the copy step exist only to carry
+  (§2), and the renderer, the derivations, and the copy step exist only to carry
   them.
 - **Routes as separate files next to `topup.yaml`.** That keeps 4 compose configs and mounts, and
   makes the renderer discover files. Inline routes keep one file, one config, and their comments.
@@ -300,10 +303,9 @@ from 13 (+3 optional) to 3, and the fixed environment variables `topup` reads fr
 
 **Phala's staging** (one Deploy `upgrade`; no re-seal, no data movement):
 
-1. The values for `deploy/environments/phala-network/staging/` come from the last attested
-   compose (run 36670873413), not from the current variables, which have drifted (§2). The owner
-   confirms `WALG_S3_PREFIX` = `s3://crypto-topup-test/staging-mt-20260928` and the Sepolia
-   provider URLs before merge.
+1. The values for `deploy/environments/phala-network/staging/` are the current `staging`
+   Environment values (owner decision). They match the compose attested by run 36670873413; the
+   §11 diff shows any transcription error.
 2. Merge, run Release images (the binary changed), and Deploy `upgrade` with that release.
    - Kept: the sealed names, the volume names (`dstack_*`), the app id, and the domain.
    - The compose hash changes, as with any upgrade.
@@ -368,9 +370,9 @@ review would put the live staging migration and a new distribution model at risk
   `-p dstack` for CVM output, and `validate-compose.sh` asserts `dstack_pgdata`.
 - **Moving validation into Rust** changes where errors surface (`topup config check` rather than
   bash). The rules are carried over one for one, with tests.
-- **Staging drift** (§2): the committed values must be the attested ones, or the upgrade would
-  silently change the backup prefix or the RPC endpoints. Step 1 of the migration guards this, and
-  the §11 diff shows it.
+- **Transcription**: the committed staging values must equal the Environment's, or the upgrade
+  would change the backup prefix or the RPC endpoints. The §11 diff against the last attested
+  compose shows any difference before the upgrade.
 
 ## 13. What stays, and why
 
