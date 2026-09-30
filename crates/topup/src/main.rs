@@ -763,11 +763,14 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         })
     });
     tasks.spawn("backup monitor", topup::observability::monitor_backup);
-    // Housekeeping only, so it runs while frozen too: a claim replaces an expired key itself.
+    // The freeze keeps the restored state as it is; pruning waits, and a claim replaces an
+    // expired key itself meanwhile.
     let idempotency_pruner =
         topup::api::IdempotencyKeyPruner::new(pool.clone(), IDEMPOTENCY_PRUNE_INTERVAL);
-    tasks.spawn("idempotency key pruner", |cancellation| async move {
-        idempotency_pruner.run(cancellation).await;
+    tasks.spawn("idempotency key pruner", |cancellation| {
+        after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
+            idempotency_pruner.run(cancellation).await;
+        })
     });
     let expiry_worker =
         topup::locks::ExpiryWorker::new(pool.clone(), Arc::clone(&routes), Duration::from_secs(5));
