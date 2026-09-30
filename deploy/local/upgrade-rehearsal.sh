@@ -349,7 +349,7 @@ deploy_chain "$base_rpc_url" base-sepolia 84532
 up old
 wait_for "the old service's /healthz" 150 healthy
 assert_running old "$old_topup" "$old_postgres"
-echo "ok: the old deployment serves /healthz"
+echo "ok: the old deployment serves /healthz, every service on the old image and its configuration"
 
 echo "== committing real data through the API"
 jq -cjn '{name: "upgrade-rehearsal", contact: {name: "Rehearsal", email: "rehearsal@example.com"},
@@ -377,32 +377,38 @@ quote=$(jq -er .id "$tmp/quote.json")
 echo "ok: account $account, its key, webhook endpoint, treasury, deposit address $deposit_address, and quote $quote"
 
 # evidence FILE: what must survive the upgrade.
+# Each value is read on its own line, so a failed query or request fails the rehearsal instead of
+# recording an empty value on both sides.
 evidence() {
-    local side key_digests
+    local side system timeline migrations rows key_digests webhook_keys address quote_json identity
     side=$(<"$tmp/cvm/.side")
+    system=$(psql_value 'SELECT system_identifier FROM pg_control_system()')
+    timeline=$(psql_value 'SELECT timeline_id FROM pg_control_checkpoint()')
+    migrations=$(psql_value "SELECT max(version) || ':' || count(*) FROM _sqlx_migrations WHERE success")
+    rows=$(psql_value "SELECT string_agg(t || '=' || n, ',' ORDER BY t) FROM (
+        SELECT 'accounts' t, string_agg(id::text, ' ' ORDER BY id) n FROM accounts
+        UNION ALL SELECT 'api_keys', string_agg(id::text, ' ' ORDER BY id) FROM api_keys
+        UNION ALL SELECT 'treasuries', string_agg(id::text, ' ' ORDER BY id) FROM treasuries
+        UNION ALL SELECT 'webhook_endpoints', string_agg(id::text, ' ' ORDER BY id) FROM webhook_endpoints
+        UNION ALL SELECT 'deposit_addresses', string_agg(id::text, ' ' ORDER BY id) FROM deposit_addresses
+        UNION ALL SELECT 'quotes', string_agg(id::text, ' ' ORDER BY id) FROM quotes) r")
     # PostgreSQL mounts all three key volumes; the distroless `keys` image has no sha256sum.
     key_digests=$(dc "$side" exec -T postgres sha256sum /run/wal-g/backup.key \
         /run/db-owner/postgres.pgpass /run/db-app/topup_service.pgpass | awk '{ print $1 }' |
         paste -sd, -)
-    jq -n \
-        --arg system "$(psql_value 'SELECT system_identifier FROM pg_control_system()')" \
-        --arg timeline "$(psql_value 'SELECT timeline_id FROM pg_control_checkpoint()')" \
-        --arg migrations "$(psql_value 'SELECT max(version) || ":" || count(*) FROM _sqlx_migrations WHERE success')" \
-        --arg rows "$(psql_value "SELECT string_agg(t || '=' || n, ',' ORDER BY t) FROM (
-            SELECT 'accounts' t, string_agg(id::text, ' ' ORDER BY id) n FROM accounts
-            UNION ALL SELECT 'api_keys', string_agg(id::text, ' ' ORDER BY id) FROM api_keys
-            UNION ALL SELECT 'treasuries', string_agg(id::text, ' ' ORDER BY id) FROM treasuries
-            UNION ALL SELECT 'webhook_endpoints', string_agg(id::text, ' ' ORDER BY id) FROM webhook_endpoints
-            UNION ALL SELECT 'deposit_addresses', string_agg(id::text, ' ' ORDER BY id) FROM deposit_addresses
-            UNION ALL SELECT 'quotes', string_agg(id::text, ' ' ORDER BY id) FROM quotes) r")" \
-        --arg keys "$key_digests" \
-        --argjson webhook_keys "$(merchant GET "/v1/attestation?nonce=00ff" | jq -c .webhook_keys)" \
-        --argjson deposit_address "$(merchant GET "/v1/deposit_addresses/$deposit_address" |
-            jq -c '{address, networks, salt, client_secret}')" \
-        --argjson quote "$(merchant GET "/v1/quotes/$quote" | jq -c '{address, amount_atomic, exchange_rate, expires_at, client_secret}')" \
-        --argjson identity "$(dc "$side" exec -T topup topup attest --nonce 00 --account "$account" |
-            jq -c '{app_id, webhook_keys}')" \
-        '$ARGS.named' >"$1"
+    webhook_keys=$(merchant GET "/v1/attestation?nonce=00ff" | jq -ce .webhook_keys)
+    address=$(merchant GET "/v1/deposit_addresses/$deposit_address" |
+        jq -c '{address, networks, salt, client_secret}')
+    quote_json=$(merchant GET "/v1/quotes/$quote" |
+        jq -c '{address, amount_atomic, exchange_rate, expires_at, client_secret}')
+    identity=$(dc "$side" exec -T topup topup attest --nonce 00 --account "$account" |
+        jq -c '{app_id, webhook_keys}')
+    [[ -n "$system" && -n "$timeline" && "$migrations" =~ ^[0-9]+:[0-9]+$ && -n "$rows" ]] ||
+        die "$side: the database evidence is incomplete"
+    jq -n --arg system "$system" --arg timeline "$timeline" --arg migrations "$migrations" \
+        --arg rows "$rows" --arg keys "$key_digests" --argjson webhook_keys "$webhook_keys" \
+        --argjson deposit_address "$address" --argjson quote "$quote_json" \
+        --argjson identity "$identity" '$ARGS.named' >"$1"
 }
 evidence "$tmp/before.json"
 jq . "$tmp/before.json"
