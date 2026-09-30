@@ -14,7 +14,7 @@ x-service-build: &service-build
   dockerfile: Dockerfile
   args:
     SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-0}
-    CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-}
+    BUILD_JOBS: ${CARGO_BUILD_JOBS:-}
 
 include:
   - local/s3.compose.yml

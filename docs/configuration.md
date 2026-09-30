@@ -65,6 +65,7 @@ routes:                                    # every enabled route version, as rou
 
 `topup config check` refuses a file that the service would refuse, without reading a secret. That
 includes:
+
 - an invalid origin or admin key;
 - a route that fails validation, or routes that disagree on a chain;
 - a provider a route names but the file does not configure, or one no route names;

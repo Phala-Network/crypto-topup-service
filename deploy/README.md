@@ -143,6 +143,7 @@ drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) accounts 
 
 The CVM's encrypted env holds exactly the rendered compose's sealed names, its `${NAME:-}`
 references, which are also its `allowed_envs`:
+
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the object store's token (declared in
   [compose.yaml](compose.yaml));
 - `SENTRY_DSN`, which may be empty to turn Sentry off;
@@ -251,6 +252,7 @@ before naming one first. Provider B never reads logs, only receipts, heads (`lat
 `finalized`), nonces, and calls.
 
 `topup config check` requires:
+
 - every provider a route names in `rpc_providers`, and no other;
 - each provider on one chain;
 - each route's providers at different URLs;
@@ -262,6 +264,7 @@ provider to report the chain of every route that names it, with the route's cont
 on it.
 
 **Adding a chain** is configuration, in one PR and one Deploy `upgrade`:
+
 1. Add its routes to `topup.yaml`
    ([self-hosting, "Routes and contracts"](../docs/self-hosting.md#3-routes-and-contracts)), with
    `chain.rpc_providers` naming two new ids and those ids in `rpc_providers`.

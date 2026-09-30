@@ -120,6 +120,7 @@ deploy/
 ```
 
 Deleted:
+
 - `docker-compose.yml`, `render-compose.sh`, `render-app-compose.sh`, `app-compose.example.json`.
 - `staging.env.example` and `product/staging.env.example`: the sealed names come from the
   artifact.
@@ -208,6 +209,7 @@ is a lowercase host name. `--origin` is an `https://` origin, restore-check only
 `--project-name` is for local rehearsals only; the CVM's project is `dstack`.
 
 Verified on v2.26.0 and v5.5.1:
+
 - `--no-interpolate` keeps `${S:-}` and `$$`;
 - `!reset null` removes a service;
 - an inactive-profile service stays in the output, with its `profiles:`;
@@ -251,6 +253,7 @@ data.
 | `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`, `TOPUP_ORIGIN`, `PRODUCT_PUBLIC_URL` | GitHub vars and derivations | the product overlay's `DOMAIN` and literal values in `config.json` |
 
 After the change:
+
 - The `${…}` names in the service artifact go from 23 to 5, the secrets only.
 - GitHub Environment variables go from 13 (+3 optional) to 3.
 - The fixed environment variables `topup` reads go from 15 to 2 (`DATABASE_URL`, `SENTRY_DSN`),
@@ -416,6 +419,7 @@ it, so recreation is about container identity, not uptime. §11 measures the act
 8. **A restore after the cutover** uses `RESTORE_AWS_*` in its env file (`RESTORE.md`).
 
 **Self-hosters (forks):**
+
 1. Copy `deploy/environments/example/` to `deploy/environments/<owner>/<env>/`.
 2. Fill it with the values from their GitHub variables, and move each keyed provider's key name
    into the overlay.
@@ -428,6 +432,7 @@ service compose, with `topup.yaml` as an inline config filled from the template'
 ## 10. Self-hosting without a fork
 
 **In this PR**:
+
 - `render.sh` and preflight accept any environment directory;
 - the example environment;
 - keyed providers' secret names in the overlay;
@@ -438,6 +443,7 @@ service compose, with `topup.yaml` as an inline config filled from the template'
     reproducible.
 
 **Follow-up**:
+
 - versioned releases (tags and notes);
 - a deploy kit consumed at a tag: the composes, `render.sh`, and a reusable `workflow_call` Deploy
   or a small CLI;
@@ -492,6 +498,7 @@ TLS evidence needs a real CVM and domain. Deploy verifies it on the staging cuto
 rehearsal asserts that the `ingress_certs` volume is unchanged.
 
 **Other checks:**
+
 - **Behavioural equivalence.** Render the old staging artifact with run 36670873413's inputs and
   the new one with the same images and gateway. Normalize both with the pinned Compose, then diff.
   Every difference is listed and explained in the PR.

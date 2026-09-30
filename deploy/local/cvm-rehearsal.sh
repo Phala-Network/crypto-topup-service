@@ -171,7 +171,7 @@ publish() {
     local tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
     shift 2
     docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-        --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" \
+        --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" \
         >/dev/null
     local_images+=("$tag")
     docker push --quiet "$tag" >/dev/null

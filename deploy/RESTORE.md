@@ -350,6 +350,7 @@ local object storage: `controlled` forces a WAL switch and requires the last mar
 wrong key fails the restore command (`126`). Then they boot the whole restore-check variant on an
 empty volume, with its read-only `RESTORE_AWS_*` credentials while the live read-write names stay in
 its environment. They require:
+
 - PostgreSQL using only the read-only credentials;
 - promotion with archiving off;
 - no heartbeat, backup, egress, or ingress running;

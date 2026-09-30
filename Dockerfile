@@ -4,7 +4,7 @@ ARG SOURCE_DATE_EPOCH=0
 # The commit the image is built from, compiled in as the Sentry release (unset: none).
 ARG SOURCE_COMMIT=""
 # Bounds the compiler's parallelism on a shared host; the binary does not depend on it.
-ARG CARGO_BUILD_JOBS=""
+ARG BUILD_JOBS=""
 ENV CARGO_INCREMENTAL=0 \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
@@ -14,7 +14,7 @@ COPY .sqlx ./.sqlx
 COPY crates ./crates
 RUN SQLX_OFFLINE=true SOURCE_COMMIT="$SOURCE_COMMIT" \
     RUSTFLAGS="--remap-path-prefix=/workspace=. -C link-arg=-Wl,--build-id=none" \
-    cargo build --release --locked -p topup ${CARGO_BUILD_JOBS:+--jobs "$CARGO_BUILD_JOBS"}
+    cargo build --release --locked -p topup ${BUILD_JOBS:+--jobs "$BUILD_JOBS"}
 
 # Stripe's smokescreen, the webhook egress proxy (docs/design/multi-tenant.md §8), which the
 # compose runs from this image as the `smokescreen` sidecar, so it is pinned and attested with
