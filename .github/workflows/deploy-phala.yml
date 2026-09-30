@@ -1,12 +1,10 @@
 name: Deploy Phala's instance
 
-# Phala's own deployments (deploy/phala.md): the reusable Deploy workflow with a release's
-# verified kit and images, and this repository's committed environment directory
-# deploy/environments/phala-network/<Environment>/<target>. Unlike an operator's caller, which
-# pins Deploy at the release, a local `uses:` cannot name a release: the Deploy workflow is this
-# repository's main (which must include the release), while the kit, the images, and every script
-# a run executes are the chosen `version`'s (deploy/README.md, "Deploy"). Dispatched from main by
-# a user with write access; see deploy.yml for what a run checks and does.
+# Phala's own deployments (deploy/phala.md), exactly as an operator's: Deploy called at the release
+# Phala runs, with this repository's committed environment directory
+# deploy/environments/phala-network/<Environment>/<target>. Adopting a new release is a pull
+# request that changes the release in both places below. Dispatched from main by a user with write
+# access; see deploy.yml for what a run checks and does.
 
 on:
   workflow_dispatch:
@@ -26,10 +24,6 @@ on:
         type: choice
         options: [provision, upgrade]
         required: true
-      version:
-        description: "The release to deploy, v<version> (Releases)"
-        type: string
-        required: true
 
 permissions:
   contents: read
@@ -37,11 +31,10 @@ permissions:
 
 jobs:
   deploy:
-    uses: ./.github/workflows/deploy.yml
+    uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@v0.3.0
     with:
-      version: ${{ inputs.version }}
+      version: v0.3.0
       environment: ${{ inputs.environment }}
       target: ${{ inputs.target }}
       mode: ${{ inputs.mode }}
       environment_dir: deploy/environments/phala-network/${{ inputs.environment }}/${{ inputs.target }}
-    secrets: inherit

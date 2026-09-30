@@ -8,10 +8,10 @@ set -eu
 # EXPECTED_COMPOSE byte for byte. Then the compose's own policy for VARIANT (`service`,
 # `restore-check`, or `template` for topup, `product` for the reference product):
 # deploy/compose-policy.jq, and allowed_envs exactly the compose's `${NAME:-}` names. The app-compose's
-# pre_launch_script, which the guest sources before `docker compose up` and which could change what
-# runs, must be absent or one of the reviewed scripts of deploy/pre-launch-scripts.json, by SHA-256.
-# The template's DSTACK_APP_DOMAIN is not an allowed env: the reviewed pre-launch script exports it
-# from the app id and the gateway domain.
+# pre_launch_script, which the guest sources before `docker compose up`, must be byte for byte the
+# reviewed deploy/phala-cloud-pre-launch.sh that Deploy sends (`--pre-launch-script`). The
+# template's DSTACK_APP_DOMAIN is not an allowed env: that script exports it from the app id and the
+# gateway domain.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
 # and the app-compose). INFO_JSON is the guest agent's public `GET /prpc/Info` on port 8090 (the
@@ -67,19 +67,11 @@ jq -r '"dstack verifier: quote and TCB \(.details.tcb_status), RTMR3 event log, 
     "attested compose hash: 0x\(.details.app_info.compose_hash)"' "$tmp/result.json"
 
 jq -e 'type == "object"' "$tmp/app-compose.json" >/dev/null
-if jq -e 'has("pre_launch_script")' "$tmp/app-compose.json" >/dev/null; then
-    jq -j '.pre_launch_script' "$tmp/app-compose.json" >"$tmp/pre-launch.sh"
-    pre_launch=$(sha256sum "$tmp/pre-launch.sh" | awk '{print $1}')
-    name=$(jq -r --arg sha256 "$pre_launch" '.scripts[] | select(.sha256 == $sha256) | .name' \
-        "$root/deploy/pre-launch-scripts.json")
-    [ -n "$name" ] || {
-        echo "the attested pre_launch_script (sha256 $pre_launch) is not a reviewed script of deploy/pre-launch-scripts.json" >&2
-        exit 1
-    }
-    echo "attested pre-launch script: $name"
-else
-    echo "attested pre-launch script: none"
-fi
+jq -j '.pre_launch_script // ""' "$tmp/app-compose.json" >"$tmp/pre-launch.sh"
+cmp -s "$tmp/pre-launch.sh" "$root/deploy/phala-cloud-pre-launch.sh" || {
+    echo "the attested pre_launch_script is not deploy/phala-cloud-pre-launch.sh" >&2
+    exit 1
+}
 jq -jer '.docker_compose_file | select(type == "string" and length > 0)' \
     "$tmp/app-compose.json" >"$tmp/docker-compose.yml"
 cmp -s "$expected_compose" "$tmp/docker-compose.yml" || {

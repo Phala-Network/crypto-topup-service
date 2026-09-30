@@ -74,7 +74,8 @@ of them. In order:
 
 1. **Release.** Pick the release to deploy, or cut one from `main`
    ([Releasing the service](../CONTRIBUTING.md#releasing-the-service)); a candidate for staging
-   only is a pre-release, `v<version>-rc.N`.
+   only is a pre-release, `v<version>-rc.N`. Adopt it by a pull request that sets it in
+   [deploy-phala.yml](../.github/workflows/deploy-phala.yml).
 2. **Factory on Sepolia: done.** The factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its
    implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified
    ([Contracts](README.md#contracts)); confirm Verify contracts is green.
@@ -87,7 +88,7 @@ of them. In order:
    since moved to the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`, the same address
    (SafeL2 v1.4.1, 1-of-1, the same fallback handler) on Sepolia and Base Sepolia. Never use
    `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is destroyed.
-4. **Stop the old service.** `npx --yes phala@1.1.22 cvms stop "$TOPUP_CVM_ID"` and the same for
+4. **Stop the old service.** `deploy/phala cvms stop "$TOPUP_CVM_ID"` and the same for
    `$STAGING_PRODUCT_CVM_ID`. Keep both CVMs and the old backup prefix for the retention period: they
    restore only with a release from before the reset. Record their ids.
 5. **Point staging at an empty database.** Merge a PR setting `WALG_S3_PREFIX` in
@@ -96,12 +97,11 @@ of them. In order:
    backup, [RESTORE.md](RESTORE.md#bootstrap-from-backup)); clear `TOPUP_CVM_ID` and
    `STAGING_PRODUCT_CVM_ID`.
 6. **Provision the service.** Run Deploy Phala's instance
-   ([deploy-phala.yml](../.github/workflows/deploy-phala.yml): `staging`, `topup`, `provision`,
-   `version` the release of step 1); set `TOPUP_CVM_ID` to the new id;
+   ([deploy-phala.yml](../.github/workflows/deploy-phala.yml): `staging`, `topup`, `provision`);
+   set `TOPUP_CVM_ID` to the new id;
    [seal the secrets](README.md#sealing-the-secrets); update the
    [DNS records](README.md#custom-domain) the summary lists (the CNAME to the new gateway, the
-   `_dstack-app-address` TXT to the new instance); then run it with `upgrade` and the same
-   `version`, which waits for `/healthz` and verifies the attestation and the certificate evidence.
+   `_dstack-app-address` TXT to the new instance); then run it with `upgrade`, which waits for `/healthz` and verifies the attestation and the certificate evidence.
    The new app id derives new webhook keys for every account.
 7. **Verify** the attestation from your machine ([Attestation](README.md#attestation-ingress-and-egress)) and
    that `GET /v1/config` with any test key lists the Sepolia assets with `confirmations` 2 (the
@@ -116,7 +116,7 @@ of them. In order:
    webhook endpoint.
 10. **Run one deposit** of each collection method ([Staging reference product](#staging-reference-product),
     step 5) and one [sweep](README.md#sweeping) from the treasury Safe; confirm `swept` and the daily report.
-11. **Retire the old CVMs** once the new service has run clean for a day: `npx --yes phala@1.1.22
+11. **Retire the old CVMs** once the new service has run clean for a day: `deploy/phala
     cvms delete "$OLD_CVM_ID" --force` for each, by the recorded id (never by name or app id); delete the old backup prefix only at the end of its retention.
 
 ## Staging reference product
@@ -264,11 +264,10 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
    setting the product config's `account` in
    [config.json](environments/phala-network/staging/product/config.json) to the new `acct_…` id,
    and merge it.
-4. Run Deploy Phala's instance (`staging`, target `product`, `provision`, the `version` staging's
-   `topup` runs), set `STAGING_PRODUCT_CVM_ID`, create the
+4. Run Deploy Phala's instance (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
    [DNS records](README.md#custom-domain) for `$PRODUCT_DOMAIN` the summary lists, seal `.env.product`
    holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and run it with
-   `upgrade` and the same `version`, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
+   `upgrade`, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
    the certificate evidence. Then, with the secret key, register the product's endpoint:
    `POST /v1/webhook_endpoints {"url": "<public_url>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.

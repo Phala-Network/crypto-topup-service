@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Phala Cloud CVM steps of .github/workflows/deploy.yml, with the pinned CLI (Phala Cloud CLI
-# 1.1.22; PHALA_CLOUD_API_KEY and PHALA_CLOUD_DIR come from the environment).
+# Phala Cloud CVM steps of .github/workflows/deploy.yml, with the locked CLI (deploy/phala: Phala
+# Cloud CLI 1.1.22; PHALA_CLOUD_API_KEY and PHALA_CLOUD_DIR come from the environment).
 #
 # Usage:
 #   deploy/phala-cvm.sh get CVM_ID >cvm.json
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 phala() {
-    npx --yes phala@1.1.22 "$@"
+    "$(dirname -- "$0")/phala" "$@"
 }
 
 # The compose hash of a `cvms get` or attestation document: lowercase hex without 0x.

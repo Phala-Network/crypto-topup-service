@@ -100,65 +100,50 @@ through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workfl
 
 A release is a `v<version>` tag of Phala Pay on a commit of `main`, the Cargo workspace version
 ([CONTRIBUTING.md, "Releasing the service"](../CONTRIBUTING.md#releasing-the-service)).
+**Prerequisites (repository settings, HUMAN-ONLY, admin; both in place):** a `refs/tags/v*`
+ruleset restricting creation, update, and deletion to admins, and immutable releases, so a
+published `v<version>` always names the same commit and assets.
 
-**Prerequisites (repository settings, HUMAN-ONLY, admin).** Both are in place for Phala Pay:
+The tag runs [Release](../.github/workflows/release.yml). It runs the whole CI workflow on the
+commit first, then builds each image on its own GitHub-hosted runner with
+[verify-image.sh](verify-image.sh) (Buildx v0.37.1 and BuildKit v0.33.0 pinned by digest; `make
+verify-image` rebuilds the same way), pushes it to `ghcr.io/phala-network/` tagged `v<version>`
+(public packages: CVMs pull without credentials), and attests its build provenance.
+`phala-pay` and `phala-pay-reference-product` are reproducible: the pushed build must have the
+digest of an earlier build, and anyone rebuilds it from the tag. `postgres-walg` is not (apt and
+dpkg timestamps): it has provenance only. The GitHub release's assets, each attested, are:
 
-- A tag ruleset for `refs/tags/v*` restricting creation, update, and deletion, with only
-  repository admins able to bypass it: only an admin pushes a release tag, and nobody moves one.
-- Immutable releases: once published, a release's assets and its tag cannot be changed or
-  deleted, so `v<version>` always names the same attested files.
+- `images.json`, each image's `repository@sha256` by name ([render.sh](render.sh)'s `--images`);
+- the deploy kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): `LICENSE`,
+  `deploy/`, and `docs/` of the tag, a tar identical to their `git archive`);
+- `phala-cloud-template.yml` ([The Phala Cloud template variant](#the-phala-cloud-template-variant));
+- `SHA256SUMS`.
 
-The tag runs [Release](../.github/workflows/release.yml):
-
-- It first waits for every check that `main`'s ruleset requires to pass on the tagged commit, and
-  refuses a tag that is not a commit of `main` or does not name the version.
-- On GitHub-hosted runners, one per image, it builds `phala-pay`, `postgres-walg`, and
-  `phala-pay-reference-product`, checks that `phala-pay` and the reference product build bit for
-  bit twice, pushes them to `ghcr.io/phala-network/` tagged `v<version>` (public packages: CVMs
-  pull without credentials), and creates a GitHub build provenance attestation for each digest.
-  `postgres-walg` is not bit-for-bit reproducible (apt and dpkg timestamps). The same two-build
-  check runs locally without pushing: `make verify-image`.
-- It publishes the GitHub release with four assets, each attested: `images.json` (the
-  `repository@sha256` references by image name, [render.sh](render.sh)'s `--images`); the deploy
-  kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): the tag's composes,
-  `render.sh`, the policy, preflight, the verifiers, the example environments, and the operator
-  documentation, at their repository paths, in a tar identical to `git archive` of the tag);
-  `phala-cloud-template.yml` ([The Phala Cloud template variant](#the-phala-cloud-template-variant));
-  and `SHA256SUMS`. Before it publishes, the kit renders the example environment and Phala's with
-  the images.
-
-Every attestation's signing certificate names exactly
-`https://github.com/Phala-Network/phala-pay/.github/workflows/release.yml@refs/tags/v<version>`, a
-GitHub-hosted runner, and the tagged commit. Operators verify a release with `gh attestation
-verify --cert-identity` of that name and `--deny-self-hosted-runners`
-([self-hosting, "Verify a release"](../docs/self-hosting.md#verify-a-release)); Deploy verifies it
-again on every run. A pre-release (`v<version>-rc.N`) is a candidate for Phala's staging.
+[verify-release.sh](verify-release.sh) is the one verification of a release, run by Deploy and by
+hand ([self-hosting, "Verify a release"](../docs/self-hosting.md#verify-a-release)). It stops at
+the first failure: the tag's commit must be in `main`'s history, the assets must match
+`SHA256SUMS`, and every asset and image must have a provenance attestation of `release.yml` at the
+tag, on a GitHub-hosted runner, for that commit (`gh attestation verify --source-digest`).
 
 ### Deploy
 
 [Deploy](../.github/workflows/deploy.yml) is the source of truth for what a deployment checks and
-does. It is a reusable workflow, called with `secrets: inherit` and `permissions: {contents: read,
-attestations: read}`. Its inputs are `version` (the release), `environment` (the GitHub
-Environment), `target` (`topup`, or `product` for Phala's reference product), `mode` (`provision`
-or `upgrade`), and `environment_dir` (the target's directory in the caller's repository). It:
+does. It is a reusable workflow, which a repository calls at a release, with the same `version`:
 
-- downloads the release's `images.json` and kit, checks `SHA256SUMS`, and verifies the build
-  provenance of both and of every image the target runs: the exact certificate identity above, a
-  GitHub-hosted build, and one source commit for all of them, which must be a commit of Phala
-  Pay's `main` (the compare API);
-- checks that the Deploy workflow running is the release's own (`job.workflow_sha`);
-- renders the directory with the kit, runs preflight, deploys, verifies the attested compose with
-  the official dstack verifier, and uploads the rendered compose and the verification as the run's
-  record. Every script it runs is the kit's.
+```yaml
+uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<release commit or tag>
+```
 
-**Who calls it.** An operator's environment repository calls it at the release, as
-`uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<commit> # v<version>` with
-`version: v<version>`: pin the tag's commit SHA (a tag also works; the ruleset and immutable releases
-keep it in place), and Deploy refuses a workflow whose commit is not the release's. Phala's own
-instance is different: [Deploy Phala's instance](../.github/workflows/deploy-phala.yml) calls
-Deploy from this repository's `main` (a local `uses:` cannot name a release), so the workflow is
-main's while the kit, the images, and every script it runs are the chosen release's; Deploy
-requires main's commit to include the release.
+Its inputs are `version`, `environment` (the GitHub Environment), `target` (`topup`, or `product`
+for Phala's reference product), `mode` (`provision` or `upgrade`), and `environment_dir` (the
+target's directory in the caller's repository). The caller grants `contents: read` and
+`attestations: read` and passes no secret: the job runs in the caller's Environment, whose secret
+`PHALA_CLOUD_API_KEY` is the only one it reads. It runs verify-release.sh of its own commit, which
+must be the release's, then only the verified kit's scripts: render, preflight, the deploy with
+the kit's pre-launch script, and the verification of the attested compose with the official
+dstack verifier; it uploads the rendered compose and the verification as the run's record.
+[Deploy Phala's instance](../.github/workflows/deploy-phala.yml) is Phala's caller, the same
+way; adopting a release is a pull request that changes its release.
 
 1. Merge the change to the environment repository's `main`: a setting, or a new `version`.
 2. First deployment: Deploy with `mode: provision`, then set `TOPUP_CVM_ID` (or, for the product,
@@ -212,7 +197,7 @@ artifact (the provision summary prints these commands):
 docker pull <the compose's phala-pay image>   # --offline pulls nothing; it runs topup config check in it
 kit/deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml \
   --environment-dir ENV/topup --offline      # .env.ENV: mode 0600
-npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.ENV
+kit/deploy/phala envs update "$TOPUP_CVM_ID" -e .env.ENV
 ```
 
 Offline, preflight checks every provider's key against its URL (`topup config check --secrets`)
@@ -253,8 +238,12 @@ kit/deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-pr
 ```
 
 - It merges the stack, the environment overlay, and the variant overlay with
-  `config --no-interpolate`, which keeps the sealed `${NAME:-}` references.
-- It pins each image to the release's digest.
+  `config --no-interpolate`, which keeps the sealed `${NAME:-}` references. The overlay may set
+  only the settings in the table above: the merge with it may differ from the merge without it
+  only in those environment keys, so it can change no image, command, entrypoint, config, mount,
+  port, or service.
+- It pins each image to the release's digest, and every image must then be one of the release's
+  or one the kit pins by digest (dstack-ingress).
 - It inlines each config file (the environment's `topup.yaml`, the PostgreSQL init script) as
   content named after its digest. A changed file therefore changes the definition of exactly the
   services that mount it, and Compose recreates them.
@@ -527,8 +516,8 @@ compose; to re-check a CVM with the deployed release's verified kit in `kit/`, t
 compose, and `PHALA_CLOUD_API_KEY` exported:
 
 ```sh
-npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
-npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
+kit/deploy/phala cvms get "$CVM_ID" --json > cvm.json
+kit/deploy/phala cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
 kit/deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
@@ -548,14 +537,10 @@ requires `allowed_envs` equal to the compose's sealed names, and the variant's
 `dstack-ingress` on 443 (`tls-alpn-01`, forwarding to `topup:8080`, for the host of
 `public_origin`); for the restore-check variant it is `topup` on 8081, with no ingress.
 
-The app-compose also carries Phala Cloud's pre-launch script, which the guest sources before
-`docker compose up` and which could change what runs. It is part of the compose hash, and
-verify-attestation.sh requires it to be absent or one of the reviewed scripts of
-[pre-launch-scripts.json](pre-launch-scripts.json), by SHA-256 (today Phala Cloud's v0.0.20, whose
-source is not published: it was reviewed from the attested app-compose). A new version fails
-verification after the deploy: review the script in the run's `attestation.json`
-(`jq -r '.compose_file | fromjson | .pre_launch_script'`), and add its SHA-256 by pull request and
-a patch release.
+The app-compose also carries a pre-launch script, which the guest sources before `docker compose
+up`. Deploy sends the kit's [phala-cloud-pre-launch.sh](phala-cloud-pre-launch.sh) with
+`--pre-launch-script` (Phala Cloud's own v0.0.20, byte for byte, reviewed from an attested
+app-compose; its source is not published), and verify-attestation.sh requires exactly that file.
 
 An account's webhook keys come only from the nonce-bound attestation, fetched with a secret key of
 that account and mode (merchants run the same check, docs/integration.md §5.3):

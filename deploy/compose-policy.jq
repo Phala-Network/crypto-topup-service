@@ -90,8 +90,6 @@ def common_violations($variant; $project):
               | all; "every volume must be the project's own, named \($project)_<volume>"),
       check([.services[] | .build, .env_file, .extends, .profiles | select(. != null)] == [];
             "no service may build, read an env_file, extend, or carry a profile"),
-      check([.services[] | .environment | env_map | has("TOPUP_OBJECT_STORE_ALLOW_HTTP")] | any | not;
-            "TOPUP_OBJECT_STORE_ALLOW_HTTP is for local stacks only"),
       check([.configs // {} | to_entries[] | (.value.file == null) and (.value.content | type == "string")
               and (.key | test("^[a-z0-9_]+_[0-9a-f]{12}$"))] | all;
             "every config must be inline content named after its digest"),

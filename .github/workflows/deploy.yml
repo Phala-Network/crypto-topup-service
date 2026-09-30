@@ -1,37 +1,39 @@
 name: Deploy
 
-# Provisions or upgrades one CVM on Phala Cloud from a release of Phala-Network/phala-pay
-# (deploy/README.md, "Deploy"): a reusable workflow, called at the release's commit from the
-# operator's environment repository (docs/self-hosting.md), and from Phala Pay's main by Phala's own
-# "Deploy Phala's instance", which deploys the chosen release's kit and images the same way. Target `topup` is the service; target `product` is Phala's staging reference product
-# (deploy/phala.md, "Staging reference product"). Nothing is deployed from a laptop.
+# Provisions or upgrades one CVM on Phala Cloud with a release of Phala-Network/phala-pay
+# (deploy/README.md, "Deploy"). A reusable workflow, called at the release (its tag or commit) with
+# the same `version`, from the operator's environment repository and from Phala's own "Deploy
+# Phala's instance" alike. Target `topup` is the service; target `product` is Phala's staging
+# reference product (deploy/phala.md). Nothing is deployed from a laptop.
 #
-# What it deploys: the release `version`, whose images.json and deploy kit it downloads and
-# verifies against their build provenance attestations (Phala-Network/phala-pay's Release workflow
-# at that tag, on GitHub-hosted runners, from a commit of main), with every image the target runs;
-# this workflow's own commit must be the release's (or, for Phala's caller, main's); and
-# the caller's committed environment directory `environment_dir`, which the kit's render.sh renders
-# with those images and the CVM node's gateway (deploy/README.md, "Attested settings"). A changed
-# setting is a pull request in the caller's repository and a new compose hash, in force only
-# through `upgrade`. Every script it runs is the kit's.
+# It runs deploy/verify-release.sh of its own commit, which must be the release's: the release's
+# commit is in main's history, its assets match SHA256SUMS, and every asset and image has the
+# Release workflow's build provenance for that commit. It then runs only the verified kit's
+# scripts on the caller's committed environment directory `environment_dir`, rendered with the
+# release's images and the CVM node's gateway (deploy/README.md, "Attested settings"), with the
+# kit's reviewed pre-launch script. A changed setting is a pull request in the caller's repository
+# and a new compose hash, in force only through `upgrade`.
 #
 # Controls, in the caller's repository: the job runs only from its `main`, in the GitHub
-# Environment `environment` (deployment branches: `main` only), whose only secret is
-# PHALA_CLOUD_API_KEY (the caller passes `secrets: inherit`). Whoever dispatches a run is
-# accountable for it; the run's attested compose and verifier read-back are the audit trail. The
-# CVM's env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references,
-# which never enter GitHub: `provision` sends them empty, and the owner then seals them from their
-# own machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed
-# env stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
-# (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for it.
+# Environment `environment` (deployment branches: `main` only), whose secret PHALA_CLOUD_API_KEY is
+# the only secret it reads (an Environment secret, available to this job without the caller
+# passing any). Whoever dispatches a run is accountable for it; the run's attested compose and
+# verifier read-back are the audit trail. The CVM's env holds only the owner-sealed secrets, the
+# rendered compose's `${NAME:-}` references, which never enter GitHub: `provision` sends them
+# empty, and the owner then seals them from their own machine (the run summary prints the
+# command); `upgrade` sends no env at all, so the sealed env stays. Each target's public origin is
+# its custom domain, served by dstack-ingress in the CVM (deploy/README.md, "Custom domain"); the
+# summary lists the DNS records the owner creates for it.
 #
-# Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by the
-# kit's deploy/phala-cvm.sh:
+# The kit's deploy/phala runs Phala Cloud CLI 1.1.22 with its dependencies locked (checked against
+# Phala-Network/phala-cloud tag cli-v1.1.22), through deploy/phala-cvm.sh:
 # - Authentication is the PHALA_CLOUD_API_KEY environment variable, which the CLI prefers over a
 #   stored profile; PHALA_CLOUD_DIR points at an empty directory so no profile or API prefix from
 #   the runner's home can be read. The API key belongs to the workspace in vars.PHALA_WORKSPACE.
 # - `--kms phala` selects Phala Cloud's KMS for every CVM (owner decision, deploy/README.md "KMS"):
 #   no DstackApp contract, no provisioner key, and an update applies directly.
+# - `--pre-launch-script` sends the kit's deploy/phala-cloud-pre-launch.sh on provision and
+#   upgrade alike (cli/src/commands/deploy/handler.ts), which verify-attestation.sh then requires.
 # - `deploy --json` ignores `--wait` on a new CVM; this workflow waits by polling `cvms get`.
 #
 # Runner constraints (Phala's org self-hosted runner): a container that drives the host Docker
@@ -43,7 +45,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: "The release to deploy, v<version>: the release whose tag or commit the caller uses this workflow at"
+        description: "The release to deploy, v<version>: the same release the caller calls this workflow at"
         type: string
         required: true
       environment:
@@ -63,7 +65,7 @@ on:
         type: string
         required: true
 
-# attestations: read for `gh attestation verify`; the caller grants both.
+# attestations: read for `gh attestation verify`; the caller's workflow grants both.
 permissions:
   contents: read
   attestations: read
@@ -164,87 +166,34 @@ jobs:
             echo "COMPOSE=$work/$COMPOSE_NAME"
           } >>"$GITHUB_ENV"
 
-      # `gh attestation verify` needs the GitHub CLI 2.49 or later; the pinned one if the runner
-      # has none.
-      - name: Install the GitHub CLI when the runner lacks it
+      # The GitHub CLI Deploy verifies with, pinned by its release checksum.
+      - name: Install the GitHub CLI 2.101.0
         run: |
-          if gh attestation verify --help >/dev/null 2>&1; then
-            gh --version | head -n 1
-            exit 0
-          fi
           version=2.101.0
-          sha256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
           archive="$RUNNER_TEMP/gh.tar.gz"
           curl -fsSL --retry 3 -o "$archive" \
             "https://github.com/cli/cli/releases/download/v$version/gh_${version}_linux_amd64.tar.gz"
-          echo "$sha256  $archive" | sha256sum -c -
+          echo "9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8  $archive" | sha256sum -c -
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/gh_${version}_linux_amd64/bin" >>"$GITHUB_PATH"
 
-      # Only what Phala-Network/phala-pay's Release workflow built from the tag on GitHub-hosted
-      # runners: the assets' checksums and build provenance (the signing certificate's exact
-      # identity, the workflow at refs/tags/<version>), then each image the target runs. Every
-      # attestation must name one source commit, a commit of the release repository's main.
-      - name: Download and verify the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          release="$WORK/release" kit_archive="phala-pay-deploy-$VERSION.tar.gz"
-          gh release download "$VERSION" -R "$RELEASE_REPOSITORY" -D "$release" \
-            -p images.json -p "$kit_archive" -p SHA256SUMS
-          (cd "$release" && sha256sum -c --ignore-missing SHA256SUMS)
-          provenance=(-R "$RELEASE_REPOSITORY" --source-ref "refs/tags/$VERSION" --deny-self-hosted-runners
-            --cert-identity "$GITHUB_SERVER_URL/$RELEASE_REPOSITORY/.github/workflows/release.yml@refs/tags/$VERSION"
-            --format json --jq '.[].verificationResult.signature.certificate.sourceRepositoryDigest')
-          for asset in images.json "$kit_archive"; do
-            gh attestation verify "$release/$asset" "${provenance[@]}" >>"$WORK/commits"
-            echo "verified $asset"
-          done
-          tar -xzf "$release/$kit_archive" -C "$KIT" --strip-components=1
-          digest='^[a-z0-9]+([._/-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$'
-          for name in $IMAGES; do
-            ref=$(jq -er --arg name "$name" '.[$name]' "$release/images.json") ||
-              { echo "::error::the release's images.json has no $name"; exit 1; }
-            [[ "$ref" =~ $digest ]] ||
-              { echo "::error::$name of the release is not repository@sha256:<64 lowercase hex>"; exit 1; }
-            gh attestation verify "oci://$ref" "${provenance[@]}" >>"$WORK/commits"
-            echo "verified $ref"
-          done
-          commit=$(sort -u "$WORK/commits")
-          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] ||
-            { echo "::error::the release's attestations do not name one source commit"; exit 1; }
-          status=$(gh api "repos/$RELEASE_REPOSITORY/compare/$commit...main" --jq .status)
-          [[ "$status" == ahead || "$status" == identical ]] ||
-            { echo "::error::the release's commit $commit is not a commit of $RELEASE_REPOSITORY's main"; exit 1; }
-          echo "RELEASE_COMMIT=$commit" | tee -a "$GITHUB_ENV"
-
-      # The workflow running now must be the release's own: an operator calls it at the release's
-      # tag or its commit SHA, so its commit is the release's. Phala's "Deploy Phala's instance"
-      # calls it from this repository's main, a later commit of the same history.
-      - name: Check that this workflow is the release's
+      # deploy/verify-release.sh of this workflow's own commit verifies the release, whose commit
+      # must then be this workflow's: the caller called Deploy at the release it deploys.
+      - name: Verify the release
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-          WORKFLOW_REF: ${{ job.workflow_ref }}
           WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
-          echo "this workflow: $WORKFLOW_REF ($WORKFLOW_SHA)"
-          [[ "$WORKFLOW_REPOSITORY" == "$RELEASE_REPOSITORY" ]] ||
-            { echo "::error::Deploy must be $RELEASE_REPOSITORY's, not $WORKFLOW_REPOSITORY's"; exit 1; }
-          if [[ "$GITHUB_REPOSITORY" == "$RELEASE_REPOSITORY" ]]; then
-            [[ "$WORKFLOW_REF" == "$RELEASE_REPOSITORY/.github/workflows/deploy.yml@refs/heads/main" ]] ||
-              { echo "::error::$RELEASE_REPOSITORY deploys with its main's Deploy"; exit 1; }
-            status=$(gh api "repos/$RELEASE_REPOSITORY/compare/$RELEASE_COMMIT...$WORKFLOW_SHA" --jq .status)
-            [[ "$status" == ahead || "$status" == identical ]] ||
-              { echo "::error::main's Deploy ($WORKFLOW_SHA) is older than the release $VERSION"; exit 1; }
-          else
-            [[ "$WORKFLOW_SHA" == "$RELEASE_COMMIT" ]] || {
-              echo "::error::call Deploy at the release you deploy: uses: ...deploy.yml@$VERSION (or its commit, $RELEASE_COMMIT), not $WORKFLOW_REF"
-              exit 1
-            }
-            [[ "$WORKFLOW_REF" == *"@refs/tags/$VERSION" || "$WORKFLOW_REF" == *"@$RELEASE_COMMIT" ]] ||
-              { echo "::error::call Deploy at refs/tags/$VERSION or $RELEASE_COMMIT, not $WORKFLOW_REF"; exit 1; }
-          fi
+          [[ "$WORKFLOW_REPOSITORY" == Phala-Network/phala-pay && "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "::error::Deploy must be Phala-Network/phala-pay's, called at a release"; exit 1; }
+          gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/$WORKFLOW_REPOSITORY/contents/deploy/verify-release.sh?ref=$WORKFLOW_SHA" \
+            >"$WORK/verify-release.sh"
+          commit=$(bash "$WORK/verify-release.sh" "$VERSION" "$WORK/release")
+          [[ "$commit" == "$WORKFLOW_SHA" ]] ||
+            { echo "::error::Deploy runs at $WORKFLOW_SHA, not $VERSION's commit $commit: call it at $VERSION"; exit 1; }
+          tar -xzf "$WORK/release/phala-pay-deploy-$VERSION.tar.gz" -C "$KIT" --strip-components=1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -252,6 +201,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
+      - name: Install the kit's locked Phala Cloud CLI
+        run: npm ci --prefix "$KIT/deploy/tools" --ignore-scripts --no-audit --no-fund
       # cast, for preflight's chain checks.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
@@ -324,6 +275,7 @@ jobs:
             "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy.json" \
               --name "$CVM_NAME" \
               --compose "$COMPOSE" \
+              --pre-launch-script "$KIT/deploy/phala-cloud-pre-launch.sh" \
               -e "$ENV_FILE" \
               --instance-type "$INSTANCE_TYPE" \
               --fs ext4 \
@@ -341,6 +293,7 @@ jobs:
             "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy.json" \
               --cvm-id "$EXISTING_CVM_ID" \
               --compose "$COMPOSE" \
+              --pre-launch-script "$KIT/deploy/phala-cloud-pre-launch.sh" \
               --no-public-logs \
               --no-public-sysinfo \
               --wait
@@ -392,6 +345,7 @@ jobs:
           "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy-public-url.json" \
             --cvm-id "$CVM_ID" \
             --compose "$COMPOSE" \
+            --pre-launch-script "$KIT/deploy/phala-cloud-pre-launch.sh" \
             --no-public-logs \
             --no-public-sysinfo \
             --wait
@@ -463,7 +417,7 @@ jobs:
         run: |
           compose_json=$("$("$KIT/deploy/pinned-compose.sh")" -f "$COMPOSE" config --no-interpolate --format json)
           names=$(cut -d= -f1 "$ENV_FILE" | awk '{ printf "%s`%s`", (count++ ? ", " : ""), $0 }')
-          kit_preflight=phala-pay-deploy-$VERSION/${PREFLIGHT#"$KIT/"}
+          kit_preflight=kit/${PREFLIGHT#"$KIT/"}
           {
             if [[ "$TARGET" == topup ]]; then
               owner_env=.env.$DEPLOY_ENVIRONMENT
@@ -484,14 +438,15 @@ jobs:
               echo "the account API answers 503. From your own machine, write \`$owner_env\` with the"
               echo "single line \`PRODUCT_API_KEY=<the account's restricted ppay_rk_test_ key>\` (mode 0600)."
             fi
-            echo "With the verified kit of \`$VERSION\` extracted beside a checkout of \`$GITHUB_SHA\`, and"
-            echo "\`$COMPOSE_NAME\` from this run's artifact (preflight --offline checks the configuration"
-            echo "in the pinned image, pulled first):"
+            echo "In a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact and the"
+            echo "release's kit in \`kit/\` (docs/self-hosting.md, \"Verify a release\"; preflight --offline"
+            echo "checks the configuration in the pinned image, pulled first):"
             echo
             echo '```sh'
+            echo "npm ci --prefix kit/deploy/tools --ignore-scripts"
             echo "docker pull $image"
             echo "$kit_preflight --env $owner_env --compose $COMPOSE_NAME --environment-dir $ENVIRONMENT_DIR --offline"
-            echo "npx --yes phala@1.1.22 envs update $CVM_ID -e $owner_env"
+            echo "kit/deploy/phala envs update $CVM_ID -e $owner_env"
             echo '```'
             if [[ "$TARGET" == topup ]]; then
               prefix=$(jq -r '.services.postgres.environment.WALG_S3_PREFIX' <<<"$compose_json")

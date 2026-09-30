@@ -52,7 +52,7 @@ check_anonymous_pulls() {
 check_phala_cloud() {
     local workspace=$1 os_image=$2 phala version current count offering
     echo "== Phala Cloud (read-only)"
-    read -r -a phala <<<"${PHALA:-npx --yes phala@1.1.22}"
+    read -r -a phala <<<"${PHALA:-$REPO_ROOT/deploy/phala}"
     version=$("${phala[@]}" --version 2>"$tmp/phala.err") || version="error: $(tool_error "$tmp/phala.err")"
     [[ "$version" == v1.1.22* || "$version" == 1.1.22* ]] ||
         fail "the Phala CLI is $version; these steps are verified against 1.1.22"

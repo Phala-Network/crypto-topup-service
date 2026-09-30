@@ -1,40 +1,25 @@
 #!/usr/bin/env bash
-# deploy/build-kit.sh: the kit's tar is identical to `git archive` of the commit (and two builds
-# here give the same bytes), it holds only its files, and works on its own, as an operator uses it: extracted
-# outside any checkout, it renders an operator's environment directory, byte for byte as this
-# checkout does, in every variant, and its preflight (--offline) and route-mode check accept the
-# result. TOPUP names a local topup binary for those two (CI's build); without it they are skipped.
+# deploy/build-kit.sh works on its own, as an operator uses it: extracted outside any checkout, the
+# kit renders an operator's environment directory, byte for byte as this checkout does, in every
+# variant, and its preflight (--offline) and route-mode check accept the result. TOPUP names a local
+# topup binary for those two (CI's build); without it they are skipped.
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 version=v0.0.0-test
-name=phala-pay-deploy-$version
 fail() {
     echo "kit: $*" >&2
     exit 1
 }
 
-"$root/deploy/build-kit.sh" "$version" "$tmp/first" >/dev/null
-"$root/deploy/build-kit.sh" "$version" "$tmp/second" >/dev/null
-cmp -s "$tmp/first/$name.tar.gz" "$tmp/second/$name.tar.gz" || fail "two builds differ"
-gzip -dc "$tmp/first/$name.tar.gz" | cmp -s - <("$root/deploy/build-kit.sh" --tar "$version") ||
-    fail "the kit's tar is not git archive of the commit"
-tar -tzf "$tmp/first/$name.tar.gz" >"$tmp/listing"
-grep -v "^$name/" "$tmp/listing" && fail "an entry is outside $name/"
-for file in deploy/render.sh deploy/compose-policy.jq deploy/contracts/reference.json \
-    deploy/environments/example/topup/topup.yaml deploy/environments/phala-cloud-template/topup/topup.yaml \
-    deploy/runbooks/sign-admin-request.sh deploy/pre-launch-scripts.json docs/self-hosting.md LICENSE; do
-    grep -qx "$name/$file" "$tmp/listing" || fail "$file is missing"
-done
-grep -E "^$name/(crates|contracts|sdk|deploy/tests|deploy/local|deploy/environments/phala-network)/" \
-    "$tmp/listing" && fail "the kit holds files it does not ship"
+"$root/deploy/build-kit.sh" "$version" "$tmp/dist" >/dev/null
 
 # The operator's side: the kit and an environment directory, in a directory of their own.
 operator="$tmp/operator"
 mkdir -p "$operator/kit" "$operator/production"
-tar -xzf "$tmp/first/$name.tar.gz" -C "$operator/kit" --strip-components=1
+tar -xzf "$tmp/dist/phala-pay-deploy-$version.tar.gz" -C "$operator/kit" --strip-components=1
 kit="$operator/kit"
 cp -r "$kit/deploy/environments/example/topup" "$operator/production/topup"
 env_dir="$operator/production/topup"

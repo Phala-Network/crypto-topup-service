@@ -244,24 +244,24 @@ never a commit ([deploy/README.md, "Releases"](deploy/README.md#releases)).
    [<version>]: https://github.com/Phala-Network/phala-pay/releases/tag/v<version>
    ```
 
-2. After it merges, a repository admin tags the merge commit on `main` (the `refs/tags/v*`
-   ruleset lets only admins create, move, or delete these tags, and releases are immutable once
-   published):
+2. After it merges, a repository admin tags the merge commit on `main` (only admins may create,
+   move, or delete `v*` tags, and a published release is immutable):
 
    ```sh
    git tag v<version> <merge commit> && git push origin v<version>
    ```
 
 3. [Release](.github/workflows/release.yml) checks that the tag is a commit of `main`, that it
-   names the Cargo workspace version, that a stable version has its dated changelog section, and
-   waits for every check `main`'s ruleset requires to pass on the commit. It then builds, on
-   GitHub-hosted runners, and pushes `phala-pay`, `postgres-walg`, and `phala-pay-reference-product` to
-   GHCR, tagged `v<version>` (`phala-pay` and the reference product only after two builds give the
-   same digest, `deploy/verify-image.sh`), and attests each digest's build provenance. Last, it
-   builds the deploy kit with `deploy/build-kit.sh`, renders every environment with it and the
-   Phala Cloud template's compose from it, and publishes the GitHub release `v<version>` with
+   names the Cargo workspace version, and that a stable version has its dated changelog section,
+   and runs the whole CI workflow on the commit. Then, on GitHub-hosted runners, it builds each
+   image with `deploy/verify-image.sh` (`phala-pay` and the reference product must build to the same
+   digest twice; `postgres-walg` is built once), pushes it tagged `v<version>`, and attests it.
+   Last, it builds the deploy kit with `deploy/build-kit.sh`, renders every environment with it and
+   the Phala Cloud template's compose from it, and publishes the GitHub release `v<version>` with
    `images.json`, the kit, `phala-cloud-template.yml`, and `SHA256SUMS`, each attested, and the
-   changelog section as its notes.
+   changelog section as its notes. `deploy/verify-release.sh v<version> DIR` verifies the result.
+4. Adopt it for Phala's instance: a pull request that sets the release in
+   [deploy-phala.yml](.github/workflows/deploy-phala.yml) (`uses: …@v<version>` and `version`).
 
 A pre-release, `v<version>-rc.N`, is a candidate for Phala's staging: its pull request sets the
 Cargo workspace version to the same pre-release and adds no changelog section, and Release

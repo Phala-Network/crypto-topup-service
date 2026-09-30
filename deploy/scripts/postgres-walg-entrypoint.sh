@@ -13,35 +13,50 @@ if [ "$(id -u)" -eq 0 ]; then
     chown postgres:postgres "$marker_dir"
 fi
 
-# The object store's settings, checked before WAL-G reads or writes anything: in the Phala Cloud
-# template they come from the deploy form, outside the attestation (deploy/compose.template.yaml).
-# An empty one fails later, where WAL-G cannot list the prefix. The endpoint is https; only the
-# local stacks' overlays, applied after deploy/render.sh and never in an attested compose
-# (deploy/compose-policy.jq), set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for their plain-http store.
-newline='
-'
-check_setting() {
-    case "$2" in
-        *"$newline"*) valid=1 ;;
-        *) printf '%s\n' "$2" | grep -Eqx "$3" && valid=0 || valid=1 ;;
-    esac
-    if [ -n "$2" ] && [ "$valid" -ne 0 ]; then
-        echo "$1 is not $4" >&2
-        exit 64
-    fi
+# The object store, checked before PostgreSQL or a WAL-G job starts (in the Phala Cloud template its
+# settings come from the deploy form, outside the attestation): WAL-G's file backend
+# (WALG_FILE_PREFIX, the tests), or S3 with all three settings well formed. The endpoint is an
+# https origin; only the local stacks' overlays, applied after deploy/render.sh and so never in an
+# attested compose, set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for their plain-http store.
+refuse() {
+    echo "$*" >&2
+    exit 64
 }
-check_setting WALG_S3_PREFIX "${WALG_S3_PREFIX:-}" 's3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._~/-]*)?' \
-    "s3://BUCKET[/PATH]"
-endpoint_scheme=https
-[ "${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off}" != on ] || endpoint_scheme='https?'
-check_setting AWS_ENDPOINT "${AWS_ENDPOINT:-}" \
-    "$endpoint_scheme://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" \
-    "an https origin, https://HOST[:PORT]"
-check_setting AWS_REGION "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' "a region name such as auto or us-east-1"
+# matches VALUE ERE: VALUE is one line that ERE matches whole.
+matches() {
+    case "$1" in *'
+'*) return 1 ;; esac
+    printf '%s\n' "$1" | grep -Eqx "$2"
+}
+label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+check_object_store() {
+    if [ -n "${WALG_FILE_PREFIX:-}" ]; then
+        [ -z "${WALG_S3_PREFIX:-}" ] || refuse "set WALG_FILE_PREFIX or WALG_S3_PREFIX, not both"
+        return 0
+    fi
+    prefix=${WALG_S3_PREFIX:-}
+    bucket=${prefix#s3://}
+    bucket=${bucket%%/*}
+    matches "$prefix" "s3://$label(\\.$label)*(/[A-Za-z0-9._~/-]*)?" &&
+        [ "${#bucket}" -ge 3 ] && [ "${#bucket}" -le 63 ] ||
+        refuse "WALG_S3_PREFIX must be s3://BUCKET[/PATH] with a valid bucket name"
+    scheme=https
+    [ "${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off}" != on ] || scheme='https?'
+    endpoint=${AWS_ENDPOINT:-} port=443
+    matches "$endpoint" "$scheme://$label(\\.$label)*(:[0-9]{1,5})?/?" ||
+        refuse "AWS_ENDPOINT must be an https origin, https://HOST[:PORT]"
+    authority=${endpoint#*://}
+    authority=${authority%/}
+    case "$authority" in *:*) port=${authority##*:} ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || refuse "AWS_ENDPOINT's port must be 1 to 65535"
+    matches "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' ||
+        refuse "AWS_REGION must be a region name such as auto or us-east-1"
+}
 
 case "$1" in
-    postgres) ;;
-    -*) set -- postgres "$@" ;;
+    postgres) check_object_store ;;
+    -*) set -- postgres "$@"; check_object_store ;;
+    walg-cron) check_object_store; exec /usr/local/bin/docker-entrypoint.sh "$@" ;;
     *) exec /usr/local/bin/docker-entrypoint.sh "$@" ;;
 esac
 

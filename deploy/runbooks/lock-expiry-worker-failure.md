@@ -29,7 +29,7 @@ scanner holds locks open by design and pages as `topup-scanner-<chain_id>`, not 
 - `rate-lock database invariant failed` on every tick: stored lock data breaks an invariant and a
   restart will not help; escalate to Engineering.
 - No error but the monitor is silent: the worker task stopped. **HUMAN-ONLY:** restart the CVM
-  (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`); it resumes from the database.
+  (`deploy/phala cvms restart "$TOPUP_CVM_ID"`); it resumes from the database.
 
 ## Fix
 

@@ -13,28 +13,32 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ### Added
 
-- Versioned releases. A `v<version>` tag of a `main` commit whose required checks passed
-  publishes the images to GHCR, built on GitHub-hosted runners, each with a GitHub build
-  provenance attestation, and a GitHub release whose assets are `images.json` (the image digests),
-  the deploy kit `phala-pay-deploy-v<version>.tar.gz` (the composes, `render.sh`, the policy,
-  preflight, the verifiers, the example environments, and the operator documentation, in a tar
-  identical to `git archive` of the tag), the Phala Cloud template's compose
-  `phala-cloud-template.yml`, and `SHA256SUMS`, each attested too. Operators verify them with
-  `gh attestation verify --cert-identity` of the Release workflow at the tag and
-  `--deny-self-hosted-runners`, and can rebuild `phala-pay` to the same digest.
+- Versioned releases. A `v<version>` tag of a `main` commit runs CI, then publishes the images to
+  GHCR, built on GitHub-hosted runners with pinned Buildx and BuildKit, each with a GitHub build
+  provenance attestation (`phala-pay` and the reference product are reproducible; `postgres-walg`
+  has provenance only), and a GitHub release whose assets are `images.json`, the deploy kit
+  `phala-pay-deploy-v<version>.tar.gz` (`git archive` of `LICENSE`, `deploy/`, and `docs/`), the
+  Phala Cloud template's compose `phala-cloud-template.yml`, and `SHA256SUMS`, each attested.
+  `deploy/verify-release.sh` verifies a release: its commit in `main`'s history, the checksums,
+  and every asset's and image's provenance for that commit.
 - Self-hosting without a fork: an operator's repository holds only its environment directory and
-  a workflow that calls Deploy at a release's commit (`docs/self-hosting.md`), or runs the kit's
-  commands. Deploy checks that the release's attestations name one commit of `main` and that its
-  own commit is the release's.
-- `deploy/verify-attestation.sh` requires the app-compose's pre-launch script to be absent or one
-  of the reviewed scripts of `deploy/pre-launch-scripts.json`, by SHA-256.
+  a workflow that calls Deploy at a release (`docs/self-hosting.md`); Deploy runs the release's
+  verify-release.sh and requires its own commit to be the release's. The kit's `deploy/phala`
+  runs the Phala Cloud CLI with its dependencies locked (`deploy/tools`).
+- The environment's `compose.yaml` may set only its documented settings (WAL-G's location,
+  dstack-ingress's `DOMAIN`, the RPC key names): `render.sh` refuses any other change, and every
+  rendered image must be the release's or one the kit pins.
+- Deploy sends the kit's reviewed pre-launch script (`deploy/phala-cloud-pre-launch.sh`, Phala
+  Cloud's v0.0.20) on provision and upgrade, and `verify-attestation.sh` requires exactly it.
 - The Phala Cloud template variant (`deploy/render.sh --template`): Phala's staging routes on a
   one-click testnet instance served at the app's gateway domain. Exactly the deploy form's values
   come from the CVM's env and are unattested: the admin public key and the origin's host, which
   `topup run` reads with `--admin-public-key-env` and `--public-origin-host-env` when the
-  configuration leaves them out, and the backup location. topup and postgres-walg parse each
-  strictly at startup; `AWS_ENDPOINT` must be `https`. A template instance has no restore-check
+  configuration leaves them out, and the backup location. A template instance has no restore-check
   path.
+- postgres-walg starts PostgreSQL or a backup only with WAL-G's file backend or all three S3
+  settings well formed: `WALG_S3_PREFIX` a valid bucket, `AWS_ENDPOINT` an `https` origin with a
+  valid host and port, and `AWS_REGION`.
 - Deposits carry `receipt_log_index` and `revision`, the position and revision their `id` is
   derived from, and `block_hash` and `block_time` (Unix seconds), in the object and every
   `deposit.*` snapshot. A snapshot rendered before this release lacks them, so they are optional

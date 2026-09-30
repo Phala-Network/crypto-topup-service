@@ -92,17 +92,30 @@ expect_exit() {
 
 expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" -e WALG_FILE_PREFIX=/tmp \
     -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image"
-# A malformed object-store setting (the Phala Cloud template takes them from its deploy form) stops
-# the container before WAL-G runs, for the backup job as for PostgreSQL.
-expect_exit 64 "WALG_S3_PREFIX is not s3://BUCKET[/PATH]" -e "WALG_S3_PREFIX=s3://bucket/a b" "$image"
-expect_exit 64 "AWS_ENDPOINT is not an https origin" -e "AWS_ENDPOINT=https://store.example/path?x" \
+# PostgreSQL and the backup job start only with WAL-G's file backend or all three S3 settings well
+# formed (the Phala Cloud template takes them from its deploy form); other commands need none.
+# expect_store STATUS MESSAGE PREFIX ENDPOINT REGION ARGS...: expect_exit with those S3 settings.
+expect_store() {
+    store_status=$1 store_message=$2 store_prefix=$3 store_endpoint=$4 store_region=$5
+    shift 5
+    expect_exit "$store_status" "$store_message" -e "WALG_S3_PREFIX=$store_prefix" \
+        -e "AWS_ENDPOINT=$store_endpoint" -e "AWS_REGION=$store_region" "$@"
+}
+store_bucket=s3://topup-backups/postgres
+expect_exit 64 "WALG_S3_PREFIX must be s3://BUCKET[/PATH]" "$image"
+expect_store 64 "WALG_S3_PREFIX must be s3://BUCKET[/PATH]" s3://a..b/p https://s3.example auto "$image"
+expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" "" auto "$image"
+expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" https://a..b:99999 auto \
     "$image" walg-cron backup-push "0 3 * * *"
-# Plain http only with the local stacks' switch, which no attested compose may carry.
-expect_exit 64 "AWS_ENDPOINT is not an https origin" -e "AWS_ENDPOINT=http://s3:3900" "$image"
-expect_exit 1 "refusing to initialize an empty data directory" -v "$volume:/var/lib/postgresql" \
-    -e AWS_ENDPOINT=http://s3:3900 -e TOPUP_OBJECT_STORE_ALLOW_HTTP=on -e WALG_FILE_PREFIX=/nonexistent \
-    "$image"
-expect_exit 64 "AWS_REGION is not a region name" -e "AWS_REGION=us east" "$image"
+expect_store 64 "AWS_ENDPOINT's port must be 1 to 65535" "$store_bucket" https://s3.example:99999 auto "$image"
+expect_store 64 "AWS_REGION must be a region name" "$store_bucket" https://s3.example "" "$image"
+expect_store 64 "set WALG_FILE_PREFIX or WALG_S3_PREFIX, not both" "$store_bucket" https://s3.example auto \
+    -e WALG_FILE_PREFIX=/tmp "$image"
+# Plain http only with the local stacks' switch, which no attested compose can carry; the settings
+# then pass, and walg-cron itself refuses its missing arguments.
+expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" http://s3:3900 us-east-1 "$image"
+expect_store 64 "usage: walg-cron" "$store_bucket" http://s3:3900 us-east-1 -e TOPUP_OBJECT_STORE_ALLOW_HTTP=on \
+    "$image" walg-cron
 
 # A listing error (here: a prefix that does not exist) must fail, not fall back to initdb, in
 # either variant; so must the restore-check variant with nothing to restore.

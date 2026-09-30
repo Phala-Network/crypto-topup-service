@@ -22,7 +22,7 @@
 # through every provider the route names; that needs the keys, so --unsealed skips it for a
 # keyed provider. Finally it checks the Phala Cloud workspace and the owner-approved OS image
 # dstack-0.5.9 (deploy/README.md). PHALA selects the CLI command (default
-# `npx --yes phala@1.1.22`), and TOPUP a local topup command instead of the pinned image's (tests).
+# deploy/phala, the locked CLI), and TOPUP a local topup command instead of the pinned image's (tests).
 #
 # Every failure is reported, and the exit status is 1 if any. Output never prints a URL with its
 # key, or a secret.

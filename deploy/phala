@@ -1,0 +1,10 @@
+#!/bin/sh
+# The Phala Cloud CLI, 1.1.22 with every dependency locked by deploy/tools/package-lock.json. Install
+# it once, next to this script: `npm ci --prefix deploy/tools` (in the deploy kit, kit/deploy/tools).
+set -eu
+tools="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/tools"
+[ -x "$tools/node_modules/.bin/phala" ] || {
+    echo "the Phala Cloud CLI is not installed: npm ci --prefix $tools" >&2
+    exit 1
+}
+exec "$tools/node_modules/.bin/phala" "$@"

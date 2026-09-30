@@ -41,8 +41,9 @@ the merchant's steps with the account's keys, never with the admin key.
   URL, so choose one you will keep: changing it later changes every merchant's configuration.
 - **A GitHub repository of your own**, private or public, for your environment directory and a
   deploy workflow (section 2).
-- **On the operator's machine**: the [GitHub CLI](https://cli.github.com/) 2.49 or later (to
-  download and verify releases), Node.js (for `npx phala@1.1.22`), Docker (the dstack verifier and
+- **On the operator's machine**: the [GitHub CLI](https://cli.github.com/) 2.101.0, the version
+  Deploy pins (to download and verify releases), Node.js and npm (the kit's locked Phala Cloud CLI,
+  `kit/deploy/phala`), Docker (the dstack verifier and
   `topup config check` run in it), `jq`, `curl`, OpenSSL, [uv](https://docs.astral.sh/uv/) (the
   Python SDK's key tools), the AWS CLI (to list backups), and Foundry v1.8.3 (`cast`, for
   preflight's chain checks, and `forge` if a chain needs the factory deployed).
@@ -54,16 +55,17 @@ the merchant's steps with the account's keys, never with the admin key.
 **HUMAN-ONLY, owner of the repository.** It holds your settings and nothing else; the software
 comes from a release.
 
-1. **Download and verify a release** ([Verify a release](#verify-a-release)), the latest
-   `v<version>` of the [releases](https://github.com/Phala-Network/phala-pay/releases), and
-   extract its deploy kit next to your repository:
+1. **Verify a release** ([Verify a release](#verify-a-release)), the latest `v<version>` of the
+   [releases](https://github.com/Phala-Network/phala-pay/releases), and extract its deploy kit next
+   to your repository, with its locked Phala Cloud CLI:
 
    ```sh
-   mkdir kit && tar -xzf phala-pay-deploy-v0.3.0.tar.gz -C kit --strip-components=1
+   mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.0.tar.gz -C kit --strip-components=1
+   npm ci --prefix kit/deploy/tools --ignore-scripts
    ```
 
-   The kit holds the attested stack, `render.sh`, the policy, preflight, the verifiers, the example
-   environment, and this guide, at their repository paths.
+   The kit is `LICENSE`, `deploy/`, and `docs/` of the release: the attested stack, `render.sh`,
+   the policy, preflight, the verifiers, the example environment, and this guide.
 2. **Create the admin key** on the machine that will keep it, one per Environment. The seed
    never leaves that machine; the printed `public_key` and the key id go into the environment
    directory's `topup.yaml` (step 4):
@@ -94,13 +96,13 @@ comes from a release.
    ```
 
 5. **The deploy workflow**, `.github/workflows/deploy.yml` in your repository. It calls the
-   release's [Deploy](../.github/workflows/deploy.yml) workflow at the release's commit and with
-   its version, which downloads the release, verifies its attestations, and runs the kit's scripts
-   on your environment directory ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)). Pin
-   the reusable workflow by the tag's commit SHA, as GitHub recommends for third-party workflows
-   (`gh api repos/Phala-Network/phala-pay/commits/v0.3.0 --jq .sha` prints it), and keep the tag in
-   a comment; Deploy refuses to run unless its own commit is the release's, so `@` and `version`
-   cannot disagree. The caller grants `attestations: read` for the verification:
+   release's [Deploy](../.github/workflows/deploy.yml) at the release, which verifies the release
+   and runs the kit's scripts on your environment directory
+   ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)). Pin it by the release's commit SHA,
+   as GitHub recommends for third-party workflows (`gh api
+   repos/Phala-Network/phala-pay/commits/v0.3.0 --jq .sha`); Deploy refuses to run at any commit
+   but `version`'s. It reads only the Environment secret `PHALA_CLOUD_API_KEY`, so pass no
+   secrets:
 
    ```yaml
    name: Deploy
@@ -126,7 +128,6 @@ comes from a release.
          environment: ${{ inputs.environment }}
          mode: ${{ inputs.mode }}
          environment_dir: ${{ inputs.environment }}/topup
-       secrets: inherit
    ```
 
    The Environment's variables are only deployment state: `PHALA_WORKSPACE` (the display name of
@@ -211,7 +212,7 @@ Deploy `upgrade`, never a runtime setting.
    docker pull <the compose's phala-pay image>   # preflight --offline checks the configuration in it
    kit/deploy/preflight.sh --env .env.production --compose docker-compose.production.yml \
      --environment-dir production/topup --offline
-   npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.production
+   kit/deploy/phala envs update "$TOPUP_CVM_ID" -e .env.production
    ```
 
    [Sealing the secrets](../deploy/README.md#sealing-the-secrets) has the rules; never change a
@@ -243,8 +244,8 @@ yourself is what makes it evidence:
 
 ```sh
 export CVM_ID=$TOPUP_CVM_ID
-npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
-npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
+kit/deploy/phala cvms get "$CVM_ID" --json > cvm.json
+kit/deploy/phala cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
 kit/deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.production.yml service
@@ -377,49 +378,35 @@ read the old app's backups, so never delete the app, and give a new app a new pr
 
 ## Verify a release
 
-A release `v<version>` of [Phala-Network/phala-pay](https://github.com/Phala-Network/phala-pay/releases)
-is built by its [Release](../.github/workflows/release.yml) workflow from the tag, on a commit of
-`main` ([deploy/README.md, "Releases"](../deploy/README.md#releases)). Its assets are
-`images.json` (each image's `repository@sha256` digest, `render.sh`'s `--images`), the deploy kit
-`phala-pay-deploy-v<version>.tar.gz`, the Phala Cloud template's compose
-`phala-cloud-template.yml`, and `SHA256SUMS`. Each asset and each image has a GitHub build
-provenance attestation whose signing certificate names exactly the Release workflow at the tag,
-a GitHub-hosted runner, and the tagged commit. Your Deploy workflow checks all of them on every
-run, and that the commit is on Phala Pay's `main`; check them yourself before you adopt a release:
+[deploy/verify-release.sh](../deploy/verify-release.sh) is the verification Deploy runs on every
+deployment; run the same program before you adopt a release. It downloads the release's assets
+into a directory and stops at the first failure:
+
+1. the tag's commit must be in Phala Pay's `main` history;
+2. the assets must match `SHA256SUMS`;
+3. every asset (`images.json`, the kit, `phala-cloud-template.yml`) and every image `images.json`
+   names must have a GitHub build provenance attestation signed by
+   [release.yml](../.github/workflows/release.yml) at the tag, on a GitHub-hosted runner, for that
+   commit (`gh attestation verify --source-digest`).
 
 ```sh
-version=v0.3.0
-gh release download "$version" -R Phala-Network/phala-pay
-sha256sum -c SHA256SUMS
-provenance=(-R Phala-Network/phala-pay --source-ref "refs/tags/$version" --deny-self-hosted-runners
-  --cert-identity "https://github.com/Phala-Network/phala-pay/.github/workflows/release.yml@refs/tags/$version")
-for asset in images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml; do
-  gh attestation verify "$asset" "${provenance[@]}"
-done
-for image in $(jq -r '.[]' images.json); do
-  gh attestation verify "oci://$image" "${provenance[@]}"
-done
+gh api -H 'Accept: application/vnd.github.raw' \
+  'repos/Phala-Network/phala-pay/contents/deploy/verify-release.sh?ref=v0.3.0' >verify-release.sh
+bash verify-release.sh v0.3.0 release     # prints the release's commit
 ```
 
-The attestations are Sigstore bundles: `gh attestation download` saves them for verification
-offline (`gh attestation verify --bundle`) or with another Sigstore verifier.
+**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch v0.3.0
+--recurse-submodules https://github.com/Phala-Network/phala-pay.git`), with Buildx v0.37.1:
 
-**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch
-v0.3.0 --recurse-submodules https://github.com/Phala-Network/phala-pay.git`):
-
-- `phala-pay` and `phala-pay-reference-product` build bit for bit: `make verify-image` builds
-  `phala-pay` twice and prints its manifest digest, which equals `images.json`'s
-  (`DOCKERFILE=deploy/Dockerfile.reference-product deploy/verify-image.sh` for the other). The
-  build takes the tag's commit time, `SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)`, as the
-  release does.
-- The kit's tar is identical to `git archive` of the tag's deployment files:
-  `deploy/build-kit.sh --tar v0.3.0 v0.3.0 | sha256sum` equals
-  `gzip -dc phala-pay-deploy-v0.3.0.tar.gz | sha256sum` (compare the tar; the gzip layer depends
-  on the compressor).
-- `postgres-walg` is not reproducible (apt and dpkg timestamps): review its
-  [Dockerfile](../deploy/Dockerfile.postgres-walg) at the tag. An image you build and push
-  yourself has a digest of its own, which Phala's attestations do not cover; render it with your
-  own `images.json` and run the kit's steps in your own workflow instead of Phala's Deploy.
+- `phala-pay` and `phala-pay-reference-product` are reproducible: `make verify-image` builds
+  `phala-pay` twice on the release's pinned BuildKit, with the tag's commit time, and prints its
+  manifest digest, which equals `images.json`'s
+  (`DOCKERFILE=deploy/Dockerfile.reference-product deploy/verify-image.sh` for the other).
+- `postgres-walg` is not reproducible (apt and dpkg timestamps): it has provenance only. Review
+  its [Dockerfile](../deploy/Dockerfile.postgres-walg) at the tag.
+- The kit's tar is `git archive` of the tag's `LICENSE`, `deploy/`, and `docs/`:
+  `gzip -dc phala-pay-deploy-v0.3.0.tar.gz` equals
+  `git archive --prefix=phala-pay-deploy-v0.3.0/ v0.3.0 -- LICENSE deploy docs`.
 
 ## The Phala Cloud template
 

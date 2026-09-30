@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # deploy/render.sh: its three deploy-time inputs and their formats, digest-named configs (a changed
 # file changes exactly the services that mount it), a reproducible output, and
-# deploy/compose-policy.jq refusing an environment overlay that breaks it.
+# the environment overlay limited to its settings, and deploy/compose-policy.jq refusing an artifact
+# that breaks it.
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -65,7 +66,7 @@ refused bare-tag "--images must map image names" --images "$tmp/bare.json" "${ga
 images "ghcr.io/phala-network/phala-pay@sha256:$(printf '0%.0s' {1..64})" >"$tmp/zero.json"
 refused zero-digest "--images must map image names" --images "$tmp/zero.json" "${gateway[@]}" "$staging"
 jq 'del(.["postgres-walg"])' "$tmp/images.json" >"$tmp/missing.json"
-refused unpinned "every image must be a nonzero repository@sha256 digest" \
+refused unpinned "not a release or kit-pinned image: backup postgres" \
     --images "$tmp/missing.json" "${gateway[@]}" "$staging"
 refused no-gateway "needs --gateway-domain HOST" --images "$tmp/images.json" "$staging"
 refused bad-gateway "needs --gateway-domain HOST" --images "$tmp/images.json" \
@@ -80,18 +81,52 @@ render "${origin[@]}" "$staging" >"$tmp/restore-check.yml"
 refused product-restore-check "--restore-check and --template render a topup environment only" \
     --images "$tmp/images.json" "${origin[@]}" "$root/deploy/environments/phala-network/staging/product"
 
-# overlay NAME YAML: staging's environment with YAML appended to its overlay.
+# The environment's compose.yaml sets only its documented settings: overlay NAME YAML is staging's
+# topup.yaml with an overlay of YAML alone, which render.sh must refuse before anything else.
 overlay() {
-    cp -r "$staging" "$tmp/$1"
-    printf '%s\n' "$2" >>"$tmp/$1/compose.yaml"
+    mkdir "$tmp/$1"
+    cp "$staging/topup.yaml" "$tmp/$1/topup.yaml"
+    printf 'services:\n%s\n' "$2" >"$tmp/$1/compose.yaml"
 }
-# A sealed value may fill only its own environment key: never a setting, a command, or a config.
-overlay secret-domain '  sentry-leak:
-    image: busybox@sha256:'"$(printf '4%.0s' {1..64})"'
+settable="may set only WAL-G's location, dstack-ingress's DOMAIN, and TOPUP_RPC_<ID>_KEY names"
+overlay image '  backup:
+    image: ghcr.io/phala-network/postgres-walg@sha256:'"$(printf '4%.0s' {1..64})"
+overlay entrypoint '  postgres:
+    entrypoint: [sh, -c, "wal-g backup-push /tmp"]'
+overlay command '  heartbeat:
+    command: [topup, heartbeat, --interval-s, "1"]'
+overlay service '  extra:
+    image: busybox@sha256:'"$(printf '5%.0s' {1..64})"
+overlay port '  migrate:
+    ports: ["5432:5432"]'
+overlay mount '  migrate:
+    volumes: [/var/run/dstack.sock:/var/run/dstack.sock]'
+overlay archive '  postgres:
+    environment:
+      TOPUP_RESTORE_FROM_BACKUP: "on"'
+overlay http-store '  postgres:
+    environment:
+      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"'
+overlay removal '  smokescreen: !reset null'
+for name in image entrypoint command service port mount archive http-store removal; do
+    refused "$name" "$settable" "${gateway[@]}" --images "$tmp/images.json" "$tmp/$name"
+done
+# A setting's value is still judged by the policy: a sealed value fills only its own key, and the
+# domain must be the origin's host.
+overlay sealed-domain '  dstack-ingress:
     environment:
       DOMAIN: ${AWS_SECRET_ACCESS_KEY:-}'
-refused secret-domain "a sealed value may not fill services.sentry-leak.environment.DOMAIN" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/secret-domain"
+refused sealed-domain "a sealed value may not fill services.dstack-ingress.environment.DOMAIN" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/sealed-domain"
+overlay sealed-key '  topup:
+    environment:
+      TOPUP_RPC_PROVIDER_A_KEY: ${AWS_SECRET_ACCESS_KEY:-}'
+refused sealed-key "a sealed value may not fill services.topup.environment.TOPUP_RPC_PROVIDER_A_KEY" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/sealed-key"
+cp -r "$staging" "$tmp/other-domain"
+sed -i 's|DOMAIN: pay-api-staging.phala.com|DOMAIN: other.phala.com|' "$tmp/other-domain/compose.yaml"
+refused other-domain "dstack-ingress must serve the host of topup's public_origin" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/other-domain"
 # A `$` in topup.yaml is escaped: it never becomes an interpolated reference.
 cp -r "$staging" "$tmp/dollar"
 sed -i 's|^environment: staging$|environment: staging # ${SENTRY_DSN:-x}|' "$tmp/dollar/topup.yaml"
@@ -101,92 +136,49 @@ grep -F 'environment: staging # $${SENTRY_DSN:-x}' "$tmp/dollar.yml" >/dev/null 
 cmp -s <("$compose" -f "$tmp/service.yml" config --variables | sort) \
     <("$compose" -f "$tmp/dollar.yml" config --variables | sort) ||
     { echo "a \$ in topup.yaml became an interpolated reference" >&2; exit 1; }
-cp -r "$staging" "$tmp/secret-rpc"
-cat >>"$tmp/secret-rpc/compose.yaml" <<'YAML'
-  migrate:
-    environment:
-      TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
-YAML
-refused secret-rpc "a sealed value may not fill services.migrate.environment.TOPUP_RPC_PROVIDER_A_KEY" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/secret-rpc"
-cp -r "$staging" "$tmp/secret-command"
-cat >>"$tmp/secret-command/compose.yaml" <<'YAML'
-  heartbeat:
-    command: [topup, heartbeat, --interval-s, "${SENTRY_DSN:-60}"]
-YAML
-refused secret-command "a sealed value may not fill services.heartbeat.command" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/secret-command"
-# Topology an environment may not change.
-cp -r "$staging" "$tmp/extra-port"
-cat >>"$tmp/extra-port/compose.yaml" <<'YAML'
-  migrate:
-    ports: ["5432:5432"]
-YAML
-refused extra-port "only dstack-ingress may publish a port, 443" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/extra-port"
-cp -r "$staging" "$tmp/env-file"
-cat >>"$tmp/env-file/compose.yaml" <<'YAML'
-  heartbeat:
-    env_file: [/dstack/.host-shared/.decrypted-env]
-YAML
-refused env-file "no service may build, read an env_file, extend, or carry a profile" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/env-file"
-cp -r "$staging" "$tmp/socket"
-cat >>"$tmp/socket/compose.yaml" <<'YAML'
-  migrate:
-    volumes: [/var/run/dstack.sock:/var/run/dstack.sock]
-YAML
-refused socket "only keys, topup, and dstack-ingress may mount the dstack socket" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/socket"
-# Smokescreen's deny list is exact: a dropped range is refused.
-cp -r "$staging" "$tmp/smokescreen"
-cat >>"$tmp/smokescreen/compose.yaml" <<'YAML'
-  smokescreen:
-    command: [smokescreen, --listen-ip=0.0.0.0, --listen-port=4750, --timeout=10s]
-YAML
-refused smokescreen "smokescreen must run its exact deny list from the service image" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/smokescreen"
-# Each credential volume has exactly its committed mounters, read-only but for keys, on tmpfs.
-cp -r "$staging" "$tmp/extra-mounter"
-cat >>"$tmp/extra-mounter/compose.yaml" <<'YAML'
-  heartbeat:
-    volumes: ["walg_key:/run/wal-g:ro"]
-YAML
-refused extra-mounter "walg_key must be mounted by exactly backup, keys, postgres" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/extra-mounter"
-cp -r "$staging" "$tmp/writable-mounter"
-cat >>"$tmp/writable-mounter/compose.yaml" <<'YAML'
-  heartbeat:
-    volumes: ["db_app:/run/db-app"]
-YAML
-refused writable-mounter "only keys may mount db_app writable" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/writable-mounter"
-cp -r "$staging" "$tmp/on-disk"
-cat >>"$tmp/on-disk/compose.yaml" <<'YAML'
-volumes:
-  db_owner:
-    driver_opts: !reset {}
-YAML
-refused on-disk "db_owner must be a tmpfs volume (uid=999,gid=999,mode=0700)" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/on-disk"
-cp -r "$staging" "$tmp/no-archive"
-sed -i 's|^      AWS_S3_FORCE_PATH_STYLE: "true"$|&\n      TOPUP_RESTORE_FROM_BACKUP: "on"|' \
-    "$tmp/no-archive/compose.yaml"
-refused no-archive "the service must archive" --images "$tmp/images.json" "${gateway[@]}" \
-    "$tmp/no-archive"
-cp -r "$staging" "$tmp/other-domain"
-sed -i 's|DOMAIN: pay-api-staging.phala.com|DOMAIN: other.phala.com|' "$tmp/other-domain/compose.yaml"
-refused other-domain "dstack-ingress must serve the host of topup's public_origin" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/other-domain"
+
+# The policy judges any artifact, including one render.sh did not produce (preflight,
+# verify-attestation.sh): policy NAME VARIANT FILE JQ MESSAGE applies JQ to the rendered FILE and
+# expects the policy to report MESSAGE.
+policy() {
+    jq "$4" "$3" | jq -r -L "$root/deploy" --arg variant "$2" \
+        'include "compose-policy"; violations($variant; "dstack")[]' >"$tmp/$1.violations"
+    grep -F -- "$5" "$tmp/$1.violations" >/dev/null || {
+        echo "the policy did not refuse $1:" >&2
+        cat "$tmp/$1.violations" >&2
+        exit 1
+    }
+}
+"$compose" -f "$tmp/restore-check.yml" config --no-interpolate --format json >"$tmp/restore-check.json"
+service=(service "$tmp/service.json")
+policy secret-command "${service[@]}" '.services.heartbeat.command += ["${SENTRY_DSN:-60}"]' \
+    "a sealed value may not fill services.heartbeat.command"
+policy secret-env "${service[@]}" '.services.migrate.environment.TOPUP_RPC_PROVIDER_A_KEY = "${TOPUP_RPC_PROVIDER_A_KEY:-}"' \
+    "a sealed value may not fill services.migrate.environment.TOPUP_RPC_PROVIDER_A_KEY"
+policy image "${service[@]}" '.services.backup.image = "postgres:18"' \
+    "every image must be a nonzero repository@sha256 digest"
+policy port "${service[@]}" '.services.migrate.ports = [{mode: "ingress", target: 5432, published: "5432", protocol: "tcp"}]' \
+    "only dstack-ingress may publish a port, 443"
+policy env-file "${service[@]}" '.services.heartbeat.env_file = [{path: "/dstack/.host-shared/.decrypted-env"}]' \
+    "no service may build, read an env_file, extend, or carry a profile"
+policy socket "${service[@]}" '.services.migrate.volumes += [{type: "bind", source: "/var/run/dstack.sock", target: "/var/run/dstack.sock"}]' \
+    "only keys, topup, and dstack-ingress may mount the dstack socket"
+policy smokescreen "${service[@]}" '.services.smokescreen.command |= .[0:4]' \
+    "smokescreen must run its exact deny list from the service image"
+policy extra-mounter "${service[@]}" '.services.heartbeat.volumes += [{type: "volume", source: "walg_key", target: "/run/wal-g", read_only: true}]' \
+    "walg_key must be mounted by exactly backup, keys, postgres"
+policy writable-mounter "${service[@]}" '(.services.heartbeat.volumes[] | select(.source == "db_app")).read_only = false' \
+    "only keys may mount db_app writable"
+policy on-disk "${service[@]}" 'del(.volumes.db_owner.driver_opts)' \
+    "db_owner must be a tmpfs volume (uid=999,gid=999,mode=0700)"
+policy no-archive "${service[@]}" '.services.postgres.environment.TOPUP_RESTORE_FROM_BACKUP = "on"' \
+    "the service must archive"
+policy admin-key "${service[@]}" '.services.topup.environment.TOPUP_ADMIN_PUBLIC_KEY = "${TOPUP_ADMIN_PUBLIC_KEY:-}"' \
+    "a sealed value may not fill services.topup.environment.TOPUP_ADMIN_PUBLIC_KEY"
 # The restore-check variant never reads the live storage credentials.
-cp -r "$staging" "$tmp/live-credentials"
-cat >>"$tmp/live-credentials/compose.yaml" <<'YAML'
-  migrate:
-    environment:
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-YAML
-refused live-credentials "a sealed value may not fill services.migrate.environment.AWS_ACCESS_KEY_ID" \
-    --images "$tmp/images.json" "${origin[@]}" "$tmp/live-credentials"
+policy live-credentials restore-check "$tmp/restore-check.json" \
+    '.services.postgres.environment.AWS_ACCESS_KEY_ID = "${AWS_ACCESS_KEY_ID:-}"' \
+    "postgres must read the restore instance's own storage credentials"
 
 # The template variant: the service without dstack-ingress, topup on port 80 for the gateway, and
 # only the deploy form's values at runtime (deploy/compose.template.yaml).
@@ -208,40 +200,13 @@ render --template "$tmp/template-key-id" >"$tmp/template-key-id.yml"
 cmp -s <("$compose" -f "$tmp/template.yml" config --variables | sort) \
     <("$compose" -f "$tmp/template-key-id.yml" config --variables | sort) ||
     { echo "a \$ in the template's topup.yaml became a runtime reference" >&2; exit 1; }
-cp -r "$template" "$tmp/template-extra"
-cat >>"$tmp/template-extra/compose.yaml" <<'YAML'
-  heartbeat:
-    environment:
-      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
-YAML
-refused template-extra "a sealed value may not fill services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY" \
-    --images "$tmp/images.json" --template "$tmp/template-extra"
-cp -r "$staging" "$tmp/service-admin-key"
-sed -i 's|^      TOPUP_RPC_PROVIDER_B_KEY: .*|&\n      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}|' \
-    "$tmp/service-admin-key/compose.yaml"
-refused service-admin-key "a sealed value may not fill services.topup.environment.TOPUP_ADMIN_PUBLIC_KEY" \
-    --images "$tmp/images.json" "${gateway[@]}" "$tmp/service-admin-key"
-# The local stacks' plain-http switch for the object store never reaches an attested compose.
-cp -r "$staging" "$tmp/http-store"
-sed -i 's|^      AWS_S3_FORCE_PATH_STYLE: "true"$|&\n      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"|' \
-    "$tmp/http-store/compose.yaml"
-refused http-store "TOPUP_OBJECT_STORE_ALLOW_HTTP is for local stacks only" --images "$tmp/images.json" \
-    "${gateway[@]}" "$tmp/http-store"
-cp -r "$template" "$tmp/template-topup-env"
-cat >>"$tmp/template-topup-env/compose.yaml" <<'YAML'
-  topup:
-    environment:
-      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
-YAML
-refused template-topup-env "a sealed value may not fill services.topup.environment.WALG_S3_PREFIX" \
-    --images "$tmp/images.json" --template "$tmp/template-topup-env"
-cp -r "$template" "$tmp/template-port"
-cat >>"$tmp/template-port/compose.yaml" <<'YAML'
-  migrate:
-    ports: ["5432:5432"]
-YAML
-refused template-port "only topup may publish a port, 80" --images "$tmp/images.json" --template \
-    "$tmp/template-port"
+"$compose" -f "$tmp/template.yml" config --no-interpolate --format json >"$tmp/template.json"
+policy template-extra template "$tmp/template.json" \
+    '.services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY = "${TOPUP_ADMIN_PUBLIC_KEY:-}"' \
+    "a sealed value may not fill services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY"
+policy template-port template "$tmp/template.json" \
+    '.services.migrate.ports = [{mode: "ingress", target: 5432, published: "5432", protocol: "tcp"}]' \
+    "only topup may publish a port, 80"
 
 # The product: its one sealed name, and its public_url on its domain.
 product="$root/deploy/environments/phala-network/staging/product"
