@@ -8,8 +8,9 @@ records why each decision was made.
 ## Operators, merchants, and customers
 
 Each operator runs its own instance in its own dstack confidential VM (CVM), for its own
-merchants. [Self-hosting](self-hosting.md) is the path from a fork to a credited deposit. Phala
-runs an instance only for Phala Cloud and offers no hosted service to others.
+merchants, from a verified release of Phala Pay and a repository that holds only its settings.
+[Self-hosting](self-hosting.md) is the path from there to a credited deposit. Phala runs an
+instance only for Phala Cloud and offers no hosted service to others.
 
 The operator onboards each merchant as an account (`acct_…`) through the admin API. The merchant
 does everything else with its API keys and the SDKs; there is no dashboard. Phala Cloud is an
@@ -38,9 +39,9 @@ is credited at spot, like the stable bank-transfer details of Stripe's customer 
 
 ## Routes
 
-A route is one chain and one token, in test or live mode. Routes are files that each operator
-commits to its fork, so they are part of the attested deployment; further merchants are accounts,
-not configuration.
+A route is one chain and one token, in test or live mode. Routes are settings that each operator
+commits to its environment repository, so they are part of the attested deployment; further
+merchants are accounts, not configuration.
 
 The repository's committed routes are test routes on Sepolia and Base Sepolia, for a test PHA
 token and Circle's testnet USDC ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).

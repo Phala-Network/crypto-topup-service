@@ -34,7 +34,7 @@ When the lag is material, pause issuance (existing addresses stay valid and watc
   restarts; the scanner resumes from its committed cursor, and a transfer it had not recorded is
   recorded then. If the service keeps restarting, read the error and escalate. If both providers
   are healthy and the monitor is still silent, **HUMAN-ONLY:** restart the CVM
-  (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).
+  (`deploy/phala cvms restart "$TOPUP_CVM_ID"`).
 
 ## Done when
 

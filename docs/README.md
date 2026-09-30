@@ -21,7 +21,7 @@ For the operator who runs an instance, onboards merchants, and handles incidents
 
 | Document | What it covers |
 |---|---|
-| [Self-hosting guide](self-hosting.md) | The steps, in order, from a fork to a credited test deposit, and on to going live. |
+| [Self-hosting guide](self-hosting.md) | The steps, in order, from an environment repository and a verified release to a credited test deposit, and on to going live. |
 | [Deployment reference](../deploy/README.md) | GitHub setup, releases and deploys, sealed secrets, attested settings, RPC providers, the custom domain, Sentry, attestation, onboarding, and merchant setup. |
 | [Service configuration](configuration.md) | The `topup` commands, flags, and environment. |
 | [Contract deployment](../deploy/CONTRACTS.md) | Deploying and verifying the deterministic forwarder factory on a chain. |

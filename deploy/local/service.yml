@@ -13,6 +13,8 @@ services:
     image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
     environment:
       WALG_RETENTION_FULL: "2"
+      # The local Garage store is plain http (deploy/scripts/postgres-walg-entrypoint.sh).
+      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"
     depends_on:
       s3-init:
         condition: service_completed_successfully

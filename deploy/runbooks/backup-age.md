@@ -26,7 +26,7 @@ database failure now would lose more data, on every route.
 - No new segments and storage reachable: archiving or the heartbeat that forces one segment a
   minute has stopped, or the credentials lost write access. Fix the credentials and re-seal them
   ([deploy/README.md, "Sealing the secrets"](../README.md#sealing-the-secrets)); otherwise
-  **HUMAN-ONLY:** restart the CVM (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).
+  **HUMAN-ONLY:** restart the CVM (`deploy/phala cvms restart "$TOPUP_CVM_ID"`).
 - Storage unavailable: a provider outage; escalate and never delete WAL or backups.
 
 ## Done when

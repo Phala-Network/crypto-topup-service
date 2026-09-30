@@ -13,9 +13,65 @@ if [ "$(id -u)" -eq 0 ]; then
     chown postgres:postgres "$marker_dir"
 fi
 
+# The object store, checked before PostgreSQL or a WAL-G job starts (in the Phala Cloud template its
+# settings come from the deploy form, outside the attestation): WAL-G's file backend
+# (WALG_FILE_PREFIX, the tests), or S3 with all three settings well formed. The endpoint is an
+# https origin; only the local stacks' overlays, applied after deploy/render.sh and so never in an
+# attested compose, set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for their plain-http store.
+refuse() {
+    echo "$*" >&2
+    exit 64
+}
+# matches VALUE ERE: VALUE is one line that ERE matches whole.
+matches() {
+    case "$1" in *'
+'*) return 1 ;; esac
+    printf '%s\n' "$1" | grep -Eqx "$2"
+}
+label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+# endpoint_is_origin URL: URL, parsed by Perl's URI (RFC 3986), is an https origin (or http, with the
+# local switch): a DNS name, an IPv4 address, or a bracketed IPv6 address; a port from 1 to 65535
+# (443 if none); no user information, path (but `/`), query, or fragment.
+endpoint_is_origin() {
+    ENDPOINT=$1 ALLOW_HTTP=${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off} \
+        perl -MURI -MSocket=inet_pton,AF_INET,AF_INET6 -e '
+        exit 1 if $ENV{ENDPOINT} =~ /[\s[:cntrl:]]/;
+        my $uri = URI->new($ENV{ENDPOINT});
+        my $scheme = $uri->scheme // "";
+        exit 1 unless $scheme eq "https" or ($scheme eq "http" and $ENV{ALLOW_HTTP} eq "on");
+        exit 1 if defined $uri->userinfo or defined $uri->query or defined $uri->fragment
+            or ($uri->path ne "" and $uri->path ne "/");
+        my $port = $uri->port // "";
+        exit 1 unless $port =~ /\A[0-9]{1,5}\z/ and $port >= 1 and $port <= 65535;
+        my $host = lc($uri->host // "");
+        exit(defined inet_pton(AF_INET6, $host) ? 0 : 1) if $uri->authority =~ /\A\[/;
+        exit(defined inet_pton(AF_INET, $host) ? 0 : 1) if $host =~ /\A[0-9.]+\z/;
+        exit 1 if $host eq "" or length $host > 253;
+        /\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/ or exit 1 for split /\./, $host, -1;
+        exit 0'
+}
+check_object_store() {
+    if [ -n "${WALG_FILE_PREFIX:-}" ]; then
+        [ -z "${WALG_S3_PREFIX:-}" ] || refuse "set WALG_FILE_PREFIX or WALG_S3_PREFIX, not both"
+        return 0
+    fi
+    prefix=${WALG_S3_PREFIX:-}
+    bucket=${prefix#s3://}
+    bucket=${bucket%%/*}
+    matches "$prefix" "s3://$label(\\.$label)*(/[A-Za-z0-9._~/-]*)?" &&
+        [ "${#bucket}" -ge 3 ] && [ "${#bucket}" -le 63 ] ||
+        refuse "WALG_S3_PREFIX must be s3://BUCKET[/PATH] with a valid bucket name"
+    endpoint_is_origin "${AWS_ENDPOINT:-}" ||
+        refuse "AWS_ENDPOINT must be an https origin, https://HOST[:PORT]: a DNS name or an IP address," \
+            "a port from 1 to 65535, and no user, path, query, or fragment"
+    matches "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' ||
+        refuse "AWS_REGION must be a region name such as auto or us-east-1"
+}
+
 case "$1" in
-    postgres) ;;
-    -*) set -- postgres "$@" ;;
+    postgres) check_object_store ;;
+    -*) set -- postgres "$@"; check_object_store ;;
+    walg-cron) check_object_store; exec /usr/local/bin/docker-entrypoint.sh "$@" ;;
     *) exec /usr/local/bin/docker-entrypoint.sh "$@" ;;
 esac
 

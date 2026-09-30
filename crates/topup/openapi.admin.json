@@ -3419,7 +3419,7 @@
       "name": "Apache-2.0"
     },
     "title": "Phala Pay admin API",
-    "version": "0.1.0"
+    "version": "0.3.0"
   },
   "openapi": "3.1.0",
   "paths": {

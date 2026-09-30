@@ -1,0 +1,203 @@
+name: Release
+
+# A versioned release of the service (deploy/README.md, "Releases"), from a `v<version>` tag on a
+# commit of main whose Cargo workspace version is <version> (CONTRIBUTING.md, "Releasing the
+# service"). A stable version needs its dated CHANGELOG.md section, the release notes; a version
+# with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release. Only admins create
+# `v*` tags (a tag ruleset), and a published release is immutable.
+#
+# `ci` runs the whole CI workflow on the tagged commit; nothing is built unless it passes. Each
+# image is then built on its own GitHub-hosted runner by deploy/verify-image.sh (Buildx v0.37.1 and
+# the pinned BuildKit, as a local rebuild uses), pushed tagged v<version>, and attested
+# (actions/attest-build-provenance, also pushed to the registry):
+# - phala-pay and phala-pay-reference-product are reproducible: the pushed build's digest must
+#   equal an earlier build's, and anyone rebuilds the same digest from the tag;
+# - postgres-walg is not (apt and dpkg record wall-clock times): built once, with provenance only.
+# `release` then publishes the GitHub release, each asset attested: images.json (the
+# repository@sha256 references by image name, deploy/render.sh's --images); the deploy kit
+# phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
+# Cloud template's compose, rendered from the kit with these images); and SHA256SUMS.
+# deploy/verify-release.sh verifies all of it (docs/self-hosting.md, "Verify a release").
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag, the version, and the changelog
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
+            { echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1; }
+          cargo_version=$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          [[ "$cargo_version" == "$version" ]] ||
+            { echo "::error::tag $GITHUB_REF_NAME does not match the Cargo workspace version $cargo_version"; exit 1; }
+          git fetch --no-tags --quiet origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD ||
+            { echo "::error::$GITHUB_REF_NAME is not a commit of main"; exit 1; }
+          [[ "$version" == *-* ]] || sdk/changelog-section.sh CHANGELOG.md "$version" >/dev/null
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+  image:
+    needs: [ci, version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        include:
+          - name: phala-pay
+            dockerfile: Dockerfile
+            mode: ""
+            smoke: topup --help
+          - name: postgres-walg
+            dockerfile: deploy/Dockerfile.postgres-walg
+            mode: --once
+            smoke: wal-g --version
+          - name: phala-pay-reference-product
+            dockerfile: deploy/Dockerfile.reference-product
+            mode: ""
+            smoke: --help
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Two from-scratch Rust release builds; the runner's preinstalled SDKs are not needed.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      # The Buildx version deploy/verify-image.sh requires; it builds on its own pinned BuildKit.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver: docker
+          use: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish ${{ matrix.name }}
+        id: publish
+        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          MODE: ${{ matrix.mode }}
+          SMOKE: ${{ matrix.smoke }}
+          IMAGE_REF_FILE: ${{ runner.temp }}/image.ref
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}"
+          PUBLISH_IMAGE="$repository:$GITHUB_REF_NAME" deploy/verify-image.sh ${MODE:+"$MODE"}
+          ref=$(cat "$IMAGE_REF_FILE")
+          read -ra smoke <<<"$SMOKE"
+          docker run --rm --pull=always "$ref" "${smoke[@]}" >/dev/null
+          { echo "name=$repository"; echo "digest=${ref#*@}"; } >>"$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/ref" && jq -n --arg name "${{ matrix.name }}" --arg ref "$ref" \
+            '{($name): $ref}' >"$RUNNER_TEMP/ref/${{ matrix.name }}.json"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.publish.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-${{ matrix.name }}
+          path: ${{ runner.temp }}/ref/${{ matrix.name }}.json
+          if-no-files-found: error
+
+  release:
+    needs: [version, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/refs
+      # The kit renders the example environment and Phala's with these images before anything is
+      # published; the template's compose is rendered from the kit itself.
+      - name: Write images.json, build the deploy kit, and render the template
+        run: |
+          dist="$RUNNER_TEMP/dist" kit="$RUNNER_TEMP/kit"
+          mkdir -p "$dist" "$kit"
+          jq -s 'add' "$RUNNER_TEMP"/refs/*.json >"$dist/images.json"
+          jq -e 'keys == ["phala-pay", "phala-pay-reference-product", "postgres-walg"]' "$dist/images.json"
+          deploy/build-kit.sh "$GITHUB_REF_NAME" "$dist"
+          tar -xzf "$dist/phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" -C "$kit" --strip-components=1
+          for environment in "$kit/deploy/environments/example/topup" deploy/environments/phala-network/*/*/; do
+            "$kit/deploy/render.sh" --images "$dist/images.json" --gateway-domain gateway.release.invalid \
+              "$environment" >/dev/null
+          done
+          "$kit/deploy/render.sh" --template --images "$dist/images.json" \
+            "$kit/deploy/environments/phala-cloud-template/topup" >"$dist/phala-cloud-template.yml"
+          (cd "$dist" && sha256sum images.json "phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
+            phala-cloud-template.yml >SHA256SUMS)
+      - name: Attest the release assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/images.json
+            ${{ runner.temp }}/dist/phala-pay-deploy-${{ github.ref_name }}.tar.gz
+            ${{ runner.temp }}/dist/phala-cloud-template.yml
+            ${{ runner.temp }}/dist/SHA256SUMS
+      # `gh release create` uploads to a draft and publishes last, as immutable releases require.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dist="$RUNNER_TEMP/dist" notes="$RUNNER_TEMP/notes.md"
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=(--prerelease)
+            echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md." >"$notes"
+          else
+            sdk/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
+          fi
+          {
+            echo
+            echo "## Verify"
+            echo
+            echo "[deploy/verify-release.sh](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/deploy/verify-release.sh)"
+            echo "checks this release as Deploy does ([self-hosting guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/self-hosting.md#verify-a-release))."
+          } >>"$notes"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Phala Pay $VERSION" \
+            --notes-file "$notes" "${prerelease[@]}" \
+            "$dist/images.json" "$dist/phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
+            "$dist/phala-cloud-template.yml" "$dist/SHA256SUMS"

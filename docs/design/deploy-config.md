@@ -459,6 +459,15 @@ service compose, with `topup.yaml` as an inline config filled from the template'
 Mixing those into this PR would put the live staging migration and a new distribution model at
 risk together.
 
+**Done** in the versioned-release change (v0.3.0): a `v<version>` tag runs the Release workflow,
+which publishes the reproducible images, each attested, and a GitHub release with `images.json`,
+the attested deploy kit (`deploy/build-kit.sh`), and the Phala Cloud template's compose
+(`render.sh --template`, [deploy/README.md](../../deploy/README.md#the-phala-cloud-template-variant)).
+Deploy is a reusable `workflow_call` workflow that runs the kit against the caller's environment
+directory. The fork path of §9, "Self-hosters (forks)", no longer applies: operators copy the
+example into their own environment repository
+([self-hosting guide](../self-hosting.md#2-your-environment-repository)).
+
 ## 11. Verification
 
 **The in-place upgrade rehearsal** (`deploy/local/upgrade-rehearsal.sh`, `make upgrade-rehearsal`)

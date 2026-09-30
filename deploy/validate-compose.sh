@@ -17,11 +17,14 @@ jq -n '{"phala-pay": "ghcr.io/phala-network/phala-pay@sha256:\("1" * 64)",
     "postgres-walg": "ghcr.io/phala-network/postgres-walg@sha256:\("2" * 64)",
     "phala-pay-reference-product": "ghcr.io/phala-network/phala-pay-reference-product@sha256:\("3" * 64)"}' \
     >"$tmp/images.json"
-# render NAME ENV_DIR [--restore-check]: the compose as Deploy renders it, and its JSON.
+# render NAME ENV_DIR [--restore-check | --template]: the compose as Deploy (or the release, for
+# the template) renders it, and its JSON.
 render() {
     local name=$1 env_dir=$2 inputs=(--gateway-domain gateway.dstack-pha-prod5.phala.network)
-    [[ "${3:-}" != --restore-check ]] ||
-        inputs=(--restore-check --origin https://0123abcd-8081.dstack-pha-prod5.phala.network)
+    case "${3:-}" in
+        --restore-check) inputs=(--restore-check --origin https://0123abcd-8081.dstack-pha-prod5.phala.network) ;;
+        --template) inputs=(--template) ;;
+    esac
     "$root/deploy/render.sh" "${inputs[@]}" --images "$tmp/images.json" "$env_dir" >"$tmp/$name.yml" ||
         fail "$env_dir does not render"
     "$compose" -f "$tmp/$name.yml" config --no-interpolate --format json >"$tmp/$name.json"
@@ -37,6 +40,7 @@ render restore-check "$staging/topup" --restore-check
 render example "$root/deploy/environments/example/topup"
 render example-restore-check "$root/deploy/environments/example/topup" --restore-check
 render product "$staging/product"
+render template "$root/deploy/environments/phala-cloud-template/topup" --template
 
 # Staging's sealed names are the ones sealed in its CVM: a change needs a re-seal
 # (deploy/README.md, "Sealing the secrets") before the upgrade that makes it.
@@ -57,6 +61,26 @@ jq -e --slurpfile service "$tmp/service.json" '
         | del(.volumes.ingress_certs, .volumes.ingress_evidences);
     normal == ($service[0] | normal)' "$tmp/restore-check.json" >/dev/null ||
     fail "the restore-check variant differs from the service in more than its declared changes"
+
+# The template is the service without dstack-ingress, topup published on 80, and the deploy form's
+# values at runtime: topup's origin and admin key from its environment, its own topup.yaml
+# (staging's routes and providers), the backup location, and no keyed provider.
+jq -e --slurpfile service "$tmp/service.json" '
+    def normal: del(.services["dstack-ingress", "restore-check"], .services.topup.ports)
+        | .services.topup.command |= .[0:6]
+        | del(.services.postgres.environment["WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION"],
+            .services.backup.environment["WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION"],
+            .services.topup.environment["DSTACK_APP_DOMAIN", "TOPUP_ADMIN_PUBLIC_KEY"])
+        | .services.topup.environment |= with_entries(select(.key | startswith("TOPUP_RPC_") | not))
+        | .configs |= with_entries(select(.key | startswith("topup_") | not))
+        | .services[].configs[]? |= (if .source | startswith("topup_") then .source = "topup" else . end)
+        | del(.volumes.ingress_certs, .volumes.ingress_evidences);
+    normal == ($service[0] | normal)' "$tmp/template.json" >/dev/null ||
+    fail "the template variant differs from the service in more than its declared changes"
+jq -j '.configs | to_entries[] | select(.key | startswith("topup_")) | .value.content' \
+    "$tmp/template.json" | sed -n '/^routes:$/,$p' |
+    cmp -s - <(sed -n '/^routes:$/,$p' "$staging/topup/topup.yaml") ||
+    fail "the template's routes must be staging's"
 
 # The reference product calls staging's topup and pins its keys there; its demo API allows only
 # the website's origin. Its chains are Sepolia and Base Sepolia, each with a committed keyless https

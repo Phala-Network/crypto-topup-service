@@ -1,27 +1,60 @@
 #!/bin/sh
+# Builds an image of this checkout (DOCKERFILE, default the phala-pay Dockerfile) for PLATFORM, with
+# the commit's time as SOURCE_DATE_EPOCH and the commit as SOURCE_COMMIT, exactly as the Release
+# workflow does: Buildx v0.37.1 and a temporary builder running the pinned BuildKit image.
+#
+# Every digest is the one BuildKit reports for what it built (`--metadata-file`,
+# `containerimage.digest` and `containerimage.config.digest`), never a tag read back. By default the
+# image must be reproducible: build 1 goes to an OCI archive, build 2 to another archive or, with
+# PUBLISH_IMAGE (a repository:tag), to the registry, and both must have the same manifest and config
+# digests. --once builds once and publishes: postgres-walg, which is not reproducible (apt and dpkg
+# record wall-clock times) and so has provenance only. IMAGE_REF_FILE receives
+# repository@<the pushed build's digest>, which the Release workflow smoke-tests and attests.
+#
+# Usage: deploy/verify-image.sh [--once]
 set -eu
+
+buildx=v0.37.1
+buildkit=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
-# The commit compiled in as the Sentry release (Dockerfile); both builds and the push take it.
+# The commit compiled in as the Sentry release (Dockerfile).
 source_commit=${SOURCE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
 platform=${PLATFORM:-linux/amd64}
-# DOCKERFILE (relative to the repository root) selects another image; default the phala-pay one.
 dockerfile="$root/${DOCKERFILE:-Dockerfile}"
-tmp=$(mktemp -d)
+once=0
+case "${1:-}" in
+    --once) once=1 ;;
+    '') ;;
+    *) echo "usage: $0 [--once]" >&2; exit 64 ;;
+esac
+case "${PUBLISH_IMAGE:-}" in
+    '') [ "$once" -eq 0 ] || { echo "--once publishes: set PUBLISH_IMAGE" >&2; exit 64; } ;;
+    *@sha256:*) echo "PUBLISH_IMAGE must be a repository:tag, not a digest" >&2; exit 64 ;;
+    *) case "${PUBLISH_IMAGE##*/}" in
+        *:*) ;;
+        *) echo "PUBLISH_IMAGE must include a tag" >&2; exit 64 ;;
+    esac ;;
+esac
+docker buildx version | grep -q " $buildx " ||
+    { echo "Buildx $buildx is required (docker buildx version)" >&2; exit 1; }
 
+tmp=$(mktemp -d)
+builder="phala-pay-verify-$$"
 cleanup() {
-    find "$tmp" -type f -delete
-    find "$tmp" -depth -type d -empty -delete
+    docker buildx rm "$builder" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
 }
 trap cleanup EXIT INT TERM
+docker buildx create --name "$builder" --driver docker-container --driver-opt "image=$buildkit" \
+    >/dev/null
 
+# build N OUTPUT: clean build N to OUTPUT (a Buildx --output); prints the manifest and config
+# digests BuildKit reports for it.
 build() {
-    number=$1
-    archive="$tmp/build-$number.tar"
-    output="$tmp/build-$number"
-    mkdir -p "$output"
     docker buildx build \
+        --builder "$builder" \
         --no-cache \
         --platform "$platform" \
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
@@ -29,81 +62,30 @@ build() {
         --provenance=false \
         --sbom=false \
         --file "$dockerfile" \
-        --output "type=oci,dest=$archive,name=phala-pay:repro,rewrite-timestamp=true,oci-mediatypes=true" \
-        "$root"
-    tar -xf "$archive" -C "$output"
-
-    manifest_digest=$(jq -r '.manifests[0].digest' "$output/index.json")
-    manifest_path="$output/blobs/sha256/${manifest_digest#sha256:}"
-    config_digest=$(jq -r '.config.digest' "$manifest_path")
-    printf '%s %s\n' "$manifest_digest" "$config_digest"
+        --metadata-file "$tmp/build-$1.json" \
+        --output "$2,rewrite-timestamp=true,oci-mediatypes=true" \
+        "$root" >&2
+    jq -er '"\(."containerimage.digest") \(."containerimage.config.digest")"' "$tmp/build-$1.json"
+}
+archived() {
+    build "$1" "type=oci,dest=$tmp/build-$1.tar,name=phala-pay:repro"
+}
+published() {
+    build "$1" "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false"
 }
 
-first=$(build 1)
-second=$(build 2)
-
-printf 'build 1: manifest=%s config=%s\n' "${first% *}" "${first#* }"
-printf 'build 2: manifest=%s config=%s\n' "${second% *}" "${second#* }"
-
-if [ "$first" != "$second" ]; then
-    echo "image reproducibility check failed" >&2
-    exit 1
+if [ "$once" -eq 1 ]; then
+    built=$(published 1)
+    echo "published (not reproducible): manifest=${built% *} config=${built#* }"
+else
+    first=$(archived 1)
+    if [ -n "${PUBLISH_IMAGE:-}" ]; then second=$(published 2); else second=$(archived 2); fi
+    printf 'build 1: manifest=%s config=%s\nbuild 2: manifest=%s config=%s\n' \
+        "${first% *}" "${first#* }" "${second% *}" "${second#* }"
+    [ "$first" = "$second" ] || { echo "image reproducibility check failed" >&2; exit 1; }
+    echo "image reproducibility check passed"
+    built=$second
 fi
-
-echo "image reproducibility check passed"
-
-if [ -n "${PUBLISH_IMAGE:-}" ]; then
-    case "$PUBLISH_IMAGE" in
-        *@sha256:*)
-            echo "PUBLISH_IMAGE must be a writable repository tag, not a digest" >&2
-            exit 64
-            ;;
-    esac
-    # The tag follows the last path component, so a registry port is not mistaken for one.
-    case "${PUBLISH_IMAGE##*/}" in
-        *:*) ;;
-        *) echo "PUBLISH_IMAGE must include an explicit candidate tag" >&2; exit 64 ;;
-    esac
-
-    docker buildx build \
-        --no-cache \
-        --platform "$platform" \
-        --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
-        --build-arg "SOURCE_COMMIT=$source_commit" \
-        --provenance=false \
-        --sbom=false \
-        --file "$dockerfile" \
-        --output "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
-        "$root"
-
-    registry_raw="$tmp/registry-raw.json"
-    registry_manifest="$tmp/registry-manifest.json"
-    docker buildx imagetools inspect "$PUBLISH_IMAGE" --raw >"$registry_raw"
-    if jq -e '.manifests' "$registry_raw" >/dev/null 2>&1; then
-        os=${platform%/*}
-        arch=${platform#*/}
-        registry_manifest_digest=$(jq -er \
-            --arg os "$os" --arg arch "$arch" \
-            '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' \
-            "$registry_raw")
-        docker buildx imagetools inspect \
-            "$PUBLISH_IMAGE@$registry_manifest_digest" --raw >"$registry_manifest"
-        registry_index_digest="sha256:$(sha256sum "$registry_raw" | awk '{print $1}')"
-    else
-        cp "$registry_raw" "$registry_manifest"
-        registry_manifest_digest="sha256:$(sha256sum "$registry_manifest" | awk '{print $1}')"
-        registry_index_digest=$registry_manifest_digest
-    fi
-    registry_config_digest=$(jq -er '.config.digest' "$registry_manifest")
-
-    printf 'registry: index=%s manifest=%s config=%s\n' \
-        "$registry_index_digest" "$registry_manifest_digest" "$registry_config_digest"
-    if [ "$registry_manifest_digest $registry_config_digest" != "$first" ]; then
-        echo "published image differs from verified local image" >&2
-        exit 1
-    fi
-    echo "published image matches verified local manifest and config"
-    if [ -n "${IMAGE_REF_FILE:-}" ]; then
-        printf '%s@%s\n' "${PUBLISH_IMAGE%:*}" "$registry_manifest_digest" >"$IMAGE_REF_FILE"
-    fi
+if [ -n "${PUBLISH_IMAGE:-}" ] && [ -n "${IMAGE_REF_FILE:-}" ]; then
+    printf '%s@%s\n' "${PUBLISH_IMAGE%:*}" "${built% *}" >"$IMAGE_REF_FILE"
 fi

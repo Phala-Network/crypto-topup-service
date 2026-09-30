@@ -3,13 +3,20 @@
 set -euo pipefail
 source "$(dirname -- "$0")/common.sh"
 
-output=""
+# The manifest of a local reference deployment of this build: the deterministic addresses, their
+# runtime code hashes, and sample forwarder addresses. reference.json is the committed copy that
+# verify-deployment.sh compares chains against, so verification needs no Solidity build; --check
+# fails unless a fresh build reproduces it, and --write regenerates it after a reviewed change.
+committed="$DEPLOY_CONTRACTS_DIR/reference.json"
+output="" mode=""
 while (($#)); do
     case "$1" in
         --output) output="${2:-}"; shift 2 ;;
-        *) die "usage: $0 [--output FILE]" ;;
+        --check | --write) mode=$1; shift ;;
+        *) die "usage: $0 [--output FILE | --check | --write]" ;;
     esac
 done
+[[ -z "$mode" || -z "$output" ]] || die "usage: $0 [--output FILE | --check | --write]"
 
 require_command anvil
 require_command cast
@@ -81,8 +88,16 @@ manifest="$(jq -n \
         sample_forwarders: $vectors
     }')"
 
-if [[ -n "$output" ]]; then
-    printf '%s\n' "$manifest" | jq . >"$output"
-else
-    printf '%s\n' "$manifest" | jq .
-fi
+case "$mode" in
+    --check)
+        printf '%s\n' "$manifest" | jq . | cmp -s - "$committed" ||
+            die "$committed differs from this build's reference deployment; review the contract change and run $0 --write"
+        echo "reference.json matches this build's reference deployment" ;;
+    --write) printf '%s\n' "$manifest" | jq . >"$committed" ;;
+    *)
+        if [[ -n "$output" ]]; then
+            printf '%s\n' "$manifest" | jq . >"$output"
+        else
+            printf '%s\n' "$manifest" | jq .
+        fi ;;
+esac

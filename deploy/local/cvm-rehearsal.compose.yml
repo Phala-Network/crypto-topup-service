@@ -64,12 +64,17 @@ services:
       dstack-simulator:
         condition: service_healthy
 
+  # The local Garage store is plain http (deploy/scripts/postgres-walg-entrypoint.sh).
   postgres:
+    environment:
+      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"
     depends_on:
       s3-init:
         condition: service_completed_successfully
 
   backup:
+    environment:
+      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"
     depends_on:
       s3-init:
         condition: service_completed_successfully

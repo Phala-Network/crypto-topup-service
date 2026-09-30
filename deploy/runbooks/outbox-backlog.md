@@ -47,7 +47,7 @@ whose endpoint keeps failing.
   the mode from `GET /v1/attestation` with its own key; after a webhook key roll the previous key
   keeps signing for the roll's overlap (at least 48 hours in live mode).
 - Monitor silent with no error: the delivery worker stopped. **HUMAN-ONLY:** restart the CVM
-  (`npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"`).
+  (`deploy/phala cvms restart "$TOPUP_CVM_ID"`).
 
 ## Done when
 

@@ -51,6 +51,7 @@ deploy-check:
 	cd contracts && forge build
 	cd contracts && forge test
 	deploy/contracts/check-build.sh --check
+	deploy/contracts/reference-manifest.sh --check
 	deploy/contracts/test-determinism.sh
 
 runbook-check:

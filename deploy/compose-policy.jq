@@ -2,7 +2,8 @@
 # render.sh, validate-compose.sh, preflight.sh, and verify-attestation.sh. Input: the compose as
 # `docker compose config --format json` prints it. `violations($variant; $project)` is the list of
 # broken rules, empty when the compose passes. $variant is `service`, `restore-check` (the topup
-# CVM, deploy/RESTORE.md), or `product` (the reference product); $project is `dstack` on a CVM.
+# CVM, deploy/RESTORE.md), `template` (the Phala Cloud template, deploy/compose.template.yaml), or
+# `product` (the reference product); $project is `dstack` on a CVM.
 
 def env_map:
     if type == "array" then map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries
@@ -38,6 +39,17 @@ def config_origin:
     // ([split("\n")[] | capture("^public_origin:[ \\t]*[\"']?(?<origin>[^\"' \\t#]+)")] | first.origin)
     // "";
 
+# The Phala Cloud template's per-deployment values, which its deploy form (and, for the origin,
+# Phala Cloud's pre-launch script) puts in the CVM's env, so the attestation does not cover them
+# (deploy/compose.template.yaml): WAL-G's backup location, which the postgres-walg entrypoint
+# checks at startup, and the origin's host and the admin public key, which topup parses at startup
+# from the variables its command names. Each may only be the whole value of its own key.
+def template_runtime_setting($service; $key; $name):
+    $name == $key and (
+        (($service == "postgres" or $service == "backup")
+            and ($key == "WALG_S3_PREFIX" or $key == "AWS_ENDPOINT" or $key == "AWS_REGION"))
+        or ($service == "topup" and ($key == "DSTACK_APP_DOMAIN" or $key == "TOPUP_ADMIN_PUBLIC_KEY")));
+
 # May the sealed secret `$name` fill the environment key `$key` of `$service`?
 def secret_allowed($variant; $service; $key; $name):
     if $variant == "product" then
@@ -46,13 +58,14 @@ def secret_allowed($variant; $service; $key; $name):
         ($name == "SENTRY_DSN" and $service == "topup" and $key == $name)
         or (($name | test("^TOPUP_RPC_[A-Z0-9_]+_KEY$")) and $key == $name
             and ($service == "topup" or $service == "restore-check"))
-        or (if $variant == "service" then
+        or (if $variant == "service" or $variant == "template" then
                 ($name == "AWS_ACCESS_KEY_ID" or $name == "AWS_SECRET_ACCESS_KEY")
                 and ($service == "postgres" or $service == "backup") and $key == $name
             else
                 ($key == "AWS_ACCESS_KEY_ID" or $key == "AWS_SECRET_ACCESS_KEY")
                 and $service == "postgres" and $name == "RESTORE_\($key)"
             end)
+        or ($variant == "template" and template_runtime_setting($service; $key; $name))
     end;
 
 # Every string of the compose that Compose would interpolate (a `$` left once `$$` is removed) must
@@ -91,7 +104,7 @@ def common_violations($variant; $project):
 # The derived credentials (deploy/README.md, "Database credentials"): each volume is the committed
 # tmpfs, mounted by exactly these services, and written only by `keys`, which derives them.
 def credential_mounters($variant):
-    if $variant == "service" then
+    if $variant == "service" or $variant == "template" then
         {walg_key: ["backup", "keys", "postgres"], db_owner: ["backup", "keys", "migrate", "postgres"],
          db_app: ["heartbeat", "keys", "postgres", "topup"]}
     else
@@ -128,9 +141,26 @@ def topup_violations:
               "topup must log in as topup_service with the application pgpass"),
         check((.services.migrate.environment | env_map | .DATABASE_URL | database_user) == "postgres";
               "migrate must log in as the database owner"),
-        check((mounted_config("topup"; "/etc/topup/topup.yaml") | config_origin | startswith("http"));
+        check(mounted_config("topup"; "/etc/topup/topup.yaml") != "";
               "topup must mount its topup.yaml at /etc/topup/topup.yaml")
       ];
+
+# The live instance, the service or the template variant: topup serves with its webhooks through
+# smokescreen, and PostgreSQL archives. The template's topup takes its origin and admin key from
+# the variables its extra arguments name.
+def serve_command: ["topup", "run", "--config", "/etc/topup/topup.yaml",
+    "--webhook-proxy", "http://smokescreen:4750"];
+def live_violations($command):
+    [ check(.services.topup.command == $command;
+              "topup must run the service with its webhooks through smokescreen"),
+        check(.services.smokescreen.image == .services.topup.image
+                and .services.smokescreen.command == smokescreen_command
+                and .services.smokescreen.entrypoint == null
+                and ((.services.smokescreen.ports // []) == []);
+              "smokescreen must run its exact deny list from the service image, publishing nothing"),
+        check([.services.postgres, .services.backup | .environment | env_map | .TOPUP_RESTORE_FROM_BACKUP // "off"]
+                == ["off", "off"]; "the service must archive: TOPUP_RESTORE_FROM_BACKUP must not be on")
+      ] + topup_violations + credential_violations("service");
 
 def service_violations:
     (.services["dstack-ingress"].environment | env_map) as $ingress
@@ -144,20 +174,23 @@ def service_violations:
                 and ($ingress.GATEWAY_DOMAIN // "" | host_name) and ($ingress.DOMAIN // "" | host_name)
                 and $origin == "https://\($ingress.DOMAIN)";
               "dstack-ingress must serve the host of topup's public_origin with tls-alpn-01, forwarding to topup:8080, through a gateway host"),
-        check(.services.topup.command == ["topup", "run", "--config", "/etc/topup/topup.yaml",
-                "--webhook-proxy", "http://smokescreen:4750"];
-              "topup must run the service with its webhooks through smokescreen"),
-        check(.services.smokescreen.image == .services.topup.image
-                and .services.smokescreen.command == smokescreen_command
-                and .services.smokescreen.entrypoint == null
-                and ((.services.smokescreen.ports // []) == []);
-              "smokescreen must run its exact deny list from the service image, publishing nothing"),
-        check([.services.postgres, .services.backup | .environment | env_map | .TOPUP_RESTORE_FROM_BACKUP // "off"]
-                == ["off", "off"]; "the service must archive: TOPUP_RESTORE_FROM_BACKUP must not be on"),
         check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
                 | unique == ["dstack-ingress", "keys", "topup"];
               "only keys, topup, and dstack-ingress may mount the dstack socket")
-      ] + topup_violations + credential_violations("service");
+      ] + live_violations(serve_command);
+
+# The template: the service without dstack-ingress, topup published on 80 for the Phala Cloud
+# gateway, which serves it as https://<app-id>.<gateway-domain>, the origin DSTACK_APP_DOMAIN names.
+def template_violations:
+    [ check((.services | keys) == ["backup", "heartbeat", "keys", "migrate", "postgres", "smokescreen",
+                "topup"];
+              "the template runs exactly keys, postgres, migrate, topup, smokescreen, heartbeat, and backup"),
+        check(only_published("topup"; 8080; "80"); "only topup may publish a port, 80"),
+        check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
+                | unique == ["keys", "topup"];
+              "only keys and topup may mount the dstack socket")
+      ] + live_violations(serve_command + ["--public-origin-host-env", "DSTACK_APP_DOMAIN",
+            "--admin-public-key-env", "TOPUP_ADMIN_PUBLIC_KEY"]);
 
 def restore_check_violations:
     (.services.postgres.environment | env_map) as $postgres
@@ -203,5 +236,6 @@ def violations($variant; $project):
     common_violations($variant; $project)
     + if $variant == "service" then service_violations
       elif $variant == "restore-check" then restore_check_violations
+      elif $variant == "template" then template_violations
       elif $variant == "product" then product_violations
       else ["unknown variant \($variant)"] end;

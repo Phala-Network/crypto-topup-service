@@ -1,0 +1,40 @@
+name: Deploy Phala's instance
+
+# Phala's own deployments (deploy/phala.md), exactly as an operator's: Deploy called at the release
+# Phala runs, with this repository's committed environment directory
+# deploy/environments/phala-network/<Environment>/<target>. Adopting a new release is a pull
+# request that changes the release in both places below. Dispatched from main by a user with write
+# access; see deploy.yml for what a run checks and does.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub Environment to deploy
+        type: choice
+        options: [staging, production]
+        required: true
+      target:
+        description: "topup: the service CVM (vars.TOPUP_CVM_ID); product: the staging reference-product CVM (vars.STAGING_PRODUCT_CVM_ID)"
+        type: choice
+        options: [topup, product]
+        required: true
+      mode:
+        description: "provision: create the target's first CVM; upgrade: update the target's CVM"
+        type: choice
+        options: [provision, upgrade]
+        required: true
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  deploy:
+    uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@v0.3.0
+    with:
+      version: v0.3.0
+      environment: ${{ inputs.environment }}
+      target: ${{ inputs.target }}
+      mode: ${{ inputs.mode }}
+      environment_dir: deploy/environments/phala-network/${{ inputs.environment }}/${{ inputs.target }}

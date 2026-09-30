@@ -38,8 +38,8 @@ which puts each whole chain, PHA included, on transfer requests by recipient (ar
 RPC cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
 usage](README.md#measuring-rpc-usage)). The head loop polls every 12 s on both chains
 (`--head-poll-interval-s`), six Base blocks, so Base Sepolia costs about what Sepolia does.
-Routes are attested config: adding or changing one is a PR and a Deploy `upgrade` of `topup`,
-never a reset.
+Routes are attested config: adding or changing one is a PR and an `upgrade` of `topup` with
+Deploy Phala's instance, never a reset.
 
 ### RPC providers
 
@@ -63,57 +63,90 @@ Mainnet needs paid providers from two different companies.
 
 ## Staging reset (HUMAN-ONLY)
 
-Phala's staging was reset this way for the multi-tenant launch, and the procedure is kept for a
-future reset (pull request #208 pinned the reference product's new account). The multi-tenant
-schema (design §14) replaced the migration history and migrates no data
-(`crates/topup/migrations/README.md`), and staging's route now uses the new factory, so the
-staging service is replaced, not upgraded: a new CVM on an empty backup prefix, with every account
-created again. Nothing on staging is live, so no funds or merchants are affected. Every step below
-is HUMAN-ONLY except the workflow runs, which the staging owner dispatches; agents and CI run none
-of them. In order:
+Staging is reset at the v0.3.0 cutover: a fresh provision on an empty backup prefix, with every
+account created again, instead of an upgrade. Nothing on staging is live, so no funds or merchants
+are affected; the new app id derives new webhook keys for every account. Every step is HUMAN-ONLY,
+by the staging owner, except the workflow runs, which the owner dispatches; agents and CI run none
+of them. Run them from a checkout of `main` with `PHALA_CLOUD_API_KEY` of the `staging` Environment
+exported and the release's verified kit in `kit/`:
 
-1. **Build.** Run Release images on `main` and note its run id.
-2. **Factory on Sepolia: done.** The factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its
-   implementation `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified
-   ([Contracts](README.md#contracts)); confirm Verify contracts is green.
-3. **Treasury Safe: done.** The staging finance Safe `0x936c1991f8dA9a919fa11b557a3514719f5A4504`
-   (v1.4.1, 1-of-1) has the `CompatibilityFallbackHandler` v1.4.1
-   `0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99` as its fallback handler (Sepolia transaction
-   `0xc63baf595bd13f9f27c27ba2a370c602bb2008c8703ab9629095af8844f10812`), so it can prove itself as
-   a treasury; [contracts/safe-expectations.json](contracts/safe-expectations.json) records it, and
-   `deploy/contracts/verify-safe.sh` passes on both providers. The reference product's account has
-   since moved to the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`, the same address
-   (SafeL2 v1.4.1, 1-of-1, the same fallback handler) on Sepolia and Base Sepolia. Never use
-   `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is destroyed.
-4. **Stop the old service.** `npx --yes phala@1.1.22 cvms stop "$TOPUP_CVM_ID"` and the same for
-   `$STAGING_PRODUCT_CVM_ID`. Keep both CVMs and the old backup prefix for the retention period: they
-   restore only with an image built before the reset. Record their ids.
-5. **Point staging at an empty database.** Merge a PR setting `WALG_S3_PREFIX` in
-   [environments/phala-network/staging/topup/compose.yaml](environments/phala-network/staging/topup/compose.yaml)
-   to a new, empty prefix (PostgreSQL initializes a cluster only on a prefix that provably holds no
-   backup, [RESTORE.md](RESTORE.md#bootstrap-from-backup)); clear `TOPUP_CVM_ID` and
-   `STAGING_PRODUCT_CVM_ID`.
-6. **Provision the service.** Deploy (`staging`, `topup`, `provision`, the release of step 1); set
-   `TOPUP_CVM_ID` to the new id; [seal the secrets](README.md#sealing-the-secrets); update the
-   [DNS records](README.md#custom-domain) the summary lists (the CNAME to the new gateway, the
-   `_dstack-app-address` TXT to the new instance); then Deploy `upgrade` with the same release,
-   which waits for `/healthz` and verifies the attestation and the certificate evidence. The new
-   app id derives new webhook keys for every account.
-7. **Verify** the attestation from your machine ([Attestation](README.md#attestation-ingress-and-egress)) and
-   that `GET /v1/config` with any test key lists the Sepolia assets with `confirmations` 2 (the
-   routes' versions are in the attested compose Deploy `upgrade` verified).
-8. **Onboard the staging accounts** ([Operator onboarding](README.md#operator-onboarding), steps 1–3, with
-   `charges_enabled: false`: Sepolia routes are test routes), first the reference product's, then
-   each internal merchant's (Phala Cloud's staging backend), and send each contact its `acct_…` and
-   key.
-9. **Set up the reference product's account** as its merchant ([Staging reference
-   product](#staging-reference-product), steps 2–4): roll the key, a restricted key for the product,
-   the treasury (step 3's Safe, as a Safe message), and, after the product is provisioned, its
-   webhook endpoint.
-10. **Run one deposit** of each collection method ([Staging reference product](#staging-reference-product),
-    step 5) and one [sweep](README.md#sweeping) from the treasury Safe; confirm `swept` and the daily report.
-11. **Retire the old CVMs** once the new service has run clean for a day: `npx --yes phala@1.1.22
-    cvms delete "$OLD_CVM_ID" --force` for each, by the recorded id (never by name or app id); delete the old backup prefix only at the end of its retention.
+```sh
+bash deploy/verify-release.sh v0.3.0 release
+mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.0.tar.gz -C kit --strip-components=1
+npm ci --prefix kit/deploy/tools --ignore-scripts
+```
+
+Already in place: v0.3.0 is released, [deploy-phala.yml](../.github/workflows/deploy-phala.yml)
+calls it, and staging's [compose.yaml](environments/phala-network/staging/topup/compose.yaml) names
+the new, empty prefix `s3://crypto-topup-test/staging-v030` (committed ahead of the cutover: until
+the reset, never upgrade the old staging CVM from `main`). The factory
+`0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its implementation
+`0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified on Sepolia and Base Sepolia
+([Contracts](README.md#contracts)), and the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`
+(SafeL2 v1.4.1, 1-of-1, `CompatibilityFallbackHandler` v1.4.1) is the same address on both. Never
+use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is destroyed.
+
+1. **Record the old CVMs, stop them, and clear their variables.** Deploy refuses to provision
+   while a CVM id variable is set:
+
+   ```sh
+   repo=(-R Phala-Network/phala-pay)
+   OLD_TOPUP_CVM_ID=$(gh variable get TOPUP_CVM_ID --env staging "${repo[@]}")
+   OLD_PRODUCT_CVM_ID=$(gh variable get STAGING_PRODUCT_CVM_ID --env staging "${repo[@]}")
+   echo "$OLD_TOPUP_CVM_ID $OLD_PRODUCT_CVM_ID"   # keep these for step 9
+   kit/deploy/phala cvms stop "$OLD_TOPUP_CVM_ID"
+   kit/deploy/phala cvms stop "$OLD_PRODUCT_CVM_ID"
+   gh variable delete TOPUP_CVM_ID --env staging "${repo[@]}"
+   gh variable delete STAGING_PRODUCT_CVM_ID --env staging "${repo[@]}"
+   ```
+
+2. **Check that the new prefix is empty.** PostgreSQL initializes a cluster only on a prefix
+   that provably holds no backup ([RESTORE.md](RESTORE.md#bootstrap-from-backup)); this lists
+   nothing:
+
+   ```sh
+   aws s3 ls s3://crypto-topup-test/staging-v030/ --recursive \
+     --endpoint-url https://1d694c298092ffa09c793cbca4587812.r2.cloudflarestorage.com
+   ```
+
+3. **Provision the service**, then record its CVM id from the run summary:
+
+   ```sh
+   gh workflow run deploy-phala.yml "${repo[@]}" --ref main -f environment=staging -f target=topup -f mode=provision
+   gh variable set TOPUP_CVM_ID --env staging --body "<the summary's CVM id>" "${repo[@]}"
+   ```
+
+4. **Reseal the service's secrets** with the commands the summary prints
+   ([Sealing the secrets](README.md#sealing-the-secrets)): `.env.staging` (mode 0600) holds exactly
+   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN`, and the empty
+   `TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY`.
+5. **Switch DNS** for `pay-api-staging.phala.com` to the records the summary lists: the CNAME to
+   the new node's gateway and the `_dstack-app-address` TXT to the new instance, DNS only
+   ([Custom domain](README.md#custom-domain)).
+6. **Upgrade once and verify.** Dispatch the same run with `-f mode=upgrade`: it waits for
+   `/healthz` and verifies the attestation and the certificate evidence. Then verify the
+   attestation from your machine ([Attestation](README.md#attestation-ingress-and-egress)), and
+   check that `GET /v1/config` with any test key lists the Sepolia and Base Sepolia assets.
+7. **Re-onboard the accounts** ([Operator onboarding](README.md#operator-onboarding), steps 1–3,
+   `charges_enabled: false`): the reference product's first, then each internal merchant's (Phala
+   Cloud's staging backend), and send each contact its `acct_…` and key. Set up the reference
+   product's account ([Staging reference product](#staging-reference-product), setup steps 1–3).
+   The cutover pull request, not this one, sets that new `acct_…` as `account` in
+   [product/config.json](environments/phala-network/staging/product/config.json); merge it.
+8. **Provision, reseal, and switch the reference product** (setup step 4): dispatch with
+   `-f target=product -f mode=provision`, `gh variable set STAGING_PRODUCT_CVM_ID --env staging`,
+   seal `.env.product` with `PRODUCT_API_KEY` as the summary prints, switch the DNS records of
+   `pay-demo-api.phala.com`, dispatch `-f target=product -f mode=upgrade`, and register its webhook
+   endpoint. Run one deposit of each collection method (setup step 5) and one
+   [sweep](README.md#sweeping) from the Safe; confirm `swept` and the daily report.
+9. **Delete the old CVMs by their recorded ids** (never by name or app id), once the new service
+   has run clean for a day. Their app is gone with them, so the old prefix
+   `staging-mt-20260928` can no longer be restored and may be deleted too:
+
+   ```sh
+   kit/deploy/phala cvms delete "$OLD_TOPUP_CVM_ID" --force
+   kit/deploy/phala cvms delete "$OLD_PRODUCT_CVM_ID" --force
+   ```
 
 ## Staging reference product
 
@@ -233,7 +266,7 @@ Anvil, with the real factory at its deterministic address, against a stand-in se
 the local product and serves it from its own origin under the CSP of `public/_headers`, so the
 demo runs cross-origin, with CORS and the cookie, as in production.
 
-Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1–8 (each step
+Setup, in order, during the [staging reset](#staging-reset-human-only)'s steps 7 and 8 (each step
 **HUMAN-ONLY** unless it is a workflow run):
 
 1. On the owner's machine (mode-0600 files, never committed), create the driver key, and commit its
@@ -260,10 +293,10 @@ Setup, in order, after the [staging reset](#staging-reset-human-only)'s steps 1�
    setting the product config's `account` in
    [config.json](environments/phala-network/staging/product/config.json) to the new `acct_…` id,
    and merge it.
-4. Deploy (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
+4. Run Deploy Phala's instance (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
    [DNS records](README.md#custom-domain) for `$PRODUCT_DOMAIN` the summary lists, seal `.env.product`
-   holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and Deploy
-   `upgrade` with the same release, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
+   holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and run it with
+   `upgrade`, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
    the certificate evidence. Then, with the secret key, register the product's endpoint:
    `POST /v1/webhook_endpoints {"url": "<public_url>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.

@@ -5,19 +5,23 @@ set -eu
 # and TCB, the RTMR3 event-log replay, and the OS image measurements. The replayed app id must be
 # APP_ID and the replayed compose hash the SHA-256 of the attested app-compose (the full
 # app-compose JSON the Phala CLI built, not the compose file), whose docker_compose_file must be
-# EXPECTED_COMPOSE byte for byte. Then the compose's own policy for VARIANT (`service` or
-# `restore-check` for topup, `product` for the reference product): deploy/compose-policy.jq, and
-# allowed_envs exactly the compose's sealed `${NAME:-}` names.
+# EXPECTED_COMPOSE byte for byte. Then the compose's own policy for VARIANT (`service`,
+# `restore-check`, or `template` for topup, `product` for the reference product):
+# deploy/compose-policy.jq, and allowed_envs exactly the compose's `${NAME:-}` names. The app-compose's
+# pre_launch_script, which the guest sources before `docker compose up`, must be byte for byte the
+# reviewed deploy/phala-cloud-pre-launch.sh that Deploy sends (`--pre-launch-script`). The
+# template's DSTACK_APP_DOMAIN is not an allowed env: that script exports it from the app id and the
+# gateway domain.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
 # and the app-compose). INFO_JSON is the guest agent's public `GET /prpc/Info` on port 8090 (the
 # CVM runs with public tcbinfo): the vm_config the quote does not carry.
 if [ "$#" -ne 5 ]; then
-    echo "usage: verify-attestation.sh ATTESTATION_JSON INFO_JSON APP_ID EXPECTED_COMPOSE service|restore-check|product" >&2
+    echo "usage: verify-attestation.sh ATTESTATION_JSON INFO_JSON APP_ID EXPECTED_COMPOSE service|restore-check|template|product" >&2
     exit 64
 fi
 case "$5" in
-    service | restore-check | product) variant=$5 ;;
+    service | restore-check | template | product) variant=$5 ;;
     *) echo "unknown variant $5" >&2; exit 64 ;;
 esac
 
@@ -63,6 +67,11 @@ jq -r '"dstack verifier: quote and TCB \(.details.tcb_status), RTMR3 event log, 
     "attested compose hash: 0x\(.details.app_info.compose_hash)"' "$tmp/result.json"
 
 jq -e 'type == "object"' "$tmp/app-compose.json" >/dev/null
+jq -j '.pre_launch_script // ""' "$tmp/app-compose.json" >"$tmp/pre-launch.sh"
+cmp -s "$tmp/pre-launch.sh" "$root/deploy/phala-cloud-pre-launch.sh" || {
+    echo "the attested pre_launch_script is not deploy/phala-cloud-pre-launch.sh" >&2
+    exit 1
+}
 jq -jer '.docker_compose_file | select(type == "string" and length > 0)' \
     "$tmp/app-compose.json" >"$tmp/docker-compose.yml"
 cmp -s "$expected_compose" "$tmp/docker-compose.yml" || {
@@ -75,7 +84,8 @@ compose=$("$root/deploy/pinned-compose.sh")
 "$compose" -f "$tmp/docker-compose.yml" config --no-interpolate --format json >"$tmp/docker-compose.json"
 # Every setting is attested: the env holds only the compose's sealed names, and exactly those.
 "$compose" -f "$tmp/docker-compose.yml" config --variables |
-    awk 'NR > 1 && NF > 0 { print $1 }' | sort -u >"$tmp/expected-envs"
+    awk -v variant="$variant" 'NR > 1 && NF > 0 && !(variant == "template" && $1 == "DSTACK_APP_DOMAIN") { print $1 }' |
+    sort -u >"$tmp/expected-envs"
 jq -r '.allowed_envs[]' "$tmp/app-compose.json" | sort -u >"$tmp/actual-envs"
 cmp -s "$tmp/actual-envs" "$tmp/expected-envs" || {
     echo "attested allowed_envs differs from the compose's sealed names" >&2
@@ -86,7 +96,7 @@ violations=$(jq -r -L "$root/deploy" --arg variant "$variant" \
     'include "compose-policy"; violations($variant; "dstack")[]' "$tmp/docker-compose.json")
 if [ -n "$violations" ]; then
     echo "the attested $variant compose breaks deploy/compose-policy.jq:" >&2
-    printf '  %s\n' "$violations" >&2
+    printf '%s\n' "$violations" | sed 's/^/  /' >&2
     exit 1
 fi
 echo "attested compose, allowed_envs, and the $variant policy passed"

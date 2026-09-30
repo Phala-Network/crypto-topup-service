@@ -1,0 +1,8 @@
+{
+  "name": "phala-pay-deploy-tools",
+  "private": true,
+  "description": "The Phala Cloud CLI that deploy/phala runs, with its dependencies locked: npm ci --prefix deploy/tools",
+  "dependencies": {
+    "phala": "1.1.22"
+  }
+}

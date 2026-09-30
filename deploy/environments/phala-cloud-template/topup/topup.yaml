@@ -1,0 +1,158 @@
+# The Phala Cloud template's topup configuration (docs/configuration.md): the four test routes and
+# the keyless providers of Phala's staging instance. It leaves out the public origin (the app's
+# gateway domain) and the admin public key, known only at deploy time: `topup run` reads them from
+# DSTACK_APP_DOMAIN and TOPUP_ADMIN_PUBLIC_KEY (deploy/compose.template.yaml), parses them strictly
+# at startup, and they are not attested. A production instance attests them (docs/self-hosting.md).
+environment: testnet
+admin_key:
+  id: admin/v1
+# Two keyless providers per chain, as on Phala's staging (deploy/phala.md, "RPC providers").
+rpc_providers:
+  provider-a: https://sepolia.gateway.tenderly.co
+  provider-b: https://ethereum-sepolia-rpc.publicnode.com
+  base-sepolia-a: https://base-sepolia.gateway.tenderly.co
+  base-sepolia-b: https://base-sepolia-rpc.publicnode.com
+# Phala's staging routes, unchanged: test mode (`livemode: false`) on Sepolia and Base Sepolia.
+routes:
+  # Staging route on Base Sepolia, the PHA route of Sepolia on a second chain: a test-mode route
+  # (`livemode: false`) any account can quote on and pay its own treasury through. Test PHA here is
+  # the same MockERC20 as on Sepolia (18 decimals, public `mint`). Route files carry no treasury
+  # (design D10); the factory and implementation are the deterministic deployment of
+  # deploy/CONTRACTS.md, the same address on every chain.
+  - route: phala-cloud-base-sepolia-pha-usd
+    version: 1
+    livemode: false
+
+    chain:
+      chain_id: 84532
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
+      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
+      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
+      confirmations: safe
+      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
+
+    asset:
+      symbol: pha
+      contract: "0x1a6F260377e42ead1418C7C1afDFD5DE371A9284"
+      decimals: 18
+      # No transfer since it was deployed (the last 100 000 blocks, Sep 2026): one token-wide log
+      # request per range. The USDC route still puts the whole chain in address mode (architecture §8).
+      backstop: token
+
+    pricing:
+      primary: { source: coinmetrics, asset: pha }
+      check: { source: binance, symbol: PHAUSDT }
+
+    limits:
+      min_credit_minor: 100
+      max_deposit_atomic: "200000000000000000000000"
+      min_refund_atomic: "20000000000000000000"
+  # Staging route on Base Sepolia for Circle's testnet USDC (https://faucet.circle.com), beside the
+  # PHA route: a test-mode route (`livemode: false`) any account can quote on and pay its own
+  # treasury through. The token is the one Circle lists for Base Sepolia
+  # (https://developers.circle.com/stablecoins/usdc-contract-addresses): FiatTokenV2_2 behind
+  # Circle's proxy, a plain ERC-20 with no transfer fee or rebasing. The chain section is the PHA
+  # route's: one chain has one set of chain settings. Route files carry no treasury (design D10).
+  - route: phala-cloud-base-sepolia-usdc-usd
+    version: 1
+    livemode: false
+
+    chain:
+      chain_id: 84532
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
+      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
+      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
+      confirmations: safe
+      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
+
+    asset:
+      symbol: usdc
+      contract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      decimals: 6
+      # About 1 to 1.5 transfers per block on Base Sepolia (1 740 to 3 065 in 2 000 blocks, up to 14 in
+      # one, Sep 2026): a token-wide 2 000-block backstop window would be up to 1.9 MB and a third of
+      # providers' 10 000-log response caps. Address mode puts the whole chain, PHA included, on
+      # requests by recipient (architecture §8).
+      backstop: addresses
+
+    pricing:
+      mode: stablecoin # credited at 1.00 while Coin Metrics' USDC reference rate is within 1% of it
+      primary: { source: coinmetrics, asset: usdc }
+
+    quote:
+      spread_bps: 0 # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
+
+    limits:
+      min_credit_minor: 100 # USD 1.00, as on the PHA route
+      max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
+      min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA
+  # Staging route on Sepolia: a test-mode route (`livemode: false`) any account can quote on and pay
+  # its own treasury through; the staging reference-product CVM uses it (deploy/phala.md, "Staging
+  # reference product"). Route files carry no treasury: each account proves its own per chain
+  # through the API (docs/design/multi-tenant.md D10). The factory and implementation are the
+  # deterministic deployment of deploy/CONTRACTS.md, the same address on every chain.
+  - route: phala-cloud-sepolia-pha-usd
+    version: 3
+    livemode: false
+
+    chain:
+      chain_id: 11155111
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      confirmations: 2 # the floor and default (design D1); an account may require more, never less
+      sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
+
+    asset:
+      symbol: pha
+      contract: "0x8F40e7E99678F44c88158f049E62817580ab113B"
+      decimals: 18
+      backstop: token # few transfers per block: one token-wide log request per range (architecture §8)
+
+    pricing:
+      primary: { source: coinmetrics, asset: pha }
+      check: { source: binance, symbol: PHAUSDT }
+
+    limits:
+      min_credit_minor: 100
+      max_deposit_atomic: "200000000000000000000000"
+      min_refund_atomic: "20000000000000000000"
+  # Staging route on Sepolia for Circle's testnet USDC (https://faucet.circle.com), beside the PHA
+  # route: a test-mode route (`livemode: false`) any account can quote on and pay its own treasury
+  # through. The token is the one Circle lists for Ethereum Sepolia
+  # (https://developers.circle.com/stablecoins/usdc-contract-addresses): FiatTokenV2_2 behind
+  # Circle's proxy, a plain ERC-20 with no transfer fee or rebasing. The chain section is the PHA
+  # route's: one chain has one set of chain settings. Route files carry no treasury (design D10).
+  - route: phala-cloud-sepolia-usdc-usd
+    version: 1
+    livemode: false
+
+    chain:
+      chain_id: 11155111
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      confirmations: 2 # the floor and default (design D1); an account may require more, never less
+      sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
+
+    asset:
+      symbol: usdc
+      contract: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+      decimals: 6
+      # About 2 transfers per block on Sepolia (4 280 in 2 000 blocks, up to 41 in one, Sep 2026):
+      # a token-wide 2 000-block backstop window would be 2.7 MB and near providers' 10 000-log
+      # response caps. Address mode puts the whole chain, PHA included, on requests by recipient
+      # (architecture §8).
+      backstop: addresses
+
+    pricing:
+      mode: stablecoin # credited at 1.00 while Coin Metrics' USDC reference rate is within 1% of it
+      primary: { source: coinmetrics, asset: usdc }
+
+    quote:
+      spread_bps: 0 # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
+
+    limits:
+      min_credit_minor: 100 # USD 1.00, as on the PHA route
+      max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
+      min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA

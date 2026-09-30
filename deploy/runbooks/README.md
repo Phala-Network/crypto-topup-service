@@ -16,7 +16,7 @@ against the CLI and every API path against `crates/topup/openapi.json` and
 | Attestation, `GET /v1/attestation?nonce=`, with an account's API key | that account's webhook keys in the key's mode ([verification](../README.md#attestation-ingress-and-egress)) |
 | Chain | `cast` reads through both RPC providers: balances, nonces, receipts, `addressOf`, the factory's `Flushed` and `FlushFailed` logs |
 | Admin actions, admin-signed | route and account `pause`/`resume` of the scopes `quotes`, `settlement`, `refunds`; a treasury's crediting `pause`/`resume`; a customer's `quotes` pause; deposit `nudge` (`dep_…` or the UUID); account creation and update (`charges_enabled` for live access, `restricted`, `max_unfinalized_credit`, `contact`) and recovery keys ([deploy/README.md, "Account credentials"](../README.md#account-credentials)); reconciliation block `lift`; after a restore, the freeze's status and the reconciliation under `/v1/admin/restore` ([Reconciliation after a restore](restore.md)). Merchants manage their webhook endpoints and resend their events themselves |
-| Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `npx --yes phala@1.1.22 cvms restart "$TOPUP_CVM_ID"` (or `stop`): the whole CVM, every container; state is in the database, so loops resume from it |
+| Phala Cloud, **HUMAN-ONLY** with the Environment's `PHALA_CLOUD_API_KEY` | `deploy/phala cvms restart "$TOPUP_CVM_ID"` (or `stop`), in the kit's directory (`deploy/phala` runs its locked CLI; `npm ci --prefix deploy/tools --ignore-scripts` once): the whole CVM, every container; state is in the database, so loops resume from it |
 
 Database rows the API does not expose (reconciliation findings, `flushed` and `flush_failures`,
 delivery attempts,
