@@ -219,8 +219,9 @@ deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.
   `validate-compose.sh`, preflight, and `verify-attestation.sh` apply to the same artifact:
   - the variant's exact services;
   - the only published port;
-  - the credential mounts and the dstack socket;
-  - smokescreen unrelaxed;
+  - the dstack socket;
+  - each credential volume on tmpfs, mounted by exactly its services, read-only but for `keys`;
+  - smokescreen with its exact deny list;
   - restore isolation;
   - each sealed name only as the whole value of its own environment key, so a sealed value can
     never fill the origin, the admin key, or an RPC host.

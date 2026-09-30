@@ -138,6 +138,37 @@ cat >>"$tmp/socket/compose.yaml" <<'YAML'
 YAML
 refused socket "only keys, topup, and dstack-ingress may mount the dstack socket" \
     --images "$tmp/images.json" "${gateway[@]}" "$tmp/socket"
+# Smokescreen's deny list is exact: a dropped range is refused.
+cp -r "$staging" "$tmp/smokescreen"
+cat >>"$tmp/smokescreen/compose.yaml" <<'YAML'
+  smokescreen:
+    command: [smokescreen, --listen-ip=0.0.0.0, --listen-port=4750, --timeout=10s]
+YAML
+refused smokescreen "smokescreen must run its exact deny list from the service image" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/smokescreen"
+# Each credential volume has exactly its committed mounters, read-only but for keys, on tmpfs.
+cp -r "$staging" "$tmp/extra-mounter"
+cat >>"$tmp/extra-mounter/compose.yaml" <<'YAML'
+  heartbeat:
+    volumes: ["walg_key:/run/wal-g:ro"]
+YAML
+refused extra-mounter "walg_key must be mounted by exactly backup, keys, postgres" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/extra-mounter"
+cp -r "$staging" "$tmp/writable-mounter"
+cat >>"$tmp/writable-mounter/compose.yaml" <<'YAML'
+  heartbeat:
+    volumes: ["db_app:/run/db-app"]
+YAML
+refused writable-mounter "only keys may mount db_app writable" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/writable-mounter"
+cp -r "$staging" "$tmp/on-disk"
+cat >>"$tmp/on-disk/compose.yaml" <<'YAML'
+volumes:
+  db_owner:
+    driver_opts: !reset {}
+YAML
+refused on-disk "db_owner must be a tmpfs volume (uid=999,gid=999,mode=0700)" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/on-disk"
 cp -r "$staging" "$tmp/no-archive"
 sed -i 's|^      AWS_S3_FORCE_PATH_STYLE: "true"$|&\n      TOPUP_RESTORE_FROM_BACKUP: "on"|' \
     "$tmp/no-archive/compose.yaml"

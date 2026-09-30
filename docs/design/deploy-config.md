@@ -243,7 +243,7 @@ data.
 | `TOPUP_RESTORE_FROM_BACKUP` | set by the renderer in 3 services | `postgres` only, `"on"` in the variant (the entrypoint defaults to `off` and turns archiving off); `restore-check` no longer reads it, since it exists only in its variant; `walg-cron` keeps its guard |
 | `TOPUP_WEBHOOK_PROXY` | env | `--webhook-proxy`, beside the smokescreen service it names |
 | `TOPUP_RESTORE_REPORT_FILE` | env in 2 services | `--restore-report` (run) and `--report` (restore-check) |
-| `TOPUP_BACKUP_TIMESTAMP_FILE` | env in 3 services, always the default | removed |
+| `TOPUP_BACKUP_TIMESTAMP_FILE` | env in 3 services, always the default | removed from the composes and from `topup`, which reads the fixed path; the postgres-walg scripts keep it only as a test seam (`deploy/tests/walg-cron.sh`) |
 | `MIGRATE_DATABASE_URL` / `DATABASE_URL` | 2 names | `DATABASE_URL`; `migrate` and `restore-check` check in code that the login owns the database |
 | `PGPASSFILE` | env | unchanged (libpq) |
 | `heartbeat --interval-s 60` | flag | removed (the default) |
@@ -330,7 +330,8 @@ it, so recreation is about container identity, not uptime. §11 measures the act
   `verify-attestation.sh`.
   - Service variant: exactly `keys postgres migrate topup smokescreen dstack-ingress heartbeat
     backup`; only dstack-ingress publishes, on 443 (tls-alpn-01 → `topup:8080`, `DOMAIN` equal to
-    `public_origin`'s host); the credential mounts; smokescreen unrelaxed.
+    `public_origin`'s host); each credential volume on tmpfs with exactly its mounters, read-only
+    but for `keys`; smokescreen's exact command and deny list.
   - Restore-check variant: exactly `keys postgres migrate topup restore-check`; only topup
     publishes, on 8081 → 8080; topup `--read-only`; postgres with `TOPUP_RESTORE_FROM_BACKUP=on`
     and no command or entrypoint override (so `archive_mode=off` wins); storage credentials only

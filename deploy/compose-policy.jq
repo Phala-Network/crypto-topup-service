@@ -88,13 +88,44 @@ def common_violations($variant; $project):
             "only the dstack socket may be bind-mounted")
     ] + secret_violations($variant);
 
+# The derived credentials (deploy/README.md, "Database credentials"): each volume is the committed
+# tmpfs, mounted by exactly these services, and written only by `keys`, which derives them.
+def credential_mounters($variant):
+    if $variant == "service" then
+        {walg_key: ["backup", "keys", "postgres"], db_owner: ["backup", "keys", "migrate", "postgres"],
+         db_app: ["heartbeat", "keys", "postgres", "topup"]}
+    else
+        {walg_key: ["keys", "postgres"], db_owner: ["keys", "migrate", "postgres", "restore-check"],
+         db_app: ["keys", "postgres", "topup"]}
+    end;
+
+def credential_violations($variant):
+    . as $root
+    | credential_mounters($variant) | to_entries | map(
+        .key as $volume | .value as $mounters
+        | ($root.services | to_entries | map(select(any(.value.volumes[]?; .source == $volume)))) as $mounting
+        | check($root.volumes[$volume] | (.external | not) and .driver == "local"
+                and .driver_opts == {type: "tmpfs", device: "tmpfs", o: "uid=999,gid=999,mode=0700"};
+              "\($volume) must be a tmpfs volume (uid=999,gid=999,mode=0700)"),
+          check(($mounting | map(.key) | sort) == $mounters;
+              "\($volume) must be mounted by exactly \($mounters | join(", "))"),
+          check([$mounting[] | select(.key != "keys") | .value.volumes[] | select(.source == $volume)
+                  | .read_only == true] | all;
+              "only keys may mount \($volume) writable")
+      ) | flatten;
+
+# Smokescreen's command, with the deny ranges its defaults count as global (deploy/README.md,
+# "Webhook egress"): exactly this, so no range can be dropped and no allowance added.
+def smokescreen_command:
+    ["smokescreen", "--listen-ip=0.0.0.0", "--listen-port=4750", "--timeout=10s",
+     "--deny-range=0.0.0.0/8", "--deny-range=100.64.0.0/10", "--deny-range=169.254.0.0/16",
+     "--deny-range=192.0.0.0/24", "--deny-range=198.18.0.0/15", "--deny-range=240.0.0.0/4"];
+
 def topup_violations:
     (.services.topup.environment | env_map) as $topup
     | [ check(($topup.DATABASE_URL | database_user) == "topup_service"
                 and $topup.PGPASSFILE == "/run/db-app/topup_service.pgpass";
               "topup must log in as topup_service with the application pgpass"),
-        check((volume_sources("topup") | any(. == "db_owner" or . == "walg_key")) | not;
-              "topup must mount neither db_owner nor walg_key"),
         check((.services.migrate.environment | env_map | .DATABASE_URL | database_user) == "postgres";
               "migrate must log in as the database owner"),
         check((mounted_config("topup"; "/etc/topup/topup.yaml") | config_origin | startswith("http"));
@@ -104,7 +135,6 @@ def topup_violations:
 def service_violations:
     (.services["dstack-ingress"].environment | env_map) as $ingress
     | (mounted_config("topup"; "/etc/topup/topup.yaml") | config_origin) as $origin
-    | (.services.smokescreen.command // []) as $smokescreen
     | [ check((.services | keys) == ["backup", "dstack-ingress", "heartbeat", "keys", "migrate",
                 "postgres", "smokescreen", "topup"];
               "the service runs exactly keys, postgres, migrate, topup, dstack-ingress, smokescreen, heartbeat, and backup"),
@@ -117,21 +147,17 @@ def service_violations:
         check(.services.topup.command == ["topup", "run", "--config", "/etc/topup/topup.yaml",
                 "--webhook-proxy", "http://smokescreen:4750"];
               "topup must run the service with its webhooks through smokescreen"),
-        check(.services.smokescreen.image == .services.topup.image and $smokescreen[0] == "smokescreen"
-                and ($smokescreen | index("--listen-port=4750")) != null
-                and ([$smokescreen[] | select(test("^--(allow|unsafe|upstream|egress-acl)"))] == [])
+        check(.services.smokescreen.image == .services.topup.image
+                and .services.smokescreen.command == smokescreen_command
+                and .services.smokescreen.entrypoint == null
                 and ((.services.smokescreen.ports // []) == []);
-              "smokescreen must run unrelaxed from the service image, publishing nothing"),
-        check((volume_sources("heartbeat") | any(. == "db_owner" or . == "walg_key")) | not;
-              "heartbeat must mount neither db_owner nor walg_key"),
-        check((volume_sources("dstack-ingress") | any(. == "db_owner" or . == "db_app" or . == "walg_key")) | not;
-              "dstack-ingress must mount no credentials"),
+              "smokescreen must run its exact deny list from the service image, publishing nothing"),
         check([.services.postgres, .services.backup | .environment | env_map | .TOPUP_RESTORE_FROM_BACKUP // "off"]
                 == ["off", "off"]; "the service must archive: TOPUP_RESTORE_FROM_BACKUP must not be on"),
         check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
                 | unique == ["dstack-ingress", "keys", "topup"];
               "only keys, topup, and dstack-ingress may mount the dstack socket")
-      ] + topup_violations;
+      ] + topup_violations + credential_violations("service");
 
 def restore_check_violations:
     (.services.postgres.environment | env_map) as $postgres
@@ -157,7 +183,7 @@ def restore_check_violations:
         check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
                 | unique == ["keys", "restore-check", "topup"];
               "only keys, topup, and restore-check may mount the dstack socket")
-      ] + topup_violations;
+      ] + topup_violations + credential_violations("restore-check");
 
 def product_violations:
     (.services["dstack-ingress"].environment | env_map) as $ingress
