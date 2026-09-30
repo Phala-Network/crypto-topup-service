@@ -43,35 +43,41 @@ const CHECK_IN_INTERVAL: Duration = Duration::from_secs(60);
 #[error("SENTRY_DSN is not a valid Sentry DSN")]
 pub struct ReportingError;
 
+/// The source commit the binary was built from (the image's `SOURCE_COMMIT` build argument), the
+/// Sentry release; unset in a build without it.
+const SOURCE_COMMIT: Option<&str> = option_env!("SOURCE_COMMIT");
+
 /// Starts Sentry reporting from `SENTRY_DSN`; returns `None`, binding nothing, when it is unset
 /// or empty.
 ///
-/// The release is the image digest from `TOPUP_IMAGE`, which the rendered compose pins, and the
-/// environment is the SDK's `SENTRY_ENVIRONMENT`, suffixed for a restore instance
-/// ([`restore_environment`]). Keep the guard alive until exit: dropping it flushes queued events.
-pub fn init_reporting() -> Result<Option<ClientInitGuard>, ReportingError> {
-    let environment = std::env::var("SENTRY_ENVIRONMENT").ok();
-    let service_mode = std::env::var("TOPUP_SERVICE_ENABLED").ok();
+/// `deployment` is the configuration's environment and whether the service is read-only
+/// ([`deployment_environment`]); the release is the source commit. Keep the guard alive until
+/// exit: dropping it flushes queued events.
+pub fn init_reporting(
+    deployment: Option<(&str, bool)>,
+) -> Result<Option<ClientInitGuard>, ReportingError> {
     let options = client_options(
         std::env::var("SENTRY_DSN").ok().as_deref(),
-        std::env::var("TOPUP_IMAGE").ok().as_deref(),
-        restore_environment(environment.as_deref(), service_mode.as_deref()),
+        SOURCE_COMMIT,
+        deployment.map(|(environment, read_only)| deployment_environment(environment, read_only)),
     )?;
     Ok(options.map(sentry::init))
 }
 
-/// `<environment>-restore` while `TOPUP_SERVICE_ENABLED=read-only` (`deploy/RESTORE.md`), so a
-/// restore or drill instance of the app never reports as the live environment; `None` otherwise,
-/// leaving the SDK's `SENTRY_ENVIRONMENT`.
-fn restore_environment(environment: Option<&str>, service_mode: Option<&str>) -> Option<String> {
-    (service_mode == Some("read-only"))
-        .then(|| format!("{}-restore", environment.unwrap_or("production")))
+/// The configured environment, or `<environment>-restore` for a read-only restore instance
+/// (`deploy/RESTORE.md`), so a restore or drill instance never reports as the live environment.
+fn deployment_environment(environment: &str, read_only: bool) -> String {
+    if read_only {
+        format!("{environment}-restore")
+    } else {
+        environment.to_owned()
+    }
 }
 
 /// Builds the client options, or `None` when `dsn` is unset or empty.
 fn client_options(
     dsn: Option<&str>,
-    image: Option<&str>,
+    commit: Option<&str>,
     environment: Option<String>,
 ) -> Result<Option<ClientOptions>, ReportingError> {
     let Some(dsn) = dsn.map(str::trim).filter(|dsn| !dsn.is_empty()) else {
@@ -84,17 +90,15 @@ fn client_options(
         .before_send(move |event| throttle.admit(prepare_event(event)))
         .before_breadcrumb(|breadcrumb| Some(scrub_breadcrumb(breadcrumb)));
     options.dsn = Some(dsn);
-    options.release = image_release(image).map(|release| Cow::Owned(release.to_owned()));
+    options.release = commit_release(commit).map(|release| Cow::Owned(release.to_owned()));
     options.environment = environment.map(Cow::Owned);
     Ok(Some(options))
 }
 
-/// The digest of an `image@sha256:...` reference; Sentry release names cannot contain `/`.
-fn image_release(image: Option<&str>) -> Option<&str> {
-    image
-        .and_then(|image| image.split_once('@'))
-        .map(|(_, digest)| digest)
-        .filter(|digest| digest.starts_with("sha256:"))
+/// A full hexadecimal commit id; anything else (an unset or malformed build argument) is no
+/// release.
+fn commit_release(commit: Option<&str>) -> Option<&str> {
+    commit.filter(|commit| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// The Sentry tracing layer when reporting is enabled.
@@ -346,7 +350,7 @@ mod tests {
     use sentry::protocol::{EnvelopeItem, MonitorCheckInStatus, Value};
     use sentry::test::{with_captured_envelopes_options, with_captured_events_options};
 
-    use super::{CronMonitor, client_options, restore_environment, runbook};
+    use super::{CronMonitor, client_options, deployment_environment, runbook};
     use crate::observability::log_subscriber;
 
     const TEST_DSN: &str = "https://public@sentry.invalid/1";
@@ -370,31 +374,28 @@ mod tests {
     }
 
     #[test]
-    fn release_is_the_pinned_image_digest() {
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let image = format!("ghcr.io/phala-network/phala-pay@{digest}");
-        let options = client_options(Some(TEST_DSN), Some(&image), None)
+    fn release_is_the_source_commit() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let options = client_options(Some(TEST_DSN), Some(commit), None)
             .expect("valid")
             .expect("enabled");
-        assert_eq!(options.release.as_deref(), Some(digest.as_str()));
-        let local = client_options(Some(TEST_DSN), Some("phala-pay:dev"), None)
-            .expect("valid")
-            .expect("enabled");
-        assert_eq!(local.release, None);
+        assert_eq!(options.release.as_deref(), Some(commit));
+        for local in [None, Some(""), Some("dev")] {
+            let options = client_options(Some(TEST_DSN), local, None)
+                .expect("valid")
+                .expect("enabled");
+            assert_eq!(options.release, None);
+        }
     }
 
     #[test]
     fn a_read_only_restore_instance_reports_under_its_own_environment() {
-        assert_eq!(
-            restore_environment(Some("staging"), Some("read-only")).as_deref(),
-            Some("staging-restore")
-        );
-        assert_eq!(restore_environment(Some("staging"), Some("on")), None);
-        assert_eq!(restore_environment(Some("staging"), None), None);
+        assert_eq!(deployment_environment("staging", true), "staging-restore");
+        assert_eq!(deployment_environment("staging", false), "staging");
         let options = client_options(
             Some(TEST_DSN),
             None,
-            restore_environment(Some("production"), Some("read-only")),
+            Some(deployment_environment("production", true)),
         )
         .expect("valid")
         .expect("enabled");

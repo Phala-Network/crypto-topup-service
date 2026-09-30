@@ -1,0 +1,6 @@
+# Phala's staging reference product: its custom domain (deploy/phala.md, "Staging reference
+# product"); every other setting is in config.json.
+services:
+  dstack-ingress:
+    environment:
+      DOMAIN: pay-demo-api.phala.com
