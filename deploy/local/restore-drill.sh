@@ -891,6 +891,10 @@ check_consistency_after_restore() {
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg address "$consistency_quote_address" \
         '.reissued and .quote.address == $address and .quote.amount == 25' >/dev/null
+    # A repeat finds the quote held already and issues nothing.
+    answer=$(admin_call POST /v1/admin/restore/quotes "$quote_request")
+    expect_call 200 "$answer"
+    call_body "$answer" | jq -e '.reissued == false' >/dev/null
     expect_call 200 "$(topup_call GET "/v1/quotes/$consistency_quote?client_secret=$secret" </dev/null)"
     # Its address is watched, its history not read yet (no scanner runs here).
     test "$(psql_value "SELECT backfilled FROM addresses \
