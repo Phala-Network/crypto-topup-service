@@ -1,46 +1,60 @@
 # Design: a lean, standard deployment configuration
 
-Status: proposed, in review (Phase 1 of the refactor; nothing is implemented yet). The owner's
-decisions of 2026-09-30 are applied: staging's values are the current `staging` Environment values
-(they match the last attested compose); the Sentry release is the compiled source commit;
-`DATABASE_URL` is the only database variable, and `migrate` and `restore-check` check in code that
-the login owns the database; and the renderer uses a Compose binary pinned by sha256.
-Scope: the attested compose, its variants, every setting of `topup` and of the deployment, and the
-scripts, workflows, and docs around them. Owner's rules: "精简优雅重构compose和各种配置项"; use a
-standard mechanism wherever one exists; don't abuse env.
+Status: accepted with the review's changes (owner decisions and Astra's review of 2026-09-30 are
+applied). Scope: the attested compose, its variants, every setting of `topup` and of the
+deployment, and the scripts, workflows, and docs around them. Owner's rules:
+"精简优雅重构compose和各种配置项"; use a standard mechanism wherever one exists; don't abuse env.
 
 Claims about third-party behaviour were checked on 2026-09-30 against source or by experiment.
-The **dstack-0.5.9 guest runs Docker Compose v2.26.0**: its `meta-dstack` v0.5.9 pins
-`meta-virtualization` 52cd8a2, whose `docker-compose_git.bb` has `PV = "v2.26.0"`. The guest starts
-the stack with `docker compose up --remove-orphans -d --build` in `/dstack`, with the sealed env as
-its process environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
-`EnvironmentFile=-/dstack/.host-shared/.decrypted-env`).
+The **dstack-0.5.9 guest runs Docker Compose v2.26.0**: `meta-dstack` v0.5.9 pins
+`meta-virtualization` 52cd8a2, whose `docker-compose_git.bb` has `PV = "v2.26.0"`. The guest runs
+`docker compose up --remove-orphans -d --build` in `/dstack`, with the sealed env as its process
+environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
+`EnvironmentFile=-/dstack/.host-shared/.decrypted-env`); `ExecStop` stops the whole stack.
 
 ## 1. Decisions
 
-1. **One typed config file for topup** per environment (`topup.yaml`: origin, admin key, RPC
-   provider URLs, routes). It is committed, reviewed by PR, and inlined into the attested compose
-   as a Compose `config`. topup reads it with `--config`; every `TOPUP_*` setting variable is
-   removed.
-2. **Env only where env is the interface**: the sealed secrets (unchanged, still `${NAME}`
-   references in the compose), libpq's `DATABASE_URL`/`PGPASSFILE`, and the env interfaces of
-   third-party images (WAL-G's `WALG_*`/`AWS_*`, dstack-ingress's `DOMAIN`). Those are written as
-   literals in the environment's compose overlay, never taken from the environment at render
-   time.
-3. **Variants are standard Compose overrides.** `compose.yaml` is the service stack; the
-   restore-check variant is `compose.restore-check.yaml`, which removes services with `!reset
-   null` and adds its own. `docker compose config` merges them. The `# only-in:` template language
-   and `render-compose.sh` are deleted.
-4. **Public settings move out of GitHub.** Environment variables go from 13 (plus 3 optional
-   overrides and 4 derived values) to 3 deployment-state variables. Deploy derives nothing.
-5. **Rendering uses Compose itself**, pinned to v2.26.0, the version the CVM runs:
-   `docker compose config --no-interpolate`, then three named deploy-time inputs (image digests,
-   the gateway domain, the restore instance's origin). The output is Compose's canonical YAML.
-6. **Services:** `heartbeat`, `keys`, and `migrate` stay (§6). The `rendered-sha256` label is
+1. **One typed config file for topup** per environment: `topup.yaml`, holding the origin, the
+   admin key, the RPC provider URLs, and the routes. It is committed, reviewed by PR, and inlined
+   into the attested compose as a Compose `config`. topup reads it with `--config`, and every
+   `TOPUP_*` setting variable is removed. `topup config check|show` validate and print it with
+   no secret present: a `{key}` stays literal. The service and a preflight that holds the secrets
+   resolve the keys through the same code path.
+2. **Env only where env is the interface.** That covers the sealed secrets (still `${NAME}`
+   references), libpq's `DATABASE_URL`/`PGPASSFILE`, and the env interfaces of third-party images:
+   WAL-G's `WALG_*`/`AWS_*` and dstack-ingress's `DOMAIN`. These are written as literals in the
+   environment's compose overlay, never taken from the environment at render time.
+3. **Variants are standard Compose overrides.**
+   - `compose.yaml` is the service stack. `restore-check` sits in it inert, under
+     `profiles: [restore-check]`, which `config` leaves out of the output.
+   - `compose.restore-check.yaml` removes the service-only services with `!reset null`, and
+     activates `restore-check` with `profiles: !reset []`.
+   - The `# only-in:` template language and `render-compose.sh` are deleted.
+4. **Public settings move out of GitHub into reviewed files.** Environment variables go from 13
+   (plus 3 optional overrides and 4 derived values) to 3 deployment-state variables.
+5. **Rendering uses Compose itself**, pinned by sha256 to v2.26.0, the version the CVM runs:
+   `config --no-interpolate`, plus three bounded deploy-time inputs. Those inputs are image
+   digests, the gateway domain (service only), and the restore instance's origin (restore-check
+   only). Each has a restricted format and there is no general `--set`. The output is Compose's
+   canonical YAML.
+6. **One artifact policy** (`deploy/compose-policy.jq`) judges the *merged* artifact wherever it
+   is checked: `validate-compose.sh`, `preflight.sh`, and `verify-attestation.sh`. It rules on
+   the service set, the ports, credential mounts, the egress, restore isolation, and where each
+   secret reference may appear.
+7. **Services:** `heartbeat`, `keys`, and `migrate` stay (§6). The `rendered-sha256` label is
    replaced by config names that carry their content digest. `restore` moves to the local drill
    overlay.
-7. **Self-hosting without a fork is a follow-up PR** (§10). This PR makes an environment one
-   directory, which is what that follow-up needs.
+8. **Fork-independent inputs now, fork-free packaging later** (§10).
+   - `render.sh` and preflight accept any environment directory. The `<owner>/<env>` path is only
+     Deploy's guard.
+   - A generic example environment ships.
+   - The environment overlay declares its keyed providers' secrets.
+   - Release packaging and the Cloud template follow in later PRs.
+9. **Two P1 fixes are in scope.**
+   - A `{key}` may only fill a whole path segment or a whole query value, and substitution must
+     leave the URL's authority unchanged (§5).
+   - The zero-data-loss claim is proved by an in-place upgrade rehearsal on real committed data,
+     not by naming (§11).
 
 ## 2. Today's surface
 
@@ -49,32 +63,36 @@ its process environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
 | `deploy/docker-compose.yml` | 561 lines, 106 of them comments; 10 services; 2 `x-` anchors; 5 inline configs (4 route copies, 128 non-blank lines duplicated from `deploy/config/routes/`, and the Postgres init script, duplicated from `postgres-init/`) |
 | `${NAME}` placeholders in the compose | 23 names: 5 sealed secrets, 2 images, 2 mode switches (set by the variant), 1 label digest, 13 public settings |
 | Sources of one public setting | a GitHub Environment variable, a derivation in `deploy.yml`, the awk/bash renderer, and the compose placeholder |
-| GitHub Environment variables (`staging`) | 13 documented, plus 3 optional overrides (`AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`) and 4 derived settings |
+| GitHub Environment variables (`staging`) | 13, plus 3 optional overrides (`AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`) and 4 derived settings; `verify-contracts.yml` reads 2 of them too |
 | Lists of sealed names | 3 kept in sync: `staging.env.example`, `app-compose.example.json` `allowed_envs`, the compose's `${…}` references |
 | Environment variables `topup` reads | 15 fixed names plus 2 per RPC provider; 4 of them only ever carry a code default or a constant (`TOPUP_BACKUP_TIMESTAMP_FILE` ×3, `TOPUP_WEBHOOK_PROXY`) |
 | Render and check scripts | `render-compose.sh` 171, `validate-compose.sh` 287, `preflight.sh` 487 (awk/sed YAML parsing of routes), `check-route-modes.sh` 70, `render-app-compose.sh` 37, `write-staging-env.sh` 28, `product/render-compose.sh` 14, `local/compose.sh` 36, `sandbox/render-sepolia-compose.sh` 31 |
 | `deploy.yml` | 524 lines: 11 settings in the job `env`, 1 step that copies `TOPUP_RPC_*_URL` from `vars`, 1 step that derives R2 and key-id defaults |
 | Adding a chain | 6 places: the route file, its compose copy with its `--route` args in two services, `x-rpc-providers`, GitHub variables, and, for a keyed provider, `staging.env.example` and `allowed_envs` |
 
-Settings that live in GitHub variables can change without a pull request, a review, or a
-history, although they fix the money-relevant RPC endpoints, the backup prefix, and the admin key.
-Today's values are consistent: the `staging` Environment's 13 variables match the compose attested
-by the last topup deploy (run 36670873413). The problem is the model, not a current mistake.
+Settings that live in GitHub variables can change without a pull request, a review, or a history.
+Yet they fix the money-relevant RPC endpoints, the backup prefix, and the admin key. Today's values
+are consistent: the `staging` Environment's 13 variables match the compose attested by the last
+topup deploy (run 36670873413). The problem is the model, not a current mistake.
 
 ## 3. Principle: four kinds of input, each with one home
 
 | Kind | Home | Attested | Examples |
 |---|---|---|---|
-| Topology: which services exist, what they mount, who talks to whom | `deploy/compose.yaml` and `deploy/compose.restore-check.yaml` | yes | uid/gid, tmpfs keys, the dstack socket mounts, the smokescreen policy, `--webhook-proxy`, ports |
-| Environment settings: public values that differ per deployment | `deploy/environments/<owner>/<env>/` (`compose.yaml` overlay and `topup.yaml`) | yes | origin, admin key, RPC URLs, routes, WAL-G location, ingress domain |
-| Deploy-time facts: known only from a release or a CVM | `render.sh` flags | yes | image digests, gateway domain, a restore instance's origin |
-| Secrets | the CVM's sealed env, names in `deploy/secrets.env.example` | names only | S3 credentials, `SENTRY_DSN`, `TOPUP_RPC_<ID>_KEY` |
+| Topology: which services exist, what they mount, who talks to whom | `deploy/compose.yaml`, `deploy/compose.restore-check.yaml` | yes | uid/gid, the tmpfs keys, the dstack socket mounts, the smokescreen policy, `--webhook-proxy`, ports |
+| Environment settings: the public values of one deployment | an environment directory: `compose.yaml` overlay and `topup.yaml` | yes | origin, admin key, RPC URLs, routes, WAL-G location, ingress domain, keyed providers' secret names |
+| Deploy-time facts: known only from a release or a CVM | `render.sh` flags, format-checked and variant-scoped | yes | image digests, gateway domain, a restore instance's origin |
+| Secrets | the CVM's sealed env | names only | S3 credentials, `SENTRY_DSN`, `TOPUP_RPC_<ID>_KEY` |
 
-The environment directory is namespaced by repository owner
-(`deploy/environments/phala-network/staging`) because Deploy resolves it from
-`${GITHUB_REPOSITORY_OWNER,,}`. A fork therefore finds no directory and fails closed. Without the
-namespace, a fork that forgot to edit the files would deploy Phala's admin public key and domain
-into its own CVM.
+The sealed names are the `${…}` references of the rendered artifact: the base compose declares the
+common ones, and the environment overlay declares its keyed providers' keys. There is no separate
+list to keep in sync. `allowed_envs`, the unsealed env file Deploy sends, and preflight all read the
+names from the artifact.
+
+Deploy resolves the environment directory as `deploy/environments/${GITHUB_REPOSITORY_OWNER,,}/<env>`.
+A fork therefore finds no directory and fails closed, instead of deploying Phala's admin public key
+and domain. `render.sh` and preflight take any directory. `deploy/environments/example/` has no
+Phala value, and preflight refuses its placeholders.
 
 ## 4. Target surface
 
@@ -82,31 +100,37 @@ into its own CVM.
 
 ```text
 deploy/
-  compose.yaml                     service stack (topology only; short pointers into docs)
-  compose.restore-check.yaml       variant: !reset null dstack-ingress, smokescreen, heartbeat,
-                                   backup; topup --read-only on 8081; + restore-check
-  secrets.env.example              the sealed names (was staging.env.example; same in every env)
-  render.sh                        pinned compose config + deploy-time inputs (~60 lines)
-  product/compose.yaml             reference product stack
-  product/secrets.env.example      PRODUCT_API_KEY
-  environments/phala-network/staging/
-    topup/compose.yaml             overlay: ingress DOMAIN, WAL-G location (~20 lines)
-    topup/topup.yaml               typed topup config, the four routes inline with their comments
-    product/compose.yaml           overlay: ingress DOMAIN
-    product/config.json            the product's config, every value literal
-  local/topup.yaml                 local stacks' config (Anvil / 127.0.0.1 providers, local admin key)
+  compose.yaml                   service stack + inert restore-check (topology; pointers into docs)
+  compose.restore-check.yaml     variant: !reset null dstack-ingress, smokescreen, heartbeat, backup;
+                                 read-only topup on 8081; restore-check active; archiving off;
+                                 read-only storage credentials under their own names
+  compose-policy.jq              the policy of the merged artifact (§1.6)
+  render.sh                      pinned compose config + the three deploy-time inputs
+  pinned-compose.sh              Docker Compose v2.26.0 by sha256, cached; --no-download for offline use
+  product/compose.yaml           reference-product stack
+  environments/
+    example/topup/               a generic environment: compose.yaml + topup.yaml, no Phala values
+    phala-network/staging/topup/ compose.yaml (ingress DOMAIN, WAL-G location, RPC key names) + topup.yaml
+    phala-network/staging/product/ compose.yaml (ingress DOMAIN) + config.json (every value literal)
+  local/topup.yaml               the local stacks' config (Anvil providers, local admin key)
 ```
 
-Deleted: `docker-compose.yml`, `render-compose.sh`, `render-app-compose.sh`,
-`app-compose.example.json`, `staging.env.example`, `write-staging-env.sh` (now a one-line `sed` in
-Deploy), `check-route-modes.sh` (moved into preflight, below), `config/routes/*.yaml` (moved into
-`topup.yaml`), `product/render-compose.sh`, `local/compose.sh` (local stacks merge the source files
-directly), and `sandbox/render-sepolia-compose.sh` (the sandbox becomes an environment directory).
+Deleted:
+- `docker-compose.yml`, `render-compose.sh`, `render-app-compose.sh`, `app-compose.example.json`.
+- `staging.env.example` and `product/staging.env.example`: the sealed names come from the
+  artifact.
+- `write-staging-env.sh`: Deploy writes the unsealed file from `config --variables`.
+- `config/routes/*.yaml`, moved into `topup.yaml`.
+- `product/render-compose.sh` and `sandbox/render-sepolia-compose.sh`: the sandbox is an
+  environment directory.
+- `local/compose.sh`: local stacks merge the source files directly.
+
+`check-route-modes.sh` stays, bound to the environment Deploy selected (§8).
 
 ### `topup.yaml`
 
 ```yaml
-environment: staging                      # Sentry environment (`-restore` suffix when --read-only)
+environment: staging                      # the Sentry environment (a tag only; `-restore` when --read-only)
 public_origin: https://pay-api-staging.phala.com
 admin_key:
   id: admin/staging-v1
@@ -122,267 +146,378 @@ routes:                                   # each item is today's route file, unc
     ...
 ```
 
-The file is parsed with serde and `deny_unknown_fields`, as routes are, and `topup config check`
-validates it. The route schema is unchanged, so routes still name provider ids in
-`chain.rpc_providers`. Preflight's bash checks move into Rust: every provider a route names exists
-and none is unused; each provider serves one chain; each route's providers have distinct URLs; and
-each `{key}` URL has its key. New commands: `topup config check FILE` and `topup config show FILE`
-(resolved JSON). `topup route validate|show` stay for single route files (`examples/`, the sandbox
-template).
+`Config::parse` is the one validation path. It uses serde with `deny_unknown_fields`, as routes
+do, and every rule below is a Rust test:
 
-### Compose (sketch of the parts that change)
+- the origin parses (`PublicOrigin`), and the admin key parses (`VerificationKey`);
+- provider ids are lowercase letters, digits, and `-`;
+- every provider URL is `https`, or `http` only when the origin is `http` (local stacks);
+- a `{key}` fills a whole path segment or a whole query value, at most once;
+- every route validates and the route set agrees across routes;
+- every provider a route names is defined, and none is unused;
+- a provider serves one chain, and one chain's providers are different URLs.
 
-```yaml
-# compose.yaml, the service stack
-services:
-  topup:
-    image: phala-pay                      # render.sh pins it to the release digest
-    command: [topup, run, --config, /etc/topup/topup.yaml, --webhook-proxy, http://smokescreen:4750]
-    environment:
-      DATABASE_URL: postgres://topup_service@postgres:5432/topup
-      PGPASSFILE: /run/db-app/topup_service.pgpass
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      TOPUP_RPC_PROVIDER_A_KEY: ${TOPUP_RPC_PROVIDER_A_KEY:-}
-      TOPUP_RPC_PROVIDER_B_KEY: ${TOPUP_RPC_PROVIDER_B_KEY:-}
-    configs: [{source: topup, target: /etc/topup/topup.yaml}]
-    ...
-# compose.restore-check.yaml
-services:
-  dstack-ingress: !reset null
-  smokescreen: !reset null
-  heartbeat: !reset null
-  backup: !reset null
-  postgres: {environment: {TOPUP_RESTORE_FROM_BACKUP: "on"}}
-  topup:
-    command: [topup, run, --config, /etc/topup/topup.yaml, --read-only,
-              --restore-report, /run/topup-observability/restore-check.json]
-    ports: ["8081:8080"]
-  restore-check: {...}                    # exists only in this variant
-```
+`topup config check FILE` and `topup config show FILE` (resolved JSON) run that path with no secret.
+`topup config check --secrets FILE` also resolves each provider's key from `TOPUP_RPC_<ID>_KEY`,
+with the same function `topup run` uses, and prints no value. `topup route validate|show` stay for
+single route files (`examples/`, the sandbox template).
+
+### Commands and flags
+
+| Command | Config and flags |
+|---|---|
+| `topup run` | `--config FILE [--bind] [--webhook-proxy URL] [--read-only [--public-origin URL] [--restore-report FILE]]`; `--public-origin` and `--restore-report` require `--read-only` |
+| `topup restore-check` | `--config FILE [--report FILE] [--expected-heartbeat-at … [--expected-lsn …]]` |
+| `topup reconcile` | `--config FILE` |
+| `topup config check`, `config show` | `FILE [--secrets]` (`check` only) |
+| `topup migrate`, `restore-check` | `DATABASE_URL`, refused unless the login owns the database (or is a superuser) |
+| `topup heartbeat`, `keys`, `healthcheck`, `attest`, `route …` | unchanged but for the removed mode variable |
 
 ### Rendering
 
 ```sh
 deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.phala.network \
-  topup deploy/environments/phala-network/staging/topup >docker-compose.staging.yml
+  deploy/environments/phala-network/staging/topup >docker-compose.staging.yml
 deploy/render.sh --restore-check --images images.json --origin https://<app_id>-8081.<gateway> \
-  topup deploy/environments/phala-network/staging/topup >restore-check.yml
+  deploy/environments/phala-network/staging/topup >restore-check.yml
+deploy/render.sh --images images.json --gateway-domain … deploy/environments/phala-network/staging/product
 ```
 
-1. `docker compose -p dstack --project-directory deploy -f compose.yaml -f ENV/compose.yaml
-   [-f compose.restore-check.yaml] config --no-interpolate --format json`. This merges the
-   overlays, resolves anchors, and keeps the secret `${…}` references and `$$` escapes.
-2. `jq` applies exactly three named inputs. It pins every `phala-pay`, `postgres-walg`, and
-   `phala-pay-reference-product` image to the release's `repository@sha256` and fails if an image
-   has no digest. It sets dstack-ingress's `GATEWAY_DOMAIN` (service), or appends
-   `--public-origin URL` to the read-only topup (restore-check). It inlines each `file:` config as
-   `content` with `$` escaped, named `<name>_<sha256[:12]>`.
-3. `docker compose -f - config --no-interpolate` turns the result into canonical YAML.
+Rendering runs in three steps:
 
-`images.json` from Release images is keyed by image name (`phala-pay`, `postgres-walg`,
-`phala-pay-reference-product`). This PR changes the binary, so the first deploy after it uses a new
-release anyway and needs no compatibility with the old keys.
+1. The pinned Compose merges the files: `-p dstack --project-directory deploy -f STACK -f ENV/compose.yaml
+   [-f compose.restore-check.yaml] config --no-interpolate --format json`. Here `STACK` is
+   `compose.yaml`, or `product/compose.yaml` when the directory has a `config.json`. This keeps
+   the secret references and `$$` escapes.
+2. `jq` applies the inputs:
+   - pins each `phala-pay`, `postgres-walg`, and `phala-pay-reference-product` image to the
+     release's `repository@sha256`, and fails on any unpinned image;
+   - sets dstack-ingress's `GATEWAY_DOMAIN`, or appends `--public-origin` to the read-only topup;
+   - inlines each `file:` config as `content`, with `$` escaped, named `<name>_<sha256[:12]>`, and
+     renames every service's `configs[].source` to match.
+3. `config --no-interpolate` produces canonical YAML, and `compose-policy.jq` checks the result
+   before it is printed.
 
-The pinned binary is fetched once by release URL and sha256 (Linux and macOS, amd64 and arm64).
-Pinning makes the output reproducible on any machine, which preflight's fresh-render byte
-comparison needs. It also proves the artifact loads on the CVM's own Compose.
+Formats: `--images` is a JSON object of image name to `repository@sha256:<64 hex>`. `--gateway-domain`
+is a lowercase host name. `--origin` is an `https://` origin, restore-check only.
+`--project-name` is for local rehearsals only; the CVM's project is `dstack`.
 
-Verified on Compose v2.26.0 and v5.5.1, on the same sample: `--no-interpolate` keeps
-`${S:-}` and `$$`; `!reset null` removes a service; the output of both versions is byte-identical;
-and v2.26.0 loads it. The output bakes the project name into resource names (`name: dstack`,
-`dstack_pgdata`, `dstack_default`). These are exactly the names the CVM derives today from
-`/dstack`, so the existing volumes are kept. The attested file states them explicitly.
+Verified on v2.26.0 and v5.5.1:
+- `--no-interpolate` keeps `${S:-}` and `$$`;
+- `!reset null` removes a service, and `profiles: !reset []` activates one;
+- an inactive-profile service is left out of the output;
+- both versions produce byte-identical output, which v2.26.0 loads.
+
+The output bakes the project name into resource names (`name: dstack`, `dstack_pgdata`), and these
+are exactly the names the CVM derives today from `/dstack`. §11 proves that the upgrade keeps the
+data.
 
 ## 5. Every setting, before and after
 
 | Setting | Today | After |
 |---|---|---|
 | `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE`, `PRODUCT_IMAGE` | `${X_IMAGE:-zero digest}` ×10, rewritten by awk | `image: phala-pay` etc.; `render.sh --images` pins them |
-| `TOPUP_IMAGE` in topup's env (Sentry release) | env | removed; release is the source commit, compiled in (`SOURCE_COMMIT` build arg beside `SOURCE_DATE_EPOCH`) |
-| dstack-ingress image | pinned digest in compose | unchanged |
-| `TOPUP_DOMAIN` | GitHub var, rendered twice | overlay `dstack-ingress.environment.DOMAIN` and `topup.yaml` `public_origin`; `validate-compose.sh` checks they agree |
+| `TOPUP_IMAGE` in topup's env (Sentry release) | env | removed; the release is the source commit, compiled in (`SOURCE_COMMIT` build arg beside `SOURCE_DATE_EPOCH`) |
+| dstack-ingress image | pinned digest | unchanged |
+| `TOPUP_DOMAIN` | GitHub var, rendered twice | overlay `dstack-ingress.environment.DOMAIN` and `topup.yaml` `public_origin`; the policy checks they agree |
 | `TOPUP_PUBLIC_ORIGIN` | env `https://${TOPUP_DOMAIN}` | `topup.yaml` `public_origin`; restore-check: `render.sh --origin` → `--public-origin` |
-| `TOPUP_GATEWAY_DOMAIN` | read from the CVM, rendered | unchanged source, now `render.sh --gateway-domain` |
+| `TOPUP_GATEWAY_DOMAIN` | read from the CVM, rendered | unchanged source; `render.sh --gateway-domain` |
 | `TOPUP_ADMIN_KID` | derived `admin/<env>-v1`, or a variable | `topup.yaml` `admin_key.id`, explicit |
 | `TOPUP_ADMIN_PUBLIC_KEY` | GitHub var | `topup.yaml` `admin_key.public_key` |
 | `TOPUP_RPC_<ID>_URL` | GitHub vars → `x-rpc-providers` → env of 2 services | `topup.yaml` `rpc_providers` |
-| `TOPUP_RPC_<ID>_KEY` | sealed | sealed, unchanged (same names, so no re-seal) |
+| `TOPUP_RPC_<ID>_KEY` | sealed; name in 3 lists | sealed; declared once in the environment overlay (staging keeps its two names, so no re-seal) |
+| `{key}` placement | anywhere; the key is substituted as text | a whole path segment or query value only; the authority must survive substitution (P1 fix) |
 | Routes | 4 files + 4 compose copies + 8 mounts + 8 `--route` args | `topup.yaml` `routes`; one config, mounted in 2 services |
-| `WALG_S3_PREFIX`, `AWS_ENDPOINT` | GitHub vars | overlay literals (WAL-G's env interface) |
-| `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE` | derived for R2, or a variable | overlay literals, explicit |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` | sealed | unchanged |
-| `SENTRY_ENVIRONMENT` | derived from the Environment's name | `topup.yaml` `environment` |
+| `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE` | GitHub vars, or derived for R2 | overlay literals (WAL-G's env interface), explicit |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | sealed; the restore instance's are the same names | sealed; the restore-check variant reads `RESTORE_AWS_ACCESS_KEY_ID`/`RESTORE_AWS_SECRET_ACCESS_KEY`, so an instance created without `--env-file` inherits no read-write credential |
+| `SENTRY_DSN` | sealed | unchanged |
+| `SENTRY_ENVIRONMENT` | derived from the Environment's name | `topup.yaml` `environment` (a Sentry tag, never a policy input) |
 | `TOPUP_SERVICE_ENABLED` (`on`/`read-only`/`off`) | set by the renderer in 2 services | `topup run --read-only` in the variant; `heartbeat` does not exist there; `off` is removed (only a test used it) |
-| `TOPUP_RESTORE_FROM_BACKUP` | set by the renderer in 3 services | only `postgres`, `"on"`, in the variant (the entrypoint defaults to `off`); the gates in `backup` and `restore-check` go, since each service exists only in its own variant |
+| `TOPUP_RESTORE_FROM_BACKUP` | set by the renderer in 3 services | `postgres` only, `"on"` in the variant (the entrypoint defaults to `off` and turns archiving off); `restore-check` no longer reads it, since it exists only in its variant; `walg-cron` keeps its guard |
 | `TOPUP_WEBHOOK_PROXY` | env | `--webhook-proxy`, beside the smokescreen service it names |
 | `TOPUP_RESTORE_REPORT_FILE` | env in 2 services | `--restore-report` (run) and `--report` (restore-check) |
 | `TOPUP_BACKUP_TIMESTAMP_FILE` | env in 3 services, always the default | removed |
-| `MIGRATE_DATABASE_URL` / `DATABASE_URL` | 2 names | `DATABASE_URL` in each service; `migrate` and `restore-check` refuse unless the login owns the database, a stronger guard than a variable name |
+| `MIGRATE_DATABASE_URL` / `DATABASE_URL` | 2 names | `DATABASE_URL`; `migrate` and `restore-check` check in code that the login owns the database |
 | `PGPASSFILE` | env | unchanged (libpq) |
 | `heartbeat --interval-s 60` | flag | removed (the default) |
-| `phala-pay.rendered-sha256` label, `${…_RENDERED_SHA256}` | on every service | removed; config names carry their digest (§6) |
-| `allowed_envs` | `app-compose.example.json` | `secrets.env.example`; checked against the compose's `${…}` names |
+| `phala-pay.rendered-sha256` label | on every service | removed; config names carry their digest (§6) |
+| `allowed_envs` | `app-compose.example.json` | the artifact's `${…}` names |
 | `PHALA_WORKSPACE`, `TOPUP_CVM_ID`, `STAGING_PRODUCT_CVM_ID`, secret `PHALA_CLOUD_API_KEY` | GitHub | unchanged: deployment state and tool credentials, not attested |
-| `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`, `TOPUP_ORIGIN`, `PRODUCT_PUBLIC_URL` | GitHub vars and derivations | product overlay `DOMAIN` and literal values in `config.json` |
-| OS image `dstack-0.5.9`, CLI `phala@1.1.22` | `deploy.yml` | unchanged |
+| `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`, `TOPUP_ORIGIN`, `PRODUCT_PUBLIC_URL` | GitHub vars and derivations | the product overlay's `DOMAIN` and literal values in `config.json` |
 
-After: `${…}` names in the compose go from 23 to 5 (the secrets), GitHub Environment variables
-from 13 (+3 optional) to 3, and the fixed environment variables `topup` reads from 15 to 3
-(`DATABASE_URL`, `PGPASSFILE`, `SENTRY_DSN`), plus each `TOPUP_RPC_<ID>_KEY`. The dev-only
-`DSTACK_SIMULATOR_ENDPOINT` stays. Adding a chain touches one file (`topup.yaml`), plus
-`secrets.env.example` and the compose's key line for a keyed provider.
+After the change:
+- The `${…}` names in the service artifact go from 23 to 5, the secrets only.
+- GitHub Environment variables go from 13 (+3 optional) to 3.
+- The fixed environment variables `topup` reads go from 15 to 2 (`DATABASE_URL`, `SENTRY_DSN`),
+  plus each `TOPUP_RPC_<ID>_KEY`. libpq reads `PGPASSFILE`.
+- Adding a chain touches the environment directory only.
+
+**Where a secret may appear.** `compose-policy.jq` allows a `${NAME:-}` reference only as the whole
+value of an environment key it names:
+
+| Secret | Allowed positions |
+|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `postgres`/`backup` env of the same key (service variant) |
+| `RESTORE_AWS_*` | `postgres` `AWS_*` (restore-check variant) |
+| `SENTRY_DSN` | `topup` `SENTRY_DSN` |
+| `TOPUP_RPC_<ID>_KEY` | `topup`/`restore-check` env of the same key |
+| `PRODUCT_API_KEY` | `product` `PRODUCT_API_KEY` |
+
+Once every `$$` is removed, no other `$` may remain anywhere: not in a config's content, a command,
+or another key. A sealed value therefore cannot fill the admin key, the origin, or an RPC host.
 
 ## 6. Services
 
 | Service | Decision | Evidence |
 |---|---|---|
-| `keys` | stays | The Postgres and WAL-G images have no dstack client, so something must derive their passwords and backup key into tmpfs. Keeping it separate means `postgres`, `backup`, and `migrate` never mount the dstack socket. Caveat: `topup`, `restore-check`, and dstack-ingress do mount it, and any socket holder can call `get_key` for any path. The boundary is therefore that third-party images never hold the socket, and that topup is given no owner credentials by configuration. It is not a hard wall against a compromised topup. The doc will say so. |
+| `keys` | stays | See the paragraph below the table. |
 | `migrate` | stays | A one-shot init job gated by `service_completed_successfully` is the Compose idiom. Folding it into topup would hand topup the owner login. |
-| `heartbeat` | stays, service variant only | Its row is the RPO anchor (`restored_heartbeat_at` within 120 s of the failure point) and the steady commit that keeps WAL flowing. `topup run` checks the contracts over RPC before it touches the database, waits for the lease-owner lock, and exits on any task failure. Folded into it, an RPC outage or a crash loop would stop the heartbeat and yield false RPO findings on the next restore. It no longer reads a mode variable, since the restore-check variant simply lacks it. |
-| `smokescreen`, `backup` | service variant only | Today they idle in restore-check. Removing them there makes "never writes the prefix" structural rather than a switch. |
-| `restore` (profile `tools`) | moves to `local/restore-drill.compose.yml` | Only `restore-drill.sh` runs it. It is attested today but never started on a CVM. |
-| `rendered-sha256` label | replaced | Compose v2.26.0 hashes only the service definition (`pkg/compose/hash.go`) and copies config content only at container creation (`createMobyContainer` → `injectConfigs`). An upgrade that changes only a config's content would therefore keep the old file. The need remains. Naming each config after its digest is Compose's documented config rotation practice (a new name per content, as with kustomize's hashed ConfigMaps). The service definition changes exactly when its content does, so only the affected services are recreated. A route change no longer restarts PostgreSQL. |
+| `heartbeat` | stays, service variant only | Its row is the RPO anchor (`restored_heartbeat_at` within 120 s of the failure point) and the steady commit that keeps WAL flowing. `topup run` checks the contracts over RPC before it touches the database, waits for the lease-owner lock, and exits on any task failure. Folded into it, an RPC outage or a crash loop would stop the heartbeat and produce false RPO findings. |
+| `smokescreen`, `backup` | service variant only | They idle in restore-check today. |
+| `restore` (profile `tools`) | moves to `local/restore-drill.compose.yml` | Only `restore-drill.sh` runs it; it is attested today but never started on a CVM. |
+| `rendered-sha256` label | replaced | See the paragraph below the table. |
+
+**`keys`.** The Postgres and WAL-G images cannot call dstack, so something must derive their
+passwords and backup key into tmpfs. The separation this buys is by mount and by database role:
+`postgres`, `backup`, and `migrate` see only the credential files they mount, and topup logs in as
+`topup_service`, never as the owner. It is not KMS isolation. `keys`, `topup`, `restore-check`,
+and dstack-ingress mount the dstack socket, and any socket holder can derive any path, so a
+compromised `topup` could derive the owner password.
+
+**The `rendered-sha256` label.** Compose v2.26.0 hashes only the service definition
+(`pkg/compose/hash.go`) and copies config content only at container creation
+(`createMobyContainer` → `injectConfigs`). A content-only change would therefore keep the old file,
+and some trigger is still needed. Naming each config after its digest is Compose's documented
+config rotation practice (kustomize hashes ConfigMap names the same way). The services'
+`configs[].source` references change with the name, so exactly the services that mount a changed
+config have a new definition. v2.26.0 also force-recreates every service that `depends_on` a
+recreated one (`convergence.go:538`, `setDependentLifecycle`). The goal is therefore scoped: a
+route change recreates `topup` and its dependent dstack-ingress, but no longer the Postgres
+container. On a CVM an upgrade restarts the whole stack anyway, since `app-compose.service` stops
+it, so recreation is about container identity, not uptime. §11 measures the actual lifecycle.
 
 ## 7. Alternatives rejected, with evidence
 
-- **`profiles` for variants.** Profile selection happens at runtime (`--profile` or
-  `COMPOSE_PROFILES`); dstack runs `docker compose up` without either, and `config` output keeps
-  `profiles:`, so an inactive service would not start. A variant chosen at runtime would also not
-  be one attested file.
-- **`include`.** It imports whole projects and cannot modify an existing service, so it cannot
-  express "topup read-only on 8081".
-- **Compose `secrets:` with `environment:` sources** (the standard secret mechanism). Compose
-  v2.26.0 writes the secret into the container only when it creates the container. After
-  `phala envs update` (a restart, with an unchanged service hash) every container would keep the
-  old secret. Interpolated `${NAME}` references change the service hash, so they recreate the
-  container. Tested; stays as today.
+- **`profiles` as the variant switch.** The switch is runtime state (`--profile`/`COMPOSE_PROFILES`)
+  outside the attested file, and dstack passes neither. It is used here only to keep
+  `restore-check` inert in the base; the overlay, not a profile, selects the variant.
+- **`include`.** It imports whole projects and cannot modify an existing service.
+- **Compose `secrets:` with `environment:` sources.** v2.26.0 writes a secret only when it creates
+  the container. After `phala envs update` (a restart, with an unchanged hash) every container would
+  keep the old secret. Tested.
 - **`env_file:` with dstack's decrypted env.** It would hand every sealed secret to every service
-  that lists it (topup would get the S3 credentials, PostgreSQL the RPC keys).
-- **Interpolating public settings at render time.** `config` without `--no-interpolate` resolves
-  the secret references too (to empty strings), and escaping them as `$${…}` survives the render as
-  literals. Verified. Deploy-time values therefore go through three explicit jq edits instead.
-- **Keeping public settings in GitHub variables.** They are mutable without review or history
-  (§2), and the renderer, the derivations, and the copy step exist only to carry
-  them.
-- **Routes as separate files next to `topup.yaml`.** That keeps 4 compose configs and mounts, and
-  makes the renderer discover files. Inline routes keep one file, one config, and their comments.
+  that lists it.
+- **Interpolating public settings at render time.** `config` would resolve the secret references
+  too, and `$${…}` escapes survive as literals. Verified.
+- **Two complete compose files.** They duplicate ~200 lines that must then be proved equal.
+- **Routes as separate files next to `topup.yaml`.** That keeps 4 configs and mounts, and makes the
+  renderer discover files.
 
 ## 8. Scripts and workflows after the change
 
-- `validate-compose.sh` keeps its policies and runs them on the two rendered variants: credential
-  mounts, egress, single ingress, no password in env, the secret names equal to
-  `secrets.env.example`, and the variant differing from the service only as §4 says. It drops the
-  route-copy comparisons, the name-mangling jq, and `app-compose.example.json`.
-- `preflight.sh` drops the awk/sed YAML parsing. Locally, it checks the env file against
-  `secrets.env.example`, that images are pinned, and a byte-equal fresh render, then runs
-  `topup config check` in the pinned image. That is the only step with network access in
-  `--offline` mode: an anonymous pull, and no RPC or Phala Cloud call. Online, it adds the RPC and
-  asset checks from `topup config show` JSON with jq, and the route-mode policy: a known chain
-  list, no devnet, and no live route when `environment: staging`. This replaces
-  `check-route-modes.sh`.
-- `deploy.yml` loses the settings `env` block, the RPC copy step, and the derivations. Its render
-  step becomes the `render.sh` call above.
-- Release images writes the new `images.json` keys and runs `render.sh`'s image check.
-- The local stacks (`make up`, the sandbox, the restore drill) run
-  `docker compose -f deploy/compose.yaml [-f compose.restore-check.yaml] -f local/…` on the
-  sources under their own project name, with `local/topup.yaml`. The CVM rehearsal runs
-  `render.sh --project-name` output, so concurrent rehearsals never share the `dstack_*` volumes.
-- Tests: `deploy/tests/render-compose.sh` becomes a `render.sh` test. `cargo test` runs
-  `topup config check` on every committed environment and on `local/topup.yaml`. The tests of the
-  deleted scripts go with them.
-- Docs: `deploy/README.md` ("One-time setup" step 4, "Attested settings", "RPC providers",
-  "Sealing the secrets", "Database credentials"), `RESTORE.md` (render commands), `phala.md`,
-  `docs/self-hosting.md` §2 and §3, `docs/configuration.md` (rewritten around `--config`),
-  architecture §14 references, and the `TOPUP_PUBLIC_ORIGIN` wording in the admin OpenAPI (so
-  `openapi.admin.json` regenerates). The compose keeps only one-line pointers into these docs, and
-  the canonical render drops compose comments anyway. The route comments survive inside the
-  config content. The CHANGELOG records only integrator-visible changes, so this refactor adds no
-  entry there unless the owner wants an "Operators" section.
+- **Every config consumer switches to `--config`:** `topup run`, `reconcile`, and `restore-check`
+  in the composes, the local stacks, the sandbox, the drill, and the rehearsals. `cargo test` runs
+  `Config::parse` on every committed `topup.yaml` (example, staging, local, sandbox template).
+- **`compose-policy.jq`** (§1.6) is included by `validate-compose.sh`, preflight, and
+  `verify-attestation.sh`.
+  - Service variant: exactly `keys postgres migrate topup smokescreen dstack-ingress heartbeat
+    backup`; only dstack-ingress publishes, on 443 (tls-alpn-01 → `topup:8080`, `DOMAIN` equal to
+    `public_origin`'s host); the credential mounts; smokescreen unrelaxed.
+  - Restore-check variant: exactly `keys postgres migrate topup restore-check`; only topup
+    publishes, on 8081 → 8080; topup `--read-only`; postgres with `TOPUP_RESTORE_FROM_BACKUP=on`
+    and no command or entrypoint override (so `archive_mode=off` wins); storage credentials only
+    `RESTORE_AWS_*`.
+  - Both variants: no password in env; the secret positions of §5; volumes named `<project>_*`.
+- **`validate-compose.sh`** renders the example environment, the staging environment, and the
+  product in both variants, and applies the policy. It also checks the local, drill, sandbox, and
+  rehearsal overlays.
+- **`preflight.sh`** takes `--env FILE`, `--compose FILE`, and `--environment-dir DIR`.
+  - `--offline` makes no network access and pulls nothing. It checks:
+    - the env file names against the artifact's names;
+    - that images are pinned;
+    - a byte-equal fresh render with the pinned Compose (`--no-download`);
+    - the policy;
+    - that no example placeholder remains;
+    - `topup config check [--secrets]` in the pinned image, which must already be present
+      (`--pull never`); otherwise it fails and names the `docker pull`.
+  - Online, it adds the anonymous pulls, RPC and asset checks from `topup config show` JSON,
+    and the Phala Cloud checks.
+  - `--unsealed` skips only `--secrets`.
+- **`check-route-modes.sh`** stays. It reads the routes from the artifact's `topup` config, and the
+  environment is the one Deploy selected: its first argument. It never reads `topup.yaml`'s
+  `environment`, so a staging config that claims `production` does not bypass it. It needs no
+  network.
+- **`deploy.yml`** loses the settings `env`, the RPC copy step, and the derivations. It resolves the
+  environment directory from the owner and Environment, renders, writes the unsealed env from the
+  artifact's names, and runs the same verification as before.
+- **`release-images.yml`** writes `images.json` keyed by image name, builds with `SOURCE_COMMIT`,
+  and runs `render.sh`'s image check.
+- **`verify-contracts.yml`** takes Sepolia's two provider URLs from the committed staging
+  `topup.yaml` (`topup config show`). It fails if one needs a `{key}`, since the workflow holds no
+  key. It validates that config instead of the deleted route directory. It no longer needs the
+  `staging` Environment.
+- **Local stacks** (`make up`, the sandbox, the drill) run the source files with
+  `local/topup.yaml` under their own project. The CVM rehearsal renders with
+  `render.sh --project-name`.
+- **Docs** move the compose's design prose out; the compose keeps one-line pointers. Affected:
+  - `deploy/README.md`;
+  - `RESTORE.md` (render commands; the `RESTORE_AWS_*` names);
+  - `phala.md`;
+  - `docs/self-hosting.md` (any environment directory; picking and verifying the official
+    digests);
+  - `docs/configuration.md`, rewritten around `--config`;
+  - architecture §14;
+  - the `TOPUP_PUBLIC_ORIGIN` wording in the admin OpenAPI.
 
 ## 9. Migration
 
-**Phala's staging** (one Deploy `upgrade`; no re-seal, no data movement):
+**Phala's staging.** One Deploy `upgrade`; the sealed names are unchanged and no data moves.
 
-1. The values for `deploy/environments/phala-network/staging/` are the current `staging`
-   Environment values (owner decision). They match the compose attested by run 36670873413; the
-   §11 diff shows any transcription error.
-2. Merge, run Release images (the binary changed), and Deploy `upgrade` with that release.
-   - Kept: the sealed names, the volume names (`dstack_*`), the app id, and the domain.
-   - The compose hash changes, as with any upgrade.
-   - Every container is recreated once, because each definition changed.
-   - PostgreSQL restarts once on its unchanged volume.
-3. Afterwards, delete the now unused `staging` variables: `TOPUP_DOMAIN`, `AWS_ENDPOINT`,
-   `TOPUP_ADMIN_PUBLIC_KEY`, the `TOPUP_RPC_*_URL`, `PRODUCT_DOMAIN`, and
-   `PRODUCT_DRIVER_PUBLIC_KEY`. Deploy stops reading them in this PR, so leaving them is harmless.
-4. The product CVM: `upgrade` with target `product`, the same way.
-5. A restore from a backup taken before the upgrade works unchanged: the prefix, key, and passwords
-   are derived exactly as before. The restore-check variant is rendered from the commit being
-   restored to, as `RESTORE.md` already requires.
+1. `deploy/environments/phala-network/staging/` holds the current `staging` Environment values
+   (owner decision). They match the compose attested by run 36670873413, and the §11 diff proves
+   it.
+2. **Before the cutover** (HUMAN-ONLY, owner):
+   - save the currently attested artifact and its verification;
+   - run `deploy/verify-attestation.sh` on it, and record the current compose hash;
+   - record the TLS evidence;
+   - record the newest `base_…` backup and `wal_005/` segment.
+3. **Cutover**: merge, run Release images (the binary changed), then Deploy `upgrade` for
+   `topup`. The new compose hash is a new full attested app-compose hash
+   (`verify-attestation.sh`), not a YAML file hash. It goes through the merchant approval flow like
+   any upgrade: announce it with the commit, and let merchants re-pin with
+   `docs/integration.md` §5.3. The webhook keys are unchanged, since they are derived from the
+   same app id.
+4. **Acceptance**, from the Deploy run and the owner's checks:
+   - the attestation verifies, and the policy holds;
+   - `/healthz` answers;
+   - the TLS evidence verifies;
+   - admin `GET /v1/admin/restore` shows no new restore;
+   - a pre-upgrade account and its webhook key are unchanged (`GET /v1/attestation`);
+   - a new `wal_005/` segment is listed within two minutes;
+   - `topup-backup` checks in `ok`.
+5. **Product**: Deploy `upgrade` with target `product`; its `ledger` volume keeps its name.
+6. **Rollback.** No schema change is in this PR, so the old binary runs on the same database.
+   - The standard path: revert the merge on `main`, run Release images, and Deploy `upgrade`.
+   - The emergency path (HUMAN-ONLY, owner): redeploy the saved artifact byte for byte with
+     `phala deploy --cvm-id "$TOPUP_CVM_ID" --compose <saved> --no-public-logs --no-public-sysinfo
+     --wait`, with no `-e`, so the sealed env stays. Then verify it with `verify-attestation.sh`
+     against the saved hash. Its images stay in GHCR.
+7. **Afterwards**, delete the unused `staging` variables: `TOPUP_DOMAIN`, `AWS_ENDPOINT`,
+   `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, the four `TOPUP_RPC_*_URL`, `PRODUCT_DOMAIN`, and
+   `PRODUCT_DRIVER_PUBLIC_KEY`. Nothing reads them any more.
+8. **A restore after the cutover** uses `RESTORE_AWS_*` in its env file (`RESTORE.md`).
 
-**Self-hosters (forks).** Create `deploy/environments/<owner>/<env>/topup/` from Phala's staging
-directory, with their own values taken from their GitHub variables. Then run Release images and
-Deploy `upgrade`. Their sealed env is untouched. Deploy fails closed until the directory exists.
+**Self-hosters (forks):**
+1. Copy `deploy/environments/example/` to `deploy/environments/<owner>/<env>/`.
+2. Fill it with the values from their GitHub variables, and move each keyed provider's key name
+   into the overlay.
+3. Run Release images and Deploy `upgrade`. Their sealed env is untouched. Deploy fails closed
+   until the directory exists.
 
-**Phala Cloud template** (Phala-Network/phala-cloud#520, open). It mirrors today's compose with
-`${VAR:-default}` public settings. It needs a follow-up there: the rendered service compose, with
-`topup.yaml` as an inline config whose values are the template's `${…}` form fields. Compose
-interpolates config `content`, so topup needs no change for that.
+**The Phala Cloud template** (Phala-Network/phala-cloud#520) needs a follow-up there: the rendered
+service compose, with `topup.yaml` as an inline config filled from the template's form.
 
-## 10. Self-hosting without a fork: a follow-up
+## 10. Self-hosting without a fork
 
-It is possible, but not in this PR. It needs three things this change does not add:
+**In this PR**:
+- `render.sh` and preflight accept any environment directory;
+- the example environment;
+- keyed providers' secret names in the overlay;
+- docs on picking an official release:
+  - the source commit of a Release images run on `main`;
+  - its `images.json` digests;
+  - `make verify-image` at that commit to rebuild and compare, since `phala-pay` is bit-for-bit
+    reproducible.
 
-- Versioned releases: tags, notes, and images published per version rather than per dispatch.
-- A distributable deploy kit consumed at a tag: `compose*.yaml`, `render.sh`, and a reusable
-  `workflow_call` Deploy, or a small CLI.
-- New trust documentation: operators verify Phala's reproducible images instead of building their
-  own.
+**Follow-up**:
+- versioned releases (tags and notes);
+- a deploy kit consumed at a tag: the composes, `render.sh`, and a reusable `workflow_call` Deploy
+  or a small CLI;
+- the Cloud template.
 
-This PR makes the follow-up small. An instance becomes one environment directory, which
-`render.sh` accepts from any path, plus a release's `images.json`. Mixing both changes into one
-review would put the live staging migration and a new distribution model at risk together.
+Mixing those into this PR would put the live staging migration and a new distribution model at
+risk together.
 
-## 11. Verification (Phase 2)
+## 11. Verification
 
-- **Behavioural equivalence.** Render the old compose with run 36670873413's inputs and the new
-  one with the same release and gateway. Normalize the old one with
-  `docker compose -p dstack config --no-interpolate`, diff the two, and explain every difference:
-  - expected: moved settings, removed defaults and label, renamed configs, removed idle services,
-    image fields;
-  - anything else is a bug.
-- **Scripts:** `validate-compose.sh`, `preflight.sh --offline`, the `deployment` CI job's tests,
-  `cargo test`, and `make lint`.
-- **Local stacks:** `make restore-drill` (both modes) and `make cvm-rehearsal`.
-- **Limits:** `CARGO_BUILD_JOBS=8`; every container, volume, and temp file the runs create is
+**The in-place upgrade rehearsal** (`deploy/local/upgrade-rehearsal.sh`, `make upgrade-rehearsal`)
+proves zero data loss on real committed data. It is the local equivalent of the staging cutover.
+
+1. **The old stack.** It starts from staging's old images (the digests of run 36670873413, pulled
+   anonymously) and the old compose: `git show <base>:deploy/…` rendered by the old renderer. It
+   runs Anvil with the factory, the local S3, and the simulator, with sealed secrets.
+2. **Real data.** It creates an account through the signed admin API, with its webhook endpoint,
+   its treasury proof, a deposit address, and a quote. Then it records the evidence:
+   - webhook key (attestation);
+   - row counts;
+   - `pg_control_system()` system identifier;
+   - timeline and the migrations;
+   - the newest archived segment.
+3. **Pre-upgrade assertions**:
+   - project name;
+   - every volume name and each service's mount targets, including `ingress_certs`,
+     `ingress_evidences`, `observability`, and the product's `ledger`;
+   - `PGDATA`;
+   - the simulator's app id;
+   - the sealed names equal the new artifact's;
+   - backup prefix;
+   - the derived key paths;
+   - the old artifact is saved.
+4. **The upgrade.** It builds the new images, renders the new artifact with `render.sh` under the
+   same project name, and runs `docker compose up` on the same volumes, as the CVM does.
+5. **Post-upgrade assertions:**
+   - the same system identifier and timeline;
+   - every pre-upgrade row present;
+   - the migrations the same or ahead;
+   - the same webhook key and deposit address for the same customer;
+   - a new segment archived after the upgrade;
+   - the new attestation (simulator quote) served;
+   - the Postgres logs show neither "restoring base backup" nor "initializing a new cluster", and
+     no `recovery.signal` exists;
+   - `topup` reports no restore (`GET /v1/admin/restore`).
+6. **Config-only change lifecycle.** A changed route recreates `topup` and dstack-ingress's
+   definition, but not Postgres: the Postgres container id is the same.
+7. **Rollback.** It redeploys the saved old artifact on the same volumes and asserts the same data
+   again.
+
+TLS evidence needs a real CVM and domain. Deploy verifies it on the staging cutover (§9); the
+rehearsal asserts that the `ingress_certs` volume is unchanged.
+
+**Other checks:**
+- **Behavioural equivalence.** Render the old staging artifact with run 36670873413's inputs and
+  the new one with the same images and gateway. Normalize both with the pinned Compose, then diff.
+  Every difference is listed and explained in the PR.
+- **Suites:** `validate-compose.sh`, `preflight.sh --offline` against the rendered staging
+  artifact, the CI `rust`, `deployment`, and image jobs (`cargo test`, `make lint`, the shell
+  tests), `make restore-drill` (both modes), and `make cvm-rehearsal`.
+- **Limits:** `CARGO_BUILD_JOBS=8`. Every container, volume, image, and temp file of a run is
   removed.
 
 ## 12. Risks
 
-- **The artifact's form changes** (canonical YAML, no comments, explicit resource names). A
-  script that reads the attested compose by today's keys breaks: in this repo,
-  `verify-attestation.sh` and the runbooks, which are updated here. Merchants pin only the compose
-  hash (`docs/integration.md` §5.3), which changes on every upgrade anyway.
-- **A new tool dependency**: the Compose binary pinned by sha256. A renderer on another version
-  could produce different bytes. `render.sh` refuses any other version, rather than silently using
-  the system Compose.
+- **The artifact's form changes** (canonical YAML, no comments, explicit resource names).
+  `verify-attestation.sh` and the runbooks are updated. Merchants pin only the compose hash
+  (`docs/integration.md` §5.3).
+- **A new pinned tool.** `render.sh` refuses any Compose but v2.26.0 by sha256.
 - **Volume identity.** Rendering under any project name but `dstack` would move the CVM onto new
-  empty volumes, and PostgreSQL would then restore from backup or wait. `render.sh` fixes
-  `-p dstack` for CVM output, and `validate-compose.sh` asserts `dstack_pgdata`.
-- **Moving validation into Rust** changes where errors surface (`topup config check` rather than
-  bash). The rules are carried over one for one, with tests.
-- **Transcription**: the committed staging values must equal the Environment's, or the upgrade
-  would change the backup prefix or the RPC endpoints. The §11 diff against the last attested
-  compose shows any difference before the upgrade.
+  empty volumes. `render.sh` fixes `-p dstack`, the policy asserts the volume names, and the
+  rehearsal proves the data survives.
+- **The restore credential names change.** A restore env file with the old names fails closed:
+  PostgreSQL cannot list the prefix. `RESTORE.md` and its preflight name the new ones.
+- **Moving validation into Rust** changes where errors surface. The rules are carried over one for
+  one, with tests.
 
 ## 13. What stays, and why
 
 - Attestation of every public setting that affects money or trust. Each one is in `topup.yaml`,
   an overlay, or a pinned image, all inside the one attested file.
-- The sealed secrets, their names, and `allowed_envs`. The admin seed never enters the CVM.
-- `keys` and the three tmpfs volumes with their mount policy, and the pinned dstack-ingress
+- Sealed secrets and `allowed_envs`. The admin seed never enters the CVM.
+- `keys`, the three tmpfs volumes and their mount policy, and the pinned dstack-ingress
   (tls-alpn-01, 443 only).
-- The smokescreen policy flags; WAL-G and its encryption key path; `postgres-init`.
-- Deploy's two modes, its read-back and verification, and preflight online and offline.
-- Every guarantee of `RESTORE.md`: the restore-check variant publishes only 8081, has no
-  `backup`, `heartbeat`, or ingress, runs PostgreSQL with `TOPUP_RESTORE_FROM_BACKUP=on`, and
-  never takes live traffic.
+- The smokescreen policy; WAL-G, its key path, and its guards; `postgres-init`.
+- Deploy's two modes, its read-back and verification; preflight online and offline.
+- Every guarantee of `RESTORE.md`, now checked on the merged artifact. The drill keeps all of its
+  assertions: the object listing is unchanged, live isolation holds, merchant requests are refused,
+  background work stops, and the freeze persists after the upgrade back to the service.
+- YAML; `<owner>/<env>`; the three bounded deploy-time inputs; digest-suffixed configs; `!reset
+  null` overrides.
