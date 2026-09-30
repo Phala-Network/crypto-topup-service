@@ -29,7 +29,8 @@
 # checked out, jq, curl, and OpenSSL 3; internet access for the old images and the live price
 # sources. UPGRADE_FROM_COMMIT, UPGRADE_FROM_TOPUP_IMAGE, and UPGRADE_FROM_POSTGRES_WALG_IMAGE
 # select another release to upgrade from.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "upgrade-rehearsal: line $LINENO failed: $BASH_COMMAND" >&2' ERR
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 source "$root/deploy/contracts/common.sh"
@@ -329,8 +330,10 @@ echo "ok: account $account, its key, webhook endpoint, treasury, deposit address
 evidence() {
     local side key_digests
     side=$(<"$tmp/cvm/.side")
-    key_digests=$(dc "$side" exec -T keys sha256sum /run/wal-g/backup.key /run/db-owner/postgres.pgpass \
-        /run/db-app/topup_service.pgpass | awk '{ print $1 }' | paste -sd, -)
+    # PostgreSQL mounts all three key volumes; the distroless `keys` image has no sha256sum.
+    key_digests=$(dc "$side" exec -T postgres sha256sum /run/wal-g/backup.key \
+        /run/db-owner/postgres.pgpass /run/db-app/topup_service.pgpass | awk '{ print $1 }' |
+        paste -sd, -)
     jq -n \
         --arg system "$(psql_value 'SELECT system_identifier FROM pg_control_system()')" \
         --arg timeline "$(psql_value 'SELECT timeline_id FROM pg_control_checkpoint()')" \
