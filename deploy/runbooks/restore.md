@@ -197,6 +197,13 @@ the customer's over a treasury in force since the restore point: check the treas
 then the merchant's record. The chain alone cannot name these customers: a salt is a hash of the
 `client_reference_id`.
 
+One call brings back a version at most 32 past the customer's latest one (an address is looked for
+that far too): each version between is issued with its networks in one transaction, so a larger
+`version` is refused with `400` before anything is issued. Re-issue a customer further behind in
+steps: `version` 32, 64, and so on (a version the customer has is returned as it is,
+`reissued: false`), then the merchant's own address or version, with its `id` and
+`client_secret`. Each step is its own audited re-issue.
+
 A merchant can also re-register an address itself after the unfreeze: `POST /v1/deposit_addresses`
 returns version 1 identically, and each `POST /v1/deposit_addresses/{id}/rotate` the next version.
 Payments made to it meanwhile are credited once it is registered, but only from the chain's cursor

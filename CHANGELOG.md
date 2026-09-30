@@ -669,6 +669,10 @@ happens only from two-provider finalized data.
 
 ### Removed
 
+- The reference product's `team_addresses` table, written with each quote and deposit address but
+  never read: the quote and deposit address records hold them. Its ledger (`PRAGMA user_version`
+  2) drops the table when the product starts; start it once before a read-only
+  `export-restore-records`.
 - Webhook events written before Stripe-style events (outbox format 1) and their old envelope;
   every event is `{id: "evt_…", object: "event", type, created, data: {object}}`.
 - The retired `rejected(product_refused)` reason and `cleared` state, and addresses issued before
@@ -691,6 +695,15 @@ happens only from two-provider finalized data.
   second instead of all at once when a one-minute window rolls over, so a page can no longer read
   120 times just before a rollover and 120 more just after it. A read over the budget is retryable
   after `Retry-After: 1` rather than at the end of the window.
+- Admin: `POST /v1/admin/restore/deposit_addresses` refuses, `400`, a `version` more than 32 past
+  the customer's latest one, before anything is issued: it issued every version between in one
+  transaction, however many, so a huge `version` held its connection and locks until it exhausted
+  them. A customer further behind is re-issued in steps (`version` 32, 64, …); an `address` was
+  already looked for only that far.
+- Admin: `GET /v1/admin/restore` no longer answers `500` for an imported `deposit.reversed` whose
+  delivery predates the receipt position (`identity_missing`) and holds a `chain_id` or `revision`
+  that is not an integer: the position is read only from integers, and the event is a finding as
+  any other.
 - Admin: a restore across a treasury change no longer deadlocks the reconciliation. Deposit
   addresses and quotes are re-issued over a treasury in force when they were issued, within 5
   minutes (any since the restore point for a deposit address, around its `created` for a quote),

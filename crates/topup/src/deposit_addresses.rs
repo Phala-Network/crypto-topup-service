@@ -397,8 +397,10 @@ pub async fn rotate<'c>(
     Ok(address)
 }
 
-/// How far past a customer's latest restored version [`reissue`] derives addresses to find one.
-pub const REISSUE_SEARCH_VERSIONS: u64 = 32;
+/// How far past a customer's latest restored version [`reissue`] goes: it derives addresses this
+/// far to find one, and brings back a version at most this far past it, so one call issues at most
+/// this many versions. A customer further behind is re-issued in steps (32, 64, ...).
+pub const REISSUE_VERSIONS_AHEAD: u64 = 32;
 
 /// The version of a customer's deposit address [`reissue`] brings back: `version`, or the version
 /// whose address over a treasury of the account in force since the restore point is `address`;
@@ -421,7 +423,8 @@ pub struct ReissueTarget {
 /// such treasury of each chain, superseded when it is no longer the chain's current one, so a
 /// payment to any address the merchant was given for it since the restore point is credited.
 /// Versions between the restored latest one and `target` are issued retired, as the rotations that
-/// issued them left them; the active one is retired. Each new network is backfilled from the
+/// issued them left them; the active one is retired. A version more than
+/// [`REISSUE_VERSIONS_AHEAD`] past the latest one is refused. Each new network is backfilled from the
 /// chain's cursor in `backfill_from` (the restored cursor), so the rescan finds payments made to it
 /// since. `id` keeps the `da_` id the merchant holds, and
 /// `client_secret_hash` the SHA-256 of a client secret of it the caller checked, so the payer's
@@ -512,7 +515,7 @@ pub async fn reissue(
                 Some(version) => {
                     u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?
                 }
-                None => (1..=latest.saturating_add(REISSUE_SEARCH_VERSIONS))
+                None => (1..=latest.saturating_add(REISSUE_VERSIONS_AHEAD))
                     .find(|version| {
                         let salt = salt(*version);
                         in_force.iter().any(|chain| {
@@ -549,6 +552,12 @@ pub async fn reissue(
             ));
         }
     };
+    if version > latest.saturating_add(REISSUE_VERSIONS_AHEAD) {
+        return Err(DepositAddressError::InvalidInput(
+            "version is more than 32 past the customer's latest one: re-issue it in steps of 32 \
+             versions (32, 64, ...)",
+        ));
+    }
     if version <= latest {
         let existing: Uuid = sqlx::query_scalar(
             "SELECT id FROM deposit_addresses WHERE customer_id = $1 AND version = $2",

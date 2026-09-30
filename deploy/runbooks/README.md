@@ -91,13 +91,15 @@ The exercises of Phala's instance; an operator records its own. Local exercises 
 PostgreSQL and Anvil with the `topup` CLI or the integration tests; Safe, Compliance, and
 publication steps are human-only and were never exercised. Except the staging restore drill, every
 exercise ran the earlier, database-level form of these runbooks; none has run in its current form
-against a CVM.
+against a CVM. **A full CVM restore drill on the current release is pending**: an operator runs it
+right after this release and fills in the "Restore, current release" row.
 
 | Runbook | Last run | Outcome | Evidence |
 |---|---|---|---|
 | Chain frozen | 2026-09-22, local | complete: freeze, dual-provider check, owner lift, re-freeze | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Reconciliation mismatch | 2026-09-22, local | complete: findings, blocks, owner-only lift | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
 | Lock exposure near cap | 2026-09-22, local | complete: cap enforcement; the alert itself not evaluated | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |
+| Restore, current release | **pending** | **not run: a full CVM restore drill on the current release is due right after it is released** | — |
 | Restore | 2026-09-25 23:09–23:26 UTC, staging | complete: drill instance on 8081, every live isolation check passed; RTO 17 min; `restore_check` `ok`, post-restore reconciliation complete; restored heartbeat newer than the start anchor; dstack verifier `UpToDate` for the original app id; the backup prefix gained only the live instance's own WAL (no `.history`, nothing removed). The first attempt (21:55 UTC, on 8080) was aborted when the drill instance took live traffic | [#126](https://github.com/Phala-Network/phala-pay/pull/126) |
 | Reconciliation after a restore | 2026-09-29, local | partial: the freeze after a restore with merchant reads refused, the admin attestation of a frozen instance, a key re-revoked by prefix, a deposit address and a quote re-issued identically with the client secret the service issued, and a signed delivery imported and its credit kept while an altered body is refused, in the restore drill (`make restore-drill`, controlled mode) and `crates/topup/tests/restore_mode.rs`; a delivered credit carried into the ledger (including a delivery the service rendered and signed), contradicted deliveries held and discarded, and the unfreeze after a rescan only in the tests (the drill runs no scanner); merchant contact not exercised | [#235](https://github.com/Phala-Network/phala-pay/pull/235) |
 | Lock expiry worker failure | 2026-09-22, local | partial: exercised a counter since removed | [#59](https://github.com/Phala-Network/phala-pay/pull/59) |

@@ -508,6 +508,43 @@ def test_orders_keyed_by_the_old_deposit_key_are_migrated(tmp_path: Path) -> Non
     assert ProductLedger(path).find_order(f"dep_{deposit.hex}") is not None
 
 
+def test_a_version_1_ledger_drops_the_unread_address_table(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    ledger = ProductLedger(str(path))
+    ledger.add_team(TEAM)
+    ledger.record_quote(TEAM, _quote())
+    ledger.record_deposit_address(TEAM, _deposit_address())
+    # Version 1 also wrote each quote's and network's address to `team_addresses`, never read.
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE team_addresses (address TEXT PRIMARY KEY, "
+        "team_id TEXT NOT NULL REFERENCES teams (id), kind TEXT NOT NULL, version INTEGER, "
+        "lock_ref TEXT);"
+        "PRAGMA user_version = 1;"
+    )
+    with old:
+        old.execute("INSERT INTO team_addresses VALUES ('0xabc', ?, 'lock', NULL, 'qt_1')", (TEAM,))
+    old.close()
+    with pytest.raises(LedgerVersionError):
+        ProductLedger(str(path), read_only=True)
+    migrated = ProductLedger(str(path))
+    tables = {
+        row[0]
+        for row in sqlite3.connect(path).execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert "team_addresses" not in tables
+    # The records a restore re-issues from are kept, and the export reads them.
+    assert [record for record, _ in migrated.quote_records()] == [_quote()]
+    assert [record for record, _ in migrated.deposit_address_records()] == [_deposit_address()]
+    reader = ProductLedger(str(path), read_only=True)
+    assert len(reader.quote_records()) == 1
+    # Recording again writes no address table.
+    migrated.record_quote(TEAM, {**_quote(), "id": "qt_" + "0e" * 16})
+    assert len(migrated.quote_records()) == 2
+
+
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))
 
 
