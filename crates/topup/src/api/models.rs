@@ -350,7 +350,7 @@ pub struct Deposit {
     /// `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
     /// `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
     /// deposit recorded at a position after the deposit there was reversed (`replaces`) has
-    /// another id.
+    /// another id, `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}:{revision}")`.
     pub id: String,
     /// Always `deposit`.
     pub object: String,
@@ -407,10 +407,25 @@ pub struct Deposit {
     pub from_address: String,
     /// Transaction hash.
     pub tx_hash: String,
+    /// Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,
+    /// and `revision`, what `id` is derived from. Absent from an event rendered before it was
+    /// added, as are `revision`, `block_hash`, and `block_time`.
+    #[schema(required = false)]
+    pub receipt_log_index: u64,
+    /// How many deposits at the same receipt position were reversed before this one: `0`, or
+    /// the revision of the deposit it `replaces` plus one.
+    #[schema(required = false)]
+    pub revision: u64,
     /// Block-wide log index of the transfer; it changes if the transaction is re-included.
     pub log_index: u64,
     /// Number of the block the transfer is in; it changes if the transaction is re-included.
     pub block_number: u64,
+    /// Hash of the block the transfer is in; it changes if the transaction is re-included.
+    #[schema(required = false)]
+    pub block_hash: String,
+    /// Time of the block the transfer is in, Unix seconds.
+    #[schema(required = false)]
+    pub block_time: i64,
     /// Refunded token amount in base units, as a decimal string: the sum of succeeded refunds.
     pub amount_refunded_atomic: String,
     /// Whether the deposit is fully refunded.
@@ -1917,14 +1932,38 @@ pub struct TreasuryVerification {
     /// The restored treasury's status now; `null` when it is missing.
     pub status: Option<String>,
     /// `matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,
-    /// the restore undid it: cancel it with `reapply`); `missing` (created after the
-    /// restore point: the merchant creates it again after the unfreeze); or `differs` (another
-    /// status, chain, or address; a change that applied after the restore point applies again).
+    /// the restore undid it: cancel it with `reapply`); `application_lost` (the merchant received
+    /// it `active` and the restore left it pending: restore it with its signed `treasury.updated`,
+    /// `POST /v1/admin/restore/treasuries/apply`); `missing` (created after the restore point: the
+    /// merchant creates it again after the unfreeze); or `differs` (another status, chain, or
+    /// address: escalate).
     pub result: String,
     /// The merchant's crediting pause, when `crediting_paused_by` was sent: `matches`; `paused` or
     /// `resumed` (applied again now); `pause_lost` or `resume_lost` (without `reapply`); `missing`;
     /// or `differs` (another chain or address).
     pub crediting: Option<String>,
+}
+
+/// `POST /v1/admin/restore/treasuries/apply` body: the delivery of the `treasury.updated` that
+/// announced a treasury change applying after the restore point, as the merchant's receiver got
+/// it.
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreTreasuryApplyRequest {
+    /// The delivery exactly as received: a `treasury.updated` whose object is `active` and whose
+    /// `previous_attributes.status` is `pending`.
+    pub delivery: DeliveredWebhook,
+    /// Why, 1 to 1024 bytes.
+    pub reason: String,
+}
+
+/// `POST /v1/admin/restore/treasuries/apply` response.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RestoreTreasuryApplyResponse {
+    /// Whether the change applied now; `false` when the treasury was in force already.
+    pub applied: bool,
+    /// The treasury.
+    pub treasury: Treasury,
 }
 
 /// `POST /v1/admin/restore/webhook_endpoints/delete` body: an endpoint the merchant deleted
@@ -1957,7 +1996,8 @@ pub struct RestoreDepositAddressRequest {
     #[serde(default)]
     pub version: Option<u64>,
     /// The address the merchant holds (the top-level `address` or a network's); the version is
-    /// found by deriving the customer's versions over the account's current treasuries.
+    /// found by deriving the customer's versions over each treasury of the account in force since
+    /// the restore point.
     #[serde(default)]
     pub address: Option<String>,
     /// The `da_` id the merchant holds, kept for the re-issued address.
@@ -2025,6 +2065,13 @@ pub struct EventImport {
     /// `imported` (stored as delivered, with no delivery), `matches` (recorded already with the
     /// same `data`), or `mismatch` (recorded already with other `data`, which is kept).
     pub result: String,
+    /// For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,
+    /// so the rescan records the transfer now at its receipt position as the deposit that
+    /// replaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is
+    /// not issued: re-issue it, then import the event again); or `identity_missing` (the delivery
+    /// carries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not
+    /// restored). `null` for other events.
+    pub reversed_deposit: Option<String>,
 }
 
 /// `POST /v1/admin/restore/delivered_credits/discard` body.

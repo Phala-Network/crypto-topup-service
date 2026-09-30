@@ -481,9 +481,11 @@ pub struct ReissuedTerms {
 
 /// Re-issues after a restore a quote the merchant created after the restore point and lost with
 /// it (docs/design/multi-tenant.md §13), from its record: the address salt is derived from the
-/// account, customer, and quote id, so only the quote's own address over the account's current
-/// treasury of `route`'s chain is accepted. The address is backfilled from the chain's cursor in
-/// `backfill_from` (the restored cursor), so the rescan finds payments made to it since.
+/// account, customer, and quote id, so only the quote's own address over the account's treasury of
+/// `route`'s chain in force when the quote was created is accepted (a change that applied since,
+/// or was restored since, does not move it: `crate::treasuries::in_force`). The address is
+/// backfilled from the chain's cursor in `backfill_from` (the restored cursor), so the rescan finds
+/// payments made to it since.
 ///
 /// The terms are the merchant's record, not the service's, so they are stored as recorded but
 /// never applied: the quote is marked re-issued by `restore`, a payment to it is credited at spot
@@ -515,23 +517,43 @@ pub async fn reissue(
     let scope = Scope::new(account.id, livemode);
     let mut transaction = pool.begin().await?;
     crate::treasuries::lock(&mut transaction, scope, false).await?;
-    let treasury = treasury(&mut transaction, scope, route.chain.chain_id).await?;
+    let in_force = crate::treasuries::in_force(
+        &mut transaction,
+        scope,
+        Some(terms.created_at),
+        terms.created_at,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::treasuries::TreasuryError::Database(error) => RateLockError::Database(error),
+        _ => RateLockError::DatabaseInvariant,
+    })?;
     let salt = quote_salt(
         &account.public_id,
         &terms.client_reference_id,
         &quote_id(terms.id),
     );
-    let address = forwarder_address(
-        route.chain.contracts.forwarder_factory,
-        route.chain.contracts.implementation,
-        treasury,
-        salt,
-    );
-    if address != terms.address {
+    let treasury = in_force
+        .into_iter()
+        .filter(|(chain_id, _)| *chain_id == route.chain.chain_id)
+        .map(|(_, treasury)| treasury)
+        .find(|treasury| {
+            forwarder_address(
+                route.chain.contracts.forwarder_factory,
+                route.chain.contracts.implementation,
+                *treasury,
+                salt,
+            ) == terms.address
+        });
+    let Some(treasury) = treasury else {
+        // `treasury_not_set` when the chain has no treasury at all.
+        self::treasury(&mut transaction, scope, route.chain.chain_id).await?;
         return Err(RateLockError::InvalidInput(
-            "the address is not the quote's over the account's current treasury",
+            "the address is not the quote's over the account's treasury in force when it was \
+             created",
         ));
-    }
+    };
+    let address = terms.address;
     if let Some(existing) = get(&mut *transaction, scope, terms.id).await? {
         if existing.address != terms.address
             || existing.client_reference_id != terms.client_reference_id

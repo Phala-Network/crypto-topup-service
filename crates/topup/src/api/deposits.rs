@@ -833,8 +833,12 @@ struct DepositRow {
     address: String,
     from_address: String,
     tx_hash: String,
+    receipt_log_index: i64,
+    revision: i64,
     log_index: i64,
     block_number: i64,
+    block_hash: String,
+    block_time: DateTime<Utc>,
     amount_refunded_atomic: String,
     replaces: Option<Uuid>,
     replaced_by: Option<Uuid>,
@@ -862,7 +866,8 @@ fn scoped_deposit_query(scope: Scope) -> QueryBuilder<Postgres> {
                deposit.credit_minor::text AS credit_minor,
                deposit.price_scaled::text AS price_scaled, deposit.price_source,
                deposit.valuation_at, address.address, deposit.from_address, deposit.tx_hash,
-               deposit.log_index, deposit.block_number,
+               deposit.receipt_log_index, deposit.revision, deposit.log_index,
+               deposit.block_number, deposit.block_hash, deposit.block_time,
                COALESCE((
                    SELECT sum(refund.amount_atomic)
                    FROM refunds AS refund
@@ -952,8 +957,13 @@ fn deposit_object(routes: &RouteSet, row: DepositRow) -> ApiResult<Deposit> {
         address: row.address,
         from_address: row.from_address,
         tx_hash: row.tx_hash,
+        receipt_log_index: u64::try_from(row.receipt_log_index)
+            .map_err(|_| ApiError::internal())?,
+        revision: u64::try_from(row.revision).map_err(|_| ApiError::internal())?,
         log_index: u64::try_from(row.log_index).map_err(|_| ApiError::internal())?,
         block_number: u64::try_from(row.block_number).map_err(|_| ApiError::internal())?,
+        block_hash: row.block_hash,
+        block_time: row.block_time.timestamp(),
         amount_refunded_atomic: row.amount_refunded_atomic,
         refunded,
         amount_refunded,

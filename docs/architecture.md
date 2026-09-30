@@ -352,6 +352,10 @@ restore_delivered_credits  deposit_id, event_id, restore_id, account_id, livemod
               price_source, credit_minor, valuation_at, discarded_at, discarded_by, discard_reason
               -- the credit of a signed delivered deposit.credited or .reversed imported after a
               -- restore: the re-derived deposit's valuation, unless discarded (§14)
+restore_deposit_tombstones  deposit_id, event_id, restore_id, successor_id
+              -- a reversed deposit restored from a signed delivered deposit.reversed: it keeps its
+              -- revision at its receipt position, and successor_id (the event's replaced_by)
+              -- replaces it once the rescan records it (§14)
 ```
 
 `metadata` on quotes, deposit addresses, deposits, and refunds is Stripe's (§12, Metadata): `NOT NULL DEFAULT '{}'`
@@ -481,7 +485,10 @@ it. The two deposits' events are delivered independently, in no set order (a new
 (§11) nets them whatever the order. Only a transfer whose content depends on chain state (a
 router, a swap output) can change this way; a plain transfer of a routed token has its recipient
 and amount fixed by its transaction, since routes never take fee-on-transfer or rebasing tokens
-(§4).
+(§4). The deposit object carries its `receipt_log_index` and `revision` (and its `block_hash` and
+`block_time`), so every delivered snapshot names its id's position and revision: after a restore
+the reversed deposit is rebuilt from its signed `deposit.reversed`, and the transfer the rescan
+reads at the position takes the successor's id and `replaces` again (§14).
 
 ## 8. Chain, valuation, screening
 
@@ -1004,10 +1011,11 @@ GET    /v1/admin/attestation {account, livemode, nonce}   GET /v1/attestation of
 GET    /v1/admin/restore                      restore freeze, rescan per chain, imported events vs the ledger (§14)
 POST   /v1/admin/restore/api_keys/revoke {account, id | prefix+last4, reason}   revoke again after a restore
 POST   /v1/admin/restore/treasuries/verify {account, livemode, treasuries, reapply, reason}   cancellations and crediting pauses again
+POST   /v1/admin/restore/treasuries/apply {delivery, reason}   a change that applied after the restore point, from its signed treasury.updated
 POST   /v1/admin/restore/webhook_endpoints/delete {account, livemode, id, reason}
-POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, client_secret?, reason}   re-issue identically
-POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, metadata?, client_secret?, reason}   re-issue identically; the lock never applies
-POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands
+POST   /v1/admin/restore/deposit_addresses {account, livemode, client_reference_id, address | version, id?, client_secret?, reason}   re-issue identically, over a treasury in force since the restore point
+POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, chain_id, asset, amount, amount_atomic, exchange_rate, address, created, expires_at, metadata?, client_secret?, reason}   re-issue identically, over the treasury in force at created; the lock never applies
+POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands, a reversed deposit is rebuilt
 POST   /v1/admin/restore/delivered_credits/discard {deposit, reason}   release a deposit whose transfer contradicts its delivered event
 POST   /v1/admin/restore/unfreeze {reason, checklist}   once every chain is rescanned; audited
 ```
@@ -1450,13 +1458,19 @@ such keys again and unfrozen), and the pumps, finality watch, refund verificatio
 treasury time-lock, webhook delivery, and idempotency key pruning wait; the scanner rescans from the restored cursor and
 the reconciler runs. The operator reconciles through the admin API (`/v1/admin/restore/…`, each
 action audited; `deploy/runbooks/restore.md`): keys revoked again, treasury cancellations, the
-merchant's treasury crediting pauses, and endpoint deletions applied again, deposit addresses and
-quotes given out after the restore point re-issued identically from their deterministic salts
-(backfilled from the restored cursor), with the client secrets the merchant holds when the service
-issued them for those ids to that account (§12), and the events merchants received imported from their
-signed deliveries (the `v1a` signature verified with the account's webhook keys), so a deposit
+merchant's treasury crediting pauses, and endpoint deletions applied again; a treasury change that
+applied after the restore point applied again while frozen, from its signed `treasury.updated`
+(the `v1a` signature verified with the account's webhook keys; the change still pending in the
+restored database, its time-lock ended; its screening at application is what the event attests,
+and the daily screening checks it again after the unfreeze), at the event's `created`, so each treasury
+is in force when it was; deposit addresses and quotes given out after the restore point re-issued
+identically from their deterministic salts over the treasury in force when each was issued (any
+since the restore point for a deposit address, whose network over a replaced treasury is kept
+superseded; the one at its `created` for a quote), backfilled from the restored cursor, with the
+client secrets the merchant holds when the service issued them for those ids to that account
+(§12); and the events merchants received imported from their signed deliveries, so a deposit
 rebuilt from the chain keeps its `deposit.credited` event id and delivered body and is never
-re-emitted. A settled amount is immutable: the confirm step values a rebuilt deposit at the credit
+re-emitted. Nothing of this waits for the unfreeze, so the unfreeze's checklist can be met. A settled amount is immutable: the confirm step values a rebuilt deposit at the credit
 its imported `deposit.credited` or `deposit.reversed` carries (`restore_delivered_credits`), not at
 spot, so its `amount_refunded` and `amount_reversed` reference what the merchant was told; a
 deposit whose transfer contradicts its delivered event is held, not credited, until the operator
@@ -1471,14 +1485,18 @@ credited again within the cap, and the finality watch settles every restored cre
 is not final. A deposit whose delivery is not imported is credited again with the same event id,
 so the merchant ignores the repeat and keeps its first credit (§11). When the backup lacks a deposit that
 was reversed because another transfer took its position (§7), the rescan finds only the final
-transfer and records it at revision 0, under the reversed deposit's id, not its successor's: the
-reversed deposit's imported credit then contradicts the transfer it holds, so that deposit is held
-as `contradicted` until the operator discards the credit, the successor's events stay `pending`,
-and the operator settles them with the merchant as one incident. The
-reversal and its successor commit in one transaction, so a backup holding the reversed deposit
-holds its successor too; should one ever lack it, the rescan records the final transfer at
-revision 1 with `replaces` `null`, and the quote the reversed deposit completed is not handed over
-(the reversal reopened or expired it as for any reversal). The restore drill runs weekly in CI
+transfer; so an imported `deposit.reversed` (valued or not: a rejected deposit may never have been)
+rebuilds the reversed deposit from its snapshot, whose id must be the one its `receipt_log_index`
+and `revision` derive (`restore_deposit_tombstones`): at its revision, reversed, valued at its
+delivered credit if it had one. The rescan then records the final transfer at the next revision,
+under the successor's id, and links it to the reversed deposit the delivery named (`replaces`), so
+it is valued at the successor's delivered credit and its events are recorded already. A delivery
+rendered before the deposit object carried its position cannot rebuild it, and neither can an
+import after the rescan reached the position: the rescan then records the final transfer under
+the reversed deposit's id, whose imported credit contradicts it, so it is held as `contradicted`
+until the operator discards the credit and settles both with the merchant. The reversal and its
+successor commit in one transaction, so a backup holding the reversed deposit holds its successor
+too. The restore drill runs weekly in CI
 on a local stack, including the freeze and the reconciliation; the staging drill restores
 staging's real backups. Ingress via the
 dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, Sentry, and merchants' webhook URLs,

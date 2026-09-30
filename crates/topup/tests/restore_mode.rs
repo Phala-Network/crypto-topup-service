@@ -29,8 +29,10 @@ use topup::api::{
     VerificationKey, WebhookKeysFuture,
 };
 use topup::db::{self, NewDeposit};
+use topup::finality::FinalityWatch;
 use topup::pump::{Pump, PumpConfig, RunOnceResult, StepSet};
 use topup::restore_mode;
+use topup::scanner::{chain_routes, scan_once};
 use topup::steps::confirm::ConfirmStep;
 use topup_adapters::attestation::AttestedWebhookKey;
 use topup_adapters::chain::evm::{
@@ -128,6 +130,13 @@ impl Harness {
         .await?;
         let key = seed::create_api_key(&pool, account.id, true).await?;
         seed::set_treasury(&pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
+        // Set long before anything the tests issue over it.
+        sqlx::query(
+            "UPDATE treasuries SET applied_at = now() - interval '1 day' WHERE account_id = $1",
+        )
+        .bind(account.id)
+        .execute(&database.owner_pool)
+        .await?;
         Ok(Self {
             app: topup::api::router(state.clone()).0,
             read_only: topup::api::read_only_router(state, None),
@@ -2412,6 +2421,886 @@ async fn the_restore_check_instance_takes_only_reads_and_the_restore_reconciliat
                 )
                 .await?;
             ensure!(revoked.status == StatusCode::OK, "{}", revoked.body);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A transaction of the router in the reorganization tests, which pays from a contract.
+const ROUTER_TX: B256 = B256::repeat_byte(0x0a);
+/// A token without a route: a transfer of it is rejected as `unsupported_asset`.
+const UNROUTED_TOKEN: Address = Address::repeat_byte(0x57);
+
+/// Both providers of chain 1 in the reorganization tests: one canonical chain holding at most
+/// the router's transfer (tests/reorged_transfer.rs).
+#[derive(Clone, Default)]
+struct ScriptedChain(Arc<std::sync::Mutex<ScriptedState>>);
+
+#[derive(Default)]
+struct ScriptedState {
+    head: u64,
+    finalized: u64,
+    transfer: Option<TransferLog>,
+}
+
+impl ScriptedChain {
+    fn set(&self, head: u64, finalized: u64, transfer: Option<TransferLog>) {
+        *self.0.lock().expect("chain state") = ScriptedState {
+            head,
+            finalized,
+            transfer,
+        };
+    }
+
+    fn state<T>(&self, read: impl FnOnce(&ScriptedState) -> T) -> T {
+        read(&self.0.lock().expect("chain state"))
+    }
+}
+
+impl ChainReader for ScriptedChain {
+    async fn factory_logs(
+        &self,
+        _factory: Address,
+        _forwarders: &[Address],
+        _from_block: u64,
+        _to_block: u64,
+    ) -> Result<Vec<FactoryLog>, ChainError> {
+        Ok(Vec::new())
+    }
+
+    async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
+        Ok(FinalizedHead {
+            number: self.state(|state| state.finalized),
+            time: Utc::now(),
+        })
+    }
+
+    async fn transfer_logs_to(
+        &self,
+        addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<TransferLog>, ChainError> {
+        Ok(self.state(|state| {
+            state
+                .transfer
+                .iter()
+                .filter(|log| {
+                    addresses.contains(&log.to)
+                        && (from_block..=to_block).contains(&log.block_number)
+                })
+                .cloned()
+                .collect()
+        }))
+    }
+
+    async fn confirmation_heads(
+        &self,
+        _confirmations: Confirmations,
+    ) -> Result<ChainHeads, ChainError> {
+        Ok(self.state(|state| ChainHeads {
+            latest: Some(state.head),
+            safe: None,
+            finalized: state.finalized,
+        }))
+    }
+
+    async fn receipt_transfer(
+        &self,
+        tx_hash: B256,
+        receipt_log_index: u64,
+    ) -> Result<ReceiptLookup, ChainError> {
+        Ok(self.state(|state| match &state.transfer {
+            Some(log) if log.tx_hash == tx_hash => ReceiptLookup::Included {
+                block_number: log.block_number,
+                block_hash: log.block_hash,
+                transfer: (log.receipt_log_index == receipt_log_index)
+                    .then(|| Box::new(log.clone())),
+            },
+            _ => ReceiptLookup::Missing,
+        }))
+    }
+
+    // Past the router transaction's nonce: a transaction no longer on chain was replaced.
+    async fn nonce_at(&self, _account: Address, _block: u64) -> Result<u64, ChainError> {
+        Ok(8)
+    }
+}
+
+/// The router's transfer of `amount` whole tokens of `token` to `to`, in `block_number`.
+fn router_transfer(
+    token: Address,
+    to: Address,
+    block_number: u64,
+    block_byte: u8,
+    amount: u64,
+) -> TransferLog {
+    TransferLog {
+        tx_hash: ROUTER_TX,
+        receipt_log_index: 0,
+        log_index: 3,
+        block_number,
+        block_hash: B256::repeat_byte(block_byte),
+        block_time: Utc::now(),
+        tx_from: Address::repeat_byte(0x77),
+        tx_nonce: 7,
+        token,
+        from: Address::repeat_byte(0x66),
+        to,
+        amount: AtomicAmount::new(U256::from(amount) * U256::from(10_u64).pow(U256::from(18))),
+    }
+}
+
+/// The service's pipeline on a [`ScriptedChain`], crediting at depth 2 as fast credit does, so a
+/// credited deposit can still be reversed.
+struct Pipeline {
+    chain: ScriptedChain,
+    routes: Arc<topup::routes::RouteSet>,
+    pump: Pump,
+    watch: FinalityWatch,
+}
+
+impl Pipeline {
+    fn new(harness: &Harness) -> Result<Self> {
+        let mut route = harness.route.clone();
+        route.chain.confirmations = Confirmations::Depth(2);
+        let routes = Arc::new(
+            topup::routes::RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?,
+        );
+        let chain = ScriptedChain::default();
+        let price = |source: &str, value| {
+            Arc::new(FixedPrice(Observation {
+                source: SourceId::new(source),
+                price: ScaledPrice::new(value, PRICE_SCALE).expect("test price"),
+                observed_at: UnixSeconds::new(
+                    u64::try_from(Utc::now().timestamp()).expect("current time"),
+                ),
+            })) as Arc<dyn PriceSource>
+        };
+        let confirm = ConfirmStep::single(
+            harness.pool.clone(),
+            route.clone(),
+            chain.clone(),
+            chain.clone(),
+            price("primary", 25_000_000),
+            Some(price("check", 25_000_000)),
+            Some(price("fx", 100_000_000)),
+        );
+        let screen = topup::steps::screen::ScreenStep::new(
+            harness.pool.clone(),
+            [topup::steps::screen::ScreenRoute::new(
+                route.route.clone(),
+                route.version,
+                route.screening.sanctions_oracle,
+                topup_core::screening::Bounds::from(&route.screening),
+                Arc::new(ClearSanctions),
+            )],
+        )?;
+        let pump = Pump::new(
+            harness.pool.clone(),
+            Arc::clone(&routes),
+            Arc::new(StepSet::new(Box::new(confirm), Box::new(screen))),
+            PumpConfig::default(),
+        )?;
+        let watch = FinalityWatch::single(
+            harness.pool.clone(),
+            Arc::clone(&routes),
+            1,
+            chain.clone(),
+            chain.clone(),
+        );
+        Ok(Self {
+            chain,
+            routes,
+            pump,
+            watch,
+        })
+    }
+
+    /// The per-block scan's record of `transfer` to the address row `address_id`, at the route's
+    /// confirmation.
+    async fn fast_scan(
+        &self,
+        harness: &Harness,
+        transfer: &TransferLog,
+        address_id: Uuid,
+    ) -> Result<()> {
+        let routed = transfer.token == harness.route.asset.contract;
+        let deposit = NewDeposit {
+            chain_id: 1,
+            tx_hash: transfer.tx_hash,
+            receipt_log_index: transfer.receipt_log_index,
+            log_index: transfer.log_index,
+            block_number: transfer.block_number,
+            block_hash: transfer.block_hash,
+            block_time: transfer.block_time,
+            address_id,
+            route: routed.then(|| harness.route.route.clone()),
+            route_version: routed.then_some(harness.route.version),
+            asset_contract: transfer.token,
+            from_address: transfer.from,
+            amount_atomic: transfer.amount,
+            state: if routed {
+                DepositState::Detected
+            } else {
+                DepositState::Rejected
+            },
+            reason: (!routed).then_some(topup_core::deposit::RejectReason::UnsupportedAsset),
+            next_attempt_at: Utc::now(),
+            tx_from: transfer.tx_from,
+            tx_nonce: transfer.tx_nonce,
+            is_final: false,
+        };
+        let committed =
+            db::commit_confirmed_scan(&harness.pool, 1, &[deposit], transfer.block_number).await?;
+        ensure!(committed.inserted == 1);
+        Ok(())
+    }
+
+    /// The finalized scanner's pass, as the rescan after a restore runs it; returns the deposits it
+    /// recorded.
+    async fn finalized_scan(&self, harness: &Harness) -> Result<u64> {
+        let routes = chain_routes(&self.routes)
+            .into_iter()
+            .next()
+            .context("the chain's routes")?;
+        Ok(scan_once(&harness.pool, &self.chain, &routes)
+            .await?
+            .inserted)
+    }
+
+    /// Runs the pump until nothing is due.
+    async fn settle(&self) -> Result<()> {
+        for _ in 0..10 {
+            if self.pump.run_once().await? == RunOnceResult::Idle {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("the pump did not settle")
+    }
+}
+
+impl Harness {
+    /// Points the account's endpoint at a receiver that records each delivery as it got it.
+    async fn receiver(&self) -> Result<Receiver> {
+        let receiver = Receiver::default();
+        sqlx::query("UPDATE webhook_endpoints SET url = $2 WHERE account_id = $1")
+            .bind(self.account.id)
+            .bind(receiver.serve().await?)
+            .execute(&self.owner)
+            .await?;
+        Ok(receiver)
+    }
+
+    /// Delivers every due event, signed as the service signs them.
+    async fn deliver(&self) -> Result<()> {
+        let worker = topup::outbox::DeliveryWorker::new(
+            self.pool.clone(),
+            Arc::new(KeySigner),
+            true,
+            topup::outbox::DeliveryConfig {
+                proxy: None,
+                ..topup::outbox::DeliveryConfig::default()
+            },
+        )?;
+        while worker.run_once().await? > 0 {}
+        Ok(())
+    }
+
+    /// The customer's deposit address, created through the API: its forwarder on chain 1 and
+    /// that forwarder's address row.
+    async fn deposit_address(&self, customer: &str) -> Result<(Address, Uuid)> {
+        let created = self
+            .merchant(
+                Method::POST,
+                "/v1/deposit_addresses",
+                &json!({"client_reference_id": customer}),
+            )
+            .await?;
+        ensure!(created.status == StatusCode::OK, "{}", created.body);
+        let forwarder = Address::from_str(created.body["address"].as_str().context("address")?)?;
+        let address_id =
+            sqlx::query_scalar("SELECT id FROM addresses WHERE address = $1 AND chain_id = 1")
+                .bind(format!("{forwarder:#x}"))
+                .fetch_one(&self.pool)
+                .await?;
+        Ok((forwarder, address_id))
+    }
+
+    /// Removes `deposits`, recorded after the restore point, and everything recorded with them,
+    /// as a restore from a backup taken before them does.
+    async fn forget_deposits(&self, deposits: &[Uuid]) -> Result<()> {
+        let mut transaction = self.owner.begin().await?;
+        // The ledger's append-only triggers guard the service, not the backup's contents.
+        sqlx::query("SET LOCAL session_replication_role = replica")
+            .execute(&mut *transaction)
+            .await?;
+        for statement in [
+            "DELETE FROM webhook_deliveries WHERE event_id IN \
+             (SELECT id FROM events WHERE object_id = ANY($1))",
+            "DELETE FROM events WHERE object_id = ANY($1)",
+            "DELETE FROM transitions WHERE deposit_id = ANY($1)",
+            "DELETE FROM deposits WHERE id = ANY($1) AND replaces IS NOT NULL",
+            "DELETE FROM deposits WHERE id = ANY($1)",
+        ] {
+            sqlx::query(statement)
+                .bind(deposits)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
+/// The delivery the receiver recorded of the `event_type` event about `object`.
+fn received(receiver: &Receiver, event_type: &str, object: &str) -> Result<Value> {
+    receiver
+        .deliveries()
+        .into_iter()
+        .find(|delivery| {
+            serde_json::from_str::<Value>(delivery["body"].as_str().unwrap_or_default()).is_ok_and(
+                |body| body["type"] == event_type && body["data"]["object"]["id"] == object,
+            )
+        })
+        .with_context(|| format!("the receiver recorded {event_type} of {object}"))
+}
+
+/// The body of a recorded delivery.
+fn delivered_body(delivery: &Value) -> Result<Value> {
+    Ok(serde_json::from_str(
+        delivery["body"].as_str().context("body")?,
+    )?)
+}
+
+#[tokio::test]
+async fn a_reversed_deposit_and_its_successor_keep_their_identities_through_a_restore() -> Result<()>
+{
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let receiver = harness.receiver().await?;
+            let (forwarder, address_id) = harness.deposit_address("team-reorg").await?;
+            harness.scan_to(5, Utc::now()).await?;
+            // The backup is taken here: it predates both deposits.
+            let pipeline = Pipeline::new(&harness)?;
+
+            // The router pays 100 PHA, credited at $25.00 before finality; its transaction is
+            // re-included against other state and the same receipt position pays 90 PHA: the
+            // finality watch reverses the first deposit and the second is credited at $22.50.
+            let first = router_transfer(harness.route.asset.contract, forwarder, 10, 0xaa, 100);
+            pipeline.chain.set(12, 5, Some(first.clone()));
+            pipeline.fast_scan(&harness, &first, address_id).await?;
+            pipeline.settle().await?;
+            let old = deposit_id(1, ROUTER_TX, 0);
+            ensure!(valuation(&harness, old).await?.0 == "credited");
+            let second = router_transfer(harness.route.asset.contract, forwarder, 11, 0xbb, 90);
+            pipeline.chain.set(30, 20, Some(second));
+            ensure!(pipeline.watch.watch_once(1).await?.reversed == 1);
+            pipeline.settle().await?;
+            let new = topup_core::identity::deposit_revision_id(1, ROUTER_TX, 0, 1);
+            let credited = valuation(&harness, new).await?;
+            ensure!(
+                credited.0 == "credited" && credited.3 == "2250",
+                "{credited:?}"
+            );
+            harness.deliver().await?;
+            let (old_id, new_id) = (
+                topup::ids::format(topup::ids::DEPOSIT, old),
+                topup::ids::format(topup::ids::DEPOSIT, new),
+            );
+            let deliveries = vec![
+                received(&receiver, "deposit.credited", &old_id)?,
+                received(&receiver, "deposit.reversed", &old_id)?,
+                received(&receiver, "deposit.credited", &new_id)?,
+            ];
+
+            // The restore loses both deposits and their events; the merchant's receiver has
+            // every delivery.
+            harness.forget_deposits(&[old, new]).await?;
+            harness.restore().await?;
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": deliveries, "reason": "the merchant's receiver log"}),
+                )
+                .await?;
+            ensure!(imported.status == StatusCode::OK, "{}", imported.body);
+            for result in imported.body["data"].as_array().context("results")? {
+                ensure!(result["result"] == "imported", "{}", imported.body);
+            }
+            ensure!(
+                imported.body["data"][1]["reversed_deposit"] == "restored"
+                    && imported.body["data"][0]["reversed_deposit"].is_null(),
+                "{}",
+                imported.body
+            );
+
+            // The rescan reads only the final transfer at the position: it is the second deposit
+            // again, with its id and link, and the first is the reversed deposit it replaced.
+            ensure!(pipeline.finalized_scan(&harness).await? == 1);
+            let recorded: Vec<(Uuid, String, i64, Option<Uuid>)> = sqlx::query_as(
+                "SELECT id, state, revision, replaces FROM deposits \
+                 WHERE chain_id = 1 AND tx_hash = $1 ORDER BY revision",
+            )
+            .bind(format!("{ROUTER_TX:#x}"))
+            .fetch_all(&harness.pool)
+            .await?;
+            ensure!(
+                recorded
+                    == vec![
+                        (old, "reversed".to_owned(), 0, None),
+                        (new, "detected".to_owned(), 1, Some(old)),
+                    ],
+                "{recorded:?}"
+            );
+            // Each deposit renders as the merchant last received it.
+            for (id, status, amount, replaces, replaced_by) in [
+                (&old_id, "reversed", 2_500, Value::Null, json!(new_id)),
+                (&new_id, "pending", 0, json!(old_id), Value::Null),
+            ] {
+                let read = harness
+                    .admin(
+                        Method::GET,
+                        &format!("/v1/admin/deposits/{id}"),
+                        &Value::Null,
+                    )
+                    .await?;
+                ensure!(read.status == StatusCode::OK, "{}", read.body);
+                ensure!(read.body["status"] == status, "{}", read.body);
+                ensure!(read.body["replaces"] == replaces, "{}", read.body);
+                ensure!(read.body["replaced_by"] == replaced_by, "{}", read.body);
+                if status == "reversed" {
+                    ensure!(read.body["amount"] == amount, "{}", read.body);
+                    ensure!(read.body["amount_reversed"] == amount, "{}", read.body);
+                }
+            }
+            // The second deposit is valued at its delivered credit, not at today's spot; nothing
+            // is sent again.
+            confirm(&harness, new, forwarder, 20_000_000).await?;
+            let restored = valuation(&harness, new).await?;
+            ensure!(
+                (restored.2.as_str(), restored.3.as_str()) == ("25000000", "2250"),
+                "{restored:?}"
+            );
+            let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries")
+                .fetch_one(&harness.pool)
+                .await?;
+            ensure!(queued == 0, "{queued} deliveries queued");
+            let status = harness
+                .admin(Method::GET, "/v1/admin/restore", &Value::Null)
+                .await?;
+            ensure!(
+                status.body["delivered_events"]["findings"] == json!([]),
+                "{}",
+                status.body
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_rejected_deposit_reversed_before_finality_round_trips_through_a_restore() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let receiver = harness.receiver().await?;
+            let (forwarder, address_id) = harness.deposit_address("team-token").await?;
+            harness.scan_to(5, Utc::now()).await?;
+            let pipeline = Pipeline::new(&harness)?;
+
+            // A token without a route is rejected unvalued; its transaction leaves the chain
+            // before finality, so the rejected deposit is reversed, still unvalued.
+            let transfer = router_transfer(UNROUTED_TOKEN, forwarder, 10, 0xaa, 100);
+            pipeline.chain.set(12, 5, Some(transfer.clone()));
+            pipeline.fast_scan(&harness, &transfer, address_id).await?;
+            pipeline.chain.set(30, 20, None);
+            ensure!(pipeline.watch.watch_once(1).await?.reversed == 1);
+            harness.deliver().await?;
+            let deposit = deposit_id(1, ROUTER_TX, 0);
+            let public_id = topup::ids::format(topup::ids::DEPOSIT, deposit);
+            let deliveries = vec![
+                received(&receiver, "deposit.rejected", &public_id)?,
+                received(&receiver, "deposit.reversed", &public_id)?,
+            ];
+            ensure!(delivered_body(&deliveries[1])?["data"]["object"]["amount"].is_null());
+
+            harness.forget_deposits(&[deposit]).await?;
+            let restore = harness.restore().await?;
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": deliveries, "reason": "the merchant's receiver log"}),
+                )
+                .await?;
+            ensure!(imported.status == StatusCode::OK, "{}", imported.body);
+            ensure!(
+                imported.body["data"][0]["result"] == "imported"
+                    && imported.body["data"][1]["result"] == "imported"
+                    && imported.body["data"][1]["reversed_deposit"] == "restored",
+                "{}",
+                imported.body
+            );
+            // Imported again, the deposit is in the ledger already.
+            let again = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [deliveries[1]], "reason": "again"}),
+                )
+                .await?;
+            ensure!(
+                again.body["data"][0]["result"] == "matches"
+                    && again.body["data"][0]["reversed_deposit"] == "recorded",
+                "{}",
+                again.body
+            );
+            // The reversed deposit is back as the merchant last received it, with no credit.
+            let read = harness
+                .admin(
+                    Method::GET,
+                    &format!("/v1/admin/deposits/{public_id}"),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(read.status == StatusCode::OK, "{}", read.body);
+            ensure!(read.body["status"] == "reversed" && read.body["amount"].is_null());
+            let credits: i64 = sqlx::query_scalar("SELECT count(*) FROM restore_delivered_credits")
+                .fetch_one(&harness.pool)
+                .await?;
+            ensure!(credits == 0);
+
+            // The rescan finds nothing at the position, and after the unfreeze nothing is sent.
+            ensure!(pipeline.finalized_scan(&harness).await? == 0);
+            let sent = receiver.deliveries().len();
+            harness.unfreeze(&restore).await?;
+            harness.deliver().await?;
+            ensure!(
+                receiver.deliveries().len() == sent,
+                "{:?}",
+                receiver.deliveries()
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Credits the recorded `deposit` through the confirm and screen steps, the chain showing its
+/// transfer to `recipient` and spot at `spot` scaled dollars.
+async fn credit(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64) -> Result<()> {
+    for _ in ["confirm", "screen and credit"] {
+        let confirm = confirm_step(harness, deposit, recipient, spot).await?;
+        let screen = topup::steps::screen::ScreenStep::new(
+            harness.pool.clone(),
+            [topup::steps::screen::ScreenRoute::new(
+                harness.route.route.clone(),
+                harness.route.version,
+                harness.route.screening.sanctions_oracle,
+                topup_core::screening::Bounds::from(&harness.route.screening),
+                Arc::new(ClearSanctions),
+            )],
+        )?;
+        run_pump(
+            harness,
+            deposit,
+            StepSet::new(Box::new(confirm), Box::new(screen)),
+        )
+        .await?;
+    }
+    ensure!(valuation(harness, deposit).await?.0 == "credited");
+    Ok(())
+}
+
+#[tokio::test]
+async fn addresses_paid_over_a_treasury_change_lost_in_the_restore_are_reissued_and_credited()
+-> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let receiver = harness.receiver().await?;
+            let contracts = &harness.route.chain.contracts;
+            let over = |treasury: Address, salt: B256| {
+                forwarder_address(
+                    contracts.forwarder_factory,
+                    contracts.implementation,
+                    treasury,
+                    salt,
+                )
+            };
+            // The backup holds the merchant's change of treasury from A to B, pending.
+            let (former, changed) = (seed::FIXTURE_TREASURY, Address::repeat_byte(0xb2));
+            let pending = seed::schedule_treasury(
+                &harness.pool,
+                harness.account.id,
+                true,
+                1,
+                changed,
+                Utc::now() - TimeDelta::minutes(1),
+            )
+            .await?;
+            harness.scan_to(100, Utc::now()).await?;
+            let routes = Arc::new(
+                topup::routes::RouteSet::new(vec![harness.route.clone()])
+                    .map_err(anyhow::Error::msg)?,
+            );
+
+            // After the restore point B applies; the merchant gives a customer a deposit address,
+            // now over B, which is paid and credited, and records a quote over B.
+            ensure!(
+                topup::treasuries::apply_due(
+                    &harness.pool,
+                    &routes,
+                    &support::ClearScreener,
+                    Utc::now()
+                )
+                .await?
+                    == 1
+            );
+            let (forwarder, address_id) = harness.deposit_address("team-b").await?;
+            let salt = deposit_address_salt(harness.account_id(), true, "team-b", 1);
+            ensure!(forwarder == over(changed, salt));
+            let tx_hash = B256::repeat_byte(0xd1);
+            let deposit =
+                record_deposit(&harness, tx_hash, address_id, U256::from(10_u64).pow(U256::from(20)))
+                    .await?;
+            credit(&harness, deposit, forwarder, 25_000_000).await?;
+            let credited = valuation(&harness, deposit).await?;
+            harness.deliver().await?;
+            let pending_id = topup::ids::format(topup::ids::TREASURY, pending);
+            let applied = received(&receiver, "treasury.updated", &pending_id)?;
+            let applied_body = delivered_body(&applied)?;
+            ensure!(applied_body["data"]["object"]["status"] == "active");
+            let applied_at = applied_body["created"].as_i64().context("created")?;
+            let former_id: Uuid = sqlx::query_scalar(
+                "SELECT id FROM treasuries WHERE address = $1 AND account_id = $2",
+            )
+            .bind(format!("{former:#x}"))
+            .bind(harness.account.id)
+            .fetch_one(&harness.pool)
+            .await?;
+            let replaced = received(
+                &receiver,
+                "treasury.updated",
+                &topup::ids::format(topup::ids::TREASURY, former_id),
+            )?;
+            let credited_delivery = received(
+                &receiver,
+                "deposit.credited",
+                &topup::ids::format(topup::ids::DEPOSIT, deposit),
+            )?;
+
+            // The restore brings back the backup: B pending, A current, no deposit address, no
+            // deposit, no events.
+            harness.forget_deposits(&[deposit]).await?;
+            for statement in [
+                "UPDATE treasuries SET applied_at = NULL WHERE address = $1",
+                "UPDATE treasuries SET replaced_at = NULL WHERE address = $2",
+                "DELETE FROM webhook_deliveries",
+                "DELETE FROM events WHERE type LIKE 'treasury.%'",
+                "DELETE FROM addresses WHERE deposit_address_id IS NOT NULL",
+                "DELETE FROM deposit_address_client_secrets",
+                "DELETE FROM deposit_addresses",
+                "DELETE FROM customers WHERE client_reference_id = 'team-b'",
+            ] {
+                sqlx::query(statement)
+                    .bind(format!("{changed:#x}"))
+                    .bind(format!("{former:#x}"))
+                    .execute(&harness.owner)
+                    .await?;
+            }
+            harness.scan_to(100, Utc::now()).await?;
+            let restore = harness.restore().await?;
+            harness.scan_to(250, Utc::now()).await?;
+
+            // The merchant's latest B shows the change applied after the restore point.
+            let verify = json!({
+                "account": harness.account_id(),
+                "livemode": true,
+                "treasuries": [applied_body["data"]["object"]],
+                "reapply": true,
+                "reason": "treasury events the merchant received",
+            });
+            let verified = harness
+                .admin(Method::POST, "/v1/admin/restore/treasuries/verify", &verify)
+                .await?;
+            ensure!(verified.status == StatusCode::OK, "{}", verified.body);
+            ensure!(
+                verified.body["data"][0]["result"] == "application_lost",
+                "{}",
+                verified.body
+            );
+            // Until B is restored, the customer's address over it is not the account's.
+            let address_request = json!({
+                "account": harness.account_id(),
+                "livemode": true,
+                "client_reference_id": "team-b",
+                "address": format!("{forwarder:#x}"),
+                "reason": "the merchant's export",
+            });
+            let path = "/v1/admin/restore/deposit_addresses";
+            let refused = harness.admin(Method::POST, path, &address_request).await?;
+            ensure!(refused.status == StatusCode::BAD_REQUEST, "{}", refused.body);
+
+            // B is restored from its signed application; the former treasury's notice, a
+            // tampered body, or a delivery signed with another key is not an application.
+            let apply = |delivery: &Value| {
+                json!({"delivery": delivery, "reason": "the merchant's treasury.updated"})
+            };
+            let apply_path = "/v1/admin/restore/treasuries/apply";
+            let mut tampered = applied.clone();
+            tampered["body"] = json!(
+                applied["body"]
+                    .as_str()
+                    .context("body")?
+                    .replace(&format!("{changed:#x}"), &format!("{:#x}", Address::repeat_byte(0xee)))
+            );
+            let other_key = delivery(&applied_body, &webhook_key("acct_other", true, 1));
+            for refused in [&replaced, &tampered, &other_key] {
+                let answer = harness
+                    .admin(Method::POST, apply_path, &apply(refused))
+                    .await?;
+                ensure!(answer.status == StatusCode::BAD_REQUEST, "{}", answer.body);
+            }
+            let restored = harness
+                .admin(Method::POST, apply_path, &apply(&applied))
+                .await?;
+            ensure!(restored.status == StatusCode::OK, "{}", restored.body);
+            ensure!(restored.body["applied"] == true, "{}", restored.body);
+            ensure!(restored.body["treasury"]["status"] == "active");
+            let again = harness
+                .admin(Method::POST, apply_path, &apply(&applied))
+                .await?;
+            ensure!(again.body["applied"] == false, "{}", again.body);
+            // As in force when it applied: B from its application, A until then.
+            let history: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+                "SELECT address, extract(epoch FROM applied_at)::bigint, \
+                        extract(epoch FROM replaced_at)::bigint \
+                 FROM treasuries WHERE account_id = $1 ORDER BY created_at",
+            )
+            .bind(harness.account.id)
+            .fetch_all(&harness.pool)
+            .await?;
+            ensure!(
+                history[1] == (format!("{changed:#x}"), Some(applied_at), None)
+                    && history[0].2 == Some(applied_at),
+                "{history:?}"
+            );
+            let verified = harness
+                .admin(Method::POST, "/v1/admin/restore/treasuries/verify", &verify)
+                .await?;
+            ensure!(verified.body["data"][0]["result"] == "matches", "{}", verified.body);
+            let audited: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit WHERE action = 'restore.treasury_apply'",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(audited == 1);
+
+            // The deposit address and the quotes are re-issued over the treasury in force when
+            // each was issued.
+            let reissued = harness.admin(Method::POST, path, &address_request).await?;
+            ensure!(reissued.status == StatusCode::OK, "{}", reissued.body);
+            ensure!(reissued.body["deposit_address"]["address"] == format!("{forwarder:#x}"));
+            // An address given out over A before B applied comes back over A, superseded as B's
+            // application left it: still watched from the restored cursor, and credited.
+            let early_salt = deposit_address_salt(harness.account_id(), true, "team-early-da", 1);
+            let early = over(former, early_salt);
+            let mut early_request = address_request.clone();
+            early_request["client_reference_id"] = json!("team-early-da");
+            early_request["address"] = json!(format!("{early:#x}"));
+            let reissued_early = harness.admin(Method::POST, path, &early_request).await?;
+            ensure!(reissued_early.status == StatusCode::OK, "{}", reissued_early.body);
+            ensure!(
+                reissued_early.body["deposit_address"]["address"]
+                    == format!("{:#x}", over(changed, early_salt)),
+                "{}",
+                reissued_early.body
+            );
+            let superseded: Option<chrono::DateTime<Utc>> =
+                sqlx::query_scalar("SELECT superseded_at FROM addresses WHERE address = $1")
+                    .bind(format!("{early:#x}"))
+                    .fetch_one(&harness.pool)
+                    .await?;
+            ensure!(superseded.is_some());
+            let watched = db::list_scan_addresses(&harness.pool, 1)
+                .await?
+                .into_iter()
+                .find(|scan| scan.address == early)
+                .context("the superseded network is scanned")?;
+            ensure!(watched.backfill_start() == 100);
+            let quote = |customer: &str, treasury: Address, created: i64| {
+                let qt = topup::ids::format(topup::ids::QUOTE, Uuid::new_v4());
+                let address = over(treasury, quote_salt(harness.account_id(), customer, &qt));
+                json!({
+                    "account": harness.account_id(),
+                    "livemode": true,
+                    "id": qt,
+                    "client_reference_id": customer,
+                    "chain_id": 1,
+                    "asset": "pha",
+                    "amount": 1_000,
+                    "amount_atomic": "100000000000000000000",
+                    "exchange_rate": "0.10000000",
+                    "address": format!("{address:#x}"),
+                    "created": created,
+                    "expires_at": created + 900,
+                    "reason": "the merchant's quote log",
+                })
+            };
+            for (customer, treasury, created, status) in [
+                ("team-q", changed, applied_at + 5, StatusCode::OK),
+                ("team-early", former, applied_at - 30, StatusCode::OK),
+                ("team-late", former, applied_at + 5, StatusCode::BAD_REQUEST),
+            ] {
+                let answer = harness
+                    .admin(
+                        Method::POST,
+                        "/v1/admin/restore/quotes",
+                        &quote(customer, treasury, created),
+                    )
+                    .await?;
+                ensure!(answer.status == status, "{customer}: {}", answer.body);
+            }
+
+            // The rescan credits the payment to the same deposit of the re-issued address, at its
+            // delivered credit.
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [credited_delivery], "reason": "receiver log"}),
+                )
+                .await?;
+            ensure!(imported.body["data"][0]["result"] == "imported", "{}", imported.body);
+            let reissued_address: Uuid = sqlx::query_scalar(
+                "SELECT id FROM addresses WHERE address = $1 AND chain_id = 1",
+            )
+            .bind(format!("{forwarder:#x}"))
+            .fetch_one(&harness.pool)
+            .await?;
+            let rederived =
+                record_deposit(&harness, tx_hash, reissued_address, U256::from(10_u64).pow(U256::from(20)))
+                    .await?;
+            ensure!(rederived == deposit);
+            confirm(&harness, deposit, forwarder, 20_000_000).await?;
+            let valued = valuation(&harness, deposit).await?;
+            ensure!((&valued.2, &valued.3) == (&credited.2, &credited.3), "{valued:?}");
+            let customer: String = sqlx::query_scalar(
+                "SELECT customer.client_reference_id FROM deposits AS deposit \
+                 JOIN customers AS customer ON customer.id = deposit.customer_id \
+                 WHERE deposit.id = $1",
+            )
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(customer == "team-b");
+            ensure!(restore.restored_cursors.get(&1) == Some(&100));
             Ok(())
         })
     })

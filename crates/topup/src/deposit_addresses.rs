@@ -401,8 +401,8 @@ pub async fn rotate<'c>(
 pub const REISSUE_SEARCH_VERSIONS: u64 = 32;
 
 /// The version of a customer's deposit address [`reissue`] brings back: `version`, or the version
-/// whose address over the account's current treasury of some chain is `address`; with both, they
-/// must agree.
+/// whose address over a treasury of the account in force since the restore point is `address`;
+/// with both, they must agree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReissueTarget {
     /// The version.
@@ -413,11 +413,14 @@ pub struct ReissueTarget {
 
 /// Re-issues after a restore the deposit address of the customer `client_reference_id` that was given out after the restore
 /// point and lost with it (docs/design/multi-tenant.md §13). The salt is derived from the account,
-/// mode, customer, and version, so the address is the one the merchant holds on every chain whose
-/// treasury is unchanged. Versions between the restored latest one and `target` are issued retired,
-/// as the rotations that issued them left them; the active one is retired. Each new network is
-/// backfilled from the chain's cursor in `backfill_from` (the restored cursor), so the rescan
-/// finds payments made to it since. `id` keeps the `da_` id the merchant holds, and
+/// mode, customer, and version, so the address is the one the merchant holds over the treasury its
+/// network paid: `target.address` is looked for over every treasury of the account in force since
+/// `in_force_since` (the restore point; `crate::treasuries::in_force`), and a network over one
+/// that is no longer current is kept, superseded, so payments to it are still credited. Versions
+/// between the restored latest one and `target` are issued retired, as the rotations that issued
+/// them left them; the active one is retired. Each new network is backfilled from the chain's
+/// cursor in `backfill_from` (the restored cursor), so the rescan finds payments made to it
+/// since. `id` keeps the `da_` id the merchant holds, and
 /// `client_secret_hash` the SHA-256 of a client secret of it the caller checked, so the payer's
 /// page reads the address again.
 ///
@@ -434,6 +437,7 @@ pub async fn reissue(
     target: ReissueTarget,
     id: Option<Uuid>,
     client_secret_hash: Option<&[u8; 32]>,
+    in_force_since: Option<DateTime<Utc>>,
     backfill_from: &BTreeMap<u64, u64>,
     actor: &Actor,
     reason: &str,
@@ -447,6 +451,23 @@ pub async fn reissue(
     let issuable = chains;
     let chains = with_treasuries(&mut transaction, scope, issuable).await?;
     require_chains(issuable, &chains)?;
+    let in_force: Vec<Chain> =
+        crate::treasuries::in_force(&mut transaction, scope, in_force_since, Utc::now())
+            .await
+            .map_err(|error| match error {
+                crate::treasuries::TreasuryError::Database(error) => {
+                    DepositAddressError::Database(error)
+                }
+                _ => DepositAddressError::DatabaseInvariant,
+            })?
+            .into_iter()
+            .filter_map(|(chain_id, treasury)| {
+                issuable
+                    .iter()
+                    .find(|chain| chain.chain_id == chain_id)
+                    .map(|chain| chain.with_treasury(treasury))
+            })
+            .collect();
     let latest: Option<i64> =
         sqlx::query_scalar("SELECT max(version) FROM deposit_addresses WHERE customer_id = $1")
             .bind(customer.id)
@@ -462,6 +483,9 @@ pub async fn reissue(
             version,
         )
     };
+    // The version, and the network over a treasury in force since the restore point whose
+    // forwarder the merchant holds, when the address was derived.
+    let mut derived_network = None;
     let found = match target.address {
         None => None,
         Some(address) => {
@@ -483,22 +507,29 @@ pub async fn reissue(
                 Some(version) => {
                     u64::try_from(version).map_err(|_| DepositAddressError::DatabaseInvariant)?
                 }
-                None => (1..=latest.saturating_add(REISSUE_SEARCH_VERSIONS))
-                    .find(|version| {
-                        let salt = salt(*version);
-                        chains.iter().any(|chain| {
-                            forwarder_address(
-                                chain.factory,
-                                chain.implementation,
-                                chain.treasury,
-                                salt,
-                            ) == address
+                None => {
+                    let (version, chain) = (1..=latest.saturating_add(REISSUE_SEARCH_VERSIONS))
+                        .find_map(|version| {
+                            let salt = salt(version);
+                            in_force
+                                .iter()
+                                .find(|chain| {
+                                    forwarder_address(
+                                        chain.factory,
+                                        chain.implementation,
+                                        chain.treasury,
+                                        salt,
+                                    ) == address
+                                })
+                                .map(|chain| (version, *chain))
                         })
-                    })
-                    .ok_or(DepositAddressError::InvalidInput(
-                        "the address is not one of the customer's deposit addresses over the \
-                         account's current treasuries",
-                    ))?,
+                        .ok_or(DepositAddressError::InvalidInput(
+                            "the address is not one of the customer's deposit addresses over \
+                             the account's treasuries in force since the restore point",
+                        ))?;
+                    derived_network = Some(chain);
+                    version
+                }
             })
         }
     };
@@ -532,6 +563,17 @@ pub async fn reissue(
             return Err(DepositAddressError::InvalidInput(
                 "id is not the customer's deposit address of this version",
             ));
+        }
+        if let Some(chain) = derived_network {
+            keep_network(
+                &mut transaction,
+                scope,
+                existing,
+                salt(version),
+                chain,
+                backfill_from,
+            )
+            .await?;
         }
         let address = get_in(&mut transaction, scope, existing)
             .await?
@@ -600,6 +642,17 @@ pub async fn reissue(
     let reissued = *issued
         .last()
         .ok_or(DepositAddressError::DatabaseInvariant)?;
+    if let Some(chain) = derived_network {
+        keep_network(
+            &mut transaction,
+            scope,
+            reissued,
+            salt(version),
+            chain,
+            backfill_from,
+        )
+        .await?;
+    }
     for (chain_id, block) in backfill_from {
         sqlx::query(
             "UPDATE addresses SET created_block = LEAST(created_block, $3) \
@@ -638,6 +691,58 @@ pub async fn reissue(
         .ok_or(DepositAddressError::DatabaseInvariant)?;
     transaction.commit().await?;
     Ok((address, true))
+}
+
+/// Gives the re-issued deposit address `id` (of `salt`) its network over `chain`'s treasury, the
+/// one whose forwarder the merchant holds, unless it has it: superseded when that treasury is no
+/// longer the chain's current one, as a treasury change leaves a network, so payments to it are
+/// still credited; backfilled from the chain's cursor in `backfill_from`.
+async fn keep_network(
+    transaction: &mut Transaction<'_, Postgres>,
+    scope: Scope,
+    id: Uuid,
+    salt: B256,
+    chain: Chain,
+    backfill_from: &BTreeMap<u64, u64>,
+) -> Result<(), DepositAddressError> {
+    let chain_id =
+        i64::try_from(chain.chain_id).map_err(|_| DepositAddressError::InvalidInput("chain_id"))?;
+    let restored_block = backfill_from
+        .get(&chain.chain_id)
+        .map(|block| i64::try_from(*block))
+        .transpose()
+        .map_err(|_| DepositAddressError::DatabaseInvariant)?;
+    let address = forwarder_address(chain.factory, chain.implementation, chain.treasury, salt);
+    sqlx::query(
+        r#"
+        INSERT INTO addresses (
+            id, account_id, livemode, chain_id, deposit_address_id, salt, treasury, address,
+            created_block, superseded_at
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8,
+               LEAST(cursor.block, COALESCE($9::bigint, cursor.block)),
+               now()
+        FROM (
+            SELECT COALESCE((SELECT scanned_block FROM cursors WHERE chain_id = $4), 0) AS block
+        ) AS cursor
+        WHERE NOT EXISTS (
+            SELECT 1 FROM addresses
+            WHERE deposit_address_id = $5 AND chain_id = $4 AND address = $8
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(chain_id)
+    .bind(id)
+    .bind(format!("{salt:#x}"))
+    .bind(format!("{:#x}", chain.treasury))
+    .bind(format!("{address:#x}"))
+    .bind(restored_block)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 /// Keeps a client secret of the re-issued address `id` the merchant holds, audited once added.

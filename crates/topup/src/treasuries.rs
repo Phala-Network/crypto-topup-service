@@ -943,6 +943,110 @@ pub async fn apply_due(
     Ok(applied)
 }
 
+/// Why [`restore_application`] refused.
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreApplicationError {
+    /// The restored treasury is not the one the delivery shows applying, or its change cannot
+    /// apply under the time-lock.
+    #[error("{0}")]
+    Refused(&'static str),
+    /// The treasury could not be read or applied.
+    #[error("{0}")]
+    Treasury(#[from] TreasuryError),
+}
+
+impl From<sqlx::Error> for RestoreApplicationError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Treasury(TreasuryError::Database(error))
+    }
+}
+
+/// A treasury change applying, as the `treasury.updated` the time-lock sent for it shows it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Application {
+    /// The treasury.
+    pub id: Uuid,
+    /// Its chain.
+    pub chain_id: u64,
+    /// Its address.
+    pub address: Address,
+    /// When it applied, the event's `created`.
+    pub applied_at: DateTime<Utc>,
+}
+
+/// Applies again, while the service is frozen after a restore (`crate::restore_mode`), the
+/// scope's pending treasury whose change applied after the restore point and was lost with it, as
+/// `application`, read from the delivered `treasury.updated` the service signed, shows it (the
+/// caller verified the delivery). Otherwise it would apply only after the unfreeze, and the
+/// deposit addresses and quotes issued over it meanwhile could not be re-issued before it.
+///
+/// The change's own rules hold: it is the restored treasury of that chain and address, proven
+/// when it was submitted and still pending (a cancellation the merchant made after the restore
+/// point is re-applied first, so its change never applied), and its time-lock ended by
+/// `applied_at`. Its screening is the one [`apply_due`] made before applying it, which the signed
+/// event attests (a treasury a sanctions list named is canceled instead); `screened_at` keeps its
+/// restored value, so [`rescreen_due`] screens it again once the service is unfrozen. It applies
+/// as [`apply_due`] applies it, at `applied_at`, so the treasury it replaced was in force until
+/// then ([`in_force`]); its `treasury.updated` events are sent again after the unfreeze. Returns
+/// the treasury and whether it applied now: a treasury in force already is returned as it is.
+pub async fn restore_application(
+    pool: &PgPool,
+    routes: &RouteSet,
+    scope: Scope,
+    application: Application,
+    actor: &Actor,
+) -> Result<(Treasury, bool), RestoreApplicationError> {
+    let Application {
+        id,
+        chain_id,
+        address,
+        applied_at,
+    } = application;
+    let refused = |reason| Err(RestoreApplicationError::Refused(reason));
+    let treasury = get(pool, scope, id).await?.ok_or(TreasuryError::NotFound)?;
+    if (treasury.chain_id, treasury.address) != (chain_id, address) {
+        return refused("the restored treasury has another chain or address than the delivery's");
+    }
+    match treasury.status {
+        Status::Active | Status::Replaced => return Ok((treasury, false)),
+        Status::Canceled => {
+            return refused(
+                "the restored treasury is canceled, but the service signed that it applied: \
+                 escalate",
+            );
+        }
+        Status::Pending => {}
+    }
+    // In whole seconds, as the event renders `created`.
+    if treasury.effective_at.timestamp() > applied_at.timestamp() || applied_at > Utc::now() {
+        return refused("the delivery does not show the change applying after its time-lock");
+    }
+    let mut transaction = pool.begin().await?;
+    lock(&mut transaction, scope, true).await?;
+    let current = get_in(&mut transaction, scope, id)
+        .await?
+        .ok_or(TreasuryError::DatabaseInvariant)?;
+    if current.status != Status::Pending {
+        return Ok((current, false));
+    }
+    let before = snapshot(&mut transaction, scope, id).await?;
+    apply(
+        &mut transaction,
+        routes,
+        scope,
+        id,
+        applied_at,
+        actor,
+        Some(&before),
+    )
+    .await?;
+    let treasury = get_in(&mut transaction, scope, id)
+        .await?
+        .ok_or(TreasuryError::DatabaseInvariant)?;
+    transaction.commit().await?;
+    Ok((treasury, true))
+}
+
 /// What one pass of [`rescreen_due`] did.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Rescreen {
@@ -1260,6 +1364,34 @@ pub async fn current(
                 Address::from_str(&address).map_err(|_| TreasuryError::DatabaseInvariant)?,
             ))
         })
+        .collect()
+}
+
+/// The scope's treasuries, by chain, that were in force at some time from `from` to `to`, in the
+/// whole seconds the API renders times in: applied by the end of `to`'s second and not replaced
+/// before `from`; without `from`, every one applied by then. What a forwarder issued in that time
+/// pays: a deposit address's network or a quote's address is derived over one of them.
+pub async fn in_force(
+    connection: &mut PgConnection,
+    scope: Scope,
+    from: Option<DateTime<Utc>>,
+    to: DateTime<Utc>,
+) -> Result<Vec<(u64, Address)>, TreasuryError> {
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT chain_id, address FROM treasuries \
+         WHERE account_id = $1 AND livemode = $2 AND applied_at IS NOT NULL \
+           AND applied_at < $4 + interval '1 second' \
+           AND ($3::timestamptz IS NULL OR replaced_at IS NULL OR replaced_at >= $3) \
+         ORDER BY chain_id, applied_at",
+    )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .bind(from)
+    .bind(to)
+    .fetch_all(connection)
+    .await?;
+    rows.into_iter()
+        .map(|(chain_id, address)| parse_chain_address(chain_id, &address))
         .collect()
 }
 
