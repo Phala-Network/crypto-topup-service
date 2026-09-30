@@ -2,9 +2,11 @@
 //!
 //! A secret carries its own tag ([`crate::client_secret`]), checked in memory first: a forged or
 //! malformed secret is `404` with no database work and no budget charged. A genuine one is then
-//! charged to its object's budget of [`PER_OBJECT`] reads per one-minute window, still before the
-//! database, and takes one of a fixed number of slots, a share of the database pool, for its
-//! database work, which [`READ_TIMEOUT`] bounds. State is held in this process; the service runs
+//! charged to its object's budget of [`PER_OBJECT`] reads per minute, still before the database,
+//! and takes one of a fixed number of slots, a share of the database pool, for its database work,
+//! which [`READ_TIMEOUT`] bounds. The budget is a GCRA, like the API's rate limits
+//! ([`super::rate_limit`]): a burst of up to all of it, refilled at its rate, so no window boundary
+//! admits a second budget right after the first. State is held in this process; the service runs
 //! one instance.
 
 use std::collections::HashMap;
@@ -15,10 +17,11 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 use super::error::ApiError;
+use super::rate_limit::{Clock, PRUNE_ABOVE, gcra};
 use crate::client_secret::ClientSecretKey;
 
-const WINDOW: Duration = Duration::from_secs(60);
-/// Reads of one quote or deposit address per window: a page polling every second, twice over.
+const MINUTE: Duration = Duration::from_secs(60);
+/// Reads of one quote or deposit address per minute: a page polling every second, twice over.
 const PER_OBJECT: u32 = 120;
 /// How long a read waits for a slot before it is refused with `Retry-After: 1`.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
@@ -28,23 +31,28 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_SLOTS: usize = 4;
 
 /// The client-secret key, and the budgets of anonymous reads by `client_secret`.
-#[derive(Debug)]
 pub struct ClientReadLimiter {
     key: ClientSecretKey,
     slots: Semaphore,
-    window: Mutex<Window>,
+    clock: Clock,
+    /// Theoretical arrival time of each object's next read.
+    reads: Mutex<HashMap<Uuid, Instant>>,
 }
 
-#[derive(Debug)]
-struct Window {
-    started: Instant,
-    reads: HashMap<Uuid, u32>,
+impl std::fmt::Debug for ClientReadLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientReadLimiter")
+            .field("key", &self.key)
+            .field("slots", &self.slots)
+            .field("reads", &self.reads)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A limiter with an ephemeral key ([`ClientSecretKey::ephemeral`]), for tests.
 impl Default for ClientReadLimiter {
     fn default() -> Self {
-        Self::with_slots(ClientSecretKey::ephemeral(), DEFAULT_SLOTS)
+        Self::with_clock(Instant::now)
     }
 }
 
@@ -54,17 +62,22 @@ impl ClientReadLimiter {
     #[must_use]
     pub fn new(key: ClientSecretKey, pool_connections: u32) -> Self {
         let slots = usize::try_from(pool_connections / 2).unwrap_or(1).max(1);
-        Self::with_slots(key, slots)
+        Self::build(key, slots, Box::new(Instant::now))
     }
 
-    fn with_slots(key: ClientSecretKey, slots: usize) -> Self {
+    /// A limiter with an ephemeral key whose budgets run on the instants `clock` reads, so a test
+    /// decides how much time passes between its reads instead of the machine it runs on.
+    #[must_use]
+    pub fn with_clock(clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        Self::build(ClientSecretKey::ephemeral(), DEFAULT_SLOTS, Box::new(clock))
+    }
+
+    fn build(key: ClientSecretKey, slots: usize, clock: Clock) -> Self {
         Self {
             key,
             slots: Semaphore::new(slots),
-            window: Mutex::new(Window {
-                started: Instant::now(),
-                reads: HashMap::new(),
-            }),
+            clock,
+            reads: Mutex::default(),
         }
     }
 
@@ -86,7 +99,7 @@ impl ClientReadLimiter {
         if !self.key.verify(id, secret) {
             return Err(ApiError::not_found());
         }
-        self.charge_at(Instant::now(), object)
+        self.charge_at((self.clock)(), object)
             .map_err(ApiError::client_reads_limited)?;
         match tokio::time::timeout(SLOT_WAIT, self.slots.acquire()).await {
             Ok(Ok(permit)) => Ok(permit),
@@ -94,26 +107,25 @@ impl ClientReadLimiter {
         }
     }
 
-    /// Counts one read of `object`; `Err` holds the seconds until the window ends, for a read over
-    /// its budget, which is not counted.
+    /// Counts one read of `object`; `Err` holds the seconds until a read would be admitted, for a
+    /// read over its budget, which is not counted.
     fn charge_at(&self, now: Instant, object: Uuid) -> Result<(), u64> {
-        let mut window = self
-            .window
+        let mut reads = self
+            .reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if now.saturating_duration_since(window.started) >= WINDOW {
-            window.started = now;
-            window.reads.clear();
-        }
-        let reads = window.reads.entry(object).or_default();
-        if *reads >= PER_OBJECT {
-            let left = WINDOW.saturating_sub(now.saturating_duration_since(window.started));
-            return Err(left
+        match gcra(reads.get(&object).copied(), now, PER_OBJECT, MINUTE) {
+            Ok(next) => {
+                if reads.len() >= PRUNE_ABOVE {
+                    reads.retain(|_, next| *next > now);
+                }
+                reads.insert(object, next);
+                Ok(())
+            }
+            Err(wait) => Err(wait
                 .as_secs()
-                .saturating_add(u64::from(left.subsec_nanos() > 0)));
+                .saturating_add(u64::from(wait.subsec_nanos() > 0))),
         }
-        *reads += 1;
-        Ok(())
     }
 }
 
@@ -128,17 +140,42 @@ pub async fn bounded<T>(work: impl Future<Output = Result<T, ApiError>>) -> Resu
 mod tests {
     use super::*;
 
+    fn admitted(limiter: &ClientReadLimiter, now: Instant, object: Uuid, reads: u32) -> u32 {
+        (0..reads)
+            .filter(|_| limiter.charge_at(now, object).is_ok())
+            .count()
+            .try_into()
+            .unwrap()
+    }
+
     #[test]
-    fn limits_each_object_per_window() {
+    fn limits_each_object_per_minute() {
         let limiter = ClientReadLimiter::default();
         let start = Instant::now();
         let quote = Uuid::from_u128(1);
-        for _ in 0..PER_OBJECT {
-            assert!(limiter.charge_at(start, quote).is_ok());
-        }
-        assert_eq!(limiter.charge_at(start, quote), Err(60));
-        assert!(limiter.charge_at(start, Uuid::from_u128(2)).is_ok());
-        assert!(limiter.charge_at(start + WINDOW, quote).is_ok());
+        assert_eq!(admitted(&limiter, start, quote, PER_OBJECT), PER_OBJECT);
+        // The next read is half a second away, at the budget's rate of two a second.
+        assert_eq!(limiter.charge_at(start, quote), Err(1));
+        assert_eq!(admitted(&limiter, start, Uuid::from_u128(2), 1), 1);
+        assert_eq!(
+            admitted(&limiter, start + Duration::from_secs(1), quote, 10),
+            2
+        );
+        assert_eq!(
+            admitted(&limiter, start + MINUTE * 2, quote, PER_OBJECT * 2),
+            PER_OBJECT
+        );
+    }
+
+    #[test]
+    fn a_minute_boundary_admits_no_second_burst() {
+        let limiter = ClientReadLimiter::default();
+        let start = Instant::now();
+        let quote = Uuid::from_u128(1);
+        let late = start + MINUTE - Duration::from_millis(1);
+        assert_eq!(admitted(&limiter, late, quote, PER_OBJECT), PER_OBJECT);
+        // A millisecond later, across where a fixed window would reset, the budget is spent.
+        assert_eq!(admitted(&limiter, start + MINUTE, quote, PER_OBJECT), 0);
     }
 
     #[test]

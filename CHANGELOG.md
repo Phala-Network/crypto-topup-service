@@ -687,6 +687,10 @@ happens only from two-provider finalized data.
 
 ### Fixed
 
+- A `client_secret`'s 120 reads per minute of its quote or deposit address refill at two a
+  second instead of all at once when a one-minute window rolls over, so a page can no longer read
+  120 times just before a rollover and 120 more just after it. A read over the budget is retryable
+  after `Retry-After: 1` rather than at the end of the window.
 - Admin: a restore across a treasury change no longer deadlocks the reconciliation. Deposit
   addresses and quotes are re-issued over a treasury in force when they were issued, within 5
   minutes (any since the restore point for a deposit address, around its `created` for a quote),

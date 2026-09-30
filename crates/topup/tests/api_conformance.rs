@@ -25,7 +25,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewAddress, NewCustomer};
-use support::{TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request};
+use support::{
+    ManualClock, TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request,
+};
 
 const ADMIN_KID: &str = "admin/v1";
 const ROUTE: &str = "phala-cloud-ethereum-pha-usd";
@@ -35,6 +37,8 @@ struct Harness {
     admin_key: SigningKey,
     /// Admin signatures are single-use, so each admin request is signed at a distinct second.
     created: AtomicI64,
+    /// The rate limiter's clock, which moves only when a test advances it.
+    clock: ManualClock,
 }
 
 struct Answer {
@@ -46,6 +50,7 @@ struct Answer {
 impl Harness {
     fn new(pool: &PgPool, limits: RateLimits) -> Result<Self> {
         let admin_key = SigningKey::from_bytes(&[81; 32]);
+        let clock = ManualClock::new();
         let route: RouteFile =
             serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
         let state = AppState {
@@ -62,7 +67,7 @@ impl Harness {
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
-            rate_limits: Arc::new(topup::api::ApiRateLimiter::new(limits)),
+            rate_limits: Arc::new(clock.rate_limiter(limits)),
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
@@ -70,6 +75,7 @@ impl Harness {
             app: topup::api::router(state).0,
             admin_key,
             created: AtomicI64::new(Utc::now().timestamp()),
+            clock,
         })
     }
 
@@ -480,7 +486,8 @@ async fn errors_carry_stripe_statuses_request_ids_and_retry_after() -> Result<()
             .to_owned();
 
         // The account's only key cannot be revoked: a 400, documented at its `doc_url`.
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        // A second later the account's one request per second is available again.
+        harness.clock.advance(std::time::Duration::from_secs(1));
         let last = harness
             .call(
                 Method::DELETE,

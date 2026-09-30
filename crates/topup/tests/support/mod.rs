@@ -7,7 +7,9 @@ use std::env;
 use std::future::{Future, poll_fn};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -440,5 +442,37 @@ impl topup::refunds::DestinationScreener for ClearScreener {
         _destination: alloy_primitives::Address,
     ) -> topup::refunds::DestinationScreening {
         topup::refunds::DestinationScreening::Clear
+    }
+}
+
+/// A rate limiter's clock that stands still until the test advances it, so whether a request is
+/// within a limit depends on the test's steps and not on how fast the machine answers them.
+#[derive(Clone, Debug)]
+pub struct ManualClock(Arc<Mutex<Instant>>);
+
+impl ManualClock {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    pub fn now(&self) -> Instant {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn advance(&self, by: Duration) {
+        let mut now = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        *now += by;
+    }
+
+    /// A limiter enforcing `limits` on this clock.
+    pub fn rate_limiter(&self, limits: topup::api::RateLimits) -> topup::api::ApiRateLimiter {
+        let clock = self.clone();
+        topup::api::ApiRateLimiter::with_clock(limits, move || clock.now())
+    }
+
+    /// A limiter of reads by `client_secret`, with an ephemeral key, on this clock.
+    pub fn client_read_limiter(&self) -> topup::api::ClientReadLimiter {
+        let clock = self.clone();
+        topup::api::ClientReadLimiter::with_clock(move || clock.now())
     }
 }

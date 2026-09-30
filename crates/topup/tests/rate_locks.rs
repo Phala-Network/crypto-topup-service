@@ -36,7 +36,8 @@ use uuid::Uuid;
 
 use support::seed::{self, NewAccount, NewCustomer};
 use support::{
-    TEST_ORIGIN, TestDatabase, merchant_request, merchant_request_with_key, public_key_base64,
+    ManualClock, TEST_ORIGIN, TestDatabase, merchant_request, merchant_request_with_key,
+    public_key_base64,
 };
 
 const ADMIN_KID: &str = "admin/v1";
@@ -984,7 +985,9 @@ async fn client_secret_reads_are_limited_per_object_and_forgeries_cost_nothing()
             public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(FixedQuote),
-            client_reads: Arc::default(),
+            // The budget's clock stands still, so no read refills it however slowly the
+            // machine answers the flood.
+            client_reads: Arc::new(ManualClock::new().client_read_limiter()),
             rate_limits: Arc::default(),
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
@@ -1050,14 +1053,15 @@ async fn client_secret_reads_are_limited_per_object_and_forgeries_cost_nothing()
         }
 
         // A flood with the genuine secret is limited to its quote's budget of 120 a minute (one
-        // read spent above), with `Retry-After`, and does not starve another quote.
+        // read spent above), retryable once its next read refills at two a second, and does not
+        // starve another quote.
         for _ in 1..120 {
             ensure!(read(flooded, genuine).await?.status() == StatusCode::OK);
         }
         let limited = read(flooded, genuine).await?;
         ensure!(limited.status() == StatusCode::TOO_MANY_REQUESTS);
         let retry_after: u64 = limited.headers()["retry-after"].to_str()?.parse()?;
-        ensure!((1..=60).contains(&retry_after), "{retry_after}");
+        ensure!(retry_after == 1, "{retry_after}");
         ensure!(limited.headers()["access-control-allow-origin"] == "*");
         ensure!(response_json(limited).await?["error"]["code"] == "rate_limit");
         ensure!(read(&quotes[1].0, &quotes[1].1).await?.status() == StatusCode::OK);
