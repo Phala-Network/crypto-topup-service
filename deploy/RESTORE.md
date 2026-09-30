@@ -347,9 +347,11 @@ product's `export-restore-records` prints. The drill requires that the replaceme
 [Restore](#restore) step 5's admin attestation answers where the merchant's does not, with the
 account's webhook key, that the lost key is refused like every key while frozen and is revoked
 again by prefix, that the lost address is re-issued with the same address, `da_` id, and client
-secret, that T2 verifies as `application_lost` and the address over it is refused until
-`treasuries/apply` restores T2 from its signed `treasury.updated` (a body changed after signing is
-refused; a repeat applies nothing), at the event's time, after which it is re-issued, that the
+secret, that the merchant's latest treasury objects verify as T2 `application_lost` and the
+treasury it replaced `replacement_lost`, and the address over T2 is refused until
+`treasuries/apply` restores T2 from its signed `treasury.updated` (a body changed after signing,
+or the replaced treasury's delivery, is refused; a repeat applies nothing), at the event's time,
+after which both verify as `matches` and the address is re-issued, that the
 quote is re-issued at its own address (over the treasury in force at its `created`) with its
 client secret (the payer's read works again) while a secret of another quote, or of this quote
 issued to another account, is refused, that the deliveries the product kept are exported byte
