@@ -124,7 +124,7 @@ pub(super) fn admin(openapi: &OpenApi) -> Value {
             "name": "Signature",
             "description": "An RFC 9421 ed25519 signature over `@method`, `@target-uri`, \
                             `content-digest`, and `idempotency-key` when sent. `@target-uri` is the \
-                            service's configured public origin (`TOPUP_PUBLIC_ORIGIN`) followed by \
+                            service's configured public origin (`public_origin`) followed by \
                             the request path and query, so sign the public URL you call; `Host` and \
                             `X-Forwarded-*` headers are ignored.",
         }

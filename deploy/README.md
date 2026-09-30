@@ -15,8 +15,8 @@ a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md)
 
 | Where | What | Deployed by |
 |---|---|---|
-| topup CVM, one per Environment (`staging`, `production`) | [docker-compose.yml](docker-compose.yml): `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup` (the service, or read-only and published on 8081 in the [restore-check variant](RESTORE.md#the-restore-check-variant)), `smokescreen` (the [webhook egress](#webhook-egress) proxy), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain), service variant only), `heartbeat`, `backup`, `restore-check` (acts only in that variant) | Deploy, target `topup` |
-| Staging reference-product CVM (optional; Phala's demo, [phala.md](phala.md#staging-reference-product)) | [product/docker-compose.yml](product/docker-compose.yml): `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
+| topup CVM, one per Environment (`staging`, `production`) | [compose.yaml](compose.yaml) with its environment directory ([Attested settings](#attested-settings)). The service variant ([compose.service.yaml](compose.service.yaml)) runs `keys` (derives the database passwords and the backup key), `postgres` (PostgreSQL 18 + WAL-G), `migrate`, `topup`, `smokescreen` (the [webhook egress](#webhook-egress) proxy), `dstack-ingress` (the only public port, 443: TLS for the [custom domain](#custom-domain)), `heartbeat`, and `backup`; the [restore-check variant](RESTORE.md#the-restore-check-variant) ([compose.restore-check.yaml](compose.restore-check.yaml)) runs `keys`, `postgres`, `migrate`, a read-only `topup` published on 8081, and `restore-check` | Deploy, target `topup` |
+| Staging reference-product CVM (optional; Phala's demo, [phala.md](phala.md#staging-reference-product)) | [product/compose.yaml](product/compose.yaml) with its environment directory: `product` (on 8089, private) and `dstack-ingress` (the only public port, 443: TLS for its [custom domain](#custom-domain)) | Deploy, target `product` |
 | Object storage (S3-compatible; Phala's instance: Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | The operator's Sentry project (optional; Phala's: `phala-network/crypto-topup-service`) | errors, alerts, Crons and Uptime monitors | the service itself |
 | EVM chains of the routes (the committed routes: Sepolia and Base Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
@@ -62,37 +62,26 @@ key, and the database passwords: that is a key migration, not an image bump.
 3. **Object storage.** Create a bucket (or prefix) per Environment in an S3-compatible store, such
    as Cloudflare R2, that the other Environment's keys cannot reach, and a read-write API token for
    it. The token is sealed into the CVM (below), never stored in GitHub.
-4. **Environment variables**, per Environment:
+4. **Environment variables**, per Environment: only deployment state, none of it attested.
 
    | Name | Value |
    |---|---|
    | `PHALA_WORKSPACE` | display name of the API key's workspace (preflight checks it) |
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
-   | `TOPUP_DOMAIN` | the [custom domain](#custom-domain), a name in the operator's DNS such as `pay-api.example.com` (Phala's instance: `pay-api-staging.phala.com` in `staging`, `pay-api.phala.com` in `production`) |
-   | `AWS_ENDPOINT` | the object store's endpoint, for R2 `https://<account>.r2.cloudflarestorage.com` |
-   | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`; a new app needs a prefix of its own ([RESTORE.md](RESTORE.md#bootstrap-from-backup)) |
-   | `TOPUP_ADMIN_PUBLIC_KEY` | from `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays with the admin |
-   | `TOPUP_RPC_<ID>_URL`, one per [RPC provider](#rpc-providers) of the compose | the provider's HTTPS RPC URL for its chain, with `{key}` in place of an API key; the Sepolia routes use `TOPUP_RPC_PROVIDER_A_URL` and `TOPUP_RPC_PROVIDER_B_URL`, the Base Sepolia routes `TOPUP_RPC_BASE_SEPOLIA_A_URL` and `TOPUP_RPC_BASE_SEPOLIA_B_URL` ([Staging routes](phala.md#staging-routes)) |
-   | `STAGING_PRODUCT_CVM_ID`, `PRODUCT_DRIVER_PUBLIC_KEY` | `staging` only, for the optional [staging reference product](phala.md#staging-reference-product) |
-   | `PRODUCT_DOMAIN` | `staging` only, likewise: the reference product's [custom domain](#custom-domain) (Phala's: `pay-demo-api.phala.com`; the [website](phala.md#website), `pay.phala.com`, is on Cloudflare) |
+   | `STAGING_PRODUCT_CVM_ID` | `staging` only, for the optional [staging reference product](phala.md#staging-reference-product) |
 
-   No variable or secret names a treasury or a transaction-signing key: treasuries are each
-   account's own, set through the API, and the service sends no transactions.
+   Every setting of the CVM is committed instead, in the Environment's directory
+   `deploy/environments/<owner, lowercased>/<Environment>/topup/` (Phala's:
+   [deploy/environments/phala-network/staging/topup](environments/phala-network/staging/topup)), copied
+   from [deploy/environments/example](environments/example/topup) ([Attested settings](#attested-settings)):
+   the domain, the object store's endpoint and backup prefix, the admin public key (from
+   `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays
+   with the admin), the RPC providers, and the routes. Deploy renders that directory and nothing
+   else, so a setting changes only through a reviewed commit and a Deploy `upgrade`, and a fork
+   deploys nothing until it commits a directory of its own owner.
 
-   That is six variables and one per RPC provider (eight with Sepolia's two) for the service, and
-   three more for the staging reference product.
-   All but the first two are [attested settings](#attested-settings). Deploy derives the rest, and
-   a variable of the same name overrides a derived value where noted:
-
-   | Setting | Derived as |
-   |---|---|
-   | `SENTRY_ENVIRONMENT` | the Environment's name (no override) |
-   | `TOPUP_GATEWAY_DOMAIN` | `gateway.<base domain>` of the CVM's node, read from the existing CVM on `upgrade`; `provision` renders a provisional value and upgrades the new CVM once its node is known (no override) |
-   | OS image | `dstack-0.5.9`, fixed in `deploy.yml` (architecture §14; no override) |
-   | `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE` | `auto` and `true` for an R2 `AWS_ENDPOINT`; set both variables for any other endpoint |
-   | `TOPUP_ADMIN_KID` | `admin/<Environment>-v1`; set the variable only after an admin key rotation to a new key id |
-
-   `TOPUP_PUBLIC_ORIGIN` is not a variable: the compose sets it to `https://$TOPUP_DOMAIN`.
+   No setting names a treasury or a transaction-signing key: treasuries are each account's own, set
+   through the API, and the service sends no transactions.
 5. **Sentry** (project admin; the Crons monitors create themselves on their first check-in):
    - Settings > Security & Privacy: keep *Data Scrubber* and *Use Default Scrubbers* on; turn
      *Prevent Storing of IP Addresses* on.
@@ -152,75 +141,102 @@ drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) accounts 
 
 ### Sealing the secrets
 
-The CVM's encrypted env holds exactly the names of [staging.env.example](staging.env.example),
-the same in both Environments: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the object store's token),
-`SENTRY_DSN` (empty turns Sentry off), and a `TOPUP_RPC_<ID>_KEY` per [RPC provider](#rpc-providers)
-that may take a key (`TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY` for Sepolia's): the
-API key topup puts in place of `{key}` in the provider's attested URL, empty for a keyless URL (as
-in Phala's staging). A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`; topup refuses a provider whose
-URL and key disagree (a `{key}` without a key, or a key without a `{key}`). Redaction keeps the URL
-and the key out of every log line and error. A new CVM waits for them: PostgreSQL initializes a cluster
+The CVM's encrypted env holds exactly the rendered compose's sealed names, its `${NAME:-}`
+references, which are also its `allowed_envs`:
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the object store's token (declared in
+  [compose.yaml](compose.yaml));
+- `SENTRY_DSN`, which may be empty to turn Sentry off;
+- a `TOPUP_RPC_<ID>_KEY` per keyed [RPC provider](#rpc-providers), declared in the environment's
+  `compose.yaml` overlay. It is the API key topup puts in place of `{key}` in the provider's
+  attested URL. Phala's staging declares `TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY`,
+  empty for its keyless URLs, so its sealed names stay the ones it was provisioned with.
+
+A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`. topup refuses a provider whose URL and key
+disagree: a `{key}` without a key, or a key without a `{key}`. Redaction keeps the URL and the key
+out of every log line and error. A new CVM waits for its secrets: PostgreSQL initializes a cluster
 only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-from-backup)).
+`deploy/validate-compose.sh` fails if staging's sealed names change, since that needs the re-seal
+below.
 
 **HUMAN-ONLY, owner, from their own machine**, in a checkout of the deployed commit with the
 rendered compose from the run's artifact (the provision summary prints these commands):
 
 ```sh
-deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml --offline   # .env.ENV: mode 0600
+docker pull <the compose's phala-pay image>   # --offline pulls nothing; it runs topup config check in it
+deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml \
+  --environment-dir deploy/environments/<owner>/ENV/topup --offline      # .env.ENV: mode 0600
 npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.ENV
 ```
 
-Deploy's preflight has no keys, so with a keyed provider it skips the asset chain checks; run
-preflight without `--offline` (with `--workspace` and `--os-image`) to run them with the keys.
+Offline, preflight checks every provider's key against its URL (`topup config check --secrets`)
+without printing it. Deploy's preflight has no keys, so with a keyed provider it skips the asset
+chain checks; run preflight without `--offline` (with `--workspace` and `--os-image`) to run them
+with the keys.
 
 The CVM restarts, `/healthz` answers, and backups have started once a WAL segment younger than two
 minutes is listed (`aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1`).
 Re-seal the same way whenever a secret changes; never change a setting with `envs update`.
 
-**A new sealed name** (a new keyed provider's `TOPUP_RPC_<ID>_KEY`, or a CVM sealed before the
-RPC keys existed) changes the CVM's allowed names, and Deploy `upgrade` keeps a CVM's allowed
-names, so its attestation check would refuse the upgrade. Once, before that upgrade, run only the
-`envs update` above with `.env.ENV` holding every name of the new `staging.env.example` (the keys
-empty for keyless URLs): the running compose ignores the new names, and preflight against it would
-refuse them. A new keyless provider adds no name.
+**A new sealed name** (a new keyed provider's `TOPUP_RPC_<ID>_KEY`) changes the CVM's allowed
+names, and Deploy `upgrade` keeps a CVM's allowed names, so its attestation check would refuse the
+upgrade. Once, before that upgrade, run only the `envs update` above with `.env.ENV` holding every
+sealed name of the new compose (the keys empty for keyless URLs): the running compose ignores the
+new names, and preflight against it would refuse them. A new keyless provider adds no name.
 
 ### Attested settings
 
 A value in the encrypted env is outside the attestation: whoever can run `phala envs update` could
-change it without changing the compose hash. So the env holds only the secrets above, and
-[render-compose.sh](render-compose.sh) writes every other `${NAME:-}` of the compose inline from
-the Environment variables, refusing a value that is not 1-512 printable ASCII characters without
-spaces, quotes, backslashes, or `$`. The settings are public (the compose is in the attestation), so
-an RPC provider's API key is not one: its URL has `{key}` where the key goes, and the key is sealed
-([Sealing the secrets](#sealing-the-secrets)):
+change it without changing the compose hash. So the env holds only the secrets above, and every
+other setting is written into the compose that the attestation covers, from reviewed files. There
+are four kinds of input, each with one home ([design](../docs/design/deploy-config.md)):
 
-| Setting | Source |
+| Kind | Home |
 |---|---|
-| `AWS_ENDPOINT`, `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, every `TOPUP_RPC_<ID>_URL` | the Environment variables of the same name |
-| `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT` | derived ([One-time setup](#one-time-setup-human-only-repository-owner), step 4) |
-| `TOPUP_DOMAIN`, `TOPUP_GATEWAY_DOMAIN` | the Environment variable, and the CVM node's gateway: `dstack-ingress`'s `DOMAIN` and `GATEWAY_DOMAIN`; topup's `TOPUP_PUBLIC_ORIGIN` is `https://$TOPUP_DOMAIN` (the product's `PRODUCT_DOMAIN` and `PRODUCT_GATEWAY_DOMAIN` likewise, with `PRODUCT_PUBLIC_URL` `https://$PRODUCT_DOMAIN`) |
-| `TOPUP_IMAGE`, `POSTGRES_WALG_IMAGE` | the release's digests; the image digest is also the Sentry release |
-| `TOPUP_RESTORE_FROM_BACKUP`, `TOPUP_SERVICE_ENABLED` | the variant: service `off`, `on`; `--restore-check`: `on`, `read-only` |
-| ingress | the variant: the service runs `dstack-ingress` on 443 and publishes no topup port; `--restore-check` runs no ingress and publishes topup on 8081 (blocks after `# only-in: VARIANT` in the compose) |
-| `dstack-ingress` image | pinned in [docker-compose.yml](docker-compose.yml) by digest ([Custom domain](#custom-domain)) |
-| route files (inline configs) | committed in [docker-compose.yml](docker-compose.yml), checked against `config/routes/` by [validate-compose.sh](validate-compose.sh) |
-| RPC provider ids | the `x-rpc-providers` block of [docker-compose.yml](docker-compose.yml) ([RPC providers](#rpc-providers)) |
+| Topology: the services, their mounts, ports, and flags | [compose.yaml](compose.yaml), [compose.service.yaml](compose.service.yaml), [compose.restore-check.yaml](compose.restore-check.yaml) (and [product/compose.yaml](product/compose.yaml)) |
+| The Environment's public settings | its directory `deploy/environments/<owner>/<Environment>/topup/`: `topup.yaml` ([the configuration file](../docs/configuration.md#the-configuration-file): `public_origin`, `admin_key`, `rpc_providers`, `routes`) and a `compose.yaml` overlay with the env interfaces of third-party images: WAL-G's `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN`, and the keyed providers' sealed key names |
+| Deploy-time facts | [render.sh](render.sh)'s three inputs: `--images` (the release's `images.json`), `--gateway-domain` (the CVM node's gateway, dstack-ingress's `GATEWAY_DOMAIN`), and, for the restore-check variant only, `--origin` (the restore instance's own origin) |
+| Secrets | the CVM's sealed env ([Sealing the secrets](#sealing-the-secrets)) |
 
-Every service also carries the label `phala-pay.rendered-sha256`, so any rendered change
-recreates it. To change a setting, change the variable (or the route, by PR) and run Deploy
-`upgrade`. [product/render-compose.sh](product/render-compose.sh) renders the product the same way.
+[render.sh](render.sh) renders them with Docker Compose v2.26.0, the version the CVM runs, pinned by
+sha256 ([pinned-compose.sh](pinned-compose.sh)):
+
+```sh
+deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.phala.network \
+  deploy/environments/phala-network/staging/topup >docker-compose.staging.yml
+```
+
+- It merges the stack, the environment overlay, and the variant overlay with
+  `config --no-interpolate`, which keeps the sealed `${NAME:-}` references.
+- It pins each image to the release's digest.
+- It inlines each config file (the environment's `topup.yaml`, the PostgreSQL init script) as
+  content named after its digest. A changed file therefore changes the definition of exactly the
+  services that mount it, and Compose recreates them.
+- It prints Compose's canonical YAML under the project name `dstack`, which is the name dstack gives
+  the stack it runs in `/dstack`, so the volumes keep their names.
+- Before printing, it applies [compose-policy.jq](compose-policy.jq), the policy that
+  `validate-compose.sh`, preflight, and `verify-attestation.sh` apply to the same artifact:
+  - the variant's exact services;
+  - the only published port;
+  - the credential mounts and the dstack socket;
+  - smokescreen unrelaxed;
+  - restore isolation;
+  - each sealed name only as the whole value of its own environment key, so a sealed value can
+    never fill the origin, the admin key, or an RPC host.
+
+`topup.yaml` itself is validated by `topup config check`, which reads no secret. To change a
+setting, change its file by pull request and run Deploy `upgrade`. The product renders the same
+way from `deploy/environments/<owner>/staging/product/` (its `config.json` and domain).
 
 ### RPC providers
 
 Every route names its chain's RPC providers by id in `chain.rpc_providers`, at least two different
 providers, and a route that names none uses `provider-a` and `provider-b` (the committed Sepolia
-routes do). An id is lowercase letters, digits, and `-`, and names its two variables, the id
-upper-cased with `-` as `_`:
+routes do). An id is lowercase letters, digits, and `-`:
 
-| Variable | What | Where |
+| Setting | What | Where |
 |---|---|---|
-| `TOPUP_RPC_<ID>_URL` | the provider's HTTPS URL for its chain; a provider that puts its API key in the URL is set with `{key}` in the key's place (`https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`) | an [attested setting](#attested-settings): the Environment variable of the same name |
-| `TOPUP_RPC_<ID>_KEY` | the key that fills `{key}`; only for a provider that may take one | [sealed](#sealing-the-secrets): a name of [staging.env.example](staging.env.example) |
+| `rpc_providers.<id>` | the provider's HTTPS URL for its chain. A provider that puts its API key in the URL has `{key}` in the key's place, as a whole path segment or query value: `https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`. The key can never change the URL's host. | `topup.yaml`, [attested](#attested-settings) |
+| `TOPUP_RPC_<ID>_KEY` | the key that fills `{key}` (the id upper-cased, `-` as `_`); only for a keyed provider | [sealed](#sealing-the-secrets); declared in the environment's `compose.yaml` overlay for `topup` and `restore-check` |
 
 A provider serves one chain: routes of the same chain name the same providers, and a route of
 another chain names providers of its own, even from the same company (`alchemy-base-sepolia` beside
@@ -234,26 +250,29 @@ endpoints refuse one or the other (a 1 000-block range cap; a required `address`
 before naming one first. Provider B never reads logs, only receipts, heads (`latest`, `safe`,
 `finalized`), nonces, and calls.
 
-The `x-rpc-providers` block of [docker-compose.yml](docker-compose.yml) lists each provider once,
-its URL and, if it may take a key, its key, and gives them to `topup` and `restore-check`.
-[Preflight](preflight.sh) requires every provider a route names there and no other, an `https` URL
-that does not embed a key, a key where the URL has `{key}` and none where it has not, each route's
-providers at different URLs, and, online, each provider reporting the chain of every route that
-names it, with the route's contracts and asset on it.
+`topup config check` requires:
+- every provider a route names in `rpc_providers`, and no other;
+- each provider on one chain;
+- each route's providers at different URLs;
+- every `{key}` a whole path segment or query value.
 
-**Adding a chain** is configuration, in one PR and one Deploy `upgrade`: the route file and its
-copy in the compose ([self-hosting, "Routes and contracts"](../docs/self-hosting.md#3-routes-and-contracts)),
-with `chain.rpc_providers` naming two new ids; their `TOPUP_RPC_<ID>_URL` lines in
-`x-rpc-providers`; for a keyed provider, its `TOPUP_RPC_<ID>_KEY` line there, in
-[staging.env.example](staging.env.example), and in [app-compose.example.json](app-compose.example.json)'s
-`allowed_envs`; the chain in [check-route-modes.sh](check-route-modes.sh) and
-[contracts/networks.json](contracts/networks.json) if they lack it; and, before the upgrade, the
-Environment variables `TOPUP_RPC_<ID>_URL` in every Environment and, for a new sealed name, the
-[re-seal](#sealing-the-secrets) with it.
+With `--secrets`, it also requires a key where the URL has `{key}` and none where it has not.
+[Preflight](preflight.sh) adds an `https` URL that does not embed a key. Online, it requires each
+provider to report the chain of every route that names it, with the route's contracts and asset
+on it.
+
+**Adding a chain** is configuration, in one PR and one Deploy `upgrade`:
+1. Add its routes to `topup.yaml`
+   ([self-hosting, "Routes and contracts"](../docs/self-hosting.md#3-routes-and-contracts)), with
+   `chain.rpc_providers` naming two new ids and those ids in `rpc_providers`.
+2. For a keyed provider, add its `TOPUP_RPC_<ID>_KEY` to the environment's overlay, and re-seal
+   with it before the upgrade ([Sealing the secrets](#sealing-the-secrets)).
+3. Add the chain to [check-route-modes.sh](check-route-modes.sh) and
+   [contracts/networks.json](contracts/networks.json) if they lack it.
 
 ### Custom domain
 
-The API has one public origin, `https://$TOPUP_DOMAIN`, a stable name the owner controls, not
+The API has one public origin, `public_origin` (`https://$TOPUP_DOMAIN`), a stable name the owner controls, not
 the CVM's gateway URL, which changes with the node and the app id: merchants call it and pin its
 attestation, treasury challenges (EIP-4361) name it as their `domain` and `uri`, and the admin
 API verifies every signed `@target-uri` against it. The official [dstack-ingress](https://github.com/Dstack-TEE/dstack-examples/tree/dstack-ingress-v2.6/custom-domain/dstack-ingress)
@@ -316,9 +335,14 @@ service mounts only what it needs, read-only, and `validate-compose.sh` enforces
 
 | Volume | Files | Mounted by |
 |---|---|---|
-| `walg_key` (`/run/wal-g`) | `backup.key` | `postgres`, `backup`, `restore` |
+| `walg_key` (`/run/wal-g`) | `backup.key` | `postgres`, `backup` |
 | `db_owner` (`/run/db-owner`) | `postgres.password`, `postgres.pgpass` | `postgres`, `migrate`, `backup`, `restore-check` |
 | `db_app` (`/run/db-app`) | `topup_service.pgpass` | `postgres`, `topup`, `heartbeat` |
+
+This is separation by mount and by database role, not by KMS: `keys`, `topup`, `restore-check`, and
+dstack-ingress mount the dstack socket, and any holder of it can derive any key path. PostgreSQL,
+WAL-G, and `migrate` never see the socket, and topup never gets the owner login's files.
+`migrate` and `restore-check` refuse any login but the database owner (`DATABASE_URL`).
 
 The same app id derives the same passwords, so a replacement or restored instance logs in
 unchanged. Rotation is an `ALTER ROLE` to a `db/*/v2` value and a new compose.
@@ -326,8 +350,8 @@ unchanged. Rotation is an `ALTER ROLE` to a `db/*/v2` value and a new compose.
 ## Sentry
 
 The service reports to Sentry itself, only while `SENTRY_DSN` is non-empty (a malformed DSN stops
-`topup run`). The release is the `TOPUP_IMAGE` digest and the environment `SENTRY_ENVIRONMENT`
-(the GitHub Environment's name), both attested.
+`topup run`). The release is the source commit compiled into the image (`SOURCE_COMMIT`), and the
+environment is `topup.yaml`'s `environment`, both attested.
 
 - **Events**: every `ERROR` line and panic, grouped by message, at most one event per issue every
   10 minutes. An event holds the log line's fields minus `account_id`; no request data, no RPC
@@ -415,20 +439,22 @@ npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
-deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml
-export TOPUP_PUBLIC_ORIGIN="https://$TOPUP_DOMAIN"
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
+export TOPUP_PUBLIC_ORIGIN="https://$TOPUP_DOMAIN"   # topup.yaml's public_origin
 deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
 ```
 
 [verify-attestation.sh](verify-attestation.sh) runs the official dstack verifier
 ([dstack-verifier.sh](dstack-verifier.sh), `dstacktee/dstack-verifier:0.5.9` pinned by digest:
-TDX quote and TCB, RTMR3 event-log replay, OS image measurements), requires TCB `UpToDate`, the
-app id, and a compose hash whose app-compose holds exactly the rendered compose, then checks the
-policy: `allowed_envs` equal to the sealed names and the only published port `dstack-ingress` on
-443 (`tls-alpn-01`, forwarding to `topup:8080`, for the domain of `TOPUP_PUBLIC_ORIGIN`), or for
-the restore-check variant `topup` on 8081 and no ingress. Never treat a hash from
-[render-app-compose.sh](render-app-compose.sh) as the deployed one; the Phala CLI builds the
-app-compose itself.
+TDX quote and TCB, RTMR3 event-log replay, OS image measurements). It requires TCB `UpToDate`, the
+app id, and a compose hash whose app-compose holds exactly the rendered compose. The compose hash
+is the hash of the full app-compose JSON the Phala CLI builds (with `allowed_envs` and the CVM
+options), not of the YAML file, so every upgrade's hash is new and goes to merchants
+([docs/integration.md §5.3](../docs/integration.md#53-pin-your-accounts-webhook-keys)). It then
+requires `allowed_envs` equal to the compose's sealed names, and the variant's
+[compose-policy.jq](compose-policy.jq): for the service, the only published port is
+`dstack-ingress` on 443 (`tls-alpn-01`, forwarding to `topup:8080`, for the host of
+`public_origin`); for the restore-check variant it is `topup` on 8081, with no ingress.
 
 An account's webhook keys come only from the nonce-bound attestation, fetched with a secret key of
 that account and mode (merchants run the same check, docs/integration.md §5.3):
@@ -453,9 +479,9 @@ expected_livemode=…)` (architecture §14 defines the construction; `TopupClien
 it on every fetch).
 
 **Ingress**: the attested compose must publish only `dstack-ingress` on 443; confirm `/openapi.json`
-at `TOPUP_PUBLIC_ORIGIN` with a valid certificate, its [certificate
+at `public_origin` with a valid certificate, its [certificate
 evidence](#custom-domain), and that PostgreSQL and topup's port 8080 are unreachable. The admin
-API verifies every signed `@target-uri` against `TOPUP_PUBLIC_ORIGIN`, so a correctly signed
+API verifies every signed `@target-uri` against `public_origin`, so a correctly signed
 admin request answered `401` usually means the URL differs from it. **Egress** (HUMAN-ONLY, cloud network
 authority; dstack has no hostname allow-list): restrict outbound traffic to the RPC providers' hosts,
 the price sources, the object storage host, the Sentry ingest host, DNS, the Phala/dstack
@@ -467,7 +493,7 @@ the addresses), and record the rules.
 
 Merchants register their own webhook URLs (`/v1/webhook_endpoints`), so a URL may name any
 address, including the CVM's own network or a cloud metadata service. Every delivery therefore
-leaves through the `smokescreen` sidecar (`TOPUP_WEBHOOK_PROXY=http://smokescreen:4750`), Stripe's
+leaves through the `smokescreen` sidecar (`--webhook-proxy http://smokescreen:4750`), Stripe's
 [smokescreen](https://github.com/stripe/smokescreen) and the only IP filter (design §8): it resolves
 the host itself and refuses, with `407` before connecting, every address that is not publicly
 routable. The service checks only a URL's scheme and port when it is registered (`https` on 443;
@@ -477,7 +503,7 @@ start without the proxy unless its own origin is `http` (local stacks).
 - **Binary.** Stripe publishes no image, so the phala-pay [Dockerfile](../Dockerfile) builds
   smokescreen v0.1.0 (commit `609eb8931420453daf5893509be0b25b21bd9edb`) with its vendored
   modules in `golang:1.27-trixie` pinned by digest, reproducibly, and the sidecar runs it from
-  `TOPUP_IMAGE`: it is pinned and attested with the service's digest.
+  the phala-pay image: it is pinned and attested with the service's digest.
 - **Policy.** Its defaults refuse loopback, private (`10/8`, `172.16/12`, `192.168/16`,
   `fc00::/7`, which holds AWS's IPv6 metadata `fd00:ec2::254`), link-local (`169.254/16` with the
   metadata address `169.254.169.254`, `fe80::/10`), CGNAT (`100.64/10`, with Alibaba's metadata
@@ -493,8 +519,8 @@ start without the proxy unless its own origin is `http` (local stacks).
   compose's own command and checks, through plain requests and CONNECT tunnels, that private,
   loopback, metadata, CGNAT, `0/8`, IPv4-mapped, NAT64, and unique-local targets are refused and a
   public address is not; CI runs it on every image build.
-- **Local stacks** (`make up`, the sandbox, the CVM rehearsal) deliver directly
-  (`TOPUP_WEBHOOK_PROXY=""`), because their receivers listen on private compose addresses.
+- **Local stacks** (the sandbox, the CVM rehearsal) deliver directly (no `--webhook-proxy`, under
+  an `http` `--public-origin`), because their receivers listen on private compose addresses.
 - A merchant's URL that resolves to a refused address fails like an unreachable one: retried with
   backoff (probed about once an hour), never disabled, and visible to the merchant as the
   endpoint's `pending_deliveries`, `oldest_pending_at`, and `last_attempt`, and as each event's
@@ -677,15 +703,22 @@ resumed, any re-valued deposit flagged, and events after the restore point deliv
 
 ## Local verification
 
-- `make up` / `make down`: the attested compose rendered with local settings plus the
+- `make up` / `make down`: the attested compose rendered from the local environment
+  ([local/environment.sh](local/environment.sh): staging's routes, placeholder providers) plus the
   [local overlay](local/docker-compose.yml) (Garage S3, the dstack simulator, a mock product);
-  run manual commands through `deploy/local/compose.sh`.
-- `make cvm-rehearsal`: the staging artifact itself against Anvil, Garage, and the simulator,
-  from the unsealed boot through sealing, operator onboarding of the product's account, its
-  treasury proof and webhook endpoint, and one credited deposit.
+  run manual commands through `deploy/local/compose.sh -p PROJECT`.
+- `make cvm-rehearsal`: a staging-shaped artifact against Anvil, Garage, and the simulator, from
+  the unsealed boot through sealing, a configuration upgrade (topup recreated, PostgreSQL not),
+  operator onboarding of the product's account, its treasury proof and webhook endpoint, and one
+  credited deposit.
+- `make upgrade-rehearsal`: the staging cutover in place. Staging's released images and compose
+  run with real data, are upgraded to this checkout on the same volumes, and are rolled back. It
+  asserts the same database, rows, keys, and identities, WAL archiving, and that no bootstrap or
+  recovery path ran ([local/upgrade-rehearsal.sh](local/upgrade-rehearsal.sh)).
 - `make restore-drill`: [RESTORE.md](RESTORE.md#local-and-ci-drills).
 - `make sandbox-local`: the integrator sandbox ([sandbox/README.md](sandbox/README.md)).
-- `deploy/validate-compose.sh`: the compose policy CI enforces.
+- `deploy/validate-compose.sh`: every committed environment rendered and checked against
+  [compose-policy.jq](compose-policy.jq), as CI enforces.
 
 ## Phala's instance
 

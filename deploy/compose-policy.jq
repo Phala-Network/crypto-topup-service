@@ -32,9 +32,11 @@ def mounted_config($service; $target):
     | [.services[$service].configs[]? | select(.target == $target) | .source]
     | if length == 1 then $root.configs[.[0]].content // "" else "" end;
 
-# The top-level `public_origin` of a topup.yaml.
+# The top-level `public_origin` of a topup.yaml, written as YAML or as JSON (`topup config show`).
 def config_origin:
-    [split("\n")[] | capture("^public_origin:[ \\t]*[\"']?(?<origin>[^\"' \\t#]+)")] | first.origin // "";
+    (fromjson? | .public_origin? | strings)
+    // ([split("\n")[] | capture("^public_origin:[ \\t]*[\"']?(?<origin>[^\"' \\t#]+)")] | first.origin)
+    // "";
 
 # May the sealed secret `$name` fill the environment key `$key` of `$service`?
 def secret_allowed($variant; $service; $key; $name):
