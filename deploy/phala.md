@@ -146,6 +146,20 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   chain's treasury is a contract), its test tokens, `bonus_bps` (the demo merchant's own +10% on
   credits paid in PHA, a promotion, not a Phala Pay feature), and `web_origin`,
   `https://pay.phala.com`, the only origin the demo's API allows.
+- **Its restore records.** Its ledger keeps what a service restore asks merchants for
+  ([restore runbook](runbooks/restore.md) step 2): each verified delivery once per `webhook-id`,
+  in the webhook inbox, as received (the raw body bytes and the `webhook-id`,
+  `webhook-timestamp`, and `webhook-signature` headers) in the transaction that applies it; and
+  each quote and deposit address it creates, as the service returned it, `client_secret`
+  included. A client secret is a capability: the ledger file is its owner's alone (mode 0600),
+  and nothing logs one. `python -m reference_product export-restore-records --config FILE`, next
+  to the ledger (in the product container), prints them as the bodies of the operator's
+  `POST /v1/admin/restore/deposit_addresses`, `/quotes`, and `/events` requests (the events in
+  batches of 100), without `reason`; `--since` takes the restore point, and `--output` writes a
+  new mode-0600 file instead. A ledger from before the inbox is migrated in place when the product
+  starts; the events it stored earlier have no raw delivery, so they are not exported. The
+  controlled [restore drill](RESTORE.md#local-and-ci-drills) runs this receiver and imports what
+  it exports.
 - **Its networks.** The page offers a configured chain only once the service serves assets there
   (`GET /v1/config`): Base Sepolia appears when its route is deployed, with no product change.
 - **Its custom domain.** The same pinned dstack-ingress as topup's

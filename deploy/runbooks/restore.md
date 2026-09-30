@@ -67,6 +67,11 @@ receiver's store, its database, or an `export_account` taken before the loss):
    `webhook-timestamp`, and `webhook-signature` headers. Only a delivery the service signed is
    imported, so a re-serialized body or a missing header cannot be used.
 
+A merchant running the reference product exports items 4 to 6 with
+`python -m reference_product export-restore-records`, each already the body of its request in
+steps 4 and 5 without `reason` ([Staging reference
+product](../phala.md#staging-reference-product)).
+
 Tell it what it cannot produce is lost: a quote it has no record of is not found, so a payment to
 it is not credited (the chain cannot name it: its address derives from its random id); a spot
 deposit whose delivery it has no record of is re-valued, and its refunds and reversal reference the

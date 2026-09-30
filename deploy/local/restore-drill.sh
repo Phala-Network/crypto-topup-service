@@ -28,6 +28,7 @@ project="topup-restore-drill-$mode-$drill_id"
 export TOPUP_LOCAL_SERVICE_IMAGE="phala-pay:$project"
 export TOPUP_LOCAL_POSTGRES_IMAGE="phala-pay-postgres-walg:$project"
 export TOPUP_LOCAL_DSTACK_IMAGE="phala-pay-dstack-simulator:$project"
+export TOPUP_LOCAL_PRODUCT_IMAGE="phala-pay-reference-product:$project"
 writer_pid=
 samples_file=
 routes_dir=
@@ -35,10 +36,15 @@ admin_dir=
 switch_lsn=
 seed_container="$project-seed"
 # The source runs the service variant of the rendered compose; the replacement boots the
-# restore-check variant (deploy/RESTORE.md).
+# restore-check variant (deploy/RESTORE.md). The controlled drill adds the merchant's product.
 variant=()
+profiles=()
+if [ "$mode" = controlled ]; then
+    profiles=(--profile merchant)
+fi
 dc() {
-    "$root/deploy/local/compose.sh" "${variant[@]}" -p "$project" -f "$drill_compose" "$@"
+    "$root/deploy/local/compose.sh" "${variant[@]}" -p "$project" -f "$drill_compose" \
+        "${profiles[@]}" "$@"
 }
 
 cleanup() {
@@ -52,7 +58,7 @@ cleanup() {
     docker rm -f "$seed_container" >/dev/null 2>&1 || true
     dc --profile tools down --volumes --remove-orphans >/dev/null 2>&1 || true
     docker image rm "$TOPUP_LOCAL_SERVICE_IMAGE" "$TOPUP_LOCAL_POSTGRES_IMAGE" \
-        "$TOPUP_LOCAL_DSTACK_IMAGE" >/dev/null 2>&1 || true
+        "$TOPUP_LOCAL_DSTACK_IMAGE" "$TOPUP_LOCAL_PRODUCT_IMAGE" >/dev/null 2>&1 || true
     if [ -n "$routes_dir" ]; then
         rm -rf "$routes_dir"
     fi
@@ -236,11 +242,13 @@ SQL
 }
 
 # Business consistency after a restore (controlled mode; deploy/runbooks/restore.md): a test-mode
-# account whose key revocation, deposit address rotation, and delivered deposit.credited happen
-# after the last archived WAL, so the restore loses them. The addresses are the deposit address
-# formula's for this account, customer, route factory, and treasury (docs/design/multi-tenant.md
-# §5a); the ids are the deterministic deposit and event ids of the transfer (chain 11155111,
-# transaction 0x5a…5a, receipt position 0).
+# account whose key revocation, deposit address rotation, quote, and delivered deposit.credited
+# happen after the last archived WAL, so the restore loses them. Its merchant is the reference
+# product (deploy/product), whose ledger survives the loss: the operator brings back what the
+# restore lost from the records the product exports, not from records the drill makes up. The
+# addresses are the deposit address formula's for this account, customer, route factory, and
+# treasury (docs/design/multi-tenant.md §5a); the ids are the deterministic deposit and event ids
+# of the transfer (chain 11155111, transaction 0x5a…5a, receipt position 0).
 consistency_account=66666666-6666-6666-6666-666666666666
 consistency_account_id=acct_66666666666666666666666666666666
 consistency_treasury=0x0000000000000000000000000000000000007ea6
@@ -249,6 +257,7 @@ consistency_address_v1=0xcac987989e30d486588c3fcdd059ce71168a8c64
 consistency_salt_v2=0xb284965b0e0bc5759251ed751eee59732336798de341530456cbb3c57373f457
 consistency_address_v2=0xfbf725ff86da685728ec7275c9fc155b4443ea35
 consistency_address_v2_id=da_99999999999999999999999999999992
+consistency_address_v2_created=1790000000
 consistency_event=c371cbc5-44c4-5e44-a795-6242ab4606d9
 # A quote the merchant created after the backup, for another customer; its address is the quote
 # salt formula's for this account, customer, and id over the route factory and treasury.
@@ -316,11 +325,14 @@ else:
 
 webhook_key_path="settlement/$consistency_account_id/test/v1"
 
-# The delivery of the event on stdin as the merchant's receiver records it (Standard Webhooks
-# headers and the raw body), signed `v1a` with the account's test-mode webhook key version 1,
-# which the simulator derives at the service's dstack path (crates/core/src/signer.rs).
+# The delivery of the event on stdin as the service sends it (Standard Webhooks headers and the
+# raw body), signed `v1a` now with the account's test-mode webhook key version 1, which the
+# simulator derives at the service's dstack path (crates/core/src/signer.rs). The drill signs it
+# as the service's delivery worker does because no service runs on the source: `topup run` checks
+# every route's contracts on a chain before it starts, and the drill has none.
 sign_delivery() {
-    local body id timestamp=1790000031
+    local body id timestamp
+    timestamp=$(date +%s)
     body=$(jq -c .)
     id=$(jq -r .id <<<"$body")
     dstack_key pem "$webhook_key_path" >"$admin_dir/webhook.pem"
@@ -355,6 +367,74 @@ print(body + checksum)
 '
 }
 
+# Runs the product's Python in its container, as its service user, with its ledger at /data.
+product_python() {
+    dc exec -T product /opt/venv/bin/python "$@"
+}
+
+# Sends a delivery (sign_delivery's output on stdin) to the merchant's webhook receiver as the
+# service's delivery worker does: the raw body with the three Standard Webhooks headers. Prints
+# the answer's status.
+deliver_webhook() {
+    dc exec -T mock-product python3 -c '
+import json, sys, urllib.error, urllib.request
+delivery = json.load(sys.stdin)
+request = urllib.request.Request(
+    "http://product:8089/webhooks", data=delivery["body"].encode(), method="POST")
+request.add_header("content-type", "application/json")
+for name in ("webhook_id", "webhook_timestamp", "webhook_signature"):
+    request.add_header(name.replace("_", "-"), delivery[name])
+try:
+    response = urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as error:
+    response = error
+print(response.status)
+'
+}
+
+# The product records a service response in its ledger, as it does when the service answers
+# `POST /v1/quotes` or `POST /v1/deposit_addresses`: `product_record quote|deposit_address
+# WORKSPACE`, the response on stdin.
+product_record() {
+    product_python -c '
+import json, sys
+from reference_product.ledger import ProductLedger
+kind, team = sys.argv[1:]
+ledger = ProductLedger("/data/ledger.sqlite3")
+response = json.load(sys.stdin)
+if kind == "quote":
+    ledger.record_quote(team, response)
+else:
+    ledger.record_deposit_address(team, response)
+' "$@"
+}
+
+# The merchant: the reference product's webhook receiver for the consistency account, with the
+# account's test-mode webhook key pinned (a merchant pins it from attestation; no service runs on
+# the source to attest it), and a workspace for each of the drill's customers.
+start_merchant_product() {
+    TOPUP_DRILL_ACCOUNT=$consistency_account_id
+    TOPUP_DRILL_TREASURY=$consistency_treasury
+    TOPUP_DRILL_PRODUCT_API_KEY=$kept_key
+    TOPUP_DRILL_WEBHOOK_PUBLIC_KEY=$(webhook_public_key)
+    openssl genpkey -algorithm ed25519 -out "$admin_dir/driver.pem" 2>/dev/null
+    TOPUP_DRILL_DRIVER_PUBLIC_KEY=$(openssl pkey -in "$admin_dir/driver.pem" -pubout \
+        -outform DER | tail -c 32 | base64)
+    rm -f "$admin_dir/driver.pem"
+    export TOPUP_DRILL_ACCOUNT TOPUP_DRILL_TREASURY TOPUP_DRILL_PRODUCT_API_KEY \
+        TOPUP_DRILL_WEBHOOK_PUBLIC_KEY TOPUP_DRILL_DRIVER_PUBLIC_KEY
+    dc up -d --no-deps product
+    wait_for product product_python -c \
+        "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/healthz')"
+    product_python -c '
+from reference_product.ledger import ProductLedger
+from reference_product.server import register_team
+ledger = ProductLedger("/data/ledger.sqlite3")
+for team in ("restore-drill-da", "restore-drill-qt"):
+    register_team(ledger, team)
+'
+}
+
 seed_consistency_fixture() {
     kept_key=$(new_api_key)
     lost_key=$(new_api_key)
@@ -376,7 +456,7 @@ VALUES ('77777777-7777-7777-7777-777777777773', :'account', false, 11155111, :'t
         'restore drill', '0x', now(), now(), now(), now(), 'key_77777777777777777777777777777771');
 INSERT INTO webhook_endpoints (id, account_id, livemode, url)
 VALUES ('77777777-7777-7777-7777-777777777774', :'account', false,
-        'http://mock-product:8081/webhooks');
+        'http://product:8089/webhooks');
 INSERT INTO customers (id, account_id, livemode, client_reference_id)
 VALUES ('88888888-8888-8888-8888-888888888888', :'account', false, 'restore-drill-da');
 INSERT INTO deposit_addresses (id, account_id, livemode, customer_id, version)
@@ -391,10 +471,10 @@ SQL
 }
 
 # After the last archived WAL: the merchant revokes a key, rotates the customer's deposit address,
-# and receives deposit.credited, whose delivery its receiver records. None of it reaches object
-# storage.
+# creates a quote, and receives deposit.credited, whose delivery its receiver keeps. None of it
+# reaches object storage.
 lose_consistency_changes() {
-    delivered_delivery=$(sign_delivery <<<"$delivered_event")
+    local secret
     dc exec -T postgres psql -U postgres -d topup -v ON_ERROR_STOP=1 \
         -v account="$consistency_account" -v treasury="$consistency_treasury" \
         -v salt="$consistency_salt_v2" -v address="$consistency_address_v2" \
@@ -415,6 +495,33 @@ VALUES (:'event', :'account', false, 'deposit.credited', 'deposit',
         'e2facb38-9b5c-57c6-9f75-01e57d34b8d5', 'system', :'data'::jsonb,
         to_timestamp(1790000000));
 SQL
+    # The event's delivery reaches the merchant's receiver, which verifies it and keeps it as
+    # received in its webhook inbox.
+    delivered_delivery=$(sign_delivery <<<"$delivered_event")
+    test "$(deliver_webhook <<<"$delivered_delivery")" = 204
+    # The product records the rotated address and the quote as the service returned them, each with
+    # a client secret the service's key tags for the account and id (a merchant created the quote,
+    # for which no service runs here).
+    secret=$(dstack_key secret client-secret/v1 "$consistency_account_id" \
+        "$consistency_address_v2_id")
+    jq -n --arg id "$consistency_address_v2_id" --arg address "$consistency_address_v2" \
+        --arg salt "$consistency_salt_v2" --arg treasury "$consistency_treasury" \
+        --arg secret "$secret" --argjson created "$consistency_address_v2_created" \
+        '{id: $id, object: "deposit_address", livemode: false,
+          client_reference_id: "restore-drill-da", version: 2, status: "active", salt: $salt,
+          address: $address, networks: [{chain_id: 11155111, address: $address,
+            treasury: $treasury, assets: [{asset: "pha"}]}],
+          payments: [], metadata: {}, created: $created, retired_at: null,
+          client_secret: $secret}' | product_record deposit_address restore-drill-da
+    secret=$(dstack_key secret client-secret/v1 "$consistency_account_id" "$consistency_quote")
+    jq -n --arg id "$consistency_quote" --arg address "$consistency_quote_address" \
+        --arg treasury "$consistency_treasury" --arg secret "$secret" \
+        '{id: $id, object: "quote", livemode: false, client_reference_id: "restore-drill-qt",
+          amount: 25, currency: "usd", chain_id: 11155111, asset: "pha",
+          amount_atomic: "1000000000000000000", exchange_rate: "0.25000000", address: $address,
+          treasury: $treasury, payment_uri: "ethereum:…", status: "open", expires_at: 1790000900, created: 1790000000, payment: null,
+          deposit: null, client_secret: $secret, metadata: {}}' |
+        product_record quote restore-drill-qt
 }
 
 # One request to topup on the compose network, its body on stdin; prints the status, the
@@ -465,10 +572,24 @@ expect_call() {
     }
 }
 
-# The replacement is frozen; the operator's reconciliation brings back the lost security change
-# and deposit address, and keeps the delivered event as delivered (deploy/runbooks/restore.md).
+# The records the merchant's product exports for the operator (deploy/runbooks/restore.md,
+# step 2), each already the body of its admin request, without the reason.
+merchant_records() {
+    product_python -m reference_product export-restore-records --config /etc/product/config.json
+}
+
+# The replacement is frozen; the operator's reconciliation brings back the lost security change,
+# deposit address, and quote from the merchant's records, and keeps the delivered event as
+# delivered (deploy/runbooks/restore.md).
+#
+# Extension points, in runbook order: a treasury change lost with the restore is re-applied while
+# frozen with `POST /v1/admin/restore/treasuries/verify` after the key revocation below (step 3),
+# from the latest `treasury.*` event object in the product's inbox (lose it in
+# lose_consistency_changes, deliver its event with deliver_webhook); a replayed revision of a
+# delivered event is one more delivery the product keeps and exports, imported with the one below
+# (step 5).
 check_consistency_after_restore() {
-    local answer key
+    local answer key records request secret
     public_origin=$(dc config --format json | jq -er '.services.topup.environment.TOPUP_PUBLIC_ORIGIN')
     answer=$(admin_call GET /v1/admin/restore)
     expect_call 200 "$answer"
@@ -511,32 +632,35 @@ check_consistency_after_restore() {
     call_body "$answer" | jq -e '.status == "revoked"' >/dev/null
     test "$(psql_value "$lost_revoked")" = t
 
-    # The address given out after the backup is re-issued identically from the merchant's record.
+    # The merchant's product exports what it recorded: the address and quote as the service
+    # returned them, and the delivery as its receiver got it.
+    records=$(merchant_records)
+
+    # The address given out after the backup is re-issued identically from the merchant's record,
+    # with its client secret, so the payer's page reads it again.
     test "$(psql_value "SELECT count(*) FROM deposit_addresses WHERE version = 2")" = 0
-    answer=$(admin_call POST /v1/admin/restore/deposit_addresses "$(jq -cn \
-        --arg account "$consistency_account_id" --arg address "$consistency_address_v2" \
-        --arg id "$consistency_address_v2_id" \
-        '{account: $account, livemode: false, client_reference_id: "restore-drill-da",
-          address: $address, id: $id, reason: "restore drill: issued after the backup"}')")
+    request=$(jq -ce --arg id "$consistency_address_v2_id" \
+        '.deposit_addresses | select(length == 1) | .[0] | select(.id == $id)
+         | .reason = "restore drill: issued after the backup"' <<<"$records")
+    answer=$(admin_call POST /v1/admin/restore/deposit_addresses "$request")
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg address "$consistency_address_v2" \
         --arg id "$consistency_address_v2_id" \
         '.reissued and .deposit_address.id == $id and .deposit_address.version == 2
          and .deposit_address.address == $address and .deposit_address.status == "active"' \
         >/dev/null
+    secret=$(jq -er .client_secret <<<"$request")
+    expect_call 200 "$(topup_call GET \
+        "/v1/deposit_addresses/$consistency_address_v2_id?client_secret=$secret" </dev/null)"
 
     # The quote created after the backup is re-issued from the merchant's record with the client
     # secret the service tagged, so the payer's page reads it again; a secret of another quote, or
     # of this one issued to another account, is refused.
-    local quote_request secret refused
-    secret=$(dstack_key secret client-secret/v1 "$consistency_account_id" "$consistency_quote")
-    quote_request=$(jq -cn --arg account "$consistency_account_id" --arg id "$consistency_quote" \
-        --arg address "$consistency_quote_address" --arg secret "$secret" \
-        '{account: $account, livemode: false, id: $id, client_reference_id: "restore-drill-qt",
-          chain_id: 11155111, asset: "pha", amount: 25, amount_atomic: "1000000000000000000",
-          exchange_rate: "0.25000000", address: $address, created: 1790000000,
-          expires_at: 1790000900, client_secret: $secret,
-          reason: "restore drill: quoted after the backup"}')
+    local quote_request refused
+    quote_request=$(jq -ce --arg id "$consistency_quote" \
+        '.quotes | select(length == 1) | .[0] | select(.id == $id)
+         | .reason = "restore drill: quoted after the backup"' <<<"$records")
+    secret=$(jq -r .client_secret <<<"$quote_request")
     for refused in "$consistency_account_id qt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
         "acct_restoredrillother $consistency_quote"; do
         # shellcheck disable=SC2086 # the account and the quote id, split on purpose
@@ -554,12 +678,14 @@ check_consistency_after_restore() {
     test "$(psql_value "SELECT backfilled FROM addresses \
         WHERE address = '$consistency_quote_address'")" = f
 
-    # The event delivered after the backup is imported from its signed delivery, as delivered, and
-    # never sent again; a body changed after signing is refused and changes nothing.
+    # The event delivered after the backup is imported from the delivery the merchant's receiver
+    # kept, byte for byte as the service sent it, as delivered, and never sent again; a body
+    # changed after signing is refused and changes nothing.
     test "$(psql_value "SELECT count(*) FROM events WHERE id = '$consistency_event'")" = 0
-    answer=$(admin_call POST /v1/admin/restore/events \
-        "$(jq -c '{deliveries: [.], reason: "restore drill: delivered after the backup"}' \
-            <<<"$delivered_delivery")")
+    request=$(jq -ce --argjson delivered "$delivered_delivery" \
+        '.events | select(length == 1) | .[0] | select(.deliveries == [$delivered])
+         | .reason = "restore drill: delivered after the backup"' <<<"$records")
+    answer=$(admin_call POST /v1/admin/restore/events "$request")
     expect_call 200 "$answer"
     call_body "$answer" | jq -e '.data == [{id: "evt_c371cbc544c45e44a7956242ab4606d9",
         result: "imported"}]' >/dev/null
@@ -568,8 +694,8 @@ check_consistency_after_restore() {
         FROM restore_delivered_credits WHERE deposit_id = 'e2facb38-9b5c-57c6-9f75-01e57d34b8d5'")" \
         = '25|25000000|spot'
     answer=$(admin_call POST /v1/admin/restore/events \
-        "$(jq -c '.body |= (fromjson | .data.object.amount = 26 | tojson)
-            | {deliveries: [.], reason: "restore drill: re-valued"}' <<<"$delivered_delivery")")
+        "$(jq -c '.deliveries[0].body |= (fromjson | .data.object.amount = 26 | tojson)
+            | .reason = "restore drill: re-valued"' <<<"$request")")
     expect_call 400 "$answer"
     call_body "$answer" | jq -e '.error.param == "deliveries"' >/dev/null
     test "$(psql_value "SELECT (data = '$(jq -c .data <<<"$delivered_event")'::jsonb)::text \
@@ -746,6 +872,9 @@ dc --profile tools config --format json |
 }
 
 dc build postgres dstack-simulator topup
+if [ "$mode" = controlled ]; then
+    dc build product
+fi
 seed_drill_volumes
 dc up -d keys s3-init mock-product
 wait_for keys dc exec -T keys topup keys --check \
@@ -767,6 +896,7 @@ dc run --rm --no-deps migrate >/dev/null
 seed_reconciliation_fixture
 if [ "$mode" = controlled ]; then
     seed_consistency_fixture
+    start_merchant_product
 fi
 
 # WAL-G 3.0.9 `backup-list --json` has `backup_name` and `time`; the newest is the one just pushed.
@@ -949,6 +1079,6 @@ printf 'upload_latency_seconds=%s\n' "$upload_latency_seconds"
 printf 'restored_timeline=%s storage_unchanged_by_restore_check=true\n' "$restored_timeline"
 printf 'elapsed_rto_seconds=%s\n' "$rto_elapsed"
 if [ "$mode" = controlled ]; then
-    echo 'restore_mode=frozen, merchant reads refused; attested by the admin API; lost key revoked again; lost deposit address and quote re-issued identically; signed delivered event and its credit kept as delivered'
+    echo 'restore_mode=frozen, merchant reads refused; attested by the admin API; lost key revoked again; lost deposit address and quote re-issued identically from the product'"'"'s records; the delivery its receiver kept imported, its credit kept as delivered'
 fi
 echo "restore drill $mode passed"

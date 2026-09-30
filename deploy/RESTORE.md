@@ -329,19 +329,24 @@ local object storage: `controlled` forces a WAL switch and requires the last mar
 wrong key fails the restore command (`126`), then boot the whole restore-check variant on an empty
 volume with read-only credentials and require promotion with archiving off, an `ok` report with a
 complete reconciliation, `503` on writes, the RPO and an RTO of at most 3600 seconds, and an
-unchanged object listing. `controlled` also runs the business-consistency scenario: after the last
-archived WAL, and before PostgreSQL is killed (a clean shutdown would archive them), the source
-revokes an API key, rotates a customer's deposit address, and records a
-delivered `deposit.credited`, and those writes are lost with the source; the merchant's records
-also hold a quote created after the backup and its client secret. The drill requires that the
+unchanged object listing. `controlled` also runs the business-consistency scenario, with the
+reference product ([Staging reference product](phala.md#staging-reference-product)) as the
+account's merchant: after the last archived WAL, and before PostgreSQL is killed (a clean shutdown
+would archive them), the source revokes an API key, rotates a customer's deposit address, and
+records a `deposit.credited`, and those writes are lost with the source. The event's delivery,
+signed with the account's webhook key as the service signs it (no service runs on the source: it
+needs a chain), reaches the product's webhook receiver, which verifies it and keeps it in its
+inbox; the product's ledger also records the rotated address and a quote created after the backup,
+as the service returns them, with their client secrets. After the restore the operator imports
+exactly what the product's `export-restore-records` prints. The drill requires that the
 replacement is frozen (merchant writes and reads `503 service_restoring`, `GET /v1/admin/restore`
 `frozen`), that [Restore](#restore) step 5's admin attestation answers where the merchant's does
 not, with the account's webhook key, that the lost key is refused like every key while frozen and
-is revoked again by prefix, that the lost address is re-issued with the same address and `da_` id,
+is revoked again by prefix, that the lost address is re-issued with the same address and `da_` id and its client secret,
 that the quote is re-issued at its own address with its client secret (the payer's read works
 again) while a secret of another quote, or of this quote issued to another account, is refused,
-that the delivered event's signed delivery is
-imported exactly as delivered with no delivery and its credit kept for the deposit, while a body
+that the delivery the product kept is exported byte
+for byte and imported exactly as delivered with no delivery and its credit kept for the deposit, while a body
 changed after signing is refused and changes nothing, and that the unfreeze is refused while no
 chain is rescanned. The [Restore drill](../.github/workflows/restore-drill.yml) workflow runs
 it every Monday at 03:17 UTC and on demand; the CI `deployment` job runs the bounded WAL-G and

@@ -721,9 +721,13 @@ def handle_webhook(headers: dict[str, str], raw_body: bytes) -> int:
     except SignatureError:
         return 400
     with db.transaction():
+        if inbox.contains(event.id):  # a redelivery: the first is kept and applied already
+            return 204
         if event.type.startswith("deposit."):
             apply_deposit(event.data["object"])  # every deposit.* event, the balance rule (§2.3)
-        store_once(event.id, event.type, event.data)  # notifications and history
+        # The delivery as received, for history and for a service restore (§5.12): the raw body
+        # bytes and the webhook-id, webhook-timestamp, and webhook-signature headers.
+        inbox.insert(event.id, event.type, raw_body, headers)
     return 204  # only after the commit
 
 def apply_deposit(snapshot: dict) -> None:
@@ -745,9 +749,9 @@ def apply_deposit(snapshot: dict) -> None:
 `phala_pay`'s `webhooks.construct_event` (Quickstart) is the same verification with a typed
 event. [sdk/examples/fastapi_app.py](../sdk/examples/fastapi_app.py) (`apply_deposit`) is this in
 full on SQLite; [deploy/product/reference_product/fulfillment.py](../deploy/product/reference_product/fulfillment.py)
-adds holds and refunds, with its tests in [deploy/product/tests](../deploy/product/tests). A
-repeat of a deposit's credit with a different `amount` follows only a service restore: keep the
-first amount and report it (obligation 5).
+adds holds, refunds, and the webhook inbox, with its tests in
+[deploy/product/tests](../deploy/product/tests). A repeat of a deposit's credit with a different
+`amount` follows only a service restore: keep the first amount and report it (obligation 5).
 
 ### 2.3 Obligations
 
@@ -758,6 +762,7 @@ first amount and report it (obligation 5).
 | 3 | Answer `2xx` only after that commit, and quickly (the service waits 20 s); do slow work (emails) from a queue. | Anything else is retried, with full-jitter backoff up to 1 h, forever. |
 | 4 | Refuse by holding (§2.4), never by failing the delivery. | A refused credit answered `5xx` is retried forever. |
 | 5 | On a repeat with a different `amount`, keep the first credit and report it to the operator. | Only a service restored from backup re-prices a spot deposit, and only one whose delivery you did not give the operator ([architecture §14](architecture.md#14-configuration-and-deployment)); the deliveries you give the operator after a restore are kept as delivered, their credit stands, and they are not sent again (§5.12). |
+| 6 | Keep each delivery as your receiver got it, once per `webhook-id`: the raw body bytes and the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers, in the same transaction as its credit. | After a service restore only a delivery the service signed can be imported, so a parsed or re-serialized event cannot prove the credit you were told of (§5.12). |
 | 6 | Apply `deposit.refunded` and `deposit.reversed` by the balance rule below, from the snapshot, per deposit, serially (a held credit was never applied, so nothing is taken back from it). | A credit is made about 30 seconds after paying, before finality; a reorg that drops the payment's transaction is rare and recoverable only this way. A partial refund takes back its share of the credit. |
 
 #### The balance rule and event ordering
@@ -1579,8 +1584,15 @@ own records since then, for:
   `deposit.credited` told you stands: the deposit keeps its `amount`, and its refunds and reversal
   are computed from it, not from a re-valued amount.
 
-Keep these records (the raw deliveries you verify for obligation 1 of §2.3, your quotes, and your
-keys' prefixes and last four characters). A quote or a delivered credit you cannot produce is lost
+Keep these records from the start (the raw deliveries of obligation 6 of §2.3, every
+`POST /v1/quotes` and deposit address response whole, and your keys' prefixes and last four
+characters). A delivery counts only byte for byte, with its three headers: store the body before
+parsing it, in the transaction that applies it. A `client_secret` is a capability to read its
+quote or address: store it like a credential (restricted access, never logged), and send it to the
+operator only over the incident's channel. The reference product keeps all three in its ledger
+and prints them in the operator's request bodies with `python -m reference_product
+export-restore-records` ([deploy/phala.md](../deploy/phala.md#staging-reference-product)). A quote
+or a delivered credit you cannot produce is lost
 with the restore: a payment to a lost quote's address is not found, and a spot deposit whose
 `deposit.credited` you cannot produce is re-valued. Keys and endpoints you created after the restore point are
 gone: create them again after the freeze lifts. So are refunds you created or marked paid after

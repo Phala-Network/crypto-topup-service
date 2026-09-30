@@ -403,8 +403,9 @@ def create_quote(
     idempotency_key: str | None = None,
 ) -> Quote:
     """Creates a quote for the workspace on a configured chain (the first by default), in `asset`
-    (the chain's first test token by default), and records its address; a repeat with the same
-    `idempotency_key` returns the first quote.
+    (the chain's first test token by default), and records it as the service returned it, its
+    `client_secret` included, for a service restore; a repeat with the same `idempotency_key`
+    returns the first quote.
 
     The client recomputes the address from the pinned forwarder, the chain's treasury, and the
     quote id, and raises before returning an address the product did not derive.
@@ -417,7 +418,7 @@ def create_quote(
         asset=asset or chain.test_token.symbol.lower(),
         idempotency_key=idempotency_key,
     )
-    ledger.record_quote_address(quote.address, team, quote.id)
+    ledger.record_quote(team, quote.to_dict())
     return quote
 
 

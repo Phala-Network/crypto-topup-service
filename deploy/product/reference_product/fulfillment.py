@@ -12,6 +12,12 @@ The service credits a deposit once it is priced and screened, and tells the prod
    per-deposit or per-period cap); support later collects a refund address and requests a refund;
 4. answer `2xx` only after that commit, so a failure is retried by the service.
 
+Every verified delivery is kept once, by its `webhook-id`, in the ledger's webhook inbox: its raw
+body and Standard Webhooks headers as received, in the same transaction as its ledger effect. A
+redelivery changes nothing; one with another body (only a service restored from backup sends one)
+keeps the first and is logged for the operator. The kept deliveries are the evidence a service
+restore imports (reference_product.restore_records).
+
 `deposit.refunded` and `deposit.reversed` take a credit back. Every `deposit.*` event carries the
 whole deposit with cumulative, service-computed claw-backs (`amount_refunded`, the refunded share
 of the credit; `amount_reversed`, all of it once reversed), and events may arrive in any order, so
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -48,11 +55,19 @@ from topup_sdk import (
     CreditedDeposit,
     FulfillmentError,
     SignatureError,
+    WebhookEvent,
     verify_webhook,
 )
 
 from .config import MissingProductKeyError, ProductConfig
-from .ledger import ORDER_FLOW_CODE, ORDER_PROVIDER, DepositView, ProductLedger, StoredOrder
+from .ledger import (
+    ORDER_FLOW_CODE,
+    ORDER_PROVIDER,
+    Delivery,
+    DepositView,
+    ProductLedger,
+    StoredOrder,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -129,33 +144,65 @@ class Fulfillment:
             )
         except SignatureError:
             return Answer(HTTPStatus.BAD_REQUEST)
+        lowered = {name.lower(): value.strip() for name, value in headers.items()}
+        delivery = Delivery(
+            event.id, lowered["webhook-timestamp"], lowered["webhook-signature"], body
+        )
+        # SQLite's BEGIN IMMEDIATE serializes every writer, so deliveries of one deposit apply one
+        # at a time. On PostgreSQL, lock the deposit's snapshot row and the team row
+        # (SELECT ... FOR UPDATE) before the per-period cap sum so concurrent credits cannot
+        # both pass it, and keep provider_order_id unique across teams for this flow; the inbox's
+        # primary key makes a concurrent redelivery's insert fail and roll back its effect.
+        with self.ledger.transaction() as db:
+            stored = ProductLedger.stored_body(db, event.id)
+            if stored is not None:
+                if stored and stored != body:
+                    LOG.error(
+                        "webhook %s %s repeats with another body; the first is kept",
+                        event.type,
+                        event.id,
+                    )
+                return Answer(HTTPStatus.NO_CONTENT)
+            state = self._apply(db, event)
+            self.ledger.record_delivery(db, delivery, event.type, event.data, state)
+        LOG.info("webhook %s %s", event.type, (event.object or {}).get("id", ""))
+        return Answer(HTTPStatus.NO_CONTENT)
+
+    def _apply(self, db: sqlite3.Connection, event: WebhookEvent) -> str:
+        """Applies a verified event's ledger effect in `db`'s transaction; returns its inbox
+        state, `processed`, or `ignored` for a malformed deposit."""
         if event.type == CREDITED_EVENT:
             try:
                 credit = CreditedDeposit.from_event(event)
             except FulfillmentError as error:
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
-            else:
-                self.fulfill(credit, event.object or {})
+                return "ignored"
+            self._fulfill(db, credit, event.object or {})
         elif event.type.startswith("deposit."):
             snapshot = deposit_view(event.object or {})
             if snapshot is None:
                 LOG.warning("ignoring %s %s: malformed deposit", event.type, event.id)
-            else:
-                self.settle(*snapshot, reason=event.type)
-        if self.ledger.record_event(event.id, event.type, event.data):
-            LOG.info("webhook %s %s", event.type, (event.object or {}).get("id", ""))
-        return Answer(HTTPStatus.NO_CONTENT)
+                return "ignored"
+            self._settle(db, *snapshot, reason=event.type)
+        return "processed"
 
     def fulfill(self, credit: CreditedDeposit, deposit: Mapping[str, Any] | None = None) -> str:
         """Credits the deposit once and returns its order status (`accepted` or `held`), or
         `reversed` when an earlier snapshot showed the deposit reversed, leaving nothing to credit.
         `deposit` is the event's deposit object, whose claw-backs apply to the credit at once."""
+        with self.ledger.transaction() as db:
+            return self._fulfill(db, credit, deposit)
+
+    def _fulfill(
+        self, db: sqlite3.Connection, credit: CreditedDeposit, deposit: Mapping[str, Any] | None
+    ) -> str:
         key = credit.fulfillment_key
         view = deposit_view(deposit or {}) or (key, DepositView("credited", 0, 0))
-        return self.settle(key, view[1], credit=credit, reason=CREDITED_EVENT) or "reversed"
+        return self._settle(db, key, view[1], credit=credit, reason=CREDITED_EVENT) or "reversed"
 
-    def settle(
+    def _settle(
         self,
+        db: sqlite3.Connection,
         key: str,
         snapshot: DepositView,
         *,
@@ -166,44 +213,39 @@ class Fulfillment:
         with `credit`, first credits the deposit when it has no order. Returns the order status,
         or `None` when the deposit has no order."""
         now = time.time()
-        # SQLite's BEGIN IMMEDIATE serializes every writer, so deliveries of one deposit apply one
-        # at a time. On PostgreSQL, lock the deposit's snapshot row and the team row
-        # (SELECT ... FOR UPDATE) before the per-period cap sum so concurrent credits cannot
-        # both pass it, and keep provider_order_id unique across teams for this flow.
-        with self.ledger.transaction() as db:
-            view = ProductLedger.merge_snapshot(db, key, snapshot)
+        view = ProductLedger.merge_snapshot(db, key, snapshot)
+        order = ProductLedger._find_order(db, key)
+        if order is None:
+            if credit is None or view.status == "reversed":
+                return None
+            order_id, status = self._credit(db, credit, now)
             order = ProductLedger._find_order(db, key)
-            if order is None:
-                if credit is None or view.status == "reversed":
-                    return None
-                order_id, status = self._credit(db, credit, now)
-                order = ProductLedger._find_order(db, key)
-                assert order is not None
-            else:
-                order_id, status = order.id, order.status
-                stored = parse_decimal(order.payload.get("amount_minor"))
-                if credit is not None and stored is not None and stored != credit.amount:
-                    # Only a service restored from backup re-prices a spot deposit: keep the first
-                    # credit and raise it with the operator.
-                    LOG.error(
-                        "deposit.credited %s repeats with %s minor, first credited %s",
-                        key,
-                        credit.amount,
-                        stored,
-                    )
-            if status == "accepted":
-                credited, net = ProductLedger.order_amounts(db, order_id)
-                nets_to = view.contribution(credited)
-                change = nets_to - net
-                if change:
-                    db.execute(
-                        "INSERT INTO credit_adjustments "
-                        "(id, team_id, order_id, amount_minor, reason, created_at) "
-                        "SELECT ?, team_id, id, ?, ?, ? FROM orders WHERE id = ?",
-                        (f"adj_{uuid.uuid4().hex}", change, reason, now, order_id),
-                    )
-                    LOG.info("fulfillment %s adjusted %+d by %s", key, change, reason)
-                self._settle_bonus(db, order, nets_to, reason, now)
+            assert order is not None
+        else:
+            order_id, status = order.id, order.status
+            stored = parse_decimal(order.payload.get("amount_minor"))
+            if credit is not None and stored is not None and stored != credit.amount:
+                # Only a service restored from backup re-prices a spot deposit: keep the first
+                # credit and raise it with the operator.
+                LOG.error(
+                    "deposit.credited %s repeats with %s minor, first credited %s",
+                    key,
+                    credit.amount,
+                    stored,
+                )
+        if status == "accepted":
+            credited, net = ProductLedger.order_amounts(db, order_id)
+            nets_to = view.contribution(credited)
+            change = nets_to - net
+            if change:
+                db.execute(
+                    "INSERT INTO credit_adjustments "
+                    "(id, team_id, order_id, amount_minor, reason, created_at) "
+                    "SELECT ?, team_id, id, ?, ?, ? FROM orders WHERE id = ?",
+                    (f"adj_{uuid.uuid4().hex}", change, reason, now, order_id),
+                )
+                LOG.info("fulfillment %s adjusted %+d by %s", key, change, reason)
+            self._settle_bonus(db, order, nets_to, reason, now)
         return status
 
     @staticmethod
