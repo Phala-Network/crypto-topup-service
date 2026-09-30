@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # `docker compose` for the local stacks (make up, the sandbox, the restore drill): the attested
 # compose rendered by deploy/render.sh exactly as for a CVM, under the local project's name, then
-# the local overlay (deploy/local/docker-compose.yml) and any further `-f` files the caller passes.
+# the local overlay (deploy/local/docker-compose.yml with local/service.yml or
+# local/restore-check.yml) and any further `-f` files the caller passes.
 # The overlay builds the images from this checkout, so the rendered digests are placeholders.
 # --restore-check renders the restore verification variant (deploy/RESTORE.md), as the restore
 # drill's replacement boots it. --environment-dir is the environment to render (default: the one
@@ -36,9 +37,9 @@ printf '%s\n' '{"phala-pay": "phala-pay-local@sha256:111111111111111111111111111
   "postgres-walg": "phala-pay-postgres-walg-local@sha256:2222222222222222222222222222222222222222222222222222222222222222"}' \
     >"$tmp/images.json"
 if ((${#variant[@]})); then
-    origin=(--origin https://topup.localhost)
+    origin=(--origin https://topup.localhost) overlay=restore-check.yml
 else
-    origin=(--gateway-domain gateway.localhost)
+    origin=(--gateway-domain gateway.localhost) overlay=service.yml
 fi
 "$root/deploy/render.sh" "${variant[@]}" --images "$tmp/images.json" "${origin[@]}" \
     --project-name "$project" "$environment_dir" >"$tmp/rendered.yml"
@@ -50,4 +51,4 @@ env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u RESTORE_AWS_ACCESS_KEY_ID \
     RESTORE_AWS_ACCESS_KEY_ID="${TOPUP_LOCAL_RESTORE_S3_ACCESS_KEY_ID:-topup-restore-read}" \
     RESTORE_AWS_SECRET_ACCESS_KEY="${TOPUP_LOCAL_RESTORE_S3_SECRET_ACCESS_KEY:-topup-restore-read-secret}" \
     docker compose -p "$project" --project-directory "$root/deploy" -f "$tmp/rendered.yml" \
-    -f "$root/deploy/local/docker-compose.yml" "$@"
+    -f "$root/deploy/local/docker-compose.yml" -f "$root/deploy/local/$overlay" "$@"

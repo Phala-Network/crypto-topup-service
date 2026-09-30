@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
+# The commit compiled in as the Sentry release (Dockerfile); both builds and the push take it.
+source_commit=${SOURCE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
 platform=${PLATFORM:-linux/amd64}
 # DOCKERFILE (relative to the repository root) selects another image; default the phala-pay one.
 dockerfile="$root/${DOCKERFILE:-Dockerfile}"
@@ -23,6 +25,7 @@ build() {
         --no-cache \
         --platform "$platform" \
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+        --build-arg "SOURCE_COMMIT=$source_commit" \
         --provenance=false \
         --sbom=false \
         --file "$dockerfile" \
@@ -66,6 +69,7 @@ if [ -n "${PUBLISH_IMAGE:-}" ]; then
         --no-cache \
         --platform "$platform" \
         --build-arg "SOURCE_DATE_EPOCH=$source_date_epoch" \
+        --build-arg "SOURCE_COMMIT=$source_commit" \
         --provenance=false \
         --sbom=false \
         --file "$dockerfile" \

@@ -1,24 +1,42 @@
-# Restore-drill overlay, applied after deploy/docker-compose.yml and deploy/local/docker-compose.yml;
-# used locally and on CI alike.
+# Restore-drill overlay, applied after the local overlays by deploy/local/compose.sh, in both
+# variants; used locally and on CI alike.
 #
 # The org's self-hosted CI runner is a container that drives the host Docker daemon through its
 # socket, so the daemon cannot see the checkout: bind-mounting a workspace path fails with "path
 # does not exist". The drill therefore never bind-mounts. It creates these project volumes and
 # fills them with `docker cp`, which streams through the API. `!override` (Compose 2.24.4 or
 # newer) replaces each service's whole volume list, because the local overlay mounts host paths
-# that a named volume cannot shadow. PostgreSQL's init script is an inline config, which Compose
-# copies into the container, so it needs no volume here.
+# that a named volume cannot shadow. The configuration and PostgreSQL's init script are inline
+# configs, which Compose copies into the containers, so they need no volume here.
 #
 # The drill talks to the stack only through `docker compose exec` and the compose network, so it
 # publishes no host ports; concurrent drills and sandbox runs on one host cannot collide.
 services:
   topup:
-    volumes: !override
-      - dstack_socket:/var/run
-      - db_app:/run/db-app:ro
-      - observability:/run/topup-observability:ro
-      - drill_routes:/etc/topup/routes:ro
     ports: !reset []
+
+  # WAL-G against the backup prefix, for the drill's own commands (profile `tools`): the object
+  # listing, the wrong-key restore, and the write probe. Never part of a CVM's compose.
+  restore:
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
+    profiles: [tools]
+    user: postgres
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    environment:
+      WALG_S3_PREFIX: s3://topup-backups/postgres
+      AWS_ENDPOINT: http://s3:3900
+      AWS_REGION: us-east-1
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      # The source's read-write key; the drill switches it to the replacement's read-only key.
+      AWS_ACCESS_KEY_ID: ${TOPUP_DRILL_S3_ACCESS_KEY_ID:-topup-s3}
+      AWS_SECRET_ACCESS_KEY: ${TOPUP_DRILL_S3_SECRET_ACCESS_KEY:-topup-s3-secret-key}
+      WALG_LIBSODIUM_KEY_PATH: /run/wal-g/backup.key
+      WALG_LIBSODIUM_KEY_TRANSFORM: hex
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - walg_key:/run/wal-g:ro
+    restart: "no"
 
   # The drill's shell on the compose network: it calls topup and the product, and derives from the
   # simulator what the service derives (webhook key, client secrets).
@@ -46,15 +64,7 @@ services:
       - drill_product_ledger:/data
     restart: "no"
 
-  restore-check:
-    volumes: !override
-      - dstack_socket:/var/run
-      - db_owner:/run/db-owner:ro
-      - observability:/run/topup-observability
-      - drill_routes:/etc/topup/routes:ro
-
 volumes:
-  drill_routes:
   drill_mock_product:
   drill_product_ledger:
 

@@ -9,24 +9,27 @@ check="$root/deploy/check-route-modes.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# compose FILE ROUTE:LIVEMODE:CHAIN...: a compose embedding one route config per argument.
+# compose FILE ROUTE:LIVEMODE:CHAIN...: a rendered compose whose inline topup.yaml lists one route
+# per argument. Its `environment` always claims production: the check must use Deploy's.
 compose() {
     local file=$1 spec route livemode chain
     shift
     {
         echo "services:"
         echo "  topup:"
-        echo "    command: [run, --route, /etc/topup/routes/a.yaml]"
+        echo "    command: [topup, run, --config, /etc/topup/topup.yaml]"
         echo "configs:"
+        echo "  topup_0123456789ab:"
+        echo "    content: |"
+        echo "      environment: production"
+        echo "      routes:"
         for spec in "$@"; do
             IFS=: read -r route livemode chain <<<"$spec"
-            echo "  topup_route_$route:"
-            echo "    content: |"
-            echo "      route: $route"
-            echo "      version: 1"
-            [[ "$livemode" == omit ]] || echo "      livemode: $livemode"
-            echo "      chain:"
-            echo "        chain_id: $chain"
+            echo "        - route: $route"
+            echo "          version: 1"
+            [[ "$livemode" == omit ]] || echo "          livemode: $livemode"
+            echo "          chain:"
+            echo "            chain_id: $chain"
         done
     } >"$file"
 }

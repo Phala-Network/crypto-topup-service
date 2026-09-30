@@ -1,6 +1,10 @@
 FROM rust:1.98.1-slim-trixie@sha256:f47a8de237dcbb0b0ce1099901e60a89728e3d51f24e664b40e947171538ade7 AS builder
 
 ARG SOURCE_DATE_EPOCH=0
+# The commit the image is built from, compiled in as the Sentry release (unset: none).
+ARG SOURCE_COMMIT=""
+# Bounds the compiler's parallelism on a shared host; the binary does not depend on it.
+ARG CARGO_BUILD_JOBS=""
 ENV CARGO_INCREMENTAL=0 \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
@@ -8,9 +12,9 @@ WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .sqlx ./.sqlx
 COPY crates ./crates
-RUN SQLX_OFFLINE=true \
+RUN SQLX_OFFLINE=true SOURCE_COMMIT="$SOURCE_COMMIT" \
     RUSTFLAGS="--remap-path-prefix=/workspace=. -C link-arg=-Wl,--build-id=none" \
-    cargo build --release --locked -p topup
+    cargo build --release --locked -p topup ${CARGO_BUILD_JOBS:+--jobs "$CARGO_BUILD_JOBS"}
 
 # Stripe's smokescreen, the webhook egress proxy (docs/design/multi-tenant.md §8), which the
 # compose runs from this image as the `smokescreen` sidecar, so it is pinned and attested with

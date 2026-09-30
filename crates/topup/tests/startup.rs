@@ -90,20 +90,14 @@ async fn run_refuses_to_start_when_the_contracts_differ_from_the_route_or_build(
     let original = cast(&["code", &format!("{factory:#x}"), "--rpc-url", &rpc_url])?;
     set_code(&rpc_url, factory, &format!("{original}00"))?;
     let path = std::env::temp_dir().join(format!("topup-startup-{}.yaml", uuid::Uuid::new_v4()));
-    std::fs::write(&path, route_yaml(&anvil, factory, TREASURY))?;
+    std::fs::write(&path, config_yaml(&anvil, factory, TREASURY))?;
     let output = Command::new(env!("CARGO_BIN_EXE_topup"))
-        .args(["run", "--route"])
+        .args(["run", "--config"])
         .arg(&path)
         .env_clear()
         // Complete runtime configuration, with a database nobody listens on: the contract check
         // must refuse before the service connects to it.
         .env("DATABASE_URL", "postgres://topup_service@127.0.0.1:1/topup")
-        .env("TOPUP_ADMIN_KID", "admin/v1")
-        .env(
-            "TOPUP_ADMIN_PUBLIC_KEY",
-            "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
-        )
-        .env("TOPUP_PUBLIC_ORIGIN", "http://127.0.0.1:8080")
         .output();
     std::fs::remove_file(&path)?;
     let output = output.context("start topup run")?;
@@ -143,6 +137,27 @@ fn route_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
             &format!("{factory:#x}"),
         )
         .replace("0x0000000000000000000000000000000000007EA5", treasury)
+}
+
+/// The service configuration of `route_yaml`, its two providers configured by id.
+fn config_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
+    let primary = anvil.rpc_url.clone();
+    let secondary = primary.replace("127.0.0.1", "localhost");
+    let route = FIXTURE
+        .replace(
+            "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
+            &format!("{factory:#x}"),
+        )
+        .replace("0x0000000000000000000000000000000000007EA5", treasury)
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "environment: test\npublic_origin: http://127.0.0.1:8080\nadmin_key:\n  id: admin/v1\n  \
+         public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\nrpc_providers:\n  \
+         alchemy: {primary}\n  quicknode: {secondary}\nroutes:\n  -\n{route}\n"
+    )
 }
 
 fn implementation_of(rpc_url: &str, factory: Address) -> Result<Address> {

@@ -2,33 +2,33 @@
 # CVM rehearsal: runs the staging deployment artifact the way a CVM would, without Phala Cloud.
 #
 # 1. Builds the three images and pushes them to a throwaway loopback registry, so the composes are
-#    rendered by deploy/render-compose.sh with immutable repository@sha256 references.
+#    rendered by deploy/render.sh with immutable repository@sha256 references.
 # 2. Starts Anvil with Sepolia's chain id, installs the canonical Multicall3 that Sepolia carries
 #    (install_anvil_multicall3), and deploys the forwarder factory with the A2 scripts
 #    (deploy/contracts: canonical proxy, mock Safe checked by verify-safe.sh, deploy-factory.sh,
 #    verify-deployment.sh), then the test token and sanctions oracle (deploy-test-contracts.sh).
 #    A second Anvil with Base Sepolia's chain id gets the same, without the Safe, for the Base
 #    Sepolia routes.
-# 3. Writes the staging routes with those addresses, inlines them into the compose exactly where the
-#    committed routes live, and renders the compose with the rehearsal's settings and the staging
-#    domain, as Deploy provisions. dstack-ingress does not run (cvm-rehearsal.compose.yml).
-# 4. Writes the unsealed `.env` with deploy/write-staging-env.sh, as Deploy does (exactly
-#    the names of deploy/staging.env.example, all empty), and runs `docker compose up` on the
-#    rendered file plus cvm-rehearsal.compose.yml (simulator, S3, Anvil), as dstack's app-compose
-#    runner does. Without storage credentials PostgreSQL must refuse to initialize (the prefix
-#    cannot be listed). Re-rendered with a changed setting (an upgrade), every service must be
-#    recreated. Then it seals the secrets (the owner's `envs update`), and PostgreSQL initializes
-#    from the provably empty prefix.
+# 3. Writes a staging-shaped environment directory: Phala's staging topup.yaml with the committed
+#    routes on those addresses and on the Anvils' providers (`topup config show` and jq), and the
+#    staging overlay with local object storage. It renders it as Deploy provisions.
+#    dstack-ingress does not run (cvm-rehearsal.compose.yml).
+# 4. Writes the unsealed `.env` as Deploy does (the rendered compose's sealed names, all empty),
+#    and runs `docker compose up` on the rendered file plus cvm-rehearsal.compose.yml (simulator,
+#    S3, Anvil), as dstack's app-compose runner does. Without storage credentials PostgreSQL must
+#    refuse to initialize (the prefix cannot be listed). Then it seals the secrets (the owner's
+#    `envs update`), and PostgreSQL initializes from the provably empty prefix. Re-rendered with
+#    a changed topup.yaml (an upgrade), topup must be recreated with the new configuration, and
+#    PostgreSQL and `keys` must not.
 # 5. Asserts: migrate exits 0, topup passes its startup contract check and serves /healthz, the
 #    attestation endpoint answers an account's API key through the simulator and binds the account's
 #    webhook key (matching `topup attest`), Sentry reporting is off with the empty DSN, and WAL
 #    archiving writes a fresh backup marker; the derived key and database credentials are mode 0600
 #    files owned by PostgreSQL and in no container environment.
-# 6. Runs the reference-product CVM the same way: deploy/product/docker-compose.yml rendered by
-#    deploy/product/render-compose.sh with the pushed image and a provisional public URL, an
-#    unsealed env from `write-staging-env.sh --product`, then the compose re-rendered with the real
-#    public URL (the container must be recreated with the new config), then the sealed product
-#    seed. One quote-first deposit, driven from another container with the deposit
+# 6. Runs the reference-product CVM the same way: its staging environment rendered with the pushed
+#    image, an unsealed env of its sealed names, the rehearsal's config (its chain, account, and
+#    compose-network URLs) mounted under its digest, first with a provisional public URL and then
+#    the real one (the container must be recreated with the new config), then the sealed key. One quote-first deposit, driven from another container with the deposit
 #    driver (`python -m reference_product deposit`), is credited end to end and recorded
 #    once in the product's ledger. Then it removes everything and asserts that no container,
 #    volume, network, or image of the run is left.
@@ -64,9 +64,19 @@ REHEARSAL_BASE_SEPOLIA_ANVIL_PORT=$(free_port)
 registry_port=$(free_port)
 rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
 base_rpc_url="http://127.0.0.1:$REHEARSAL_BASE_SEPOLIA_ANVIL_PORT"
-mapfile -t env_names < <(awk -F= '/^[[:space:]]*($|#)/ { next } { print $1 }' \
-    "$root/deploy/staging.env.example")
+# The sealed names of the rendered compose (filled in after the first render).
+env_names=()
 local_images=()
+# The rehearsal's environment directory (deploy/render.sh ENV_DIR).
+environment="$tmp/environment"
+mkdir "$environment"
+{
+    sed -n '/^services:$/,$p' "$root/deploy/environments/phala-network/staging/topup/compose.yaml" |
+        sed -e 's|WALG_S3_PREFIX: .*|WALG_S3_PREFIX: s3://topup-backups/postgres|' \
+            -e 's|AWS_ENDPOINT: .*|AWS_ENDPOINT: http://s3:3900|' \
+            -e 's|AWS_REGION: .*|AWS_REGION: us-east-1|'
+} >"$environment/compose.yaml"
+cp "$root/deploy/environments/phala-network/staging/topup/topup.yaml" "$environment/topup.yaml"
 
 # Compose as the CVM runs it: the rendered file with its `.env`. The staging names are removed
 # from the calling environment so a developer's or CI's AWS_* or TOPUP_* cannot override
@@ -160,7 +170,8 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%
 publish() {
     local tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
     shift 2
-    docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" -t "$tag" "$@" \
+    docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+        --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" \
         >/dev/null
     local_images+=("$tag")
     docker push --quiet "$tag" >/dev/null
@@ -176,9 +187,21 @@ publish phala-pay-reference-product PRODUCT_IMAGE \
     -f "$root/deploy/Dockerfile.reference-product" "$root"
 docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
     -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
-echo "TOPUP_IMAGE=$TOPUP_IMAGE"
-echo "POSTGRES_WALG_IMAGE=$POSTGRES_WALG_IMAGE"
-echo "PRODUCT_IMAGE=$PRODUCT_IMAGE"
+jq -n --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" --arg product "$PRODUCT_IMAGE" \
+    '{"phala-pay": $topup, "postgres-walg": $postgres, "phala-pay-reference-product": $product}' \
+    >"$tmp/images.json"
+cat "$tmp/images.json"
+# render_topup: the environment rendered as Deploy provisions it, for this project's volumes.
+render_topup() {
+    "$root/deploy/render.sh" --images "$tmp/images.json" \
+        --gateway-domain gateway.dstack-pha-prod5.phala.network --project-name "$project" \
+        "$environment" >"$cvm/docker-compose.yaml"
+}
+# The first render, with staging's own routes, only brings up the Anvils below.
+render_topup
+compose_file="$cvm/docker-compose.yaml"
+mapfile -t env_names < <(docker compose -f "$compose_file" config --variables |
+    awk 'NR > 1 && NF > 0 { print $1 }' | sort)
 
 echo "== starting Anvil (chain ids 11155111 and 84532) and the client container"
 dc up -d --wait anvil anvil-base-sepolia >/dev/null
@@ -244,89 +267,55 @@ base_oracle=$(jq -er .sanctions_oracle "$tmp/base-test-contracts.json")
 printf 'base-sepolia: token=%s second_token=%s sanctions_oracle=%s\n' \
     "$base_token" "$base_second_token" "$base_oracle"
 
-echo "== writing the routes and rendering the staging compose"
-# The committed staging routes with their chain's addresses, one file per inline config. On each
-# chain the test token stands in for PHA, the reference product's asset, and the second mock token
-# for USDC.
+echo "== writing the configuration and rendering the staging compose"
+# Phala's staging configuration with this network's addresses: on each chain the test token stands
+# in for PHA, the reference product's asset, and the second mock token for USDC. Provider A is
+# keyless, as staging's; provider B is attested with a `{key}`, as a paid provider is, and Anvil
+# ignores the query that carries the key. Base Sepolia's two providers are keyless, at two URLs of
+# its Anvil.
 second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
-mkdir "$tmp/routes"
-for path in "$root"/deploy/config/routes/*.yaml; do
-    name=$(basename "$path" .yaml)
-    case "$name" in
-        phala-cloud-sepolia-pha) asset=$token route_oracle=$oracle ;;
-        phala-cloud-sepolia-usdc) asset=$second_token route_oracle=$oracle ;;
-        phala-cloud-base-sepolia-pha) asset=$base_token route_oracle=$base_oracle ;;
-        phala-cloud-base-sepolia-usdc) asset=$base_second_token route_oracle=$base_oracle ;;
-        *) die "no rehearsal token for the route $name" ;;
-    esac
-    route="$tmp/routes/topup_route_${name//-/_}.yaml"
-    sed -e "s|^\(  forwarder_factory: \).*|\1\"$factory\"|" \
-        -e "s|^\(  contract: \).*|\1\"$asset\"|" \
-        -e "s|^\(  sanctions_oracle: \).*|\1\"$route_oracle\"|" \
-        "$path" >"$route"
-    if grep -Eiq '0x([0-9a-f])\1{39}' "$route"; then
-        die "the rehearsal route $name still has a placeholder address"
-    fi
-    docker run --rm -i "$TOPUP_IMAGE" topup route validate /dev/stdin <"$route"
-done
 # The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
 admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
-# Replace the inline routes in a copy of the attested compose, as the operator's route commit
-# does, then render it with the production renderer.
-awk -v routes="$tmp/routes" '
-    /^  topup_route_[a-z0-9_]+:$/ {
-        print
-        route = routes "/" substr($1, 1, length($1) - 1) ".yaml"
-        skipping = 0
-        next
-    }
-    route != "" && /^    content: [|]$/ {
-        print
-        while ((getline line < route) > 0) print (line == "" ? "" : "      " line)
-        close(route)
-        skipping = 1
-        next
-    }
-    skipping && (/^      / || /^$/) { next }
-    { skipping = 0; route = ""; print }
-' "$root/deploy/docker-compose.yml" >"$tmp/docker-compose.yml"
-# render_topup ADMIN_KID: the settings Deploy renders from the `staging` Environment
-# variables, for this network. Provider A is keyless, as staging's; provider B is attested with a
-# `{key}` placeholder, as a paid provider is, and Anvil ignores the query that carries the key.
-# Base Sepolia's two providers are keyless, as staging's, at two URLs of its Anvil.
-render_topup() {
-    AWS_ENDPOINT=http://s3:3900 AWS_REGION=us-east-1 AWS_S3_FORCE_PATH_STYLE=true \
-        WALG_S3_PREFIX=s3://topup-backups/postgres TOPUP_ADMIN_KID=$1 \
-        TOPUP_ADMIN_PUBLIC_KEY=$admin_public_key SENTRY_ENVIRONMENT=staging \
-        TOPUP_DOMAIN=pay-api-staging.phala.com \
-        TOPUP_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
-        TOPUP_RPC_PROVIDER_A_URL=http://anvil:8545 \
-        TOPUP_RPC_PROVIDER_B_URL='http://anvil:8545/?key={key}' \
-        TOPUP_RPC_BASE_SEPOLIA_A_URL=http://anvil-base-sepolia:8545 \
-        TOPUP_RPC_BASE_SEPOLIA_B_URL='http://anvil-base-sepolia:8545/?provider=b' \
-        "$root/deploy/render-compose.sh" "$tmp/docker-compose.yml" >"$cvm/docker-compose.yaml"
+# write_config ADMIN_KEY_ID: the rehearsal's topup.yaml (resolved JSON, which is YAML).
+write_config() {
+    docker run --rm -i --network none "$TOPUP_IMAGE" topup config show /dev/stdin \
+        <"$root/deploy/environments/phala-network/staging/topup/topup.yaml" |
+        jq --arg id "$1" --arg key "$admin_public_key" --arg factory "$factory" \
+            --arg implementation "$implementation" \
+            --argjson assets "$(jq -n --arg pha "$token" --arg usdc "$second_token" \
+                --arg base_pha "$base_token" --arg base_usdc "$base_second_token" \
+                --arg oracle "$oracle" --arg base_oracle "$base_oracle" '{
+                    "phala-cloud-sepolia-pha-usd": [$pha, $oracle],
+                    "phala-cloud-sepolia-usdc-usd": [$usdc, $oracle],
+                    "phala-cloud-base-sepolia-pha-usd": [$base_pha, $base_oracle],
+                    "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle]}')" '
+            .admin_key = {id: $id, public_key: $key}
+            | .rpc_providers = {
+                "provider-a": "http://anvil:8545",
+                "provider-b": "http://anvil:8545/?key={key}",
+                "base-sepolia-a": "http://anvil-base-sepolia:8545",
+                "base-sepolia-b": "http://anvil-base-sepolia:8545/?provider=b"}
+            | .routes |= map(($assets[.route] // error("no rehearsal token for \(.route)")) as $asset
+                | .chain.forwarder_factory = $factory | .chain.implementation = $implementation
+                | .asset.contract = $asset[0] | .chain.sanctions_oracle = $asset[1])' \
+        >"$environment/topup.yaml"
+    docker run --rm -i --network none "$TOPUP_IMAGE" topup config check /dev/stdin \
+        <"$environment/topup.yaml" >/dev/null || die "the rehearsal configuration is invalid"
 }
-render_topup rehearsal-admin/v0
-compose_file="$cvm/docker-compose.yaml"
+write_config rehearsal-admin/v0
+render_topup
 dc config --format json >"$tmp/stack.json"
-jq -r '.configs | keys[] | select(startswith("topup_route_"))' "$tmp/stack.json" |
-    LC_ALL=C sort >"$tmp/configs"
-for route in "$tmp"/routes/*.yaml; do
-    basename "$route" .yaml
-done | LC_ALL=C sort | cmp -s - "$tmp/configs" ||
-    die "the rendered compose does not carry one inline config per rehearsal route"
-for route in "$tmp"/routes/*.yaml; do
-    jq -j --arg name "$(basename "$route" .yaml)" '.configs[$name].content' "$tmp/stack.json" |
-        cmp -s - "$route" || die "the rendered compose does not carry the rehearsal route $route"
-done
+jq -j '.configs | to_entries[] | select(.key | startswith("topup_")) | .value.content' \
+    "$tmp/stack.json" | cmp -s - "$environment/topup.yaml" ||
+    die "the rendered compose does not carry the rehearsal configuration"
 jq -e --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" \
     '[.services[] | select(.image | startswith("127.0.0.1:")) | .image] | unique == ([$topup, $postgres] | sort)' \
     "$tmp/stack.json" >/dev/null || die "the rendered compose does not use the pushed digests"
 jq -e '[.services[].volumes[]? | select(.type == "bind")] | length == 0' "$tmp/stack.json" \
     >/dev/null || die "the rehearsal stack bind-mounts a host path"
 
-echo "== writing the unsealed .env with write-staging-env.sh"
+echo "== writing the unsealed .env, as Deploy does"
 # The owner-sealed secrets, the only env values.
 declare -A values=(
     [AWS_ACCESS_KEY_ID]=topup-s3
@@ -337,15 +326,12 @@ declare -A values=(
     [TOPUP_RPC_PROVIDER_A_KEY]=''
     [TOPUP_RPC_PROVIDER_B_KEY]=rehearsal-rpc-key
 )
-((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and staging.env.example differ"
+((${#values[@]} == ${#env_names[@]})) || die "the rehearsal .env and the compose's sealed names differ"
 for name in "${env_names[@]}"; do
     [[ -v "values[$name]" ]] || die "no rehearsal value for $name"
 done
-env -i PATH="$PATH" "$root/deploy/write-staging-env.sh" "$cvm/.env" >/dev/null
+printf '%s=\n' "${env_names[@]}" >"$cvm/.env"
 grep -qx 'AWS_SECRET_ACCESS_KEY=' "$cvm/.env" || die "the unsealed .env carries the S3 secret"
-docker compose -f "$compose_file" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$tmp/variables"
-printf '%s\n' "${env_names[@]}" | sort | cmp -s - "$tmp/variables" ||
-    die "the rendered compose reads other variables than staging.env.example"
 
 echo "== docker compose up unsealed (the CVM's app-compose command)"
 # Without credentials the backup prefix cannot be listed, so PostgreSQL refuses to initialize
@@ -364,17 +350,6 @@ if docker run --rm --entrypoint test -v "${project}_pgdata:/var/lib/postgresql" 
     die "PostgreSQL initialized a cluster without listing the backup prefix"
 fi
 echo "ok: unsealed, PostgreSQL refuses to initialize without a listed backup prefix"
-
-echo "== re-rendering with a changed setting (Deploy's upgrade)"
-keys_before=$(dc ps -q keys)
-render_topup rehearsal-admin/v1
-dc up -d --remove-orphans >/dev/null 2>&1 || true
-[[ -n "$(dc ps -q keys)" && "$(dc ps -q keys)" != "$keys_before" ]] ||
-    die "a re-rendered setting did not recreate the services"
-docker inspect --format '{{json .Config.Env}}' "$(dc ps -a -q topup)" |
-    jq -e 'index("TOPUP_ADMIN_KID=rehearsal-admin/v1") != null' >/dev/null ||
-    die "topup does not carry the re-rendered setting"
-echo "ok: the re-rendered setting recreated every service"
 
 echo "== sealing the secrets (the owner's envs update: same names, restart)"
 for name in "${env_names[@]}"; do
@@ -427,6 +402,23 @@ marker_fresh() {
 }
 wait_for "a fresh backup marker" 120 marker_fresh
 echo "ok: WAL archiving refreshed the backup marker"
+
+echo "== re-rendering with a changed configuration (Deploy's upgrade)"
+# The config is named after its digest, so exactly the services that mount it get a new
+# definition: topup, and dstack-ingress, which depends on it (Compose recreates dependents).
+# PostgreSQL and `keys` keep their containers.
+postgres_before=$(dc ps -q postgres) keys_before=$(dc ps -q keys) topup_before=$(dc ps -q topup)
+write_config rehearsal-admin/v1
+render_topup
+dc up -d --remove-orphans >/dev/null
+[[ -n "$(dc ps -q topup)" && "$(dc ps -q topup)" != "$topup_before" ]] ||
+    die "a changed configuration did not recreate topup"
+[[ "$(dc ps -q postgres)" == "$postgres_before" && "$(dc ps -q keys)" == "$keys_before" ]] ||
+    die "a changed configuration recreated PostgreSQL or keys"
+dc exec -T topup cat /etc/topup/topup.yaml | jq -e '.admin_key.id == "rehearsal-admin/v1"' >/dev/null ||
+    die "topup does not read the re-rendered configuration"
+wait_for "GET /healthz after the upgrade" 90 healthy
+echo "ok: the changed configuration recreated topup only; PostgreSQL and keys kept their containers"
 
 echo "== one quote-first deposit against the reference product"
 # A CVM has no database access, so the operator creates the account through the signed admin API;
@@ -516,47 +508,52 @@ echo "ok: topup attest reports the same webhook key and report_data"
 
 echo "== the reference-product CVM: rendered compose, unsealed env, public URL, then the sealed key"
 driver_key=$(product_python -m topup_sdk keygen --keyid driver/v1 --seed-out /opt/driver.seed)
-# The committed product compose with this network's addresses, as for the route above: its chains
-# are this one Anvil Sepolia, with its treasury and test token.
-chains=$(jq -cn --arg treasury "$treasury" --arg token "$token" \
-    '[{chain_id: 11155111, name: "Sepolia", rpc_url: "http://anvil:8545", treasury: $treasury,
-       test_tokens: [{symbol: "PHA", address: $token}]}]')
-sed -e "s|^\(        \"factory\": \).*|\1\"$factory\",|" \
-    -e "s|^\(        \"implementation\": \).*|\1\"$implementation\",|" \
-    -e "s|^\(        \"account\": \).*|\1\"$account\",|" \
-    "$root/deploy/product/docker-compose.yml" |
-    awk -v chains="$chains" '
-        /^        "chains": \[$/ { print "        \"chains\": " chains ","; skip = 1; next }
-        skip { if ($0 ~ /^        \],$/) skip = 0; next }
-        { print }
-    ' >"$tmp/product-source.yml"
-grep -Fq '"rpc_url": "http://anvil:8545"' "$tmp/product-source.yml" ||
-    die "the product compose's chains were not replaced with the rehearsal's"
-# render_product PUBLIC_URL: the settings Deploy (target `product`) renders, for this network.
-render_product() {
-    TOPUP_ORIGIN=http://topup:8080 PRODUCT_PUBLIC_URL=$1 \
-        PRODUCT_DOMAIN=pay-demo-api.phala.com PRODUCT_GATEWAY_DOMAIN=gateway.dstack-pha-prod5.phala.network \
-        PRODUCT_DRIVER_PUBLIC_KEY="$(jq -er .public_key <<<"$driver_key")" \
-        "$root/deploy/product/render-compose.sh" "$tmp/product-source.yml" >"$tmp/product.yml"
-}
-render_product https://pending.invalid
-grep -Fq "\"factory\": \"$factory\"," "$tmp/product.yml" || die "the product compose lacks the rehearsal factory"
-cat >"$tmp/product-overlay.yml" <<YAML
+# The product's staging environment, rendered as Deploy renders it (its public_url is the host of
+# its domain, as the policy requires). The CVM would read that config; here the rehearsal mounts
+# its own, the staging config with this network's chain, account, and compose-network URLs, named
+# after its digest as render.sh names configs.
+cp -r "$root/deploy/environments/phala-network/staging/product" "$tmp/product-environment"
+"$root/deploy/render.sh" --images "$tmp/images.json" \
+    --gateway-domain gateway.dstack-pha-prod5.phala.network --project-name "$product_project" \
+    "$tmp/product-environment" >"$tmp/product.yml"
+# product_overlay PUBLIC_URL: the overlay with the rehearsal's product config.
+product_overlay() {
+    local config digest
+    config=$(jq --arg factory "$factory" --arg implementation "$implementation" \
+        --arg account "$account" --arg treasury "$treasury" --arg token "$token" --arg url "$1" \
+        --arg driver "$(jq -er .public_key <<<"$driver_key")" '
+        .factory = $factory | .implementation = $implementation | .account = $account
+        | .service_url = "http://topup:8080" | .public_url = $url | .driver_public_key = $driver
+        | .chains = [{chain_id: 11155111, name: "Sepolia", rpc_url: "http://anvil:8545",
+            treasury: $treasury, test_tokens: [{symbol: "PHA", address: $token}]}]' \
+        "$tmp/product-environment/config.json")
+    config=$(jq -c . <<<"$config")
+    [[ "$config" != *[\'\$]* ]] || die "the product config cannot be quoted in the overlay"
+    digest=$(printf '%s' "$config" | sha256sum | cut -c1-12)
+    cat >"$tmp/product-overlay.yml" <<YAML
 services:
   product:
     networks:
       default:
         aliases: [product]
+    configs: !override
+      - source: rehearsal_product_$digest
+        target: /etc/product/config.json
   # As in topup's overlay (cvm-rehearsal.compose.yml): the custom domain needs a real CVM.
   dstack-ingress:
     profiles: [cvm]
+configs:
+  rehearsal_product_$digest:
+    content: '$config'
 networks:
   default:
     name: ${project}_default
     external: true
 YAML
-: >"$tmp/product.env"
-env -i PATH="$PATH" "$root/deploy/write-staging-env.sh" --product "$tmp/product.env" >/dev/null
+}
+product_overlay https://pending.invalid
+printf '%s=\n' $(docker compose -f "$tmp/product.yml" config --variables | awk 'NR > 1 && NF > 0 { print $1 }') \
+    >"$tmp/product.env"
 [[ "$(<"$tmp/product.env")" == PRODUCT_API_KEY= ]] || die "the unsealed product env is not only an empty key"
 pc up -d >/dev/null
 product_healthy() {
@@ -564,10 +561,10 @@ product_healthy() {
 }
 wait_for "the product's /healthz" 90 product_healthy
 echo "ok: the unsealed product serves /healthz; it pins its webhook key once the key is sealed"
-# Like the provisioning run's public-URL upgrade: a compose that differs only in the config content
-# must recreate the container with the new config.
+# Like the provisioning run's public-URL upgrade: a config with new content, named after its
+# digest, must recreate the container with the new config.
 provisional=$(pc ps -q product)
-render_product http://product:8089
+product_overlay http://product:8089
 pc up -d >/dev/null
 [[ "$(pc ps -q product)" != "$provisional" ]] || die "a changed product setting did not recreate the container"
 pc exec -T product cat /etc/product/config.json | jq -e '.public_url == "http://product:8089"' >/dev/null ||

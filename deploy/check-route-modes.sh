@@ -6,6 +6,10 @@
 # development chain, a compose without routes, and any live route in staging, which moves no real
 # money. The service validates `livemode` against the chain again when it loads a route.
 #
+# ENVIRONMENT is the one Deploy selected, never the configuration's own `environment` (a Sentry
+# tag), so a staging configuration that calls itself production is still checked as staging. It
+# reads the rendered compose only, with no network.
+#
 # Usage: deploy/check-route-modes.sh staging|production COMPOSE
 set -euo pipefail
 
@@ -23,13 +27,14 @@ testnets=" 11155111 17000 560048 84532 11155420 "
 # Anvil and Hardhat, Geth dev: never deployed.
 devnets=" 31337 1337 "
 
-# One "route livemode chain_id" line per route file embedded in the compose. A route's keys are
-# its `route:`, `livemode:`, and its chain's `chain_id:`; nothing else in the compose uses them.
+# One "route livemode chain_id" line per route of the topup.yaml inlined in the compose. A route's
+# keys are its `route:` (a list item's first key), `livemode:`, and its chain's `chain_id:`;
+# nothing else in the compose uses them.
 routes=$(awk '
     function flush() {
         if (name != "") print name, (livemode == "" ? "-" : livemode), (chain == "" ? "-" : chain)
     }
-    /^[[:space:]]+route:[[:space:]]/ { flush(); name = $2; livemode = ""; chain = ""; next }
+    /^[[:space:]]+(- )?route:[[:space:]]/ { flush(); sub(/^[[:space:]]+(- )?route:[[:space:]]*/, ""); name = $1; livemode = ""; chain = ""; next }
     name != "" && /^[[:space:]]+livemode:[[:space:]]/ { livemode = $2 }
     name != "" && /^[[:space:]]+chain_id:[[:space:]]/ { chain = $2 }
     END { flush() }

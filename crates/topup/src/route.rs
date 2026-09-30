@@ -28,14 +28,21 @@ mod tests {
 
     const VALID: &str = include_str!("../tests/fixtures/phala-cloud-pha.yaml");
     const TEMPLATE: &str = include_str!("../../../examples/phala-cloud-pha.yaml");
-    const DEPLOY_ROUTE: &str =
-        include_str!("../../../deploy/config/routes/phala-cloud-sepolia-pha.yaml");
-    const DEPLOY_USDC_ROUTE: &str =
-        include_str!("../../../deploy/config/routes/phala-cloud-sepolia-usdc.yaml");
-    const DEPLOY_BASE_PHA_ROUTE: &str =
-        include_str!("../../../deploy/config/routes/phala-cloud-base-sepolia-pha.yaml");
-    const DEPLOY_BASE_USDC_ROUTE: &str =
-        include_str!("../../../deploy/config/routes/phala-cloud-base-sepolia-usdc.yaml");
+    const STAGING: &str =
+        include_str!("../../../deploy/environments/phala-network/staging/topup/topup.yaml");
+    const DEPLOY_ROUTE: &str = "phala-cloud-sepolia-pha-usd";
+    const DEPLOY_USDC_ROUTE: &str = "phala-cloud-sepolia-usdc-usd";
+    const DEPLOY_BASE_PHA_ROUTE: &str = "phala-cloud-base-sepolia-pha-usd";
+    const DEPLOY_BASE_USDC_ROUTE: &str = "phala-cloud-base-sepolia-usdc-usd";
+
+    /// A route of Phala's staging configuration, by name.
+    fn staging(name: &str) -> Result<RouteFile, String> {
+        topup::config::Config::parse(STAGING)?
+            .routes
+            .into_iter()
+            .find(|route| route.route == name)
+            .ok_or_else(|| format!("staging has no route {name}"))
+    }
 
     #[test]
     fn valid_fixture_parses_and_validates() {
@@ -54,7 +61,7 @@ mod tests {
 
     #[test]
     fn staging_route_resolves_to_the_reviewed_values() {
-        let route = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
+        let route = staging(DEPLOY_ROUTE).expect("staging route must pass");
         assert!(!route.livemode, "Sepolia is a test route");
         assert_eq!(
             route.chain.confirmations,
@@ -83,8 +90,8 @@ mod tests {
 
     #[test]
     fn staging_usdc_route_is_a_stablecoin_route_beside_pha() {
-        let pha = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
-        let usdc = parse_and_validate(DEPLOY_USDC_ROUTE, false).expect("USDC route must pass");
+        let pha = staging(DEPLOY_ROUTE).expect("staging route must pass");
+        let usdc = staging(DEPLOY_USDC_ROUTE).expect("USDC route must pass");
         assert!(!usdc.livemode, "Sepolia is a test route");
         assert_eq!(
             usdc.chain, pha.chain,
@@ -123,8 +130,8 @@ mod tests {
 
     #[test]
     fn base_sepolia_routes_credit_at_safe_on_their_own_providers() {
-        let pha = parse_and_validate(DEPLOY_BASE_PHA_ROUTE, false).expect("Base PHA route");
-        let usdc = parse_and_validate(DEPLOY_BASE_USDC_ROUTE, false).expect("Base USDC route");
+        let pha = staging(DEPLOY_BASE_PHA_ROUTE).expect("Base PHA route");
+        let usdc = staging(DEPLOY_BASE_USDC_ROUTE).expect("Base USDC route");
         assert!(!pha.livemode, "Base Sepolia is a test route");
         assert_eq!(
             pha.chain, usdc.chain,
@@ -139,7 +146,7 @@ mod tests {
             pha.chain.rpc_providers,
             ["base-sepolia-a", "base-sepolia-b"]
         );
-        let sepolia = parse_and_validate(DEPLOY_ROUTE, false).expect("staging route must pass");
+        let sepolia = staging(DEPLOY_ROUTE).expect("staging route must pass");
         assert_eq!(pha.chain.contracts, sepolia.chain.contracts);
         assert_eq!(
             (pha.asset.backstop, usdc.asset.backstop),
@@ -155,7 +162,7 @@ mod tests {
         assert_eq!(usdc.rate_lock.spread_bps.value(), 0);
 
         // All four staging routes load together: two chains, each in address mode.
-        let usdc_sepolia = parse_and_validate(DEPLOY_USDC_ROUTE, false).expect("USDC route");
+        let usdc_sepolia = staging(DEPLOY_USDC_ROUTE).expect("USDC route");
         let routes = topup::routes::RouteSet::new(vec![sepolia, usdc_sepolia, pha, usdc])
             .expect("the staging routes load");
         assert_eq!(routes.current_in(false).count(), 4);
@@ -171,14 +178,11 @@ mod tests {
 
     #[test]
     fn resolved_json_parses_back_to_the_same_route() {
-        for yaml in [
-            VALID,
-            DEPLOY_ROUTE,
-            DEPLOY_USDC_ROUTE,
-            DEPLOY_BASE_PHA_ROUTE,
-            DEPLOY_BASE_USDC_ROUTE,
-        ] {
-            let route = parse_and_validate(yaml, false).expect("route must pass");
+        let staging_routes = topup::config::Config::parse(STAGING)
+            .expect("the staging configuration is valid")
+            .routes;
+        let valid = parse_and_validate(VALID, false).expect("the fixture is valid");
+        for route in std::iter::once(valid).chain(staging_routes) {
             let resolved = resolved_json(&route).expect("route serializes");
             assert!(resolved.contains("\"implementation\"") && resolved.contains("\"window_s\""));
             assert_eq!(parse_and_validate(&resolved, false), Ok(route));

@@ -1,0 +1,18 @@
+# The local overlay's part for the service variant (deploy/local/compose.sh): local images for the
+# service-only services. dstack-ingress never starts locally: tls-alpn-01 needs a public DNS name
+# and Let's Encrypt connecting through the dstack gateway (the upstream TESTING.md tests it only on
+# a real CVM).
+services:
+  dstack-ingress:
+    profiles: [cvm]
+  smokescreen:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
+  heartbeat:
+    image: ${TOPUP_LOCAL_SERVICE_IMAGE:-phala-pay:local}
+  backup:
+    image: ${TOPUP_LOCAL_POSTGRES_IMAGE:-phala-pay-postgres-walg:local}
+    environment:
+      WALG_RETENTION_FULL: "2"
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully

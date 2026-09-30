@@ -261,7 +261,7 @@ impl ChainReader for BackfillReader {
 }
 
 const BASE_SEPOLIA: u64 = 84_532;
-/// Test PHA on Base Sepolia (deploy/config/routes/phala-cloud-base-sepolia-pha.yaml).
+/// Test PHA on Base Sepolia (the staging route `phala-cloud-base-sepolia-pha-usd`).
 const BASE_SEPOLIA_PHA: Address =
     alloy_primitives::address!("1a6F260377e42ead1418C7C1afDFD5DE371A9284");
 
@@ -394,18 +394,14 @@ impl ChainReader for StagingReader {
 
 /// The committed Base Sepolia routes: an OP-stack chain credited at `safe`, in address mode.
 fn base_sepolia_routes() -> Result<ChainRoutes> {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/config/routes");
-    let routes = [
-        "phala-cloud-base-sepolia-pha.yaml",
-        "phala-cloud-base-sepolia-usdc.yaml",
-    ]
-    .into_iter()
-    .map(|file| -> Result<RouteFile> {
-        Ok(serde_saphyr::from_str(&std::fs::read_to_string(
-            directory.join(file),
-        )?)?)
-    })
-    .collect::<Result<Vec<_>>>()?;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/environments/phala-network/staging/topup/topup.yaml");
+    let routes = topup::config::Config::load(&path)
+        .map_err(anyhow::Error::msg)?
+        .routes
+        .into_iter()
+        .filter(|route| route.chain.chain_id == BASE_SEPOLIA)
+        .collect::<Vec<_>>();
     chain_routes(&RouteSet::new(routes).map_err(anyhow::Error::msg)?)
         .into_iter()
         .next()
