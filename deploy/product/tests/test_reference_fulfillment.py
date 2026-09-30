@@ -1,8 +1,10 @@
-"""The reference product credits each `deposit.credited` once and holds what it refuses."""
+"""The reference product credits each `deposit.credited` once and holds what it refuses, keeps
+each delivery as received, and exports the records a service restore asks for."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import time
 import uuid
@@ -16,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from reference_product.__main__ import write_records
 from reference_product.config import (
     DRIVER_KEYID,
     ChainConfig,
@@ -24,9 +27,16 @@ from reference_product.config import (
     ProductConfig,
 )
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
-from reference_product.ledger import ProductLedger
+from reference_product.ledger import Delivery, LedgerVersionError, ProductLedger
+from reference_product.restore_records import export_restore_records
 from reference_product.server import AccountApi
-from topup_sdk import RequestSigner, credited_event_id, load_public_key, sign_webhook
+from topup_sdk import (
+    RequestSigner,
+    credited_event_id,
+    load_public_key,
+    sign_webhook,
+    verify_webhook_signature,
+)
 from topup_sdk.addresses import deposit_id
 from topup_sdk.signing import sf_string
 
@@ -87,6 +97,58 @@ def _credited(
         if event_type == "deposit.credited"
         else "evt_" + uuid.uuid4().hex
     )
+    return _delivery(
+        event_type,
+        {
+            "id": deposit,
+            "object": "deposit",
+            "livemode": livemode,
+            "client_reference_id": team,
+            "quote": "qt_" + "0c" * 16,
+            "deposit_address": None,
+            "status": "credited",
+            "final": False,
+            "swept": False,
+            "metadata": {},
+            "rejection_reason": None,
+            "chain_id": CHAIN_ID,
+            "asset": "pha",
+            "asset_contract": TOKEN,
+            "amount_atomic": "25000000000000000000",
+            "amount": amount_minor,
+            "currency": "usd",
+            "exchange_rate": "0.10000000",
+            "price_source": "quote",
+            "valued_at": 1_790_410_320,
+            "address": "0x" + "66" * 20,
+            "from_address": "0x" + "77" * 20,
+            "tx_hash": tx_hash,
+            "log_index": 0,
+            "block_number": 100,
+            "amount_refunded_atomic": "0",
+            "refunded": False,
+            "amount_refunded": 0,
+            "amount_reversed": 0,
+            "created": 1_790_410_300,
+        }
+        | fields,
+        event_id=event_id,
+        account=account,
+        livemode=livemode,
+    )
+
+
+def _delivery(
+    event_type: str,
+    obj: dict[str, Any],
+    *,
+    event_id: str | None = None,
+    account: str = CONFIG.account,
+    livemode: bool = False,
+    created: int = 1_790_410_321,
+) -> tuple[dict[str, str], bytes]:
+    """A signed delivery of an event about `obj`, as the service sends it."""
+    event_id = event_id or "evt_" + uuid.uuid4().hex
     body = json.dumps(
         {
             "id": event_id,
@@ -94,42 +156,8 @@ def _credited(
             "account": account,
             "livemode": livemode,
             "type": event_type,
-            "created": 1_790_410_321,
-            "data": {
-                "object": {
-                    "id": deposit,
-                    "object": "deposit",
-                    "livemode": livemode,
-                    "client_reference_id": team,
-                    "quote": "qt_" + "0c" * 16,
-                    "deposit_address": None,
-                    "status": "credited",
-                    "final": False,
-                    "swept": False,
-                    "metadata": {},
-                    "rejection_reason": None,
-                    "chain_id": CHAIN_ID,
-                    "asset": "pha",
-                    "asset_contract": TOKEN,
-                    "amount_atomic": "25000000000000000000",
-                    "amount": amount_minor,
-                    "currency": "usd",
-                    "exchange_rate": "0.10000000",
-                    "price_source": "quote",
-                    "valued_at": 1_790_410_320,
-                    "address": "0x" + "66" * 20,
-                    "from_address": "0x" + "77" * 20,
-                    "tx_hash": tx_hash,
-                    "log_index": 0,
-                    "block_number": 100,
-                    "amount_refunded_atomic": "0",
-                    "refunded": False,
-                    "amount_refunded": 0,
-                    "amount_reversed": 0,
-                    "created": 1_790_410_300,
-                }
-                | fields
-            },
+            "created": created,
+            "data": {"object": obj},
         }
     ).encode()
     return sign_webhook(SERVICE_KEY, event_id, int(time.time()), body), body
@@ -357,6 +385,105 @@ def test_another_accounts_or_modes_event_is_refused_without_a_credit() -> None:
     assert fulfillment.ledger.credits_for(TEAM) == []
 
 
+def test_the_inbox_keeps_each_delivery_as_received_once(caplog: pytest.LogCaptureFixture) -> None:
+    fulfillment = _fulfillment()
+    headers, body = _credited()
+    # Header names arrive in any case; the body is kept byte for byte, not re-serialized.
+    received = {name.upper(): value for name, value in headers.items()}
+    spaced = body.replace(b'"object": "event"', b'"object":   "event"')
+    received["WEBHOOK-SIGNATURE"] = sign_webhook(
+        SERVICE_KEY, headers["webhook-id"], int(received["WEBHOOK-TIMESTAMP"]), spaced
+    )["webhook-signature"]
+    for _ in range(2):
+        assert fulfillment.handle(received, spaced).status == 204
+    [(delivery, _)] = fulfillment.ledger.deliveries(["deposit.credited"])
+    assert delivery == Delivery(
+        headers["webhook-id"],
+        received["WEBHOOK-TIMESTAMP"],
+        received["WEBHOOK-SIGNATURE"],
+        spaced,
+    )
+    # A redelivery with another body (a service restored from backup re-valued the deposit)
+    # changes nothing and is raised with the operator.
+    assert fulfillment.handle(*_credited(amount_minor=2_600)).status == 204
+    assert [kept for kept, _ in fulfillment.ledger.deliveries(["deposit.credited"])] == [delivery]
+    assert [amount for _, amount in fulfillment.ledger.credits_for(TEAM)] == [2_500]
+    assert "repeats with another body" in caplog.text
+
+
+def test_a_delivery_is_kept_only_with_its_ledger_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    fulfillment = _fulfillment()
+    delivery = _credited()
+
+    def unavailable(*_: object) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fulfillment, "_credit", unavailable)
+        with pytest.raises(sqlite3.OperationalError):
+            fulfillment.handle(*delivery)
+    assert fulfillment.ledger.deliveries(["deposit.credited"]) == []
+    # The service retries; the retry credits and keeps the delivery.
+    assert fulfillment.handle(*delivery).status == 204
+    assert len(fulfillment.ledger.deliveries(["deposit.credited"])) == 1
+    assert fulfillment.ledger.balance_for(TEAM) == 2_500
+
+
+def test_a_ledger_from_before_the_inbox_keeps_its_events(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, "
+        "data TEXT NOT NULL, received_at REAL NOT NULL);"
+        "INSERT INTO webhook_events VALUES ('evt_old', 'deposit.credited', '{\"object\": {}}', 1);"
+    )
+    old.close()
+    # A ledger before versioning (user_version 0) is migrated, not recreated.
+    fulfillment = _fulfillment(ledger=ProductLedger(str(path)))
+    fulfillment.ledger.add_team(TEAM)
+    assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
+    assert fulfillment.ledger.events_without_evidence(["deposit.credited"]) == 1
+    # Its redelivery is not applied again, but completes its evidence; new deliveries keep theirs.
+    redelivery = _delivery("deposit.credited", {}, event_id="evt_old")
+    assert fulfillment.handle(*redelivery).status == 204
+    assert [kept.body for kept, _ in fulfillment.ledger.deliveries(["deposit.credited"])] == [
+        redelivery[1]
+    ]
+    assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
+    assert fulfillment.ledger.credits_for(TEAM) == []
+    assert fulfillment.handle(*_credited()).status == 204
+    assert len(fulfillment.ledger.deliveries(["deposit.credited"])) == 2
+    # The ledger holds client secrets: its file is its owner's alone.
+    assert path.stat().st_mode & 0o777 == 0o600
+    # Opened again, it is at the latest version and changes nothing.
+    assert len(ProductLedger(str(path)).deliveries(["deposit.credited"])) == 2
+
+
+def test_a_new_ledger_file_is_its_owners_alone(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    ProductLedger(str(path)).add_team(TEAM)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_export_reads_the_ledger_without_changing_it(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    fulfillment = _fulfillment(ledger=ProductLedger(str(path)))
+    fulfillment.ledger.add_team(TEAM)
+    assert fulfillment.handle(*_credited()).status == 204
+    before = path.read_bytes()
+    reader = ProductLedger(str(path), read_only=True)
+    assert len(export_restore_records(CONFIG.account, reader)["events"]) == 1
+    with pytest.raises(sqlite3.OperationalError):
+        reader.add_team("team-2")
+    assert path.read_bytes() == before
+    # A ledger the product has not migrated yet is refused, and left as it is.
+    legacy = tmp_path / "legacy.sqlite3"
+    sqlite3.connect(legacy).close()
+    with pytest.raises(LedgerVersionError):
+        ProductLedger(str(legacy), read_only=True)
+    assert legacy.read_bytes() == b""
+
+
 def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
     def unpinned() -> PinnedKeys:
         raise MissingProductKeyError("not sealed yet")
@@ -436,11 +563,11 @@ def test_the_account_view_lists_the_workspaces_quote_events() -> None:
         def list_deposits(self, *, client_reference_id: str) -> list[SimpleNamespace]:
             return []
 
-    ledger = ProductLedger()
-    ledger.add_team(TEAM)
+    fulfillment = _fulfillment()
+    ledger = fulfillment.ledger
     for team in (TEAM, "team-2"):
-        quote = {"object": {"id": f"qt_{team}", "client_reference_id": team}}
-        ledger.record_event(f"evt_{team}", "quote.expired", quote)
+        quote = {"id": f"qt_{team}", "client_reference_id": team}
+        assert fulfillment.handle(*_delivery("quote.expired", quote)).status == 204
     api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
     api._client = Service()  # type: ignore[assignment]
     answer = _account_call(api, "GET", f"/accounts/{TEAM}", b"")
@@ -491,3 +618,293 @@ def test_refund_requests_only_name_the_workspaces_own_deposits() -> None:
     for _ in range(2):
         assert api.handle("POST", target, headers, payload).status == 200
     assert keys[1] == keys[2] != keys[0]
+
+
+# Service restores: the product exports what the operator asks merchants for, as the admin
+# requests take it (deploy/runbooks/restore.md).
+
+QUOTE_ID = "qt_" + "0c" * 16
+ADDRESS_ID = "da_" + "0d" * 16
+QUOTE_SECRET = f"{QUOTE_ID}_secret_" + "ab" * 24
+ADDRESS_SECRET = f"{ADDRESS_ID}_secret_" + "cd" * 24
+
+
+def _quote(created: int = 1_790_000_000) -> dict[str, Any]:
+    """A `POST /v1/quotes` response, whole."""
+    return {
+        "id": QUOTE_ID,
+        "object": "quote",
+        "livemode": False,
+        "client_reference_id": TEAM,
+        "amount": 2_500,
+        "currency": "usd",
+        "chain_id": 11155111,
+        "asset": "pha",
+        "amount_atomic": "25000000000000000000",
+        "exchange_rate": "0.10000000",
+        "address": "0x" + "66" * 20,
+        "treasury": "0x" + "7e" * 20,
+        "payment_uri": "ethereum:0x…",
+        "status": "open",
+        "expires_at": created + 900,
+        "created": created,
+        "payment": None,
+        "deposit": None,
+        "client_secret": QUOTE_SECRET,
+        "metadata": {"order_id": "order_1"},
+    }
+
+
+def _deposit_address(created: int = 1_790_000_000) -> dict[str, Any]:
+    """A `POST /v1/deposit_addresses` response, whole."""
+    return {
+        "id": ADDRESS_ID,
+        "object": "deposit_address",
+        "livemode": False,
+        "client_reference_id": TEAM,
+        "version": 2,
+        "status": "active",
+        "salt": "0x" + "5a" * 32,
+        "address": "0x" + "88" * 20,
+        "networks": [
+            {"chain_id": 11155111, "address": "0x" + "88" * 20, "treasury": "0x0", "assets": []}
+        ],
+        "payments": [],
+        "metadata": {},
+        "created": created,
+        "retired_at": None,
+        "client_secret": ADDRESS_SECRET,
+    }
+
+
+def test_the_export_is_the_admin_requests_bodies() -> None:
+    fulfillment = _fulfillment()
+    ledger = fulfillment.ledger
+    ledger.record_quote(TEAM, _quote())
+    ledger.record_deposit_address(TEAM, _deposit_address())
+    credited = _credited()
+    for delivery in (
+        credited,
+        _credited(2, event_type="deposit.reversed", status="reversed", amount_reversed=2_500),
+        # Neither a refund nor any other event is re-derived by a restore, so none is imported.
+        _credited(event_type="deposit.refunded", amount_refunded=100),
+        _delivery("quote.expired", {"id": QUOTE_ID}),
+    ):
+        assert fulfillment.handle(*delivery).status == 204
+
+    records = export_restore_records(CONFIG.account, ledger)
+    assert records["deposit_addresses"] == [
+        {
+            "account": CONFIG.account,
+            "livemode": False,
+            "client_reference_id": TEAM,
+            "id": ADDRESS_ID,
+            "version": 2,
+            "address": "0x" + "88" * 20,
+            "client_secret": ADDRESS_SECRET,
+        }
+    ]
+    # Only the fields the restore request takes (it refuses any other), the secret included.
+    quote = _quote()
+    assert records["quotes"] == [
+        {"account": CONFIG.account}
+        | {
+            name: quote[name]
+            for name in (
+                "livemode",
+                "id",
+                "client_reference_id",
+                "chain_id",
+                "asset",
+                "amount",
+                "amount_atomic",
+                "exchange_rate",
+                "address",
+                "created",
+                "expires_at",
+                "metadata",
+                "client_secret",
+            )
+        }
+    ]
+    [batch] = records["events"]
+    deliveries = batch["deliveries"]
+    assert [json.loads(each["body"])["type"] for each in deliveries] == [
+        "deposit.credited",
+        "deposit.reversed",
+    ]
+    # The delivery exactly as received, so it verifies with the service's key as it did then.
+    headers, body = credited
+    assert deliveries[0] == {
+        "webhook_id": headers["webhook-id"],
+        "webhook_timestamp": headers["webhook-timestamp"],
+        "webhook_signature": headers["webhook-signature"],
+        "body": body.decode(),
+    }
+    for each in deliveries:
+        signed = {
+            "webhook-id": each["webhook_id"],
+            "webhook-timestamp": each["webhook_timestamp"],
+            "webhook-signature": each["webhook_signature"],
+        }
+        verify_webhook_signature(
+            signed,
+            each["body"].encode(),
+            SERVICE_KEY.public_key(),
+            now=int(each["webhook_timestamp"]),
+        )
+
+
+def _treasury(status: str, number: int = 1) -> dict[str, Any]:
+    return {
+        "id": f"trs_{number:032x}",
+        "object": "treasury",
+        "livemode": False,
+        "chain_id": 11155111,
+        "address": "0x" + f"{number:02x}" * 20,
+        "kind": "eoa",
+        "status": status,
+        "crediting_paused_by": [],
+    }
+
+
+def test_the_export_verifies_the_latest_treasuries_and_restores_signed_applications() -> None:
+    fulfillment = _fulfillment()
+    pending = _delivery("treasury.created", _treasury("pending"), created=100)
+    applied = _delivery("treasury.updated", _treasury("active"), created=300)
+    # The application's event names the change becoming active from pending.
+    applied_body = json.loads(applied[1])
+    applied_body["data"]["previous_attributes"] = {"status": "pending"}
+    body = json.dumps(applied_body).encode()
+    applied = sign_webhook(SERVICE_KEY, applied_body["id"], int(time.time()), body), body
+    paused = _delivery("treasury.updated", _treasury("active", 2), created=200)
+    # Delivered out of order: the latest by `created` wins.
+    for delivery in (applied, paused, pending):
+        assert fulfillment.handle(*delivery).status == 204
+
+    records = export_restore_records(CONFIG.account, fulfillment.ledger)
+    assert records["treasuries"] == [
+        {
+            "account": CONFIG.account,
+            "livemode": False,
+            "treasuries": [
+                {
+                    name: _treasury(status, number)[name]
+                    for name in ("id", "status", "chain_id", "address", "crediting_paused_by")
+                }
+                for status, number in (("active", 1), ("active", 2))
+            ],
+        }
+    ]
+    # Only the signed pending-to-active change is an application, exactly as received.
+    headers, _ = applied
+    assert records["treasury_applications"] == [
+        {
+            "delivery": {
+                "webhook_id": headers["webhook-id"],
+                "webhook_timestamp": headers["webhook-timestamp"],
+                "webhook_signature": headers["webhook-signature"],
+                "body": body.decode(),
+            }
+        }
+    ]
+    assert records["events"] == []
+
+
+def test_the_export_starts_five_minutes_before_the_restore_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restore_point = 1_790_000_000
+    ledger = ProductLedger()
+    ledger.add_team(TEAM)
+    # Recorded an hour before the restore point.
+    monkeypatch.setattr("reference_product.ledger.time.time", lambda: restore_point - 3_600)
+    ledger.record_quote(TEAM, {**_quote(created=restore_point - 299), "id": QUOTE_ID})
+    ledger.record_quote(TEAM, {**_quote(created=restore_point - 301), "id": "qt_" + "0e" * 16})
+    ledger.record_deposit_address(TEAM, _deposit_address(created=restore_point - 3_600))
+    records = export_restore_records(CONFIG.account, ledger, since=restore_point)
+    # The service re-issues a quote it no longer holds created up to five minutes before.
+    assert [quote["id"] for quote in records["quotes"]] == [QUOTE_ID]
+    assert records["deposit_addresses"] == []
+    # Posted again after the restore point, the address has a new client secret the service
+    # must keep, though it was created long before.
+    fresh = f"{ADDRESS_ID}_secret_" + "ef" * 24
+    monkeypatch.setattr("reference_product.ledger.time.time", lambda: restore_point + 10)
+    ledger.record_deposit_address(
+        TEAM, {**_deposit_address(created=restore_point - 3_600), "client_secret": fresh}
+    )
+    records = export_restore_records(CONFIG.account, ledger, since=restore_point)
+    assert [address["client_secret"] for address in records["deposit_addresses"]] == [fresh]
+    everything = export_restore_records(CONFIG.account, ledger, since=None)
+    assert len(everything["quotes"]) == 2
+
+
+def test_the_export_orders_deliveries_by_deposit_position_and_batches_them() -> None:
+    fulfillment = _fulfillment()
+    # D1 (revision 1) arrives before D0, which it replaced, and another deposit between them.
+    tx_hash = "0x" + "7c" * 32
+    replaced, replacing = (
+        _credited(
+            9,
+            event_type="deposit.reversed",
+            status="reversed",
+            tx_hash=tx_hash,
+            receipt_log_index=0,
+            revision=0,
+        ),
+        _credited(9, tx_hash=tx_hash, receipt_log_index=0, revision=1),
+    )
+    for delivery in (replacing, _credited(1, amount_minor=1), replaced):
+        assert fulfillment.handle(*delivery).status == 204
+    [batch] = export_restore_records(CONFIG.account, fulfillment.ledger)["events"]
+    order = [json.loads(each["body"])["data"]["object"] for each in batch["deliveries"]]
+    assert [(deposit["tx_hash"], deposit.get("revision")) for deposit in order] == [
+        ("0x" + "01" * 32, None),
+        (tx_hash, 0),
+        (tx_hash, 1),
+    ]
+    for number in range(10, 110):
+        assert fulfillment.handle(*_credited(number, amount_minor=1)).status == 204
+    records = export_restore_records(CONFIG.account, fulfillment.ledger, since=None)
+    assert [len(batch["deliveries"]) for batch in records["events"]] == [100, 3]
+
+
+def test_a_later_deposit_address_response_replaces_the_record() -> None:
+    ledger = ProductLedger()
+    ledger.add_team(TEAM)
+    ledger.record_deposit_address(TEAM, _deposit_address())
+    fresh = f"{ADDRESS_ID}_secret_" + "ef" * 24
+    ledger.record_deposit_address(TEAM, {**_deposit_address(), "client_secret": fresh})
+    [record] = export_restore_records(CONFIG.account, ledger)["deposit_addresses"]
+    assert record["client_secret"] == fresh
+
+
+def test_an_export_file_is_new_and_its_owners_alone(tmp_path: Path) -> None:
+    output = tmp_path / "records.json"
+    write_records("{}\n", str(output))
+    assert output.read_text() == "{}\n"
+    assert output.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(FileExistsError):
+        write_records("[]\n", str(output))
+    # Never replaced, and no temporary file is left behind.
+    assert output.read_text() == "{}\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["records.json"]
+
+
+def test_the_account_api_serves_the_restore_records_to_the_driver_only() -> None:
+    fulfillment = _fulfillment()
+    ledger = fulfillment.ledger
+    ledger.record_quote(TEAM, _quote())
+    assert fulfillment.handle(*_credited()).status == 204
+    api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    answer = _account_call(api, "GET", "/accounts/restore-records", b"")
+    assert (answer.status, answer.body) == (200, export_restore_records(CONFIG.account, ledger))
+    answer = _account_call(api, "GET", "/accounts/restore-records?since=1790000000", b"")
+    assert answer.body == export_restore_records(CONFIG.account, ledger, since=1_790_000_000)
+    other = RequestSigner.from_seed(DRIVER_KEYID, bytes([8] * 32))
+    assert _account_call(api, "GET", "/accounts/restore-records", b"", other).status == 401
+    for query in ("?since=-1", "?since=x", "?since=1&since=2", "?other=1"):
+        assert _account_call(api, "GET", "/accounts/restore-records" + query, b"").status == 400
+    # Its path is not a workspace's.
+    register = json.dumps({"account_id": "restore-records"}).encode()
+    assert _account_call(api, "POST", "/accounts", register).status == 400

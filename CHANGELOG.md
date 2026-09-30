@@ -44,6 +44,23 @@ webhook receivers must ignore unknown fields. The format follows
   imported, signed `deposit.credited` carries its credit, and its `expires_at` is the restore's
   detection at the latest. A `client_secret` the service issued for the quote is kept, so the
   payer's page reads it again; `POST /v1/admin/restore/deposit_addresses` takes one too.
+- Integration guide §2.3, obligation 6: keep each webhook delivery as your receiver got it, once
+  per `webhook-id`, in the transaction that applies it: the raw body bytes and the `webhook-id`,
+  `webhook-timestamp`, and `webhook-signature` headers. After a service restore only a delivery
+  the service signed is imported (§5.12), so a parsed or re-serialized event cannot prove a credit;
+  keep every quote and deposit address response whole too, its `client_secret` stored like a
+  credential.
+- The reference product (`deploy/product`) keeps a webhook inbox (each verified delivery as
+  received, with its processing state, committed with its ledger effect; a redelivery with another
+  body keeps the first and is logged) and each quote and deposit address response it gets, client
+  secret included, in its ledger, now mode 0600; an existing ledger is migrated in place.
+  `python -m reference_product export-restore-records` (from the ledger, read-only) or
+  `fetch-restore-records` (from its account API, `GET /accounts/restore-records`, signed with the
+  driver key) prints them as the bodies of `POST /v1/admin/restore/treasuries/verify`,
+  `/treasuries/apply`, `/deposit_addresses`, `/quotes`, and `/events`; `--since` keeps what was
+  created or recorded from five minutes before the restore point on. The controlled restore drill runs the product's receiver and uses
+  only what it exports, not events the drill made up; it now also restores a treasury change lost
+  with the restore, an unvalued reversed deposit, and a reorganized deposit's revisions.
 - Admin: `GET /v1/admin/attestation?account=&livemode=&nonce=` returns `GET /v1/attestation` of any
   account and mode, so the operator verifies a restored instance, where merchant keys are refused.
 - Admin: `POST /v1/admin/restore/unfreeze` requires `quotes_reissued`.

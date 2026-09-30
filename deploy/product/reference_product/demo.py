@@ -504,7 +504,7 @@ class DemoConsole:
             )
         if not isinstance(quote.client_secret, str):
             return _json(HTTPStatus.BAD_GATEWAY, {"code": "unexpected_response"})
-        self.ledger.record_quote_address(quote.address, account, quote.id)
+        self.ledger.record_quote(account, quote.to_dict())
         with self.ledger.transaction() as db:
             db.execute(
                 "INSERT OR IGNORE INTO demo_quotes (id, account, amount, amount_atomic, "
@@ -578,8 +578,7 @@ class DemoConsole:
                 "ON CONFLICT (account) DO UPDATE SET id = excluded.id",
                 (account, address.id, address.created),
             )
-        for network in address.networks:
-            self.ledger.record_quote_address(network.address, account, address.id)
+        self.ledger.record_deposit_address(account, address.to_dict())
         return _json(
             HTTPStatus.OK,
             {

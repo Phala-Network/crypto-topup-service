@@ -130,6 +130,11 @@ class ProductApi:
     def account(self, team: str) -> dict[str, Any]:
         return self._call("GET", f"/accounts/{quote(team)}")
 
+    def restore_records(self, *, since: int | None = None) -> dict[str, Any]:
+        """The product's records for a service restore (`GET /accounts/restore-records`)."""
+        query = "" if since is None else f"?since={since}"
+        return self._call("GET", "/accounts/restore-records" + query)
+
     def refund(
         self, team: str, deposit_id: str, destination_address: str, amount_atomic: str
     ) -> dict[str, Any]:

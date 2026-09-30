@@ -146,6 +146,35 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   chain's treasury is a contract), its test tokens, `bonus_bps` (the demo merchant's own +10% on
   credits paid in PHA, a promotion, not a Phala Pay feature), and `web_origin`,
   `https://pay.phala.com`, the only origin the demo's API allows.
+- **Its restore records.** Its ledger keeps what a service restore asks merchants for
+  ([restore runbook](runbooks/restore.md) step 2): each verified delivery once per `webhook-id`,
+  in the webhook inbox, as received (the raw body bytes and the `webhook-id`,
+  `webhook-timestamp`, and `webhook-signature` headers) in the transaction that applies it; and
+  each quote and deposit address it creates, as the service returned it, `client_secret`
+  included. A client secret is a capability: the ledger file is its owner's alone (mode 0600),
+  and nothing logs one. The export is the bodies of the operator's
+  `POST /v1/admin/restore/treasuries/verify` (each treasury's latest object among its `treasury.*`
+  deliveries), `/treasuries/apply` (each signed `treasury.updated` of a pending change becoming
+  `active`), `/deposit_addresses`, `/quotes`, and `/events` requests (treasuries and events in
+  batches of 100, deliveries in the order of their deposits' positions and revisions), without
+  `reason`. `--since` takes the restore point (Unix seconds, `GET /v1/admin/restore`'s
+  `restore.restore_point`) and keeps every record the service created or the product last
+  recorded from five minutes before it on; `--output` writes a new mode-0600 file instead of
+  stdout. On the staging CVM, the owner fetches it from its machine through the product's account
+  API (`GET /accounts/restore-records?since=`), signed with the driver key of setup step 1, with
+  `driver.json` of step 5 and no other secret:
+
+  ```sh
+  PYTHONPATH=deploy/product uv run --locked --project sdk/python python -m reference_product \
+    fetch-restore-records --config driver.json --driver-seed-file ~/staging/driver.seed \
+    --since <restore point> --output records.json
+  ```
+
+  Next to the ledger file (a local stack), `export-restore-records --config FILE` prints the same
+  from the ledger, opened read-only. A ledger from before the inbox is migrated when the product
+  starts; quotes and deposit addresses it created earlier were not recorded, and its earlier
+  events have no raw delivery until one is delivered again. The controlled
+  [restore drill](RESTORE.md#local-and-ci-drills) runs this receiver and imports what it fetches.
 - **Its networks.** The page offers a configured chain only once the service serves assets there
   (`GET /v1/config`): Base Sepolia appears when its route is deployed, with no product change.
 - **Its custom domain.** The same pinned dstack-ingress as topup's

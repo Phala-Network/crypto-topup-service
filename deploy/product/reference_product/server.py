@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -46,12 +46,15 @@ from .config import (
 from .demo import DemoConsole, Response
 from .fulfillment import Answer, Fulfillment, PinnedKeys, TransientError, parse_decimal
 from .ledger import ProductLedger
+from .restore_records import export_restore_records
 
 LOG = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1024 * 1024
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# The account API's path of the restore records, reserved among workspace ids.
+RESTORE_RECORDS = "restore-records"
 
 
 class ProductServer:
@@ -159,7 +162,10 @@ class AccountApi:
     - `POST /accounts/{id}/deposits/{deposit_id}/refunds` `{"destination_address",
       "amount_atomic"}` requests a refund of one of the workspace's deposits (`create_refund`);
     - `GET /accounts/{id}` returns the workspace's deposits (from the service), its credits
-      (from the ledger), and the verified webhook events for those deposits and its quotes.
+      (from the ledger), and the verified webhook events for those deposits and its quotes;
+    - `GET /accounts/restore-records?since=` returns the records a service restore asks the
+      merchant for (reference_product.restore_records), client secrets included, for the
+      operator's `fetch-restore-records`; `restore-records` is not a workspace id.
 
     The product calls the service with its own key on the user's behalf, as Phala Cloud's
     backend does. Requests must carry an RFC 9421 signature by the pinned driver key
@@ -200,6 +206,8 @@ class AccountApi:
         try:
             if method == "POST" and not parts:
                 team = _account_ref(_json_object(body).get("account_id"))
+                if team == RESTORE_RECORDS:
+                    raise ValueError(f"{RESTORE_RECORDS} is not a workspace id")
                 register_team(self.ledger, team)
                 return Answer(HTTPStatus.OK, {"account_id": team})
             if len(parts) == 2 and parts[1] == "quotes" and method == "POST":
@@ -251,6 +259,12 @@ class AccountApi:
                     deposit, destination, amount, idempotency_key=verified.idempotency_key
                 )
                 return Answer(HTTPStatus.OK, refund.to_dict())
+            if parts == [RESTORE_RECORDS] and method == "GET":
+                since = _since(urlsplit(target).query)
+                # The records hold client secrets: logged as exported, never their content.
+                LOG.warning("restore records exported through the account API (since %s)", since)
+                records = export_restore_records(self.config.account, self.ledger, since=since)
+                return Answer(HTTPStatus.OK, records)
             if len(parts) == 1 and method == "GET":
                 team = _account_ref(parts[0])
                 if self.ledger.team_suspended(team) is None:
@@ -320,6 +334,19 @@ def _account_ref(value: object) -> str:
     if not isinstance(value, str) or not ACCOUNT_REF.fullmatch(value):
         raise ValueError("expected 1-64 letters, digits, '.', '_', or '-'")
     return value
+
+
+def _since(query: str) -> int | None:
+    """The restore records query's `since`, Unix seconds; `None` when absent."""
+    values = parse_qs(query, keep_blank_values=True, strict_parsing=bool(query))
+    if set(values) - {"since"}:
+        raise ValueError("the only parameter is since")
+    if "since" not in values:
+        return None
+    [since] = values["since"]
+    if not (since.isascii() and since.isdigit()):
+        raise ValueError("since must be Unix seconds")
+    return int(since)
 
 
 def _json_object(body: bytes) -> dict[str, Any]:
@@ -403,8 +430,9 @@ def create_quote(
     idempotency_key: str | None = None,
 ) -> Quote:
     """Creates a quote for the workspace on a configured chain (the first by default), in `asset`
-    (the chain's first test token by default), and records its address; a repeat with the same
-    `idempotency_key` returns the first quote.
+    (the chain's first test token by default), and records it as the service returned it, its
+    `client_secret` included, for a service restore; a repeat with the same `idempotency_key`
+    returns the first quote.
 
     The client recomputes the address from the pinned forwarder, the chain's treasury, and the
     quote id, and raises before returning an address the product did not derive.
@@ -417,7 +445,7 @@ def create_quote(
         asset=asset or chain.test_token.symbol.lower(),
         idempotency_key=idempotency_key,
     )
-    ledger.record_quote_address(quote.address, team, quote.id)
+    ledger.record_quote(team, quote.to_dict())
     return quote
 
 
