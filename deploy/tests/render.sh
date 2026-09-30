@@ -200,18 +200,33 @@ refused template-gateway "--template serves the app's gateway domain" --images "
 refused template-restore-check "usage:" --images "$tmp/images.json" --template "${origin[@]}" "$template"
 refused template-as-service "a sealed value may not fill services.postgres.environment.WALG_S3_PREFIX" \
     --images "$tmp/images.json" "${gateway[@]}" "$template"
-refused service-as-template "the template's public_origin must be the app's gateway domain" \
-    --images "$tmp/images.json" --template "$staging"
-# A runtime value fills only the form's settings: not another line of topup.yaml, not another
-# service's environment; and topup publishes only port 80.
+# A runtime value fills only the form's settings, in their own keys: never topup.yaml, whose `$`
+# are escaped, another service's environment, or another key; and topup publishes only port 80.
 cp -r "$template" "$tmp/template-key-id"
 sed -i 's|id: admin/v1|id: ${TOPUP_ADMIN_PUBLIC_KEY:-}|' "$tmp/template-key-id/topup.yaml"
-refused template-key-id "a sealed value may not fill configs.topup_" --images "$tmp/images.json" \
-    --template "$tmp/template-key-id"
-cp -r "$template" "$tmp/template-rpc"
-sed -i 's|^  provider-a: .*|  provider-a: https://${DSTACK_APP_DOMAIN:-}|' "$tmp/template-rpc/topup.yaml"
-refused template-rpc "a sealed value may not fill configs.topup_" --images "$tmp/images.json" \
-    --template "$tmp/template-rpc"
+render --template "$tmp/template-key-id" >"$tmp/template-key-id.yml"
+cmp -s <("$compose" -f "$tmp/template.yml" config --variables | sort) \
+    <("$compose" -f "$tmp/template-key-id.yml" config --variables | sort) ||
+    { echo "a \$ in the template's topup.yaml became a runtime reference" >&2; exit 1; }
+cp -r "$template" "$tmp/template-extra"
+cat >>"$tmp/template-extra/compose.yaml" <<'YAML'
+  heartbeat:
+    environment:
+      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
+YAML
+refused template-extra "a sealed value may not fill services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY" \
+    --images "$tmp/images.json" --template "$tmp/template-extra"
+cp -r "$staging" "$tmp/service-admin-key"
+sed -i 's|^      TOPUP_RPC_PROVIDER_B_KEY: .*|&\n      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}|' \
+    "$tmp/service-admin-key/compose.yaml"
+refused service-admin-key "a sealed value may not fill services.topup.environment.TOPUP_ADMIN_PUBLIC_KEY" \
+    --images "$tmp/images.json" "${gateway[@]}" "$tmp/service-admin-key"
+# The local stacks' plain-http switch for the object store never reaches an attested compose.
+cp -r "$staging" "$tmp/http-store"
+sed -i 's|^      AWS_S3_FORCE_PATH_STYLE: "true"$|&\n      TOPUP_OBJECT_STORE_ALLOW_HTTP: "on"|' \
+    "$tmp/http-store/compose.yaml"
+refused http-store "TOPUP_OBJECT_STORE_ALLOW_HTTP is for local stacks only" --images "$tmp/images.json" \
+    "${gateway[@]}" "$tmp/http-store"
 cp -r "$template" "$tmp/template-topup-env"
 cat >>"$tmp/template-topup-env/compose.yaml" <<'YAML'
   topup:

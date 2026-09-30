@@ -244,15 +244,18 @@ never a commit ([deploy/README.md, "Releases"](deploy/README.md#releases)).
    [<version>]: https://github.com/Phala-Network/phala-pay/releases/tag/v<version>
    ```
 
-2. After it merges, a repository admin tags the merge commit on `main`:
+2. After it merges, a repository admin tags the merge commit on `main` (the `refs/tags/v*`
+   ruleset lets only admins create, move, or delete these tags, and releases are immutable once
+   published):
 
    ```sh
    git tag v<version> <merge commit> && git push origin v<version>
    ```
 
 3. [Release](.github/workflows/release.yml) checks that the tag is a commit of `main`, that it
-   names the Cargo workspace version, and that a stable version has its dated changelog section.
-   It then builds and pushes `phala-pay`, `postgres-walg`, and `phala-pay-reference-product` to
+   names the Cargo workspace version, that a stable version has its dated changelog section, and
+   waits for every check `main`'s ruleset requires to pass on the commit. It then builds, on
+   GitHub-hosted runners, and pushes `phala-pay`, `postgres-walg`, and `phala-pay-reference-product` to
    GHCR, tagged `v<version>` (`phala-pay` and the reference product only after two builds give the
    same digest, `deploy/verify-image.sh`), and attests each digest's build provenance. Last, it
    builds the deploy kit with `deploy/build-kit.sh`, renders every environment with it and the

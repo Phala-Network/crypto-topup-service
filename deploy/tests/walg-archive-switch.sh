@@ -95,8 +95,13 @@ expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" -e WALG_FILE_PREFIX
 # A malformed object-store setting (the Phala Cloud template takes them from its deploy form) stops
 # the container before WAL-G runs, for the backup job as for PostgreSQL.
 expect_exit 64 "WALG_S3_PREFIX is not s3://BUCKET[/PATH]" -e "WALG_S3_PREFIX=s3://bucket/a b" "$image"
-expect_exit 64 "AWS_ENDPOINT is not an http(s) origin" -e "AWS_ENDPOINT=https://store.example/path?x" \
+expect_exit 64 "AWS_ENDPOINT is not an https origin" -e "AWS_ENDPOINT=https://store.example/path?x" \
     "$image" walg-cron backup-push "0 3 * * *"
+# Plain http only with the local stacks' switch, which no attested compose may carry.
+expect_exit 64 "AWS_ENDPOINT is not an https origin" -e "AWS_ENDPOINT=http://s3:3900" "$image"
+expect_exit 1 "refusing to initialize an empty data directory" -v "$volume:/var/lib/postgresql" \
+    -e AWS_ENDPOINT=http://s3:3900 -e TOPUP_OBJECT_STORE_ALLOW_HTTP=on -e WALG_FILE_PREFIX=/nonexistent \
+    "$image"
 expect_exit 64 "AWS_REGION is not a region name" -e "AWS_REGION=us east" "$image"
 
 # A listing error (here: a prefix that does not exist) must fail, not fall back to initdb, in

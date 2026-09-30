@@ -167,9 +167,8 @@ if [[ "${provider_url[*]}" == *"{key}"* ]]; then
     echo "note: skipped: a keyed RPC provider has no key here (--unsealed); run preflight online" \
         "with the sealed env file to check the asset chains"
 else
-    for command in cast forge; do
-        require_command "$command"
-    done
+    # verify-deployment.sh compares with the committed reference deployment: cast, no Solidity build.
+    require_command cast
     redact() {
         local text=$1 id key
         for id in "${!provider_url[@]}"; do

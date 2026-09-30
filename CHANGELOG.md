@@ -13,20 +13,28 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ### Added
 
-- Versioned releases. A `v<version>` tag publishes the images to GHCR, each with a GitHub build
+- Versioned releases. A `v<version>` tag of a `main` commit whose required checks passed
+  publishes the images to GHCR, built on GitHub-hosted runners, each with a GitHub build
   provenance attestation, and a GitHub release whose assets are `images.json` (the image digests),
   the deploy kit `phala-pay-deploy-v<version>.tar.gz` (the composes, `render.sh`, the policy,
-  preflight, the verifiers, the example environments, and the operator documentation), the Phala
-  Cloud template's compose `phala-cloud-template.yml`, and `SHA256SUMS`, each attested too.
-  Operators verify them with `gh attestation verify`, and can rebuild `phala-pay` and the kit from
-  the tag to the same digests.
+  preflight, the verifiers, the example environments, and the operator documentation, in a tar
+  identical to `git archive` of the tag), the Phala Cloud template's compose
+  `phala-cloud-template.yml`, and `SHA256SUMS`, each attested too. Operators verify them with
+  `gh attestation verify --cert-identity` of the Release workflow at the tag and
+  `--deny-self-hosted-runners`, and can rebuild `phala-pay` to the same digest.
 - Self-hosting without a fork: an operator's repository holds only its environment directory and
-  a workflow that calls Deploy at a release's tag (`docs/self-hosting.md`), or runs the kit's
-  commands.
+  a workflow that calls Deploy at a release's commit (`docs/self-hosting.md`), or runs the kit's
+  commands. Deploy checks that the release's attestations name one commit of `main` and that its
+  own commit is the release's.
+- `deploy/verify-attestation.sh` requires the app-compose's pre-launch script to be absent or one
+  of the reviewed scripts of `deploy/pre-launch-scripts.json`, by SHA-256.
 - The Phala Cloud template variant (`deploy/render.sh --template`): Phala's staging routes on a
-  one-click testnet instance served at the app's gateway domain. Its policy leaves exactly the
-  deploy form's values unattested (the admin public key, the origin, and the backup location),
-  and topup and postgres-walg check their format at startup.
+  one-click testnet instance served at the app's gateway domain. Exactly the deploy form's values
+  come from the CVM's env and are unattested: the admin public key and the origin's host, which
+  `topup run` reads with `--admin-public-key-env` and `--public-origin-host-env` when the
+  configuration leaves them out, and the backup location. topup and postgres-walg parse each
+  strictly at startup; `AWS_ENDPOINT` must be `https`. A template instance has no restore-check
+  path.
 - Deposits carry `receipt_log_index` and `revision`, the position and revision their `id` is
   derived from, and `block_hash` and `block_time` (Unix seconds), in the object and every
   `deposit.*` snapshot. A snapshot rendered before this release lacks them, so they are optional

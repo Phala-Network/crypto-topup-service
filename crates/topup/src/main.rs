@@ -107,8 +107,18 @@ struct RunArgs {
     read_only: bool,
     /// An origin replacing the configured one: the restore instance's own (deploy/RESTORE.md), or a
     /// local stack's. deploy/compose-policy.jq keeps it out of the service's attested compose.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", conflicts_with = "public_origin_host_env")]
     public_origin: Option<String>,
+    /// The environment variable that holds the public origin's host, served as `https://HOST`,
+    /// when the configuration leaves `public_origin` out: the Phala Cloud template's
+    /// `DSTACK_APP_DOMAIN` (deploy/compose.template.yaml). The host must be a lowercase DNS name.
+    #[arg(long, value_name = "NAME")]
+    public_origin_host_env: Option<String>,
+    /// The environment variable that holds the admin public key (standard base64 ed25519) when the
+    /// configuration leaves `admin_key.public_key` out: the Phala Cloud template's
+    /// `TOPUP_ADMIN_PUBLIC_KEY`.
+    #[arg(long, value_name = "NAME")]
+    admin_public_key_env: Option<String>,
     /// The restore-check report served on /healthz.
     #[arg(long, value_name = "FILE", requires = "read_only")]
     restore_report: Option<PathBuf>,
@@ -555,12 +565,19 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     };
     // Checked before the on-chain contract check; `connect` reads it again below.
     database_url("run").context("missing runtime configuration")?;
-    let admin_key = config.admin_key.clone();
+    let environment = |name: &str| std::env::var(name).ok();
+    let admin_key = config
+        .runtime_admin_key(args.admin_public_key_env.as_deref(), environment)
+        .map_err(anyhow::Error::msg)
+        .context("invalid admin key")?;
     let public_origin = match &args.public_origin {
         Some(origin) => {
             topup::api::PublicOrigin::parse(origin).context("invalid --public-origin")?
         }
-        None => config.public_origin.clone(),
+        None => config
+            .runtime_public_origin(args.public_origin_host_env.as_deref(), environment)
+            .map_err(anyhow::Error::msg)
+            .context("invalid public origin")?,
     };
     if args.read_only {
         const READ_ONLY_CONNECTIONS: u32 = 4;
@@ -1236,7 +1253,7 @@ fn check_config(file: &Path, secrets: bool) -> ExitCode {
     match checked {
         Ok(config) => {
             println!(
-                "configuration `{}` is valid: {} routes, {} RPC providers{}",
+                "configuration `{}` is valid: {} routes, {} RPC providers{}{}",
                 file.display(),
                 config.routes.len(),
                 config.rpc_providers.len(),
@@ -1244,6 +1261,11 @@ fn check_config(file: &Path, secrets: bool) -> ExitCode {
                     ", every provider key fits its URL"
                 } else {
                     "; provider keys were not checked"
+                },
+                if config.public_origin.is_none() || config.admin_key.is_none() {
+                    "; the origin or the admin key is left to `topup run`'s environment"
+                } else {
+                    ""
                 }
             );
             ExitCode::SUCCESS

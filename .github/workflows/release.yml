@@ -3,9 +3,16 @@ name: Release
 # A versioned release of the service (deploy/README.md, "Releases"), from a `v<version>` tag on a
 # commit of main whose Cargo workspace version is <version> (CONTRIBUTING.md, "Releasing the
 # service"). A stable version needs its dated CHANGELOG.md section, the release notes; a version
-# with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release.
+# with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release. The repository's tag
+# ruleset lets only admins create, move, or delete `v*` tags, and releases are immutable once
+# published.
 #
-# `images` builds and publishes the images the attested composes pin, tagged v<version>:
+# `checks` refuses the tag unless it names the version, is a commit of main, and every check that
+# main's ruleset requires passed on that commit (it waits for CI's push run).
+#
+# The image jobs build, publish, and attest the images the attested composes pin, tagged
+# v<version>, each on its own GitHub-hosted runner, so every attestation names a GitHub-hosted build
+# (verified with --deny-self-hosted-runners):
 # - phala-pay: deploy/verify-image.sh builds it twice from clean, compares the OCI manifest and
 #   config digests, builds and pushes a third time, and fails unless the registry's platform
 #   manifest and config equal the verified local ones. Anyone rebuilds the same digest from the tag.
@@ -19,18 +26,13 @@ name: Release
 # pushed to the registry. `release` then publishes the GitHub release, whose assets are:
 # - images.json: the manifest references (`repository@sha256:...`) by image name, deploy/render.sh's
 #   --images;
-# - phala-pay-deploy-v<version>.tar.gz: the deploy kit (deploy/build-kit.sh), `git archive` of the
-#   tag's deployment files;
+# - phala-pay-deploy-v<version>.tar.gz: the deploy kit (deploy/build-kit.sh), whose tar is
+#   identical to `git archive` of the tag's deployment files;
 # - phala-cloud-template.yml: the Phala Cloud template's compose, rendered from the kit with these
 #   images (deploy/render.sh --template);
 # - SHA256SUMS over the three.
 # Each asset gets a build provenance attestation, which operators check with `gh attestation
-# verify` (docs/self-hosting.md, "Verify a release").
-#
-# Runner constraints (org self-hosted runner): the runner is a container that drives the host Docker
-# daemon through its socket. Builds send their context over the socket and nothing bind-mounts a
-# workspace path; the OCI archives and read-backs stay in runner.temp. `ss` and `envsubst` are not
-# used. The release job runs on a GitHub-hosted runner, which has the GitHub CLI.
+# verify --cert-identity` of this workflow at the tag (docs/self-hosting.md, "Verify a release").
 
 on:
   push:
@@ -49,16 +51,15 @@ defaults:
     shell: bash
 
 jobs:
-  images:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+  checks:
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
       contents: read
-      packages: write
-      id-token: write
-      attestations: write
+      checks: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_date_epoch: ${{ steps.version.outputs.source_date_epoch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,16 +81,62 @@ jobs:
             echo "version=$version"
             echo "source_date_epoch=$(git log -1 --pretty=%ct)"
           } >>"$GITHUB_OUTPUT"
-      # The repository owner's GHCR namespace; GHCR names are lowercase, which expressions cannot do.
-      - name: Choose the image repositories
+      # The checks main's ruleset requires, each by its app, as the latest run on the tagged commit:
+      # all must succeed. CI's push run on main may still be running when the tag is pushed.
+      - name: Wait for main's required checks on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          namespace="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-          {
-            echo "TOPUP_REPOSITORY=$namespace/phala-pay"
-            echo "POSTGRES_WALG_REPOSITORY=$namespace/postgres-walg"
-            echo "REFERENCE_PRODUCT_REPOSITORY=$namespace/phala-pay-reference-product"
-          } >>"$GITHUB_ENV"
-      # The OCI exporter and rewrite-timestamp need a BuildKit builder; the runner's Docker driver has none.
+          gh api "repos/$GITHUB_REPOSITORY/rules/branches/main" --jq \
+            '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]
+              | {context, app: .integration_id}]' >"$RUNNER_TEMP/required.json"
+          jq -e 'length > 0' "$RUNNER_TEMP/required.json" >/dev/null ||
+            { echo "::error::main's ruleset requires no check; refusing to release unchecked"; exit 1; }
+          for _ in $(seq 1 200); do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100" \
+              --jq '.check_runs[] | {name, app: .app.id, id, status, conclusion}' |
+              jq -s . >"$RUNNER_TEMP/runs.json"
+            jq -r --slurpfile runs "$RUNNER_TEMP/runs.json" '.[] | . as $check
+              | ([$runs[0][] | select(.name == $check.context and ($check.app == null or .app == $check.app))]
+                 | max_by(.id)) as $run
+              | "\($check.context) \(if $run == null then "missing" elif $run.status != "completed"
+                  then "pending" else $run.conclusion end)"' \
+              "$RUNNER_TEMP/required.json" >"$RUNNER_TEMP/states"
+            if grep -Ev ' (success|missing|pending)$' "$RUNNER_TEMP/states"; then
+              echo "::error::a required check did not pass on $GITHUB_SHA"
+              exit 1
+            fi
+            if ! grep -Eq ' (missing|pending)$' "$RUNNER_TEMP/states"; then
+              cat "$RUNNER_TEMP/states"
+              exit 0
+            fi
+            sleep 30
+          done
+          cat "$RUNNER_TEMP/states"
+          echo "::error::main's required checks did not finish on $GITHUB_SHA"
+          exit 1
+
+  phala-pay:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      ref: ${{ steps.publish.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Three from-scratch Rust release builds; the runner's preinstalled SDKs are not needed.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # The OCI exporter and rewrite-timestamp need a BuildKit builder.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -97,18 +144,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish phala-pay after two matching reproducible builds
+        id: publish
         env:
-          SOURCE_DATE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
-          PUBLISH_IMAGE: ${{ env.TOPUP_REPOSITORY }}:${{ github.ref_name }}
-          IMAGE_REF_FILE: ${{ runner.temp }}/topup.ref
-          # The runner context is only available at step level.
+          SOURCE_DATE_EPOCH: ${{ needs.checks.outputs.source_date_epoch }}
+          IMAGE_REF_FILE: ${{ runner.temp }}/image.ref
           TMPDIR: ${{ runner.temp }}
-        run: deploy/verify-image.sh
-      - name: Publish postgres-walg and read it back
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
-          IMAGE: ${{ env.POSTGRES_WALG_REPOSITORY }}:${{ github.ref_name }}
         run: |
+          export PUBLISH_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phala-pay:$GITHUB_REF_NAME"
+          deploy/verify-image.sh
+          echo "ref=$(cat "$IMAGE_REF_FILE")" >>"$GITHUB_OUTPUT"
+      - name: Split the reference
+        id: subject
+        env:
+          REF: ${{ steps.publish.outputs.ref }}
+        run: '{ echo "name=${REF%@*}"; echo "digest=${REF#*@}"; } >>"$GITHUB_OUTPUT"'
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.subject.outputs.name }}
+          subject-digest: ${{ steps.subject.outputs.digest }}
+          push-to-registry: true
+
+  postgres-walg:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      ref: ${{ steps.publish.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish postgres-walg and read it back
+        id: publish
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.checks.outputs.source_date_epoch }}
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/postgres-walg"
+          image="$repository:$GITHUB_REF_NAME"
           metadata="$RUNNER_TEMP/postgres-walg-metadata.json"
           docker buildx build \
             --no-cache \
@@ -118,82 +201,68 @@ jobs:
             --sbom=false \
             --file deploy/Dockerfile.postgres-walg \
             --metadata-file "$metadata" \
-            --output "type=image,name=$IMAGE,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
+            --output "type=image,name=$image,push=true,unpack=false,rewrite-timestamp=true,oci-mediatypes=true" \
             .
           # Single platform without attestations: BuildKit pushes one image manifest, no index.
           pushed_digest=$(jq -er '."containerimage.digest"' "$metadata")
-          registry_digest="sha256:$(docker buildx imagetools inspect "$IMAGE" --raw | sha256sum | awk '{print $1}')"
+          registry_digest="sha256:$(docker buildx imagetools inspect "$image" --raw | sha256sum | awk '{print $1}')"
           if [ "$registry_digest" != "$pushed_digest" ]; then
-            echo "registry tag $IMAGE is $registry_digest, BuildKit pushed $pushed_digest" >&2
+            echo "registry tag $image is $registry_digest, BuildKit pushed $pushed_digest" >&2
             exit 1
           fi
-          ref="$POSTGRES_WALG_REPOSITORY@$pushed_digest"
-          # Drop the builder's local copy so the smoke run executes what the registry serves.
-          docker image rm "$IMAGE" >/dev/null 2>&1 || true
+          ref="$repository@$pushed_digest"
           docker run --rm --pull=always "$ref" wal-g --version
-          docker image rm "$ref" >/dev/null || true
-          printf '%s\n' "$ref" >"$RUNNER_TEMP/postgres-walg.ref"
+          { echo "ref=$ref"; echo "name=$repository"; echo "digest=$pushed_digest"; } >>"$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.publish.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+  reference-product:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      ref: ${{ steps.publish.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish phala-pay-reference-product after two matching reproducible builds
+        id: publish
         env:
-          SOURCE_DATE_EPOCH: ${{ steps.version.outputs.source_date_epoch }}
+          SOURCE_DATE_EPOCH: ${{ needs.checks.outputs.source_date_epoch }}
           DOCKERFILE: deploy/Dockerfile.reference-product
-          PUBLISH_IMAGE: ${{ env.REFERENCE_PRODUCT_REPOSITORY }}:${{ github.ref_name }}
-          IMAGE_REF_FILE: ${{ runner.temp }}/reference-product.ref
+          IMAGE_REF_FILE: ${{ runner.temp }}/image.ref
           TMPDIR: ${{ runner.temp }}
         run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phala-pay-reference-product"
+          export PUBLISH_IMAGE="$repository:$GITHUB_REF_NAME"
           deploy/verify-image.sh
           ref=$(cat "$IMAGE_REF_FILE")
-          # Drop the builder's local copy so the smoke run executes what the registry serves.
           docker image rm "$PUBLISH_IMAGE" >/dev/null 2>&1 || true
           docker run --rm --pull=always "$ref" --help >/dev/null
-          docker image rm "$ref" >/dev/null || true
-      - name: Write images.json
-        id: images
-        run: |
-          mkdir -p "$RUNNER_TEMP/images"
-          jq -n --rawfile topup "$RUNNER_TEMP/topup.ref" \
-            --rawfile postgres_walg "$RUNNER_TEMP/postgres-walg.ref" \
-            --rawfile product "$RUNNER_TEMP/reference-product.ref" \
-            '{"phala-pay": ($topup | rtrimstr("\n")), "postgres-walg": ($postgres_walg | rtrimstr("\n")),
-              "phala-pay-reference-product": ($product | rtrimstr("\n"))}' \
-            >"$RUNNER_TEMP/images/images.json"
-          for name in phala-pay postgres-walg phala-pay-reference-product; do
-            echo "$name=$(jq -er --arg name "$name" '.[$name] | split("@")[1]' "$RUNNER_TEMP/images/images.json")"
-          done | tr - _ >>"$GITHUB_OUTPUT"
-      - name: Attest phala-pay
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+          { echo "ref=$ref"; echo "name=$repository"; echo "digest=${ref#*@}"; } >>"$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ env.TOPUP_REPOSITORY }}
-          subject-digest: ${{ steps.images.outputs.phala_pay }}
+          subject-name: ${{ steps.publish.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
           push-to-registry: true
-      - name: Attest postgres-walg
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.POSTGRES_WALG_REPOSITORY }}
-          subject-digest: ${{ steps.images.outputs.postgres_walg }}
-          push-to-registry: true
-      - name: Attest phala-pay-reference-product
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REFERENCE_PRODUCT_REPOSITORY }}
-          subject-digest: ${{ steps.images.outputs.phala_pay_reference_product }}
-          push-to-registry: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: images-${{ github.ref_name }}
-          path: ${{ runner.temp }}/images/images.json
-          if-no-files-found: error
-      # The host daemon keeps pushed tags in its image store; remove this run's tags, not their cache.
-      - name: Remove this run's image tags from the host
-        if: always()
-        env:
-          TOPUP: ${{ env.TOPUP_REPOSITORY }}:${{ github.ref_name }}
-          POSTGRES_WALG: ${{ env.POSTGRES_WALG_REPOSITORY }}:${{ github.ref_name }}
-          PRODUCT: ${{ env.REFERENCE_PRODUCT_REPOSITORY }}:${{ github.ref_name }}
-        run: docker image rm "$TOPUP" "$POSTGRES_WALG" "$PRODUCT" 2>/dev/null || true
 
   release:
-    needs: images
+    needs: [checks, phala-pay, postgres-walg, reference-product]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -201,15 +270,22 @@ jobs:
       id-token: write
       attestations: write
     env:
-      VERSION: ${{ needs.images.outputs.version }}
+      VERSION: ${{ needs.checks.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: images-${{ github.ref_name }}
-          path: ${{ runner.temp }}/dist
+      - name: Write images.json
+        env:
+          TOPUP: ${{ needs.phala-pay.outputs.ref }}
+          POSTGRES_WALG: ${{ needs.postgres-walg.outputs.ref }}
+          PRODUCT: ${{ needs.reference-product.outputs.ref }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          jq -n --arg topup "$TOPUP" --arg postgres_walg "$POSTGRES_WALG" --arg product "$PRODUCT" \
+            '{"phala-pay": $topup, "postgres-walg": $postgres_walg, "phala-pay-reference-product": $product}' \
+            >"$RUNNER_TEMP/dist/images.json"
+          cat "$RUNNER_TEMP/dist/images.json"
       # The kit renders every environment it ships and Phala's own, with these images, before
       # anything is published; the template's compose is rendered from the kit itself.
       - name: Build the deploy kit and render the Phala Cloud template from it
@@ -249,19 +325,24 @@ jobs:
           else
             sdk/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
           fi
+          identity="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
           {
             echo
             echo "## Deploy"
             echo
             echo "Deploy an environment directory with this release's kit and images, after verifying"
-            echo "both ([self-hosting guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/self-hosting.md)):"
+            echo "both ([self-hosting guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/self-hosting.md#verify-a-release)):"
             echo
             echo '```sh'
             echo "gh release download $GITHUB_REF_NAME -R $GITHUB_REPOSITORY"
             echo "sha256sum -c SHA256SUMS"
+            echo "provenance=(-R $GITHUB_REPOSITORY --source-ref $GITHUB_REF --deny-self-hosted-runners"
+            echo "  --cert-identity $identity)"
             echo "for asset in images.json phala-pay-deploy-$GITHUB_REF_NAME.tar.gz phala-cloud-template.yml; do"
-            echo "  gh attestation verify \"\$asset\" -R $GITHUB_REPOSITORY \\"
-            echo "    --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref $GITHUB_REF"
+            echo "  gh attestation verify \"\$asset\" \"\${provenance[@]}\""
+            echo "done"
+            echo "for image in \$(jq -r '.[]' images.json); do"
+            echo "  gh attestation verify \"oci://\$image\" \"\${provenance[@]}\""
             echo "done"
             echo '```'
             echo

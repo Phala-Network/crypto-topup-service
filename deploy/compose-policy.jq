@@ -39,21 +39,16 @@ def config_origin:
     // ([split("\n")[] | capture("^public_origin:[ \\t]*[\"']?(?<origin>[^\"' \\t#]+)")] | first.origin)
     // "";
 
-# The Phala Cloud template's per-deployment values, which its deploy form puts in the CVM's env and
-# the attestation therefore does not cover (deploy/compose.template.yaml): WAL-G's backup location,
-# checked by the postgres-walg entrypoint at startup, and two lines of topup.yaml, the origin and
-# the admin public key, which topup parses at startup.
+# The Phala Cloud template's per-deployment values, which its deploy form (and, for the origin,
+# Phala Cloud's pre-launch script) puts in the CVM's env, so the attestation does not cover them
+# (deploy/compose.template.yaml): WAL-G's backup location, which the postgres-walg entrypoint
+# checks at startup, and the origin's host and the admin public key, which topup parses at startup
+# from the variables its command names. Each may only be the whole value of its own key.
 def template_runtime_setting($service; $key; $name):
-    $name == $key and ($service == "postgres" or $service == "backup")
-    and ($key == "WALG_S3_PREFIX" or $key == "AWS_ENDPOINT" or $key == "AWS_REGION");
-
-def template_runtime_lines:
-    ["public_origin: https://${DSTACK_APP_DOMAIN:-}", "  public_key: ${TOPUP_ADMIN_PUBLIC_KEY:-}"];
-
-# Every line of a template's topup.yaml that Compose would interpolate is one of those, at most once.
-def template_config_allowed:
-    [gsub("\\$\\$"; "") | split("\n")[] | select(contains("$"))] as $lines
-    | ($lines - template_runtime_lines) == [] and ($lines | length) == ($lines | unique | length);
+    $name == $key and (
+        (($service == "postgres" or $service == "backup")
+            and ($key == "WALG_S3_PREFIX" or $key == "AWS_ENDPOINT" or $key == "AWS_REGION"))
+        or ($service == "topup" and ($key == "DSTACK_APP_DOMAIN" or $key == "TOPUP_ADMIN_PUBLIC_KEY")));
 
 # May the sealed secret `$name` fill the environment key `$key` of `$service`?
 def secret_allowed($variant; $service; $key; $name):
@@ -77,16 +72,12 @@ def secret_allowed($variant; $service; $key; $name):
 # be exactly one allowed `${NAME:-}` environment value: a sealed value can fill nothing else.
 def secret_violations($variant):
     . as $root
-    | ([.services.topup.configs[]? | select(.target == "/etc/topup/topup.yaml") | .source][0]) as $topup_config
     | [paths(type == "string") as $path
         | ($root | getpath($path)) as $value
         | select($value | gsub("\\$\\$"; "") | contains("$"))
         | ($value | capture("^\\$\\{(?<name>[A-Z_][A-Z0-9_]*):-\\}$").name // null) as $name
         | if ($path | length) == 4 and $path[0] == "services" and $path[2] == "environment"
                 and $name != null and secret_allowed($variant; $path[1]; $path[3]; $name)
-            then empty
-            elif $variant == "template" and $path == ["configs", $topup_config, "content"]
-                and ($value | template_config_allowed)
             then empty
             else "a sealed value may not fill \($path | map(tostring) | join("."))"
           end];
@@ -99,6 +90,8 @@ def common_violations($variant; $project):
               | all; "every volume must be the project's own, named \($project)_<volume>"),
       check([.services[] | .build, .env_file, .extends, .profiles | select(. != null)] == [];
             "no service may build, read an env_file, extend, or carry a profile"),
+      check([.services[] | .environment | env_map | has("TOPUP_OBJECT_STORE_ALLOW_HTTP")] | any | not;
+            "TOPUP_OBJECT_STORE_ALLOW_HTTP is for local stacks only"),
       check([.configs // {} | to_entries[] | (.value.file == null) and (.value.content | type == "string")
               and (.key | test("^[a-z0-9_]+_[0-9a-f]{12}$"))] | all;
             "every config must be inline content named after its digest"),
@@ -150,15 +143,17 @@ def topup_violations:
               "topup must log in as topup_service with the application pgpass"),
         check((.services.migrate.environment | env_map | .DATABASE_URL | database_user) == "postgres";
               "migrate must log in as the database owner"),
-        check((mounted_config("topup"; "/etc/topup/topup.yaml") | config_origin | startswith("http"));
+        check(mounted_config("topup"; "/etc/topup/topup.yaml") != "";
               "topup must mount its topup.yaml at /etc/topup/topup.yaml")
       ];
 
 # The live instance, the service or the template variant: topup serves with its webhooks through
-# smokescreen, and PostgreSQL archives.
-def live_violations:
-    [ check(.services.topup.command == ["topup", "run", "--config", "/etc/topup/topup.yaml",
-                "--webhook-proxy", "http://smokescreen:4750"];
+# smokescreen, and PostgreSQL archives. The template's topup takes its origin and admin key from
+# the variables its extra arguments name.
+def serve_command: ["topup", "run", "--config", "/etc/topup/topup.yaml",
+    "--webhook-proxy", "http://smokescreen:4750"];
+def live_violations($command):
+    [ check(.services.topup.command == $command;
               "topup must run the service with its webhooks through smokescreen"),
         check(.services.smokescreen.image == .services.topup.image
                 and .services.smokescreen.command == smokescreen_command
@@ -184,22 +179,20 @@ def service_violations:
         check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
                 | unique == ["dstack-ingress", "keys", "topup"];
               "only keys, topup, and dstack-ingress may mount the dstack socket")
-      ] + live_violations;
+      ] + live_violations(serve_command);
 
 # The template: the service without dstack-ingress, topup published on 80 for the Phala Cloud
-# gateway, which serves it as https://<app-id>.<gateway-domain>, the origin topup.yaml names.
+# gateway, which serves it as https://<app-id>.<gateway-domain>, the origin DSTACK_APP_DOMAIN names.
 def template_violations:
     [ check((.services | keys) == ["backup", "heartbeat", "keys", "migrate", "postgres", "smokescreen",
                 "topup"];
               "the template runs exactly keys, postgres, migrate, topup, smokescreen, heartbeat, and backup"),
         check(only_published("topup"; 8080; "80"); "only topup may publish a port, 80"),
-        check((mounted_config("topup"; "/etc/topup/topup.yaml") | config_origin)
-                == "https://${DSTACK_APP_DOMAIN:-}";
-              "the template's public_origin must be the app's gateway domain, https://${DSTACK_APP_DOMAIN:-}"),
         check([.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/dstack.sock") | .key]
                 | unique == ["keys", "topup"];
               "only keys and topup may mount the dstack socket")
-      ] + live_violations;
+      ] + live_violations(serve_command + ["--public-origin-host-env", "DSTACK_APP_DOMAIN",
+            "--admin-public-key-env", "TOPUP_ADMIN_PUBLIC_KEY"]);
 
 def restore_check_violations:
     (.services.postgres.environment | env_map) as $postgres

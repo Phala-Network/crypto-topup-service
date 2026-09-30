@@ -4,8 +4,9 @@
 # `phala-pay-deploy-VERSION/`, as OUT_DIR/phala-pay-deploy-VERSION.tar.gz. It holds no image and
 # needs no Rust or Solidity toolchain; the release's images.json names the images.
 #
-# The tar is `git archive` of COMMIT (default HEAD), so it is reproducible from the release's tag:
-# `gzip -dc` of the kit equals `deploy/build-kit.sh --tar VERSION TAG` byte for byte.
+# The tar is `git archive` of COMMIT (default HEAD): the kit's tar (`gzip -dc`) is identical to
+# `deploy/build-kit.sh --tar VERSION TAG`, byte for byte. The gzip layer is not claimed
+# reproducible; compare the tar.
 #
 # Usage: deploy/build-kit.sh VERSION OUT_DIR [COMMIT]
 #        deploy/build-kit.sh --tar VERSION [COMMIT] >kit.tar
@@ -49,6 +50,7 @@ paths=(
     deploy/verify-attestation.sh
     deploy/dstack-verifier.sh
     deploy/verify-ingress-evidence.sh
+    deploy/pre-launch-scripts.json
     deploy/contracts/common.sh
     deploy/contracts/verify-deployment.sh
     deploy/contracts/reference.json

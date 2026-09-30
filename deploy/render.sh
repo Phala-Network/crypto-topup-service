@@ -12,8 +12,8 @@
 #      names by image name, --gateway-domain is dstack-ingress's gateway (the service variant and
 #      the product), and --origin is the restore instance's own origin (restore-check only). Every
 #      config file is inlined as content named after its digest, so a changed file changes the
-#      definition of exactly the services that mount it. Its `$` are escaped, except, in the
-#      template variant, the runtime references the policy allows there.
+#      definition of exactly the services that mount it. Its `$` are escaped, so a config never
+#      reads the environment.
 #   3. Prints Compose's canonical YAML after deploy/compose-policy.jq accepted it.
 #
 # The project is `dstack`, the name dstack gives the stack it runs in /dstack, so the volumes keep
@@ -110,11 +110,8 @@ while IFS=$'\t' read -r name file; do
     [[ -f "$file" ]] || { echo "config $name: $file does not exist" >&2; exit 1; }
     digest=$(if command -v sha256sum >/dev/null; then sha256sum "$file"; else shasum -a 256 "$file"; fi |
         cut -c1-12)
-    jq -n --arg name "$name" --arg digest "$digest" --rawfile content "$file" --arg variant "$variant" \
-        '{name: $name, renamed: "\($name)_\($digest)", content: ($content | gsub("\\$"; "$$")
-            | if $variant == "template" and $name == "topup"
-              then gsub("\\$\\$\\{(?<v>DSTACK_APP_DOMAIN|TOPUP_ADMIN_PUBLIC_KEY):-\\}"; "${\(.v):-}")
-              else . end)}' \
+    jq -n --arg name "$name" --arg digest "$digest" --rawfile content "$file" \
+        '{name: $name, renamed: "\($name)_\($digest)", content: ($content | gsub("\\$"; "$$"))}' \
         >>"$tmp/contents.jsonl"
 done < <(jq -r '.configs // {} | to_entries[] | select(.value.file) | [.key, .value.file] | @tsv' \
     "$tmp/merged.json")

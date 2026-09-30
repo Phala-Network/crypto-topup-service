@@ -6,6 +6,11 @@
 //! preflight), and a keyed provider's URL keeps its `{key}`. The keys are resolved only by
 //! [`Config::route_set`] (the service) and [`Config::check_secrets`] (a preflight that holds them),
 //! both through [`ProviderUrl::resolve`].
+//!
+//! The public origin and the admin public key may be left out of the file only for `topup run` to
+//! take them from its environment ([`Config::runtime_public_origin`],
+//! [`Config::runtime_admin_key`]): the Phala Cloud template (deploy/compose.template.yaml), whose
+//! deploy form holds them. Each has exactly one source; neither or both refuses to start.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,12 +22,14 @@ use crate::api::{PublicOrigin, VerificationKey};
 use crate::routes::RouteSet;
 use crate::rpc_provider::{ProviderUrl, environment_key, key_environment};
 
-/// The file as written. Every field is required; an unknown field is an error.
+/// The file as written. Every field but the two that `topup run` may take from its environment is
+/// required; an unknown field is an error.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigSpec {
     environment: String,
-    public_origin: String,
+    #[serde(default)]
+    public_origin: Option<String>,
     admin_key: AdminKeySpec,
     rpc_providers: BTreeMap<String, String>,
     routes: Vec<RouteFile>,
@@ -32,7 +39,8 @@ struct ConfigSpec {
 #[serde(deny_unknown_fields)]
 struct AdminKeySpec {
     id: String,
-    public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    public_key: Option<String>,
 }
 
 /// A validated service configuration.
@@ -41,10 +49,14 @@ pub struct Config {
     /// The deployment's name, reported to Sentry (`<environment>-restore` while read-only). A tag
     /// only: no deployment policy reads it.
     pub environment: String,
-    /// The API's one public origin: admin signatures and treasury challenges name it.
-    pub public_origin: PublicOrigin,
-    /// The operator's admin verification key.
-    pub admin_key: VerificationKey,
+    /// The API's one public origin: admin signatures and treasury challenges name it. `None` when
+    /// `topup run` takes it from its environment.
+    pub public_origin: Option<PublicOrigin>,
+    /// The operator's admin key id.
+    pub admin_key_id: String,
+    /// The operator's admin verification key. `None` when `topup run` takes it from its
+    /// environment.
+    pub admin_key: Option<VerificationKey>,
     /// Each provider id's URL; a keyed one keeps `{key}` here.
     pub rpc_providers: BTreeMap<String, ProviderUrl>,
     /// Every enabled route version.
@@ -65,7 +77,8 @@ impl std::fmt::Debug for AdminKeySpec {
 #[derive(Serialize)]
 struct ResolvedConfig<'a> {
     environment: &'a str,
-    public_origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_origin: Option<String>,
     admin_key: &'a AdminKeySpec,
     rpc_providers: &'a BTreeMap<String, ProviderUrl>,
     routes: &'a [RouteFile],
@@ -91,11 +104,19 @@ impl Config {
                     .to_owned(),
             );
         }
-        let public_origin = PublicOrigin::parse(&spec.public_origin)
+        let public_origin = spec
+            .public_origin
+            .as_deref()
+            .map(PublicOrigin::parse)
+            .transpose()
             .map_err(|error| format!("public_origin: {error}"))?;
-        let admin_key =
-            VerificationKey::from_base64(spec.admin_key.id.clone(), &spec.admin_key.public_key)
-                .map_err(|error| format!("admin_key.public_key: {error}"))?;
+        let admin_key = spec
+            .admin_key
+            .public_key
+            .as_deref()
+            .map(|key| VerificationKey::from_base64(spec.admin_key.id.clone(), key))
+            .transpose()
+            .map_err(|error| format!("admin_key.public_key: {error}"))?;
         if spec.admin_key.id.is_empty() || spec.admin_key.id.chars().any(char::is_whitespace) {
             return Err("admin_key.id must be a non-empty key id without spaces".to_owned());
         }
@@ -118,11 +139,62 @@ impl Config {
         Ok(Self {
             environment: spec.environment,
             public_origin,
+            admin_key_id: spec.admin_key.id.clone(),
             admin_key,
             rpc_providers,
             routes: spec.routes,
             admin_key_spec: spec.admin_key,
         })
+    }
+
+    /// The public origin `topup run` serves: the file's, or, with `host_variable` (the template's
+    /// `--public-origin-host-env`), `https://` and the host that variable holds, read through
+    /// `env`. Exactly one of the two; the host must be a lowercase DNS name and nothing else.
+    pub fn runtime_public_origin(
+        &self,
+        host_variable: Option<&str>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<PublicOrigin, String> {
+        match (&self.public_origin, host_variable) {
+            (Some(origin), None) => Ok(origin.clone()),
+            (None, Some(name)) => {
+                let host = env(name).unwrap_or_default();
+                if !is_host_name(&host) {
+                    return Err(format!(
+                        "{name} must be the public origin's host, a lowercase DNS name"
+                    ));
+                }
+                PublicOrigin::parse(&format!("https://{host}"))
+                    .map_err(|error| format!("{name}: {error}"))
+            }
+            (Some(_), Some(name)) => Err(format!(
+                "public_origin is set both in the configuration and by {name}; set it in one place"
+            )),
+            (None, None) => Err("public_origin is not set in the configuration".to_owned()),
+        }
+    }
+
+    /// The admin verification key `topup run` uses: the file's, or, with `key_variable` (the
+    /// template's `--admin-public-key-env`), the standard base64 ed25519 public key that variable
+    /// holds, read through `env`. Exactly one of the two.
+    pub fn runtime_admin_key(
+        &self,
+        key_variable: Option<&str>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<VerificationKey, String> {
+        match (&self.admin_key, key_variable) {
+            (Some(key), None) => Ok(key.clone()),
+            (None, Some(name)) => VerificationKey::from_base64(
+                self.admin_key_id.clone(),
+                &env(name).unwrap_or_default(),
+            )
+            .map_err(|error| format!("{name}: admin {error}")),
+            (Some(_), Some(name)) => Err(format!(
+                "admin_key.public_key is set both in the configuration and by {name}; set it in \
+                 one place"
+            )),
+            (None, None) => Err("admin_key.public_key is not set in the configuration".to_owned()),
+        }
     }
 
     /// The routes with each provider's client, its key read from `TOPUP_RPC_<ID>_KEY`.
@@ -158,7 +230,7 @@ impl Config {
     pub fn resolved_json(&self) -> Result<String, String> {
         serde_json::to_string_pretty(&ResolvedConfig {
             environment: &self.environment,
-            public_origin: self.public_origin.to_string(),
+            public_origin: self.public_origin.as_ref().map(ToString::to_string),
             admin_key: &self.admin_key_spec,
             rpc_providers: &self.rpc_providers,
             routes: &self.routes,
@@ -166,6 +238,22 @@ impl Config {
         .map(|json| json + "\n")
         .map_err(|error| format!("failed to write the configuration: {error}"))
     }
+}
+
+/// A lowercase DNS name of at least two labels: letters, digits, and inner `-`, at most 253
+/// characters; no port, path, or anything else.
+fn is_host_name(value: &str) -> bool {
+    value.len() <= 253
+        && value.split('.').count() >= 2
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 /// Lowercase letters, digits, `-`, and `_`, starting with a letter or digit.
@@ -251,8 +339,18 @@ mod tests {
     #[test]
     fn a_valid_configuration_parses_without_any_secret() {
         let parsed = Config::parse(&config(PROVIDERS, "https://pay.example")).expect("valid");
-        assert_eq!(parsed.public_origin.to_string(), "https://pay.example");
-        assert_eq!(parsed.admin_key.kid, "admin/staging-v1");
+        assert_eq!(
+            parsed
+                .public_origin
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("https://pay.example")
+        );
+        assert_eq!(
+            parsed.admin_key.as_ref().map(|key| key.kid.as_str()),
+            Some("admin/staging-v1")
+        );
         let shown = parsed.resolved_json().expect("show");
         assert!(shown.contains("https://eth-mainnet.g.alchemy.com/v2/{key}"));
         let reparsed = Config::parse(&shown).expect("show prints a valid configuration");
@@ -333,8 +431,7 @@ mod tests {
     }
 
     /// Every committed configuration validates without secrets, as CI and Deploy's unsealed
-    /// preflight run it. The Phala Cloud template's two runtime references are filled as Compose
-    /// fills them on the CVM (deploy/compose.template.yaml).
+    /// preflight run it.
     #[test]
     fn every_committed_configuration_validates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -352,42 +449,89 @@ mod tests {
         }
         assert!(files.len() >= 2, "{files:?}");
         for file in files {
-            let yaml = std::fs::read_to_string(&file).expect("configuration file");
-            let yaml = yaml
-                .replace(
-                    "${DSTACK_APP_DOMAIN:-}",
-                    "0123abcd.dstack-pha-prod5.phala.network",
-                )
-                .replace(
-                    "${TOPUP_ADMIN_PUBLIC_KEY:-}",
-                    "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
-                );
-            Config::parse(&yaml).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+            Config::load(&file).unwrap_or_else(|error| panic!("{error}"));
         }
     }
 
-    /// The Phala Cloud template's runtime values come from its deploy form, outside the
-    /// attestation: topup refuses to start unless each is present and well formed.
+    /// The Phala Cloud template leaves the origin and the admin key to `topup run`'s environment
+    /// (deploy/compose.template.yaml): each must then come from exactly one place and be well
+    /// formed, or topup refuses to start.
     #[test]
-    fn template_runtime_values_are_checked_at_startup() {
-        let template =
-            include_str!("../../../deploy/environments/phala-cloud-template/topup/topup.yaml");
-        let fill = |domain: &str, key: &str| {
-            template
-                .replace("${DSTACK_APP_DOMAIN:-}", domain)
-                .replace("${TOPUP_ADMIN_PUBLIC_KEY:-}", key)
+    fn runtime_settings_have_one_source_and_are_parsed_strictly() {
+        const DOMAIN: &str = "0123abcd.dstack-pha-prod5.phala.network";
+        let template = Config::parse(include_str!(
+            "../../../deploy/environments/phala-cloud-template/topup/topup.yaml"
+        ))
+        .expect("the template's configuration");
+        assert!(template.public_origin.is_none() && template.admin_key.is_none());
+        let env = |host: &'static str, key: &'static str| {
+            move |name: &str| match name {
+                "DSTACK_APP_DOMAIN" => Some(host.to_owned()),
+                "TOPUP_ADMIN_PUBLIC_KEY" => Some(key.to_owned()),
+                _ => None,
+            }
         };
-        let key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
-        let domain = "0123abcd.dstack-pha-prod5.phala.network";
-        Config::parse(&fill(domain, key)).expect("filled template");
-        for (yaml, reason) in [
-            (fill("", key), "public_origin"),
-            (fill("pay.example/path", key), "public_origin"),
-            (fill(domain, ""), "admin_key"),
-            (fill(domain, "not-a-key"), "admin_key"),
+        let origin = template
+            .runtime_public_origin(Some("DSTACK_APP_DOMAIN"), env(DOMAIN, KEY))
+            .expect("origin");
+        assert_eq!(origin.to_string(), format!("https://{DOMAIN}"));
+        let key = template
+            .runtime_admin_key(Some("TOPUP_ADMIN_PUBLIC_KEY"), env(DOMAIN, KEY))
+            .expect("key");
+        assert_eq!(key.kid, "admin/v1");
+        for host in [
+            "",
+            "localhost",
+            "pay.example:443",
+            "pay.example/path",
+            "Pay.example",
+            "pay.example\npublic_origin: https://evil.example",
+            "-pay.example",
         ] {
-            let error = Config::parse(&yaml).expect_err(reason);
-            assert!(error.contains(reason), "{reason}: {error}");
+            let error = template
+                .runtime_public_origin(Some("DSTACK_APP_DOMAIN"), env(host, KEY))
+                .expect_err(host);
+            assert!(error.starts_with("DSTACK_APP_DOMAIN "), "{host}: {error}");
         }
+        for key in [
+            "",
+            "not-a-key",
+            " 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        ] {
+            let error = template
+                .runtime_admin_key(Some("TOPUP_ADMIN_PUBLIC_KEY"), env(DOMAIN, key))
+                .expect_err(key);
+            assert!(
+                error.starts_with("TOPUP_ADMIN_PUBLIC_KEY: "),
+                "{key}: {error}"
+            );
+        }
+        assert!(
+            template
+                .runtime_public_origin(None, env(DOMAIN, KEY))
+                .is_err()
+        );
+        assert!(template.runtime_admin_key(None, env(DOMAIN, KEY)).is_err());
+        // A configuration that writes them keeps them: an environment variable cannot replace them.
+        let written = Config::parse(&config(PROVIDERS, "https://pay.example")).expect("valid");
+        assert!(
+            written
+                .runtime_public_origin(Some("DSTACK_APP_DOMAIN"), env(DOMAIN, KEY))
+                .expect_err("two sources")
+                .contains("in one place")
+        );
+        assert!(
+            written
+                .runtime_admin_key(Some("TOPUP_ADMIN_PUBLIC_KEY"), env(DOMAIN, KEY))
+                .expect_err("two sources")
+                .contains("in one place")
+        );
+        assert_eq!(
+            written
+                .runtime_public_origin(None, |_| None)
+                .expect("the file's")
+                .to_string(),
+            "https://pay.example"
+        );
     }
 }

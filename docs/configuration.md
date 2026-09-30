@@ -53,6 +53,11 @@ routes:                                    # every enabled route version, as rou
   challenges (EIP-4361) name it. Behind an ingress it must be the public URL (in a CVM, the
   [custom domain](../deploy/README.md#custom-domain)), not the internal address. The service never
   trusts `Host` or `X-Forwarded-*` headers.
+- **`public_origin`** and **`admin_key.public_key`** may be left out only for `topup run` to take
+  them from its environment (`--public-origin-host-env`, `--admin-public-key-env`): the Phala Cloud
+  template's, whose deploy form holds them
+  ([deploy/README.md](../deploy/README.md#the-phala-cloud-template-variant)). `topup run` refuses
+  to start unless each has exactly one source. Every other deployment writes both, attested.
 - **`rpc_providers`** maps each provider id (lowercase letters, digits, `-`) to its URL, `https` in
   a deployment (preflight requires it). Routes name their chain's providers by id in
   `chain.rpc_providers`, and a route that names none uses `provider-a` and `provider-b`. The first
@@ -94,6 +99,8 @@ The files it refuses include:
 | `--read-only` | off | Serves only the read API of a database restored from backup (the restore-check variant, [deploy/RESTORE.md](../deploy/RESTORE.md)): no loop, no lease-owner lock, every write refused, and Sentry reports as `<environment>-restore`. |
 | `--restore-report FILE` | none | With `--read-only`, the restore-check report `/healthz` serves. |
 | `--public-origin URL` | the file's | Replaces `public_origin`: the restore instance's own origin, or a local stack's. The attested service compose never sets it. |
+| `--public-origin-host-env NAME` | none | When the file leaves `public_origin` out: the environment variable holding the origin's host, a lowercase DNS name served as `https://HOST` (the template's `DSTACK_APP_DOMAIN`). |
+| `--admin-public-key-env NAME` | none | When the file leaves `admin_key.public_key` out: the environment variable holding the admin public key, standard base64 ed25519 (the template's `TOPUP_ADMIN_PUBLIC_KEY`). |
 | `--head-poll-interval-s` | one block time (12 s) | Delay between `eth_blockNumber` polls of provider A. Each new block's transfers to every issued address are read in one request. |
 | `--finalized-poll-interval-s` | 60 | Least delay between reads of the `finalized` head. Its advances drive the finalized backstop, the finality watch, and reconciliation. |
 | `--reconcile-interval-s` | 600 | Least delay between reconciliation rounds; a round runs only after `finalized` advanced. |
@@ -123,6 +130,7 @@ application role included, before touching the schema.
 |---|---|---|
 | `DATABASE_URL` | database commands | The login above; its password is in `PGPASSFILE`. |
 | `TOPUP_RPC_<ID>_KEY` | `run`, `reconcile`, `restore-check`, `config check --secrets` | The sealed key that fills provider `<ID>`'s `{key}`. |
+| `DSTACK_APP_DOMAIN`, `TOPUP_ADMIN_PUBLIC_KEY` | `run`, only when named by the flags above | The Phala Cloud template's origin host and admin key. |
 | `SENTRY_DSN` | `run` | Sentry reporting, off while unset or empty ([deploy/README.md, "Sentry"](../deploy/README.md#sentry)). The environment is the file's `environment`; the release is the source commit compiled into the image. |
 
 The service also needs the dstack guest API socket (`/var/run/dstack.sock`) for its keys and

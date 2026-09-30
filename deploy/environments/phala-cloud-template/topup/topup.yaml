@@ -1,13 +1,11 @@
 # The Phala Cloud template's topup configuration (docs/configuration.md): the four test routes and
-# the keyless providers of Phala's staging instance. The origin (the app's gateway domain) and the
-# admin public key are known only at deploy time, so they are the two runtime values the template
-# policy allows (deploy/compose-policy.jq), filled by Compose from the CVM's env and parsed by
-# topup at startup; they are not attested. A production instance attests them (docs/self-hosting.md).
+# the keyless providers of Phala's staging instance. It leaves out the public origin (the app's
+# gateway domain) and the admin public key, known only at deploy time: `topup run` reads them from
+# DSTACK_APP_DOMAIN and TOPUP_ADMIN_PUBLIC_KEY (deploy/compose.template.yaml), parses them strictly
+# at startup, and they are not attested. A production instance attests them (docs/self-hosting.md).
 environment: testnet
-public_origin: https://${DSTACK_APP_DOMAIN:-}
 admin_key:
   id: admin/v1
-  public_key: ${TOPUP_ADMIN_PUBLIC_KEY:-}
 # Two keyless providers per chain, as on Phala's staging (deploy/phala.md, "RPC providers").
 rpc_providers:
   provider-a: https://sepolia.gateway.tenderly.co

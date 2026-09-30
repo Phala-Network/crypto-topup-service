@@ -15,7 +15,9 @@ fi
 
 # The object store's settings, checked before WAL-G reads or writes anything: in the Phala Cloud
 # template they come from the deploy form, outside the attestation (deploy/compose.template.yaml).
-# An empty one fails later, where WAL-G cannot list the prefix.
+# An empty one fails later, where WAL-G cannot list the prefix. The endpoint is https; only the
+# local stacks' overlays, applied after deploy/render.sh and never in an attested compose
+# (deploy/compose-policy.jq), set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for their plain-http store.
 newline='
 '
 check_setting() {
@@ -30,8 +32,11 @@ check_setting() {
 }
 check_setting WALG_S3_PREFIX "${WALG_S3_PREFIX:-}" 's3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._~/-]*)?' \
     "s3://BUCKET[/PATH]"
-check_setting AWS_ENDPOINT "${AWS_ENDPOINT:-}" 'https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?' \
-    "an http(s) origin, https://HOST[:PORT]"
+endpoint_scheme=https
+[ "${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off}" != on ] || endpoint_scheme='https?'
+check_setting AWS_ENDPOINT "${AWS_ENDPOINT:-}" \
+    "$endpoint_scheme://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?" \
+    "an https origin, https://HOST[:PORT]"
 check_setting AWS_REGION "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' "a region name such as auto or us-east-1"
 
 case "$1" in

@@ -1,0 +1,11 @@
+{
+  "comment": "The pre-launch scripts an attested app-compose may carry (deploy/verify-attestation.sh): Phala Cloud's default, which it adds to every app-compose, reviewed by its SHA-256. A new version fails verification until it is reviewed from a Deploy record's attestation.json and added here (deploy/README.md, \"Attestation, ingress, and egress\").",
+  "scripts": [
+    {
+      "name": "Phala Cloud Pre-Launch Script v0.0.20",
+      "sha256": "982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8",
+      "reviewed": "2026-09-30",
+      "seen": "the attested app-compose of all 19 successful staging Deploy runs of 2026-09-29 and 2026-09-30, e.g. 36769082508"
+    }
+  ]
+}

@@ -63,12 +63,14 @@ jq -e --slurpfile service "$tmp/service.json" '
     fail "the restore-check variant differs from the service in more than its declared changes"
 
 # The template is the service without dstack-ingress, topup published on 80, and the deploy form's
-# values at runtime: its own topup.yaml (staging's routes and providers), the backup location, and
-# no keyed provider.
+# values at runtime: topup's origin and admin key from its environment, its own topup.yaml
+# (staging's routes and providers), the backup location, and no keyed provider.
 jq -e --slurpfile service "$tmp/service.json" '
     def normal: del(.services["dstack-ingress", "restore-check"], .services.topup.ports)
+        | .services.topup.command |= .[0:6]
         | del(.services.postgres.environment["WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION"],
-            .services.backup.environment["WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION"])
+            .services.backup.environment["WALG_S3_PREFIX", "AWS_ENDPOINT", "AWS_REGION"],
+            .services.topup.environment["DSTACK_APP_DOMAIN", "TOPUP_ADMIN_PUBLIC_KEY"])
         | .services.topup.environment |= with_entries(select(.key | startswith("TOPUP_RPC_") | not))
         | .configs |= with_entries(select(.key | startswith("topup_") | not))
         | .services[].configs[]? |= (if .source | startswith("topup_") then .source = "topup" else . end)

@@ -94,9 +94,13 @@ comes from a release.
    ```
 
 5. **The deploy workflow**, `.github/workflows/deploy.yml` in your repository. It calls the
-   release's [Deploy](../.github/workflows/deploy.yml) workflow, at the release's tag and with the
-   same version, which downloads the release, verifies its attestations, and runs the kit's
-   scripts on your environment directory ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)):
+   release's [Deploy](../.github/workflows/deploy.yml) workflow at the release's commit and with
+   its version, which downloads the release, verifies its attestations, and runs the kit's scripts
+   on your environment directory ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)). Pin
+   the reusable workflow by the tag's commit SHA, as GitHub recommends for third-party workflows
+   (`gh api repos/Phala-Network/phala-pay/commits/v0.3.0 --jq .sha` prints it), and keep the tag in
+   a comment; Deploy refuses to run unless its own commit is the release's, so `@` and `version`
+   cannot disagree. The caller grants `attestations: read` for the verification:
 
    ```yaml
    name: Deploy
@@ -113,9 +117,10 @@ comes from a release.
            required: true
    permissions:
      contents: read
+     attestations: read
    jobs:
      deploy:
-       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@v0.3.0
+       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<the v0.3.0 commit SHA> # v0.3.0
        with:
          version: v0.3.0
          environment: ${{ inputs.environment }}
@@ -186,7 +191,7 @@ Deploy `upgrade`, never a runtime setting.
 
 ## 4. Release and provision
 
-1. **Pick the release.** Your workflow's `@v<version>` and `version` name it (section 2, step 5);
+1. **Pick the release.** Your workflow's `uses: …@<commit> # v<version>` and `version` name it (section 2, step 5);
    its images are Phala's, public on GHCR, and each run verifies them again. Read its notes and
    [verify it](#verify-a-release) yourself once.
 2. **Provision.** Run your Deploy workflow with `environment: production` and
@@ -349,14 +354,14 @@ read the old app's backups, so never delete the app, and give a new app a new pr
 
 ## 11. Upgrades and operations
 
-- **Upgrades.** A new release is a pull request to your repository that changes the version in
-  your workflow, in both places. Review its notes and what it changes in the attested compose
-  (`git diff v0.3.0 v0.4.0 -- deploy/` in a clone of Phala Pay, or render your directory with
-  both kits and diff), [verify it](#verify-a-release), merge, and run Deploy `upgrade`. An upgrade
-  sends only the compose, so the sealed secrets stay; rollback is an upgrade to an earlier
-  release, and a schema is never rolled back ([Deploy](../deploy/README.md#deploy)). Tell
-  merchants the new compose hash. The OS image is fixed; moving to dstack 0.6 changes every derived key
-  ([OS image](../deploy/README.md#os-image)).
+- **Upgrades.** A new release is a pull request to your repository that changes the release in your
+  workflow, in both places (the `uses:` commit and `version`). Review its notes and what it changes
+  in the attested compose (`git diff v0.3.0 v0.4.0 -- deploy/` in a clone of Phala Pay, or render
+  your directory with both kits and diff), [verify it](#verify-a-release), merge, and run Deploy
+  `upgrade`. An upgrade sends only the compose, so the sealed secrets stay; rollback is an upgrade
+  to an earlier release, and a schema is never rolled back ([Deploy](../deploy/README.md#deploy)).
+  Tell merchants the new compose hash. The OS image is fixed; moving to dstack 0.6 changes every
+  derived key ([OS image](../deploy/README.md#os-image)).
 - **Operations.** A production CVM has no SSH, logs, or database access: you work through Sentry,
   the admin API (daily report, deposit view, pauses, metrics), and the chain. Every alert names its
   runbook ([runbooks](../deploy/runbooks/README.md#alert-and-symptom-index)); RPC usage and cost
@@ -378,15 +383,16 @@ is built by its [Release](../.github/workflows/release.yml) workflow from the ta
 `images.json` (each image's `repository@sha256` digest, `render.sh`'s `--images`), the deploy kit
 `phala-pay-deploy-v<version>.tar.gz`, the Phala Cloud template's compose
 `phala-cloud-template.yml`, and `SHA256SUMS`. Each asset and each image has a GitHub build
-provenance attestation that names the workflow and the tag it ran from. Your Deploy workflow
-checks all of them on every run; check them yourself before you adopt a release:
+provenance attestation whose signing certificate names exactly the Release workflow at the tag,
+a GitHub-hosted runner, and the tagged commit. Your Deploy workflow checks all of them on every
+run, and that the commit is on Phala Pay's `main`; check them yourself before you adopt a release:
 
 ```sh
 version=v0.3.0
 gh release download "$version" -R Phala-Network/phala-pay
 sha256sum -c SHA256SUMS
-provenance=(-R Phala-Network/phala-pay --source-ref "refs/tags/$version"
-  --signer-workflow Phala-Network/phala-pay/.github/workflows/release.yml)
+provenance=(-R Phala-Network/phala-pay --source-ref "refs/tags/$version" --deny-self-hosted-runners
+  --cert-identity "https://github.com/Phala-Network/phala-pay/.github/workflows/release.yml@refs/tags/$version")
 for asset in images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml; do
   gh attestation verify "$asset" "${provenance[@]}"
 done
@@ -406,8 +412,10 @@ v0.3.0 --recurse-submodules https://github.com/Phala-Network/phala-pay.git`):
   (`DOCKERFILE=deploy/Dockerfile.reference-product deploy/verify-image.sh` for the other). The
   build takes the tag's commit time, `SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)`, as the
   release does.
-- The kit is `git archive` of the tag: `deploy/build-kit.sh --tar v0.3.0 v0.3.0 | sha256sum`
-  equals `gzip -dc phala-pay-deploy-v0.3.0.tar.gz | sha256sum`.
+- The kit's tar is identical to `git archive` of the tag's deployment files:
+  `deploy/build-kit.sh --tar v0.3.0 v0.3.0 | sha256sum` equals
+  `gzip -dc phala-pay-deploy-v0.3.0.tar.gz | sha256sum` (compare the tar; the gzip layer depends
+  on the compressor).
 - `postgres-walg` is not reproducible (apt and dpkg timestamps): review its
   [Dockerfile](../deploy/Dockerfile.postgres-walg) at the tag. An image you build and push
   yourself has a digest of its own, which Phala's attestations do not cover; render it with your
@@ -421,10 +429,13 @@ Phala Cloud's [Phala Pay template](https://cloud.phala.com/templates/phala-pay) 
 [deploy/environments/phala-cloud-template](../deploy/environments/phala-cloud-template/topup)
 ([deploy/README.md, "The Phala Cloud template variant"](../deploy/README.md#the-phala-cloud-template-variant)).
 It serves Phala's staging routes at the app's own gateway domain, with no custom domain or
-dstack-ingress. Its deploy form cannot put values in the attested compose, so five values are
-outside the attestation: the admin public key (`TOPUP_ADMIN_PUBLIC_KEY`), the public origin
-(`https://${DSTACK_APP_DOMAIN}`, from Phala Cloud's pre-launch script), and the backup location
-(`WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`). Whoever controls the workspace can change them
-without changing the compose hash. topup and postgres-walg refuse to start unless each is well
-formed, and the policy allows a runtime value nowhere else. For an instance with merchants, deploy
-as this guide describes, where every one of them is attested.
+dstack-ingress. Its deploy form cannot put values in the attested compose, so five values come
+from the CVM's env and are outside the attestation: the admin public key
+(`TOPUP_ADMIN_PUBLIC_KEY`), the public origin's host (`DSTACK_APP_DOMAIN`, from Phala Cloud's
+reviewed pre-launch script), and the backup location (`WALG_S3_PREFIX`, `AWS_ENDPOINT`,
+`AWS_REGION`). Whoever controls the workspace can change them without changing the compose hash.
+topup and postgres-walg parse each strictly at startup and refuse to start otherwise, and the
+policy allows a runtime value in no other place. A template instance also has no restore-check
+path: its restore guarantees would rest on those unattested values
+([deploy/README.md](../deploy/README.md#the-phala-cloud-template-variant)). For an instance with
+merchants, deploy as this guide describes, where every one of them is attested.

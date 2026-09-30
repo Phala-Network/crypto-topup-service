@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# deploy/build-kit.sh: the kit is reproducible (twice the same bytes, and its tar is `git archive`
-# of the commit), holds only its files, and works on its own, as an operator uses it: extracted
+# deploy/build-kit.sh: the kit's tar is identical to `git archive` of the commit (and two builds
+# here give the same bytes), it holds only its files, and works on its own, as an operator uses it: extracted
 # outside any checkout, it renders an operator's environment directory, byte for byte as this
 # checkout does, in every variant, and its preflight (--offline) and route-mode check accept the
 # result. TOPUP names a local topup binary for those two (CI's build); without it they are skipped.
@@ -25,7 +25,7 @@ tar -tzf "$tmp/first/$name.tar.gz" >"$tmp/listing"
 grep -v "^$name/" "$tmp/listing" && fail "an entry is outside $name/"
 for file in deploy/render.sh deploy/compose-policy.jq deploy/contracts/reference.json \
     deploy/environments/example/topup/topup.yaml deploy/environments/phala-cloud-template/topup/topup.yaml \
-    deploy/runbooks/sign-admin-request.sh docs/self-hosting.md LICENSE; do
+    deploy/runbooks/sign-admin-request.sh deploy/pre-launch-scripts.json docs/self-hosting.md LICENSE; do
     grep -qx "$name/$file" "$tmp/listing" || fail "$file is missing"
 done
 grep -E "^$name/(crates|contracts|sdk|deploy/tests|deploy/local|deploy/environments/phala-network)/" \

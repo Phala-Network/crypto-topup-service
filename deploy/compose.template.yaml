@@ -2,11 +2,19 @@
 # `deploy/render.sh --template` after the environment's overlay, instead of compose.service.yaml: a
 # testnet quick start served at the app's own Phala Cloud gateway domain, with no custom domain.
 # deploy/compose-policy.jq checks the merged result, including the few per-deployment values it
-# leaves to the deploy form.
+# takes from the CVM's env, which its deploy form fills.
 services:
   restore-check: !reset null
   # The gateway terminates TLS for https://<app-id>.<gateway-domain> and forwards to port 80.
   dstack-ingress: !reset null
+  # The origin and the admin key are the environment's, not topup.yaml's: topup parses each at
+  # startup. DSTACK_APP_DOMAIN is exported by Phala Cloud's pre-launch script (deploy/README.md,
+  # "The Phala Cloud template variant"), TOPUP_ADMIN_PUBLIC_KEY is the deploy form's.
   topup:
+    command: [topup, run, --config, /etc/topup/topup.yaml, --webhook-proxy, "http://smokescreen:4750",
+      --public-origin-host-env, DSTACK_APP_DOMAIN, --admin-public-key-env, TOPUP_ADMIN_PUBLIC_KEY]
+    environment:
+      DSTACK_APP_DOMAIN: ${DSTACK_APP_DOMAIN:-}
+      TOPUP_ADMIN_PUBLIC_KEY: ${TOPUP_ADMIN_PUBLIC_KEY:-}
     ports:
       - "80:8080"
