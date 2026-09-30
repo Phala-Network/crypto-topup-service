@@ -8,8 +8,8 @@ cargo test --locked -p topup --test refunds refund_flow -- --nocapture
 docker compose -f deploy/docker-compose.staging.yml exec -T topup topup restore-check
 docker compose -f deploy/docker-compose.staging.yml exec -T postgres psql -c "SELECT 'topup bogus'"
 topup reconcile \
-  --route deploy/config/routes/phala-cloud-sepolia-pha.yaml
-cargo run --locked -q -p topup -- route validate deploy/config/routes/phala-cloud-sepolia-pha.yaml
+  --config deploy/environments/phala-network/staging/topup/topup.yaml
+cargo run --locked -q -p topup -- config check deploy/environments/phala-network/staging/topup/topup.yaml
 export TOPIC="$(cast keccak Flushed)"
 psql "$DATABASE_URL" <<'SQL'
 topup bogus --not-a-command

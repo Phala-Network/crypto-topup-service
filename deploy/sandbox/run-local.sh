@@ -16,7 +16,9 @@ done
 
 project="topup-sandbox-$$"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-sandbox.XXXXXX")
-compose=("$root/deploy/local/compose.sh" -p "$project" -f "$root/deploy/sandbox/docker-compose.local.yml")
+environment="$tmp/environment"
+compose=("$root/deploy/local/compose.sh" --environment-dir "$environment" -p "$project"
+    -f "$root/deploy/sandbox/docker-compose.local.yml")
 # The product side (example, reference product, and scenarios) runs in this image on the compose
 # network, so the service reaches its endpoints as http://product:8089 even where a host firewall
 # drops traffic from containers to the host.
@@ -58,18 +60,16 @@ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%
 TOPUP_LOCAL_PORT=$(free_port)
 SANDBOX_ANVIL_PORT=$(free_port)
 export TOPUP_LOCAL_PORT SANDBOX_ANVIL_PORT
-export TOPUP_LOCAL_ROUTES_DIR="$tmp/routes"
 rpc_url="http://127.0.0.1:$SANDBOX_ANVIL_PORT"
 service_url="http://127.0.0.1:$TOPUP_LOCAL_PORT"
 public_url="http://product:8089"
 slug="sandbox-local"
-mkdir -p "$TOPUP_LOCAL_ROUTES_DIR"
 # A throwaway admin key for this run; the service issues the product through the admin API.
-export TOPUP_LOCAL_ADMIN_KID="sandbox-admin/v1"
+admin_key_id="sandbox-admin/v1"
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
-TOPUP_LOCAL_ADMIN_PUBLIC_KEY=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER |
-    tail -c 32 | base64)
-export TOPUP_LOCAL_ADMIN_PUBLIC_KEY
+admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
+# The local environment until the sandbox route exists (below).
+"$root/deploy/local/environment.sh" "$environment"
 
 echo "== building and starting postgres, dstack simulator, and anvil"
 "${compose[@]}" build postgres dstack-simulator topup
@@ -89,14 +89,30 @@ implementation=$(cast call "$factory" 'implementation()(address)' --rpc-url "$rp
     --rpc-url "$rpc_url" >"$tmp/contracts.json"
 jq . "$tmp/contracts.json"
 
-echo "== rendering the sandbox route"
+echo "== rendering the sandbox route and configuration"
 FORWARDER_FACTORY="$factory" \
     TEST_TOKEN=$(jq -er .test_token "$tmp/contracts.json") \
     SANCTIONS_ORACLE=$(jq -er .sanctions_oracle "$tmp/contracts.json") \
     PRODUCT_SLUG="$slug" \
     RATE_LOCK_WINDOW_S=45 \
-    "$root/deploy/sandbox/render-route.sh" >"$TOPUP_LOCAL_ROUTES_DIR/sandbox.yaml"
-"${compose[@]}" run --rm --no-deps topup topup route validate /etc/topup/routes/sandbox.yaml
+    "$root/deploy/sandbox/render-route.sh" >"$tmp/sandbox-route.yaml"
+# The sandbox's own configuration: its one route, on the Anvil chain as providers A and B.
+{
+    cat <<YAML
+environment: sandbox
+public_origin: https://topup.localhost
+admin_key:
+  id: $admin_key_id
+  public_key: $admin_public_key
+rpc_providers:
+  provider-a: http://anvil:8545
+  provider-b: http://anvil:8545/?provider=b
+routes:
+YAML
+    awk 'NR == 1 { print "  - " $0; next } { print ($0 == "" ? "" : "    " $0) }' \
+        <(grep -v '^#' "$tmp/sandbox-route.yaml")
+} >"$environment/topup.yaml"
+"${compose[@]}" run --rm --no-deps topup topup config check /etc/topup/topup.yaml
 
 echo "== starting the service"
 "${compose[@]}" up -d topup
@@ -111,8 +127,7 @@ jq -n --arg name "$slug" --arg today "$(date -u +%F)" \
       charges_enabled: false, reason: "local sandbox"}' \
     >"$tmp/product.json"
 mapfile -t headers < <("$root/deploy/runbooks/sign-admin-request.sh" POST \
-    http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" \
-    "$TOPUP_LOCAL_ADMIN_KID")
+    http://topup:8080/v1/admin/accounts "$tmp/product.json" "$tmp/admin.pem" "$admin_key_id")
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' \
     -H "${headers[0]}" -H "${headers[1]}" -H "${headers[2]}" \
     --data-binary @"$tmp/product.json" "$service_url/v1/admin/accounts" >"$tmp/account.json"

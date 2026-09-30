@@ -12,7 +12,8 @@ name: Release images
 #   product): the same two-build, push, and read-back discipline as phala-pay, and the digest,
 #   pulled from the registry, must run `--help`.
 # The job summary and the `images.json` artifact carry the manifest references
-# (`repository@sha256:...`) for Deploy and deploy/render-compose.sh.
+# (`repository@sha256:...`) by image name, the --images input of deploy/render.sh that Deploy
+# renders with. phala-pay compiles the commit in as its Sentry release (SOURCE_COMMIT).
 #
 # No build provenance attestation: actions/attest-build-provenance supports private repositories
 # only on GitHub Enterprise Cloud, and this private repository's organization is on the Free plan.
@@ -137,25 +138,27 @@ jobs:
         env:
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          topup=$(cat "$RUNNER_TEMP/topup.ref")
-          postgres_walg=$(cat "$RUNNER_TEMP/postgres-walg.ref")
-          product=$(cat "$RUNNER_TEMP/reference-product.ref")
-          # render-compose.sh rejects anything but a nonzero repository@sha256 reference.
-          TOPUP_IMAGE=$topup POSTGRES_WALG_IMAGE=$postgres_walg deploy/render-compose.sh --images-only >/dev/null
-          PRODUCT_IMAGE=$product deploy/render-compose.sh --images-only deploy/product/docker-compose.yml >/dev/null
           mkdir -p "$RUNNER_TEMP/images"
-          jq -n --arg topup "$topup" --arg postgres_walg "$postgres_walg" --arg product "$product" \
-            '{TOPUP_IMAGE: $topup, POSTGRES_WALG_IMAGE: $postgres_walg, PRODUCT_IMAGE: $product}' \
+          jq -n --rawfile topup "$RUNNER_TEMP/topup.ref" \
+            --rawfile postgres_walg "$RUNNER_TEMP/postgres-walg.ref" \
+            --rawfile product "$RUNNER_TEMP/reference-product.ref" \
+            '{"phala-pay": ($topup | rtrimstr("\n")), "postgres-walg": ($postgres_walg | rtrimstr("\n")),
+              "phala-pay-reference-product": ($product | rtrimstr("\n"))}' \
             >"$RUNNER_TEMP/images/images.json"
+          # render.sh accepts only nonzero repository@sha256 references: render every committed
+          # environment of this repository with them.
+          for environment in deploy/environments/*/*/*/; do
+            deploy/render.sh --images "$RUNNER_TEMP/images/images.json" \
+              --gateway-domain gateway.release.invalid "$environment" >/dev/null
+          done
           {
             echo "## Published images"
             echo
-            echo "Commit \`$GITHUB_SHA\`, tag \`$TAG\`. Deploy the manifest digests, never the tag."
+            echo "Commit \`$GITHUB_SHA\`, tag \`$TAG\`. Deploy renders the manifest digests of this"
+            echo "run's \`images.json\` (deploy/render.sh \`--images\`), never the tag:"
             echo
-            echo '```sh'
-            echo "export TOPUP_IMAGE=$topup"
-            echo "export POSTGRES_WALG_IMAGE=$postgres_walg"
-            echo "export PRODUCT_IMAGE=$product"
+            echo '```json'
+            cat "$RUNNER_TEMP/images/images.json"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -5,7 +5,7 @@
 # (s3.compose.yml), and the asset chains (an Anvil with Sepolia's chain id and one with Base
 # Sepolia's, for the committed routes of each). Images, commands,
 # settings, inline configs, and healthchecks all come from the rendered file, and the secrets from a
-# `.env` shaped like staging.env.example.
+# `.env` of the rendered compose's sealed names.
 #
 # The exception is the custom domain: dstack-ingress does not run, because tls-alpn-01 needs the
 # public DNS records and Let's Encrypt connecting through the dstack gateway (the upstream

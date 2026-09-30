@@ -87,7 +87,7 @@ dc() {
         unset+=(-u "$name")
     done
     env "${unset[@]}" docker compose --progress quiet -p "$project" --project-directory "$root/deploy/local" \
-        --env-file "$cvm/.env" -f "${compose_file:-$root/deploy/docker-compose.yml}" \
+        --env-file "$cvm/.env" -f "$compose_file" \
         -f "$root/deploy/local/cvm-rehearsal.compose.yml" "$@"
 }
 

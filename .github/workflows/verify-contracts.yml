@@ -1,9 +1,8 @@
 name: Verify contracts
 
-# Read-only: checks the approved Safe and the deployed factory on Sepolia through the two staging
-# RPC providers, and validates the committed staging routes. No keys; the RPC URLs (which may carry
-# provider API keys) are Environment secrets and appear only as "sepolia/a" and "sepolia/b" in the
-# reports. The `staging` Environment admits only `main`, so this runs from `main`.
+# Read-only: validates Phala's committed staging configuration and, through its two Sepolia RPC
+# providers, checks the approved Safe and the deployed factory. It holds no key, so both providers
+# must be keyless; they appear only as "sepolia/a" and "sepolia/b" in the reports.
 
 on:
   schedule:
@@ -30,8 +29,9 @@ env:
 jobs:
   verify:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    environment: staging
     timeout-minutes: 45
+    env:
+      STAGING_CONFIG: deploy/environments/phala-network/staging/topup/topup.yaml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,27 +50,27 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-verify-contracts-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Verify the Safe and the factory deployment on both providers
-        env:
-          RPC_A: ${{ vars.TOPUP_RPC_PROVIDER_A_URL }}
-          RPC_B: ${{ vars.TOPUP_RPC_PROVIDER_B_URL }}
+      - name: Validate the committed staging configuration
         run: |
-          [[ -n "$RPC_A" && -n "$RPC_B" ]] ||
-            { echo "::error::TOPUP_RPC_PROVIDER_A_URL and TOPUP_RPC_PROVIDER_B_URL must be set"; exit 1; }
           mkdir -p reports
+          cargo run --locked -q -p topup -- config show "$STAGING_CONFIG" >reports/staging-config.json
+
+      - name: Verify the Safe and the factory deployment on both providers
+        run: |
+          # The providers of the configuration's Sepolia routes, in their order.
+          IFS=$'\t' read -r RPC_A RPC_B < <(jq -r '
+            [.routes[] | select(.chain.chain_id == 11155111)][0].chain.rpc_providers as $ids
+            | .rpc_providers as $urls | [$urls[$ids[0]], $urls[$ids[1]]] | @tsv' \
+            reports/staging-config.json)
+          [[ -n "$RPC_A" && -n "$RPC_B" && "$RPC_A$RPC_B" != *"{key}"* ]] ||
+            { echo "::error::the staging configuration needs two keyless Sepolia providers"; exit 1; }
           status=0
           deploy/contracts/verify-safe.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
             >reports/sepolia-safe-verification.json || status=1
           deploy/contracts/verify-deployment.sh --rpc sepolia/a="$RPC_A" --rpc sepolia/b="$RPC_B" \
             >reports/sepolia-contract-verification.json || status=1
-          jq '{passed, chains: [.chains[] | {target, passed}]}' reports/*.json || true
+          jq '{passed, chains: [.chains[] | {target, passed}]}' reports/sepolia-*.json || true
           exit "$status"
-
-      - name: Validate the committed staging routes
-        run: |
-          for route in deploy/config/routes/*.yaml; do
-            cargo run --locked -q -p topup -- route validate "$route"
-          done
 
       - name: Upload the reports
         if: always()

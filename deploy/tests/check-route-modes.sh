@@ -65,8 +65,12 @@ accepts production sepolia-pha:false:11155111 mainnet-pha:true:1
 accepts production mainnet-pha:true:1
 accepts production base-usdc:true:8453 sepolia-pha:false:11155111
 accepts staging sepolia-pha:false:11155111 hoodi-pha:false:560048
-# The committed compose is a staging compose.
-"$check" staging "$root/deploy/docker-compose.yml" >/dev/null
+# Phala's staging environment, rendered as Deploy renders it, is a staging compose.
+jq -n '{"phala-pay": "ghcr.io/phala-network/phala-pay@sha256:\("1" * 64)",
+    "postgres-walg": "ghcr.io/phala-network/postgres-walg@sha256:\("2" * 64)"}' >"$tmp/images.json"
+"$root/deploy/render.sh" --images "$tmp/images.json" --gateway-domain gateway.dstack-pha-prod5.phala.network \
+    "$root/deploy/environments/phala-network/staging/topup" >"$tmp/staging.yml"
+"$check" staging "$tmp/staging.yml" >/dev/null
 
 refuses production "chain 11155111 is a test network: livemode must be false" \
     mainnet-pha:true:1 sepolia-pha:true:11155111

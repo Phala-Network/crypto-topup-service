@@ -58,7 +58,8 @@ jobs:
   test:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     env:
-      MIGRATE_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # The test harness's database owner and application login (crates/topup/tests/support).
+      OWNER_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       DATABASE_URL: postgres://topup_ci:topup_ci@localhost:5432/postgres
     services:
       postgres:
@@ -91,10 +92,10 @@ jobs:
       - name: Install SQLx CLI
         run: cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres --locked
       - name: Run migrations
-        run: cargo run --locked -p topup -- migrate
+        run: DATABASE_URL="$OWNER_DATABASE_URL" cargo run --locked -p topup -- migrate
       - name: Create application login role
         run: >-
-          psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -c
+          psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 -c
           "CREATE ROLE topup_ci LOGIN PASSWORD 'topup_ci' IN ROLE topup_app"
       - name: Check SQLx offline metadata
         env:
@@ -250,18 +251,15 @@ jobs:
           mapfile -t scripts < <(git grep -lz '^#!.*sh$' | xargs -0 awk 'FNR == 1 { if (/^#!.*sh$/) print FILENAME; nextfile }')
           tar -cf - .shellcheckrc "${scripts[@]}" |
             docker run --rm -i "$SHELLCHECK_IMAGE" sh -c 'mkdir /src && cd /src && tar -x && shellcheck "$@"' sh "${scripts[@]}"
-      - name: Validate deployment scripts and app compose
+      - name: Validate deployment scripts
         run: |
-          jq empty deploy/app-compose.example.json
           deploy/tests/walg-cron.sh
           deploy/tests/walg-restore.sh
-          deploy/tests/render-compose.sh
+          deploy/tests/render.sh
           deploy/tests/render-route.sh
           deploy/tests/check-route-modes.sh
-          deploy/tests/preflight.sh
           deploy/tests/preflight-phala.sh
           deploy/tests/product-preflight.sh
-          deploy/tests/write-staging-env.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
       - uses: ./.github/actions/rust
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -271,6 +269,11 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-runbooks-${{ hashFiles('**/Cargo.lock') }}
+      # Preflight checks the configuration with topup; offline and in CI, this build's binary.
+      - name: Check preflight's local checks
+        run: |
+          cargo build --locked -q -p topup
+          TOPUP="$PWD/target/debug/topup" deploy/tests/preflight.sh
       - name: Check runbook commands against the CLI and OpenAPI
         run: make runbook-check
       - name: Build postgres-walg image
