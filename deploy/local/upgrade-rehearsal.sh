@@ -137,6 +137,52 @@ wait_for() {
 healthy() {
     [[ "$(curl -s -o /dev/null -w '%{http_code}' "$api/healthz")" == 200 ]]
 }
+# up old|new: `docker compose up` of that side as dstack runs it; a failure stops the rehearsal.
+up() {
+    echo "$1" >"$tmp/cvm/.side"
+    dc "$1" up -d --remove-orphans >"$tmp/up.log" 2>&1 || {
+        cat "$tmp/up.log" >&2
+        die "docker compose up of the $1 deployment failed"
+    }
+}
+# assert_running old|new TOPUP_IMAGE POSTGRES_IMAGE: every service of that side's artifact runs
+# (or ran, for a one-shot) exactly as that side's compose defines it: the image reference and the
+# image it resolves to, the command and entrypoint, and the content of every mounted config. The
+# artifact itself pins the given images.
+assert_running() {
+    local side=$1 topup_image=$2 postgres_image=$3 service id expected target source content
+    "$compose" -f "$tmp/cvm/$side.yml" config --no-interpolate --format json >"$tmp/artifact.json"
+    jq -e --arg topup "$topup_image" --arg postgres "$postgres_image" '
+        [.services[] | .image | select(test("(phala-pay|postgres-walg)@"))] | unique | sort
+        == ([$topup, $postgres] | sort)' "$tmp/artifact.json" >/dev/null ||
+        die "the $side artifact does not pin $topup_image and $postgres_image"
+    dc "$side" config --format json >"$tmp/expected.json"
+    for service in $(jq -r --slurpfile artifact "$tmp/artifact.json" \
+        '.services | to_entries[] | select(.value.profiles == null)
+        | select(.key | in($artifact[0].services)) | .key' "$tmp/expected.json"); do
+        id=$(dc "$side" ps -a -q "$service")
+        [[ -n "$id" && "$id" != *$'\n'* ]] || die "$side: service $service has no single container"
+        jq -c --arg service "$service" '.services[$service] | {image, command, entrypoint}' \
+            "$tmp/expected.json" >"$tmp/expected-service.json"
+        expected=$(jq -r .image "$tmp/expected-service.json")
+        [[ "$(docker inspect -f '{{.Config.Image}}' "$id")" == "$expected" &&
+            "$(docker inspect -f '{{.Image}}' "$id")" == "$(docker image inspect -f '{{.Id}}' "$expected")" ]] ||
+            die "$side: $service runs $(docker inspect -f '{{.Config.Image}}' "$id"), not $expected"
+        jq -e --argjson cmd "$(docker inspect -f '{{json .Config.Cmd}}' "$id")" \
+            --argjson entrypoint "$(docker inspect -f '{{json .Config.Entrypoint}}' "$id")" '
+            (.command == null or .command == ($cmd // []))
+            and (.entrypoint == null or .entrypoint == ($entrypoint // []))' \
+            "$tmp/expected-service.json" >/dev/null ||
+            die "$side: $service does not run its compose's command and entrypoint"
+        while IFS=$'\t' read -r source target; do
+            content=$(jq -j --arg source "$source" '.configs[$source].content' "$tmp/expected.json" |
+                sed 's/[$][$]/$/g'; printf x)
+            [[ "$(docker cp "$id:$target" - | tar -xO; printf x)" == "$content" ]] ||
+                die "$side: $service's $target is not its compose's config $source"
+        done < <(jq -r --arg service "$service" \
+            '.services[$service].configs[]? | [.source, .target] | @tsv' "$tmp/expected.json")
+    done
+}
 psql_value() {
     dc "$(<"$tmp/cvm/.side")" exec -T postgres psql -U postgres -d topup -XAtqc "$1"
 }
@@ -164,10 +210,11 @@ docker run -d --name "$registry" -p "127.0.0.1:$registry_port:5000" \
     --mount type=tmpfs,destination=/var/lib/registry "$registry_image" >/dev/null
 wait_for "the registry" 30 curl -fsS "http://127.0.0.1:$registry_port/v2/"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
-# publish NAME BUILD_ARGS...: builds, pushes, and prints the repository@sha256 reference.
+# publish NAME VARIABLE BUILD_ARGS...: builds, pushes, and sets VARIABLE to the repository@sha256
+# reference. It runs in this shell, not a command substitution, so cleanup sees its images.
 publish() {
-    local tag="127.0.0.1:$registry_port/$1:upgrade" digest
-    shift
+    local tag="127.0.0.1:$registry_port/$1:upgrade" variable=$2 digest
+    shift 2
     docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
         --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" >/dev/null
     local_images+=("$tag")
@@ -175,10 +222,12 @@ publish() {
     digest=$(docker image inspect --format '{{json .RepoDigests}}' "$tag" |
         jq -er --arg repository "${tag%:upgrade}" '.[] | select(startswith($repository + "@"))')
     local_images+=("$digest")
-    printf '%s' "$digest"
+    printf -v "$variable" '%s' "$digest"
 }
-new_topup=$(publish phala-pay "$root")
-new_postgres=$(publish postgres-walg -f "$root/deploy/Dockerfile.postgres-walg" "$root")
+new_topup='' new_postgres=''
+publish phala-pay new_topup "$root"
+publish postgres-walg new_postgres -f "$root/deploy/Dockerfile.postgres-walg" "$root"
+
 jq -n --arg topup "$new_topup" --arg postgres "$new_postgres" \
     '{"phala-pay": $topup, "postgres-walg": $postgres}' >"$tmp/images.json"
 docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
@@ -297,8 +346,9 @@ deploy_chain() {
 }
 deploy_chain "$rpc_url" sepolia 11155111
 deploy_chain "$base_rpc_url" base-sepolia 84532
-dc old up -d --remove-orphans >/dev/null 2>&1 || true
+up old
 wait_for "the old service's /healthz" 150 healthy
+assert_running old "$old_topup" "$old_postgres"
 echo "ok: the old deployment serves /healthz"
 
 echo "== committing real data through the API"
@@ -379,9 +429,10 @@ jq -e --arg project "$project" 'all(.[]; .project == $project)
 
 echo "== upgrading in place, as Deploy upgrades"
 upgrade_at=$(date +%s)
-echo new >"$tmp/cvm/.side"
-dc new up -d --remove-orphans >/dev/null 2>&1 || true
+up new
 wait_for "the upgraded service's /healthz" 150 healthy
+assert_running new "$new_topup" "$new_postgres"
+echo "ok: every service runs the new image and its new configuration"
 running >"$tmp/running-after.json"
 # The same project, volumes, mounts, PGDATA, and backup prefix; restore-check and the old tools
 # service never run in the service variant.
@@ -419,9 +470,10 @@ echo "ok: WAL archiving continues, and the upgraded service is attested"
 
 echo "== rolling back to the kept old artifact on the same volumes"
 cp "$tmp/old-artifact.yml" "$tmp/cvm/old.yml"
-echo old >"$tmp/cvm/.side"
-dc old up -d --remove-orphans >/dev/null 2>&1 || true
+up old
 wait_for "the rolled-back service's /healthz" 150 healthy
+assert_running old "$old_topup" "$old_postgres"
+echo "ok: every service runs the old image and its old configuration again"
 evidence "$tmp/rolled-back.json"
 cmp -s <(jq -S . "$tmp/before.json") <(jq -S . "$tmp/rolled-back.json") || {
     diff -u <(jq -S . "$tmp/before.json") <(jq -S . "$tmp/rolled-back.json") >&2
