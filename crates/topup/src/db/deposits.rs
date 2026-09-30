@@ -414,7 +414,9 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
 /// all reversed takes a new deposit with the next revision (`identity::deposit_revision_id`) from
 /// finalized `evidence` only, so an existing deposit keeps its id and a concurrent insert of the
 /// same revision does nothing. A successor names the deposit it replaces when both are in the same
-/// account and mode.
+/// account and mode: the one the finality watch reversed, or a reversed deposit restored after a
+/// restore whose delivered `deposit.reversed` named this deposit as its successor
+/// (`crate::restore_mode`).
 pub(crate) async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
@@ -476,7 +478,11 @@ pub(crate) async fn insert_deposit_in(
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id
         LEFT JOIN deposits AS replaced
-            ON replaced.id = $23 AND replaced.account_id = address.account_id
+            ON replaced.id = COALESCE(
+                   $23,
+                   (SELECT deposit_id FROM restore_deposit_tombstones WHERE successor_id = $1)
+               )
+               AND replaced.account_id = address.account_id
                AND replaced.livemode = address.livemode
         WHERE address.id = $8 AND ($21 = 0::bigint OR $22)
         ON CONFLICT DO NOTHING

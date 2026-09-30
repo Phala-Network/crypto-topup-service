@@ -9,6 +9,23 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Added
 
+- Deposits carry `receipt_log_index` and `revision`, the position and revision their `id` is
+  derived from, and `block_hash` and `block_time` (Unix seconds), in the object and every
+  `deposit.*` snapshot. A snapshot rendered before this release lacks them, so they are optional
+  in the OpenAPI schema.
+- Admin: `POST /v1/admin/restore/treasuries/apply` applies again, while frozen after a restore, a
+  treasury change that applied after the restore point, from the merchant's delivery of its
+  `treasury.updated`: only a delivery the service signed, of the restored pending change becoming
+  `active`, whose time-lock ended, and screened again when screening answers (a treasury a
+  sanctions list names now is refused). It applies at the event's `created`, audited in the same
+  transaction, and its events are not sent again. `POST /v1/admin/restore/treasuries/verify`
+  reports such a change as `application_lost`, and the treasury it replaced, received `replaced`,
+  as `replacement_lost` when that change is sent in the same request as `active` (both were
+  `differs`); both are `matches` once the change is restored. A change on a chain without a current
+  route stays pending, as the time-lock leaves it.
+- Admin: each result of `POST /v1/admin/restore/events` carries `reversed_deposit` for a
+  `deposit.reversed`: `restored`, `recorded`, `address_unknown`, `rescanned` (the rescan recorded
+  its position first; also a finding status of `GET /v1/admin/restore`), or `identity_missing`.
 - Deposits carry `replaces` and `replaced_by` (`dep_…` or `null`), in the object and every
   `deposit.*` snapshot: a deposit recorded for the transfer that took a reversed deposit's receipt
   position after a reorganization names that deposit, and the reversed one names it (see Fixed).
@@ -653,6 +670,28 @@ happens only from two-provider finalized data.
 
 ### Fixed
 
+- Admin: a restore across a treasury change no longer deadlocks the reconciliation. Deposit
+  addresses and quotes are re-issued over a treasury in force when they were issued, within 5
+  minutes (any since the restore point for a deposit address, around its `created` for a quote),
+  not only the current one, once the lost change is applied again with `POST
+  /v1/admin/restore/treasuries/apply`; before, they could be re-issued only over the restored
+  current treasury, while the change would apply only after the unfreeze those re-issues must
+  precede. Each re-issued deposit address version, by address or by version, keeps a superseded
+  network over every treasury in force since the restore point, still credited. A restore without
+  a restore point re-issues nothing, and a quote the restored database does not hold, created well
+  before the restore point, is refused (one it holds is returned, `reissued: false`).
+- A quote's `created` is taken once its chain's treasury is read under the treasury lock, and a
+  time-locked treasury change records `applied_at` as it applies under that lock rather than when
+  the time-lock's pass started, so each falls while the other's treasury is in force.
+- Admin: a deposit reversed after the restore point because a re-included transaction put
+  another transfer at its receipt position keeps its identity through the restore. Its imported
+  `deposit.reversed` rebuilds it, reversed, at its revision, so the rescan records the final
+  transfer as its successor again, with the same id, `replaces`, and delivered credit; before, the
+  rescan recorded it under the reversed deposit's id, held as `contradicted`, and the successor
+  could never be rebuilt.
+- Admin: `POST /v1/admin/restore/events` imports the `deposit.reversed` of a deposit that was never
+  valued (rejected, such as a token without a route); it refused the whole request with `400`. A
+  `deposit.credited` still needs its valuation.
 - Idempotent requests are atomic (architecture §12; Brandur Leach's
   [Stripe-like idempotency keys in Postgres](https://brandur.org/idempotency-keys)): every
   merchant `POST` saves its response in the transaction of its changes, so a retry after a crash,

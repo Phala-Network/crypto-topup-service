@@ -516,6 +516,7 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("restore_timeline", &["SELECT", "UPDATE"]),
     ("restores", &["SELECT", "INSERT", "UPDATE"]),
     ("restore_delivered_events", &["SELECT", "INSERT"]),
+    ("restore_deposit_tombstones", &["SELECT", "INSERT"]),
     // Plus `UPDATE` of its discard columns only, checked below.
     ("restore_delivered_credits", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),

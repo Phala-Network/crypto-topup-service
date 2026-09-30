@@ -101,12 +101,18 @@ rebuilt deposit then finds its event recorded and nothing is sent again with ano
 is valued at the credit the merchant was told, not re-valued, so its refunds and reversal reference
 that credit. A deposit whose recorded transfer contradicts its delivered event is held until the
 operator discards the delivered credit. A spot deposit whose delivery no merchant produces is
-re-valued. The same reconciliation revokes again the keys, cancels again the treasury changes,
-pauses or resumes treasury crediting again, and deletes again the endpoints that the restore
-brought back, and re-issues the deposit addresses and quotes given out after the restore point,
-identically; a re-issued quote's payment is credited at spot unless a signed delivery carries its
-credit, a client secret re-issued with one is accepted only when the service issued it for that id
-to that account, and a quote no merchant reports stays lost ([runbook](runbooks/restore.md)).
+re-valued. A deposit reversed after the restore point because a re-included transaction put
+another transfer at its receipt position is rebuilt, reversed, from its signed `deposit.reversed`,
+so the rescan records that transfer under its successor's id and link, at the successor's
+delivered credit; a reversed deposit that was never valued is imported the same way. The same
+reconciliation revokes again the keys, cancels again the treasury changes, pauses or resumes
+treasury crediting again, and deletes again the endpoints that the restore brought back; applies
+again, while frozen, a treasury change that applied after the restore point, from its signed
+`treasury.updated`; and re-issues the deposit addresses and quotes given out after the restore
+point, identically, over the treasury in force when each was issued. A re-issued quote's payment
+is credited at spot unless a signed delivery carries its credit, a client secret re-issued with one
+is accepted only when the service issued it for that id to that account, and a quote no merchant
+reports stays lost ([runbook](runbooks/restore.md)).
 
 A service that booted straight from backup into the service compose (an empty volume, so the
 PostgreSQL entrypoint restored it, without the restore-check variant) is frozen as well: every

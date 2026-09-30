@@ -838,10 +838,15 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     four; secret and restricted keys alike), compares the treasuries with the `treasury` events
     the merchant received and cancels again what it canceled and pauses or resumes their crediting
     again as the merchant last did (the per-treasury crediting pause of the launch hardening; the
-    operator re-applies its own pauses), deletes again the endpoints it deleted, re-issues the deposit
-    addresses it gave out (the salt formula of §5a gives the same address, backfilled from the
-    restored cursor) and the quotes it created (the quote salt gives the same address from the
-    `qt_` id; only that address over the current treasury is accepted, backfilled from the restored
+    operator re-applies its own pauses), applies again a treasury change that applied after the
+    restore point from its `treasury.updated` delivery the service signed (restore closure
+    amendment of 2026-09-30: the change still pending in the restored database, its time-lock
+    ended, screened again when screening answers, applied at the event's time and not announced
+    again), deletes again the endpoints it deleted,
+    re-issues the deposit addresses it gave out (the salt formula of §5a gives the same address
+    over a treasury in force since the restore point, backfilled from the restored cursor) and the
+    quotes it created (the quote salt gives the same address from the `qt_` id; only that address
+    over a treasury in force within minutes of the quote's creation is accepted, backfilled from the restored
     cursor, with the recorded terms kept but never applied and a `client_secret` accepted only
     with the service's tag and its owner tag of the account: an id is unique across accounts, and
     only the secret proves which one the service issued it to), and imports the deposit events it received
@@ -850,8 +855,11 @@ mode only for Phala's own accounts (Phala Cloud first); after it, for any mercha
     another body. A settled amount is immutable, so the credit a delivered `deposit.credited` or
     `deposit.reversed` carries (amount, exchange rate, price source, valuation time) is the
     re-derived deposit's valuation, not spot, and its refunds and reversal reference it; a
-    deposit whose transfer on chain contradicts the delivered one is held, not credited, until the
-    operator discards the delivered credit and settles the difference. A re-issued quote's locked
+    delivered `deposit.reversed` also rebuilds its reversed deposit at the revision its snapshot
+    names (`receipt_log_index`, `revision`), so the transfer that replaced it is re-derived under
+    its successor's id and link; a deposit whose transfer on chain contradicts the delivered one is
+    held, not credited, until the operator discards the delivered credit and settles the
+    difference. A re-issued quote's locked
     price is the merchant's record, which the service never signed (no event carries a quote as
     created), so it never applies: a payment to the quote is valued at a delivered credit, which
     is the service's signed evidence of the quote's price, or at spot. The chain alone cannot name

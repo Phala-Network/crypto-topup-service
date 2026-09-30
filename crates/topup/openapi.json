@@ -1196,7 +1196,9 @@
           "amount_reversed": 0,
           "asset": "PHA",
           "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+          "block_hash": "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c",
           "block_number": 21000000,
+          "block_time": 1790553612,
           "chain_id": 1,
           "client_reference_id": "team-42",
           "created": 1790553624,
@@ -1215,10 +1217,12 @@
           "object": "deposit",
           "price_source": "quote",
           "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+          "receipt_log_index": 0,
           "refunded": false,
           "rejection_reason": null,
           "replaced_by": null,
           "replaces": null,
+          "revision": 0,
           "status": "credited",
           "swept": false,
           "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -1280,10 +1284,19 @@
             "description": "Token contract address.",
             "type": "string"
           },
+          "block_hash": {
+            "description": "Hash of the block the transfer is in; it changes if the transaction is re-included.",
+            "type": "string"
+          },
           "block_number": {
             "description": "Number of the block the transfer is in; it changes if the transaction is re-included.",
             "format": "int64",
             "minimum": 0,
+            "type": "integer"
+          },
+          "block_time": {
+            "description": "Time of the block the transfer is in, Unix seconds.",
+            "format": "int64",
             "type": "integer"
           },
           "chain_id": {
@@ -1336,7 +1349,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id, `uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}:{revision}\")`.",
             "type": "string"
           },
           "livemode": {
@@ -1384,6 +1397,12 @@
               }
             ]
           },
+          "receipt_log_index": {
+            "description": "Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,\nand `revision`, what `id` is derived from. Absent from an event rendered before it was\nadded, as are `revision`, `block_hash`, and `block_time`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "refunded": {
             "description": "Whether the deposit is fully refunded.",
             "type": "boolean"
@@ -1408,6 +1427,12 @@
               "string",
               "null"
             ]
+          },
+          "revision": {
+            "description": "How many deposits at the same receipt position were reversed before this one: `0`, or\nthe revision of the deposit it `replaces` plus one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "status": {
             "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: its credit is\ntaken back, `amount_reversed`). New values may be added.",
@@ -1901,7 +1926,9 @@
               "amount_reversed": 0,
               "asset": "PHA",
               "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+              "block_hash": "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c",
               "block_number": 21000000,
+              "block_time": 1790553612,
               "chain_id": 1,
               "client_reference_id": "team-42",
               "created": 1790553624,
@@ -1920,10 +1947,12 @@
               "object": "deposit",
               "price_source": "quote",
               "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+              "receipt_log_index": 0,
               "refunded": false,
               "rejection_reason": null,
               "replaced_by": null,
               "replaces": null,
+              "revision": 0,
               "status": "credited",
               "swept": false,
               "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -2108,7 +2137,9 @@
                   "amount_reversed": 0,
                   "asset": "PHA",
                   "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                  "block_hash": "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c",
                   "block_number": 21000000,
+                  "block_time": 1790553612,
                   "chain_id": 1,
                   "client_reference_id": "team-42",
                   "created": 1790553624,
@@ -2127,10 +2158,12 @@
                   "object": "deposit",
                   "price_source": "quote",
                   "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+                  "receipt_log_index": 0,
                   "refunded": false,
                   "rejection_reason": null,
                   "replaced_by": null,
                   "replaces": null,
+                  "revision": 0,
                   "status": "credited",
                   "swept": false,
                   "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -2197,7 +2230,9 @@
               "amount_reversed": 0,
               "asset": "PHA",
               "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+              "block_hash": "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c",
               "block_number": 21000000,
+              "block_time": 1790553612,
               "chain_id": 1,
               "client_reference_id": "team-42",
               "created": 1790553624,
@@ -2216,10 +2251,12 @@
               "object": "deposit",
               "price_source": "quote",
               "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+              "receipt_log_index": 0,
               "refunded": false,
               "rejection_reason": null,
               "replaced_by": null,
               "replaces": null,
+              "revision": 0,
               "status": "credited",
               "swept": false,
               "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",

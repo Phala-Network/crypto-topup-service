@@ -25,6 +25,7 @@ const QUOTE_ADDRESS: &str = "0x2f3e91325b2288bce392711f85f5359661062a91";
 const CUSTOMER_ADDRESS: &str = "0x0f45147a02e4c9d91aff20024e22095536fd5053";
 const PAYER: &str = "0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a";
 const TX: &str = "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e";
+const BLOCK_HASH: &str = "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c";
 const REFUND_TX: &str = "0x4b6d8f0a2c4e6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c";
 const SALT: &str = "0x4e9767dd0c2ab5b953a305c3f10dc1e0d1f7c9d3cbab8463509d2edb06ca4b52";
 
@@ -395,6 +396,32 @@ pub(super) fn schema(name: &str) -> Option<Value> {
                 "crediting": "matches",
             }],
         }),
+        "RestoreTreasuryApplyRequest" => {
+            let body = json!({
+                "id": EVENT,
+                "object": "event",
+                "account": ACCOUNT,
+                "livemode": false,
+                "type": "treasury.updated",
+                "created": CREATED + 1_760,
+                "actor": "system",
+                "request": null,
+                "data": {"object": treasury(), "previous_attributes": {"status": "pending"}},
+            });
+            json!({
+                "delivery": {
+                    "webhook_id": EVENT,
+                    "webhook_timestamp": (CREATED + 1_761).to_string(),
+                    "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
+                    "body": body.to_string(),
+                },
+                "reason": "applied after the restore point, from the merchant's receiver; INC-12",
+            })
+        }
+        "RestoreTreasuryApplyResponse" => json!({
+            "applied": true,
+            "treasury": treasury(),
+        }),
         "RestoreWebhookEndpointDeleteRequest" => json!({
             "account": ACCOUNT,
             "livemode": true,
@@ -469,7 +496,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
         }),
         "RestoreEventsImportResponse" => json!({
             "object": "list",
-            "data": [{"id": EVENT, "result": "imported"}],
+            "data": [{"id": EVENT, "result": "imported", "reversed_deposit": null}],
         }),
         "RestoreUnfreezeRequest" => json!({
             "reason": "INC-12 reconciled with every merchant; signed off by the on-call lead",
@@ -581,8 +608,12 @@ fn deposit() -> Value {
         "address": QUOTE_ADDRESS,
         "from_address": PAYER,
         "tx_hash": TX,
+        "receipt_log_index": 0,
+        "revision": 0,
         "log_index": 212,
         "block_number": 21_000_000,
+        "block_hash": BLOCK_HASH,
+        "block_time": CREATED + 12,
         "amount_refunded_atomic": "0",
         "refunded": false,
         "amount_refunded": 0,

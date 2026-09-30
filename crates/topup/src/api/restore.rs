@@ -1,6 +1,7 @@
 //! The operator's reconciliation after a restore from backup (`crate::restore_mode`,
 //! `deploy/RESTORE.md`): the freeze's status, re-applying the security changes made after the
-//! restore point, re-issuing deposit addresses and quotes given out after it, importing the events
+//! restore point, restoring treasury changes that applied after it, re-issuing deposit addresses
+//! and quotes given out after it, importing the events
 //! the merchant received after it, and unfreezing. Every write needs an active freeze, except
 //! discarding a delivered credit the chain contradicts, and is audited.
 
@@ -14,6 +15,7 @@ use axum::extract::State;
 use chrono::DateTime;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use topup_core::identity::deposit_revision_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::valuation::ValuationSource;
 use uuid::Uuid;
@@ -24,7 +26,7 @@ use crate::deposit_addresses::{self, ChainContracts, ReissueTarget};
 use crate::ids;
 use crate::locks::{self, ReissuedTerms};
 use crate::outbox::SignedWebhook;
-use crate::restore_mode::{self, DeliveredCredit, DeliveredEvent, Restore};
+use crate::restore_mode::{self, DeliveredCredit, DeliveredEvent, DeliveredIdentity, Restore};
 use crate::tenancy::Scope;
 use crate::treasuries::{self, Status as TreasuryStatus};
 
@@ -38,8 +40,9 @@ use super::models::{
     RestoreDeliveredCreditDiscardRequest, RestoreDeliveredCreditDiscardResponse,
     RestoreDepositAddressRequest, RestoreDepositAddressResponse, RestoreEventsImportRequest,
     RestoreEventsImportResponse, RestoreObject, RestoreQuoteRequest, RestoreQuoteResponse,
-    RestoreStatus, RestoreTreasuryVerifyRequest, RestoreTreasuryVerifyResponse,
-    RestoreUnfreezeRequest, RestoreWebhookEndpointDeleteRequest, TreasuryVerification,
+    RestoreStatus, RestoreTreasuryApplyRequest, RestoreTreasuryApplyResponse,
+    RestoreTreasuryVerifyRequest, RestoreTreasuryVerifyResponse, RestoreUnfreezeRequest,
+    RestoreWebhookEndpointDeleteRequest, TreasuryVerification,
 };
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -208,7 +211,9 @@ pub(crate) async fn revoke_api_key(
 /// Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,
 /// with `reapply`, cancels again each pending change the merchant canceled after the restore point
 /// (while frozen no treasury change applies, so none takes effect first) and pauses or resumes
-/// crediting again as the merchant last did. Audited, each change announced as `treasury.*`.
+/// crediting again as the merchant last did. A change that applied after the restore point is
+/// `application_lost`: it is restored from its signed `treasury.updated`
+/// ([`apply_treasury`]). Audited, each change announced as `treasury.*`.
 pub(crate) async fn verify_treasuries(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -238,6 +243,12 @@ pub(crate) async fn verify_treasuries(
             .map_err(|_| ApiError::invalid_param("treasuries", "address must be an address"))?;
         received.push((id, treasury, address));
     }
+    // The changes the merchant received applied, whatever their order in the request.
+    let received_active: BTreeSet<(Uuid, u64, EvmAddress)> = received
+        .iter()
+        .filter(|(_, treasury, _)| treasury.status == TreasuryStatus::Active.code())
+        .map(|(id, treasury, address)| (*id, treasury.chain_id, *address))
+        .collect();
     let mut data = Vec::new();
     for (id, treasury, address) in received {
         let current = treasuries::get(&state.pool, scope, id)
@@ -262,6 +273,23 @@ pub(crate) async fn verify_treasuries(
             "differs"
         } else if current_status == treasury.status {
             "matches"
+        } else if treasury.status == TreasuryStatus::Active.code()
+            && current.status == TreasuryStatus::Pending
+        {
+            // Restored from its signed application, not from this unsigned object.
+            "application_lost"
+        } else if treasury.status == TreasuryStatus::Replaced.code()
+            && current.status == TreasuryStatus::Active
+            && treasuries::pending_on(&state.pool, scope, current.chain_id)
+                .await
+                .map_err(super::treasuries::map_error)?
+                .is_some_and(|(pending, pending_address)| {
+                    received_active.contains(&(pending, current.chain_id, pending_address))
+                })
+        {
+            // The other half of an `application_lost` in this request: restoring that change,
+            // the chain's pending one, replaces this one.
+            "replacement_lost"
         } else if treasury.status == "canceled" && current.status == TreasuryStatus::Pending {
             if request.reapply {
                 current = treasuries::cancel(&state.pool, scope, &actor, id)
@@ -344,6 +372,124 @@ pub(crate) async fn verify_treasuries(
 
 #[utoipa::path(
     post,
+    path = "/v1/admin/restore/treasuries/apply",
+    request_body = RestoreTreasuryApplyRequest,
+    responses(
+        (status = 200, description = "OK: applied, or in force already", body = RestoreTreasuryApplyResponse),
+        (status = 400, description = "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, its time-lock had not ended, or a sanctions list names it now; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no account has the event's `account`, or the restored database lacks the treasury (proven after the restore point: the merchant proves it again after the unfreeze)", body = ErrorResponse),
+        (status = 503, description = "Service Unavailable: the webhook keys cannot be derived; retry", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// Applies again a treasury change that applied after the restore point and was lost with it,
+/// from the merchant's delivery of its `treasury.updated`: only a delivery the service signed
+/// (with one of the account's webhook keys in its mode) of a pending treasury becoming `active`
+/// is accepted. The change applies as its time-lock applied it, at the event's `created`, so the
+/// deposit addresses and quotes issued over it are re-issued over it while frozen, and those
+/// issued before it over the treasury it replaced. It is screened again when screening is
+/// available; no event is sent again. Audited in the transaction that applies it.
+pub(crate) async fn apply_treasury(
+    State(state): State<AppState>,
+    AdminActor(actor): AdminActor,
+    ApiJson(request): ApiJson<RestoreTreasuryApplyRequest>,
+) -> ApiResult<Json<RestoreTreasuryApplyResponse>> {
+    validate_reason(&request.reason)?;
+    let restore = frozen(&state).await?;
+    let delivery = &request.delivery;
+    let invalid = |message: &str| ApiError::invalid_param("delivery", message.to_owned());
+    let event: Value = serde_json::from_str(&delivery.body)
+        .map_err(|_| invalid("the delivery's body is not an event object"))?;
+    let applied = delivered_application(&event).ok_or_else(|| {
+        invalid(
+            "the delivery is not the treasury.updated of a pending treasury change becoming \
+             active",
+        )
+    })?;
+    if delivery.webhook_id != ids::format(ids::EVENT, applied.event_id) {
+        return Err(invalid("the delivery's webhook_id is not its event's id"));
+    }
+    let scope = Scope::new(applied.account_id, applied.livemode);
+    let keys = webhook_public_keys(&state, scope).await?;
+    if !SignedWebhook::verifies(
+        &keys,
+        &delivery.webhook_id,
+        &delivery.webhook_timestamp,
+        delivery.body.as_bytes(),
+        &delivery.webhook_signature,
+    ) {
+        return Err(invalid(
+            "the delivery's signature does not verify with its account's webhook keys",
+        ));
+    }
+    let (treasury, applied_now) = treasuries::restore_application(
+        &state.pool,
+        &state.routes,
+        state.screening.as_ref(),
+        scope,
+        applied.application,
+        &actor,
+        &format!("restore {}: {}", restore.id, request.reason.trim()),
+    )
+    .await
+    .map_err(|error| match error {
+        treasuries::RestoreApplicationError::Refused(message) => invalid(message),
+        treasuries::RestoreApplicationError::Treasury(error) => super::treasuries::map_error(error),
+    })?;
+    Ok(Json(RestoreTreasuryApplyResponse {
+        applied: applied_now,
+        treasury: super::treasuries::treasury_object(&treasury),
+    }))
+}
+
+/// A treasury change applying, as its delivered `treasury.updated` shows it.
+struct DeliveredApplication {
+    event_id: Uuid,
+    account_id: Uuid,
+    livemode: bool,
+    application: treasuries::Application,
+}
+
+/// Reads a `treasury.updated` whose object became `active` from `pending`: the event the time-lock
+/// sends when a change applies, at its `created`.
+fn delivered_application(event: &Value) -> Option<DeliveredApplication> {
+    let text =
+        |value: &Value, field: &str| value.get(field).and_then(Value::as_str).map(str::to_owned);
+    if text(event, "type")? != "treasury.updated" {
+        return None;
+    }
+    let data = event.get("data")?;
+    let object = data.get("object")?;
+    let before = data.get("previous_attributes")?;
+    if text(object, "status")? != TreasuryStatus::Active.code()
+        || text(before, "status")? != TreasuryStatus::Pending.code()
+    {
+        return None;
+    }
+    let livemode = event.get("livemode").and_then(Value::as_bool)?;
+    if object.get("livemode").and_then(Value::as_bool) != Some(livemode) {
+        return None;
+    }
+    Some(DeliveredApplication {
+        event_id: ids::parse_event(&text(event, "id")?)?,
+        account_id: ids::parse(ids::ACCOUNT, &text(event, "account")?)?,
+        livemode,
+        application: treasuries::Application {
+            id: ids::parse(ids::TREASURY, &text(object, "id")?)?,
+            chain_id: object.get("chain_id").and_then(Value::as_u64)?,
+            address: EvmAddress::from_str(&text(object, "address")?).ok()?,
+            applied_at: event
+                .get("created")
+                .and_then(Value::as_i64)
+                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))?,
+        },
+    })
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/admin/restore/webhook_endpoints/delete",
     request_body = RestoreWebhookEndpointDeleteRequest,
     responses(
@@ -393,7 +539,7 @@ pub(crate) async fn delete_webhook_endpoint(
     request_body = RestoreDepositAddressRequest,
     responses(
         (status = 200, description = "OK: re-issued, or the customer's existing version", body = RestoreDepositAddressResponse),
-        (status = 400, description = "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the address is not the customer's over a treasury of the account in force since the restore point (restore a lost treasury change first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -402,8 +548,9 @@ pub(crate) async fn delete_webhook_endpoint(
 )]
 /// Re-issues a deposit address the merchant gave a customer after the restore point, from the
 /// merchant's record of its address or version: the salt is derived from the account, mode,
-/// customer, and version, so it is the same address, backfilled from the restored cursor so the
-/// rescan credits payments made to it since. Audited.
+/// customer, and version, so it is the same address over the treasury its network paid (one in
+/// force since the restore point), backfilled from the restored cursor so the rescan credits
+/// payments made to it since. Audited.
 pub(crate) async fn reissue_deposit_address(
     State(state): State<AppState>,
     AdminActor(actor): AdminActor,
@@ -471,6 +618,7 @@ pub(crate) async fn reissue_deposit_address(
         target,
         id,
         client_secret_hash.as_ref(),
+        restore.restore_point,
         &restore.restored_cursors,
         &actor,
         &request.reason,
@@ -492,7 +640,7 @@ pub(crate) async fn reissue_deposit_address(
     request_body = RestoreQuoteRequest,
     responses(
         (status = 200, description = "OK: re-issued, or the quote exists already for the customer at the address", body = RestoreQuoteResponse),
-        (status = 400, description = "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
+        (status = 400, description = "Bad Request: the address is not the quote's over the account's treasury of the chain in force at its `created` (restore a lost treasury change first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 404, description = "Not Found", body = ErrorResponse)
     ),
@@ -501,7 +649,8 @@ pub(crate) async fn reissue_deposit_address(
 )]
 /// Re-issues a quote the merchant created after the restore point, from its record of the quote
 /// object: the address salt is derived from the account, customer, and `qt_` id, so only the
-/// quote's own address is accepted, backfilled from the restored cursor so the rescan finds a
+/// quote's own address over the treasury in force at its `created` is accepted, backfilled from
+/// the restored cursor so the rescan finds a
 /// payment made to it since. A `client_secret` the service issued for the quote to the account is
 /// kept, so the payer's page reads it again. The terms are stored as recorded but never applied:
 /// a payment to the quote is credited at spot unless an imported `deposit.credited` for it, which
@@ -582,8 +731,7 @@ pub(crate) async fn reissue_quote(
         request.livemode,
         route,
         &terms,
-        (restore.id, restore.detected_at),
-        &restore.restored_cursors,
+        &restore,
         &actor,
         &request.reason,
     )
@@ -690,15 +838,33 @@ pub(crate) async fn import_events(
             ));
         }
     }
-    let mut data = Vec::new();
-    for (_, event) in &events {
-        let outcome =
-            restore_mode::import_delivered_event(&state.pool, &restore, event, &actor).await?;
-        data.push(EventImport {
+    // A reversed deposit is restored after the one it replaced, so it links to it at once.
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by_key(|&index| {
+        events[index]
+            .1
+            .identity
+            .as_ref()
+            .map_or(0, |identity| identity.revision)
+    });
+    let mut data = vec![None; events.len()];
+    for index in order {
+        let event = &events[index].1;
+        let (outcome, reversed) = restore_mode::import_delivered_event(
+            &state.pool,
+            &state.routes,
+            &restore,
+            event,
+            &actor,
+        )
+        .await?;
+        data[index] = Some(EventImport {
             id: ids::format(ids::EVENT, event.id),
             result: outcome.code().to_owned(),
+            reversed_deposit: reversed.map(|reversed| reversed.code().to_owned()),
         });
     }
+    let data = data.into_iter().flatten().collect();
     Ok(Json(RestoreEventsImportResponse {
         object: "list".to_owned(),
         data,
@@ -933,14 +1099,21 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
         .get("actor")
         .and_then(Value::as_str)
         .unwrap_or(crate::db::SYSTEM_ACTOR);
-    let credit = restore_mode::CREDITED_EVENT_TYPES
-        .contains(&event_type)
-        .then(|| {
-            delivered_credit(object).ok_or_else(|| {
-                invalid("a credited or reversed event's deposit needs its transfer and valuation")
-            })
-        })
-        .transpose()?;
+    // A credited deposit was valued; a reversed one was credited, and valued, or rejected, maybe
+    // unvalued (an unsupported token).
+    let valued = ["amount", "exchange_rate", "price_source", "valued_at"]
+        .iter()
+        .any(|field| object.get(*field).is_some_and(|value| !value.is_null()));
+    let credit = match event_type {
+        "deposit.credited" => Some(delivered_credit(object).ok_or_else(|| {
+            invalid("a credited event's deposit needs its transfer and valuation")
+        })?),
+        "deposit.reversed" if valued => Some(delivered_credit(object).ok_or_else(|| {
+            invalid("a reversed event's valued deposit needs its transfer and valuation")
+        })?),
+        _ => None,
+    };
+    let identity = delivered_identity(object, deposit_id)?;
     Ok(DeliveredEvent {
         id,
         account_id,
@@ -951,7 +1124,76 @@ fn delivered_event(event: &Value) -> ApiResult<DeliveredEvent> {
         actor: actor.to_owned(),
         data: data.clone(),
         credit,
+        identity,
     })
+}
+
+/// The identity and chain evidence of a deposit's snapshot, whose id must be the one its receipt
+/// position and revision derive; `None` for a snapshot rendered before the deposit object carried
+/// them.
+fn delivered_identity(object: &Value, deposit_id: Uuid) -> ApiResult<Option<DeliveredIdentity>> {
+    if object.get("receipt_log_index").is_none_or(Value::is_null) {
+        return Ok(None);
+    }
+    let invalid = || {
+        ApiError::invalid_param(
+            "events",
+            "an event's deposit needs its transfer, receipt position, revision, and block",
+        )
+    };
+    let text = |field: &str| object.get(field).and_then(Value::as_str);
+    let number = |field: &str| object.get(field).and_then(Value::as_u64);
+    let address = |field: &str| text(field).and_then(|value| EvmAddress::from_str(value).ok());
+    let seconds = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_i64)
+            .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+    };
+    let deposit = |field: &str| match object.get(field) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => value
+            .as_str()
+            .and_then(|id| ids::parse(ids::DEPOSIT, id))
+            .map(Some),
+    };
+    let identity = (|| {
+        Some(DeliveredIdentity {
+            chain_id: number("chain_id")?,
+            tx_hash: text("tx_hash").and_then(|value| B256::from_str(value).ok())?,
+            receipt_log_index: number("receipt_log_index")?,
+            revision: number("revision")?,
+            log_index: number("log_index")?,
+            block_number: number("block_number")?,
+            block_hash: text("block_hash").and_then(|value| B256::from_str(value).ok())?,
+            block_time: seconds("block_time")?,
+            address: address("address")?,
+            asset_contract: address("asset_contract")?,
+            from_address: address("from_address")?,
+            amount_atomic: AtomicAmount::new(text("amount_atomic").and_then(decimal_u256)?),
+            replaces: deposit("replaces")?,
+            replaced_by: deposit("replaced_by")?,
+            created: seconds("created")?,
+            metadata: object
+                .get("metadata")
+                .filter(|metadata| metadata.is_object())
+                .cloned()?,
+        })
+    })()
+    .ok_or_else(invalid)?;
+    if deposit_revision_id(
+        identity.chain_id,
+        identity.tx_hash,
+        identity.receipt_log_index,
+        identity.revision,
+    ) != deposit_id
+    {
+        return Err(ApiError::invalid_param(
+            "events",
+            "an event's deposit id is not the one its receipt position and revision derive",
+        ));
+    }
+    Ok(Some(identity))
 }
 
 /// The transfer and valuation of a credited deposit's snapshot, as the deposit object renders
@@ -1082,6 +1324,80 @@ mod tests {
         let mut unvalued = credited(deposit);
         unvalued["data"]["object"]["exchange_rate"] = Value::Null;
         assert!(delivered_event(&unvalued).is_err());
+    }
+
+    fn reversed(deposit: Uuid, valued: bool) -> Value {
+        let mut event = credited(deposit);
+        event["type"] = json!("deposit.reversed");
+        event["id"] = json!(ids::format(
+            ids::EVENT,
+            event_id("deposit.reversed", deposit)
+        ));
+        if !valued {
+            for field in ["amount", "exchange_rate", "price_source", "valued_at"] {
+                event["data"]["object"][field] = Value::Null;
+            }
+        }
+        event
+    }
+
+    #[test]
+    fn a_reversed_event_carries_a_credit_only_when_its_deposit_was_valued() {
+        let deposit = Uuid::from_u128(7);
+        // A rejected deposit of an unsupported token was never valued: its reversal carries no
+        // credit but is imported.
+        let unvalued = delivered_event(&reversed(deposit, false)).unwrap();
+        assert!(unvalued.credit.is_none());
+        let valued = delivered_event(&reversed(deposit, true)).unwrap();
+        assert_eq!(valued.credit.unwrap().credit_minor, MinorAmount::new(250));
+        // A valuation that is there only in part is malformed.
+        let mut partial = reversed(deposit, false);
+        partial["data"]["object"]["amount"] = json!(250);
+        assert!(delivered_event(&partial).is_err());
+    }
+
+    #[test]
+    fn a_delivered_identity_must_derive_the_deposit_id() {
+        let tx_hash = B256::repeat_byte(0x5a);
+        let deposit = deposit_revision_id(1, tx_hash, 2, 1);
+        let mut event = reversed(deposit, false);
+        let object = &mut event["data"]["object"];
+        object["receipt_log_index"] = json!(2);
+        object["revision"] = json!(1);
+        object["log_index"] = json!(40);
+        object["block_number"] = json!(120);
+        object["block_hash"] = json!(format!("{:#x}", B256::repeat_byte(0xb1)));
+        object["block_time"] = json!(1_789_999_990);
+        object["replaces"] = json!(ids::format(
+            ids::DEPOSIT,
+            deposit_revision_id(1, tx_hash, 2, 0)
+        ));
+        object["replaced_by"] = Value::Null;
+        object["created"] = json!(1_789_999_995);
+        object["metadata"] = json!({"order": "o-1"});
+        let identity = delivered_event(&event).unwrap().identity.unwrap();
+        assert_eq!((identity.receipt_log_index, identity.revision), (2, 1));
+        assert_eq!(
+            identity.replaces,
+            Some(deposit_revision_id(1, tx_hash, 2, 0))
+        );
+        assert_eq!(identity.block_time.timestamp(), 1_789_999_990);
+
+        // Another revision, or a position without its block, is refused.
+        let mut other_revision = event.clone();
+        other_revision["data"]["object"]["revision"] = json!(2);
+        let mut no_block = event.clone();
+        no_block["data"]["object"]["block_hash"] = Value::Null;
+        for refused in [other_revision, no_block] {
+            assert!(delivered_event(&refused).is_err(), "{refused}");
+        }
+        // A snapshot rendered before the deposit carried its position has no identity.
+        assert!(
+            delivered_event(&reversed(deposit, false))
+                .unwrap()
+                .identity
+                .is_none()
+        );
     }
 
     #[test]

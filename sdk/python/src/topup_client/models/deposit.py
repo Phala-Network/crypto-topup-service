@@ -39,13 +39,14 @@ class Deposit:
         Example:
             {'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount': 2500, 'amount_atomic':
                 '202510000000000000000', 'amount_refunded': 0, 'amount_refunded_atomic': '0', 'amount_reversed': 0, 'asset':
-                'PHA', 'asset_contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_number': 21000000, 'chain_id': 1,
-                'client_reference_id': 'team-42', 'created': 1790553624, 'currency': 'usd', 'deposit_address': None,
-                'exchange_rate': '0.12345679', 'final': True, 'final_at': 1790554572, 'from_address':
+                'PHA', 'asset_contract': '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'block_hash':
+                '0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c', 'block_number': 21000000, 'block_time':
+                1790553612, 'chain_id': 1, 'client_reference_id': 'team-42', 'created': 1790553624, 'currency': 'usd',
+                'deposit_address': None, 'exchange_rate': '0.12345679', 'final': True, 'final_at': 1790554572, 'from_address':
                 '0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a', 'id': 'dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516', 'livemode': False,
                 'log_index': 212, 'metadata': {'order_id': 'ord_1001'}, 'object': 'deposit', 'price_source': 'quote', 'quote':
-                'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'refunded': False, 'rejection_reason': None, 'replaced_by': None,
-                'replaces': None, 'status': 'credited', 'swept': False, 'tx_hash':
+                'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'receipt_log_index': 0, 'refunded': False, 'rejection_reason': None,
+                'replaced_by': None, 'replaces': None, 'revision': 0, 'status': 'credited', 'swept': False, 'tx_hash':
                 '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e', 'valued_at': 1790553630}
 
         Attributes:
@@ -75,7 +76,7 @@ class Deposit:
                 `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}")`, where
                 `receipt_log_index` is the transfer's position among its transaction's receipt logs. A
                 deposit recorded at a position after the deposit there was reversed (`replaces`) has
-                another id.
+                another id, `uuid_v5(DEPOSIT_NAMESPACE, "{chain_id}:{tx_hash}:{receipt_log_index}:{revision}")`.
             livemode (bool): Whether the deposit is on a live-mode route.
             log_index (int): Block-wide log index of the transfer; it changes if the transaction is re-included.
             metadata (DepositMetadata): Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)): a copy of
@@ -94,6 +95,8 @@ class Deposit:
             admin (DepositAdmin | None | Unset):
             amount (int | None | Unset): Credit in the currency's minor unit (cents), once valued.
             asset (None | str | Unset): Asset code; `null` for a token without a route.
+            block_hash (str | Unset): Hash of the block the transfer is in; it changes if the transaction is re-included.
+            block_time (int | Unset): Time of the block the transfer is in, Unix seconds.
             deposit_address (None | str | Unset): The deposit address that received the transfer, `da_…`, on `chain_id` at
                 `address`; `null`
                 for a quote's address. Payments to a deposit address, active or retired, are credited at
@@ -104,6 +107,10 @@ class Deposit:
                 `null` until `final`.
             price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
             quote (None | Quote | str | Unset):
+            receipt_log_index (int | Unset): Position of the transfer among its transaction's receipt logs: with `chain_id`,
+                `tx_hash`,
+                and `revision`, what `id` is derived from. Absent from an event rendered before it was
+                added, as are `revision`, `block_hash`, and `block_time`.
             rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
                 `out_of_bounds`,
                 `out_of_range`, or `sanctioned`.
@@ -115,6 +122,8 @@ class Deposit:
                 before finality against other state (a router or swap output), and the transfer at the same
                 position in the final chain is this deposit. `null` otherwise, or when that deposit is in
                 another account or mode.
+            revision (int | Unset): How many deposits at the same receipt position were reversed before this one: `0`, or
+                the revision of the deposit it `replaces` plus one.
             valued_at (int | None | Unset): Valuation time, Unix seconds.
     """
 
@@ -143,14 +152,18 @@ class Deposit:
     admin: DepositAdmin | None | Unset = UNSET
     amount: int | None | Unset = UNSET
     asset: None | str | Unset = UNSET
+    block_hash: str | Unset = UNSET
+    block_time: int | Unset = UNSET
     deposit_address: None | str | Unset = UNSET
     exchange_rate: None | str | Unset = UNSET
     final_at: int | None | Unset = UNSET
     price_source: None | str | Unset = UNSET
     quote: None | Quote | str | Unset = UNSET
+    receipt_log_index: int | Unset = UNSET
     rejection_reason: None | str | Unset = UNSET
     replaced_by: None | str | Unset = UNSET
     replaces: None | str | Unset = UNSET
+    revision: int | Unset = UNSET
     valued_at: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -223,6 +236,10 @@ class Deposit:
         else:
             asset = self.asset
 
+        block_hash = self.block_hash
+
+        block_time = self.block_time
+
         deposit_address: None | str | Unset
         if isinstance(self.deposit_address, Unset):
             deposit_address = UNSET
@@ -255,6 +272,8 @@ class Deposit:
         else:
             quote = self.quote
 
+        receipt_log_index = self.receipt_log_index
+
         rejection_reason: None | str | Unset
         if isinstance(self.rejection_reason, Unset):
             rejection_reason = UNSET
@@ -272,6 +291,8 @@ class Deposit:
             replaces = UNSET
         else:
             replaces = self.replaces
+
+        revision = self.revision
 
         valued_at: int | None | Unset
         if isinstance(self.valued_at, Unset):
@@ -313,6 +334,10 @@ class Deposit:
             field_dict["amount"] = amount
         if asset is not UNSET:
             field_dict["asset"] = asset
+        if block_hash is not UNSET:
+            field_dict["block_hash"] = block_hash
+        if block_time is not UNSET:
+            field_dict["block_time"] = block_time
         if deposit_address is not UNSET:
             field_dict["deposit_address"] = deposit_address
         if exchange_rate is not UNSET:
@@ -323,12 +348,16 @@ class Deposit:
             field_dict["price_source"] = price_source
         if quote is not UNSET:
             field_dict["quote"] = quote
+        if receipt_log_index is not UNSET:
+            field_dict["receipt_log_index"] = receipt_log_index
         if rejection_reason is not UNSET:
             field_dict["rejection_reason"] = rejection_reason
         if replaced_by is not UNSET:
             field_dict["replaced_by"] = replaced_by
         if replaces is not UNSET:
             field_dict["replaces"] = replaces
+        if revision is not UNSET:
+            field_dict["revision"] = revision
         if valued_at is not UNSET:
             field_dict["valued_at"] = valued_at
 
@@ -420,6 +449,10 @@ class Deposit:
 
         asset = _parse_asset(d.pop("asset", UNSET))
 
+        block_hash = d.pop("block_hash", UNSET)
+
+        block_time = d.pop("block_time", UNSET)
+
         def _parse_deposit_address(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -473,6 +506,8 @@ class Deposit:
 
         quote = _parse_quote(d.pop("quote", UNSET))
 
+        receipt_log_index = d.pop("receipt_log_index", UNSET)
+
         def _parse_rejection_reason(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -499,6 +534,8 @@ class Deposit:
             return cast(None | str | Unset, data)
 
         replaces = _parse_replaces(d.pop("replaces", UNSET))
+
+        revision = d.pop("revision", UNSET)
 
         def _parse_valued_at(data: object) -> int | None | Unset:
             if data is None:
@@ -535,14 +572,18 @@ class Deposit:
             admin=admin,
             amount=amount,
             asset=asset,
+            block_hash=block_hash,
+            block_time=block_time,
             deposit_address=deposit_address,
             exchange_rate=exchange_rate,
             final_at=final_at,
             price_source=price_source,
             quote=quote,
+            receipt_log_index=receipt_log_index,
             rejection_reason=rejection_reason,
             replaced_by=replaced_by,
             replaces=replaces,
+            revision=revision,
             valued_at=valued_at,
         )
 

@@ -54,7 +54,8 @@ receiver's store, its database, or an `export_account` taken before the loss):
 1. API keys it created, revoked, or rolled, secret and restricted: the key's `id` (`key_…`), or its
    prefix and last four characters (`ppay_sk_live_…abcd`, `ppay_rk_live_…abcd`);
 2. the latest `treasury` object of each treasury it received an event about (`treasury.created`,
-   `.updated`, `.canceled`), with its `status` and `crediting_paused_by`;
+   `.updated`, `.canceled`), with its `status` and `crediting_paused_by`, and the delivery of each
+   `treasury.updated` it received, as in 6 below;
 3. webhook endpoints it deleted (`we_…`);
 4. deposit addresses it received: `client_reference_id`, `address`, and `id` (`da_…`) or
    `version`, and a `client_secret` it holds for one;
@@ -111,15 +112,50 @@ admin POST /v1/admin/restore/treasuries/verify \
 ```
 
 Each `result` is `matches`, `canceled` (canceled again now), `cancellation_lost` (without
-`reapply`), `missing` (proven after the restore point: the merchant proves it again after the
-unfreeze), or `differs` (a change that applied after the restore point: it applies again at its
-`effective_at` after the unfreeze; anything else, escalate). Each `crediting` (when
+`reapply`), `application_lost` (a change that applied after the restore point: restore it below),
+`replacement_lost` (the treasury that change replaced, which the merchant received `replaced`,
+reported only when the chain's pending change is sent in the same request as `active`, with the
+same id and address, in any order: restoring the change replaces it, so it needs nothing of its
+own), `missing` (proven after the
+restore point: the merchant proves it again after the unfreeze), or `differs` (another chain,
+address, or status: escalate). Send both treasuries of a lost change, each object as the
+merchant's latest `treasury.updated` of it shows it; once the change is restored, both are
+`matches`. Each `crediting` (when
 `crediting_paused_by` was sent) is `matches`, `paused` or `resumed` (applied again now, announced
 as `treasury.updated`), or `pause_lost` or `resume_lost` (without `reapply`). No treasury change
 applies and nothing is credited while frozen, so none takes effect before this step. Only the
 merchant's own pause is compared: re-apply the operator's own treasury pauses made after the
 restore point from the incident record
 (`admin POST "/v1/admin/accounts/$ACCOUNT/treasuries/$TREASURY_ID/pause" '{"reason":"…"}'`).
+
+Restore each `application_lost` change now, before step 4: the deposit addresses and quotes issued
+after it are derived over it, so they can be re-issued only once it is in force again. The evidence
+is the merchant's delivery of the `treasury.updated` that announced it (its object `active`, its
+`previous_attributes.status` `pending`), as its receiver got it:
+
+```sh
+admin POST /v1/admin/restore/treasuries/apply \
+  '{"delivery":{"webhook_id":"evt_…","webhook_timestamp":"1790000005","webhook_signature":"v1a,…","body":"{\"id\":\"evt_…\",…}"},"reason":"INC-…"}' | jq '{applied, status: .treasury.status}'
+```
+
+Only a delivery the service signed is accepted (verified with the account's webhook keys, as in
+step 5), of the restored treasury with the same chain and address. The change's own rules hold: it
+was proven when it was submitted, it is still pending (cancel again first what the merchant
+canceled, above), and its time-lock ended by the event's `created`. It is screened again when a
+route of its chain can screen it; as the time-lock, it stays pending while its chain has no current
+route (`400`). `400` if a sanctions list names it now (escalate; at the unfreeze its change is
+canceled). When screening is unavailable, the screening the time-lock made before applying it
+stands (the signed event attests it: a sanctioned change is canceled, never applied), and the daily
+screening checks it again after the unfreeze. It applies at the event's `created`: the time-lock
+recorded `applied_at` when the change applied, under its account's lock, and the event's `created`
+is when that transaction started, at most seconds earlier and in whole seconds, so re-issue allows
+for clock and rounding skew (step 4). The treasury
+it replaced stays in force until then, and the account's deposit address networks on the chain
+move to it. Its `treasury.updated` events are not sent again: the merchant received them when it
+first applied, and new ones would carry the restore's time. The apply and its `restore.treasury_apply`
+audit row commit together. `applied` is `false` when it is in force already. The merchant's unsigned `treasury`
+object is never enough: a merchant without the delivery proves the treasury again after the
+unfreeze, and the addresses and quotes issued over it meanwhile cannot be re-issued (escalate).
 
 Delete again every endpoint the merchant deleted, before deliveries resume:
 
@@ -132,19 +168,26 @@ admin POST /v1/admin/restore/webhook_endpoints/delete \
 
 A deposit address's salt is derived from the account, mode, `client_reference_id`, and version
 ([design §5a](../../docs/design/multi-tenant.md#5a-deposit-addresses-d16)), so the service issues
-the same address again from the merchant's record. Re-apply treasury changes first: a network's
-address is derived over the chain's current treasury.
+the same address again from the merchant's record. A network's address is derived over the
+treasury of its chain in force when it was issued, so restore lost treasury changes first (step 3):
+the merchant's address is looked for over every treasury of the account in force since the restore
+point (from 5 minutes before it, for the recorded application times). A restore without a restore
+point (the restored database has no heartbeat) re-issues nothing: escalate.
 
 ```sh
 admin POST /v1/admin/restore/deposit_addresses \
   '{"account":"acct_…","livemode":true,"client_reference_id":"team-42","address":"0x…","id":"da_…","reason":"INC-…"}' | jq
 ```
 
-The answer's `deposit_address` has the merchant's `address` and `id`; the versions between the
-restored latest one and it are issued retired, as the rotations left them. Each new network is
-backfilled from the restored cursor, so the rescan credits payments made to it since. `400` means
-the address is not the customer's over the account's current treasuries: check the treasury, then
-the merchant's record. The chain alone cannot name these customers: a salt is a hash of the
+The answer's `deposit_address` has the merchant's `id` and its networks over the current
+treasuries. Sent with its `address` or its `version` alone, each version the re-issue brings back
+(the merchant's and the retired ones before it) also gets a network over every other treasury of
+each chain in force since the restore point, superseded, still watched and credited, as a treasury
+change leaves one: whichever of its addresses the merchant gave out is credited. The versions
+between the restored latest one and it are issued retired, as the rotations left them. Each new network is backfilled from the
+restored cursor, so the rescan credits payments made to it since. `400` means the address is not
+the customer's over a treasury in force since the restore point: check the treasuries (step 3),
+then the merchant's record. The chain alone cannot name these customers: a salt is a hash of the
 `client_reference_id`.
 
 A merchant can also re-register an address itself after the unfreeze: `POST /v1/deposit_addresses`
@@ -154,8 +197,11 @@ at that time; re-issue here so nothing is missed.
 
 Re-issue every quote the merchant created after the restore point the same way. Its address salt
 is derived from the account, `client_reference_id`, and `qt_` id ([architecture
-§9](../../docs/architecture.md#9-quotes)), so only the quote's own address over the chain's current
-treasury is accepted:
+§9](../../docs/architecture.md#9-quotes)), so only the quote's own address over a treasury of the
+chain in force within 5 minutes of its `created` is accepted (every one is the merchant's own, and
+the salt binds the `qt_` id). A quote the restored database holds, same id and account, is returned
+as it is, `reissued: false`, whenever it was created; any other quote created more than 5 minutes
+before the restore point is refused, since the restore did not lose it:
 
 ```sh
 admin POST /v1/admin/restore/quotes \
@@ -174,7 +220,9 @@ payer's page reads the quote again; without it the quote is re-issued and its pa
 the same, and a repeat with the secret, once the merchant finds it, adds it. `reissued` is `false`
 when the quote exists already for the customer at the address. Its address is backfilled from the
 restored cursor, so the rescan finds a payment made to it. `400` means the address is not the
-quote's over the current treasury (check the treasury, then the record), the `client_secret` is
+quote's over a treasury in force around its `created` (check the treasuries, then the record), the
+quote was created before the restore point, the
+`client_secret` is
 not the quote's or not the account's, or no route has the chain and asset. A quote nobody reports
 stays lost.
 
@@ -207,11 +255,31 @@ next, for a roll lost with the restore). Each event is stored as the event it is
 when the rescan re-derives its deposit, the event is recorded already and nothing is sent again
 with another body. The credit a `deposit.credited` or `deposit.reversed` carries is kept, and the
 deposit is valued at it (amount, exchange rate, price source, valuation time), not re-valued, so its
-refunds and reversal reference what the merchant was told. `imported`; `matches` (recorded
-already, same body); `mismatch` (recorded already with another body, which is kept; record it).
-`400` names a delivery whose signature does not verify, whose event is not a re-derived deposit
-event, or whose id is not the one its type and deposit derive; nothing of that request is
-imported. `503` means the webhook keys cannot be derived; retry.
+refunds and reversal reference what the merchant was told. A `deposit.reversed` of a deposit that
+was never valued (rejected, such as a token without a route) carries no credit and is imported all
+the same. `imported`; `matches` (recorded already, same body); `mismatch` (recorded already with
+another body, which is kept; record it). `400` names a delivery whose signature does not verify,
+whose event is not a re-derived deposit event, whose `deposit.credited` has no valuation, whose id
+is not the one its type and deposit derive, or whose deposit's id is not the one its
+`receipt_log_index` and `revision` derive; nothing of that request is imported. `503` means the
+webhook keys cannot be derived; retry.
+
+A `deposit.reversed` also brings its deposit back, reversed, as the merchant received it, when the
+restore lost it. Its `reversed_deposit` is `restored`; `recorded` (the ledger holds the deposit
+already); `address_unknown` (its address is not issued in the event's account and mode: re-issue
+it, step 4, and import the event again); `rescanned` (see below); or `identity_missing` (a delivery
+rendered before the deposit object carried `receipt_log_index`, `revision`, `block_hash`, and
+`block_time`: see step 8). A deposit the
+finality watch reversed because a re-included transaction put another transfer at its receipt
+position ([architecture §7](../../docs/architecture.md#7-states-and-pump)) so keeps its revision
+there, and the rescan records the transfer now at the position under its successor's id, with its
+`replaces`, valued at the successor's delivered credit. Import every delivery before the service
+resumes (step 6): a rescan that reaches the position first records the transfer under the reversed
+deposit's id. The import then never restores the reversed deposit over it: its event is imported,
+its `reversed_deposit` is `rescanned`, and `GET /v1/admin/restore` lists it as a `rescanned`
+finding (step 8). Only a deposit the rescan recorded at the reversed deposit's revision or below is
+such a conflict; one at a higher revision is its successor, whether the reversal named it or
+not.
 
 ## 6. Resume and wait for the rescan
 
@@ -276,20 +344,19 @@ what the merchant received. A delivered credit is carried into the ledger, so a 
 only a discarded contradiction or an event that carries no credit. The merchant keeps its
 delivered credit and is never sent another; record each mismatch, both amounts, and the deposit in
 the incident and settle it with the merchant. A `pending` finding that stays after the rescan is a
-deposit the chain does not show: escalate. One exception: a deposit the finality watch reversed
-because another transfer took its receipt position, and its successor (the successor's
-`replaces` names it), when the backup predates both. The rescan records the final transfer under
-the reversed deposit's id, so that deposit's imported credit contradicts the transfer it now holds:
-it shows as `contradicted` and is held, and the successor's events stay `pending`. Record the two as
-one incident, settle what the merchant applied with it, then discard the held deposit's delivered
-credit (step 6). (A backup
-holding the reversed deposit holds its successor too: both commit in one transaction. Should one
-ever lack it, the rescan records the transfer as a new deposit with `replaces` `null`, and the
-quote is not handed over: link the two by their transaction hash.)
+deposit the chain does not show: escalate. A deposit the finality watch reversed because another
+transfer took its receipt position is brought back from its imported `deposit.reversed` (step 5),
+so its successor is recorded under its own id. Only when that could not be done (the delivery was
+`identity_missing`, or the rescan reached the position before the import: a `rescanned` finding)
+does the rescan record the final transfer under the reversed deposit's id: that deposit's imported
+credit then contradicts the transfer it holds, so it is held, and the successor's events stay
+`pending`. Record the two as one incident, settle what the merchant applied with it, then discard
+the held deposit's delivered credit (step 6).
 
 ## Done when
 
 `frozen` is `false`, every chain was `complete` at the unfreeze, no `delivered_events` finding is
-`pending` or `contradicted`, each `mismatch` and discarded credit is recorded and settled, and
+`pending` or `contradicted`, each `mismatch`, `rescanned` finding, and discarded credit is recorded
+and settled, and
 every merchant confirmed that its keys, treasuries, endpoints, deposit addresses, and quotes are as
 it left them.

@@ -23,7 +23,7 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `reconciliation_deposit_cursors`, `restores` | `SELECT`, `INSERT`, `UPDATE` |
 | `restore_delivered_credits` | `SELECT`, `INSERT`; `UPDATE` of `discarded_at`, `discarded_by`, and `discard_reason` only |
 | `restore_timeline` | `SELECT`, `UPDATE` |
-| `restore_delivered_events` | `SELECT`, `INSERT` |
+| `restore_delivered_events`, `restore_deposit_tombstones` | `SELECT`, `INSERT` |
 | `_sqlx_migrations` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 

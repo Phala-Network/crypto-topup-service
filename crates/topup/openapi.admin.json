@@ -702,7 +702,7 @@
             ]
           },
           "status": {
-            "description": "`pending` (the rescan has not re-derived or valued the deposit yet), `contradicted` (the\nrecorded transfer is not the one the delivered event names: the deposit is held, not\ncredited, until the operator discards the delivered credit), or `mismatch` (the ledger's\ntoken amount or credit differs from what the merchant received; the delivered event is\nkept and never sent again).",
+            "description": "`rescanned` (a `deposit.reversed` whose receipt position the rescan recorded first, with a\ndeposit that is not reversed at its revision or below: the reversed deposit could not be\nrestored; escalate), `pending` (the rescan has not re-derived or valued the deposit\nyet), `contradicted` (the recorded transfer is not the one the delivered event names: the deposit is held, not\ncredited, until the operator discards the delivered credit), or `mismatch` (the ledger's\ntoken amount or credit differs from what the merchant received; the delivered event is\nkept and never sent again).",
             "type": "string"
           },
           "type": {
@@ -780,7 +780,9 @@
           "amount_reversed": 0,
           "asset": "PHA",
           "asset_contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+          "block_hash": "0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c",
           "block_number": 21000000,
+          "block_time": 1790553612,
           "chain_id": 1,
           "client_reference_id": "team-42",
           "created": 1790553624,
@@ -799,10 +801,12 @@
           "object": "deposit",
           "price_source": "quote",
           "quote": "qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10",
+          "receipt_log_index": 0,
           "refunded": false,
           "rejection_reason": null,
           "replaced_by": null,
           "replaces": null,
+          "revision": 0,
           "status": "credited",
           "swept": false,
           "tx_hash": "0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e",
@@ -864,10 +868,19 @@
             "description": "Token contract address.",
             "type": "string"
           },
+          "block_hash": {
+            "description": "Hash of the block the transfer is in; it changes if the transaction is re-included.",
+            "type": "string"
+          },
           "block_number": {
             "description": "Number of the block the transfer is in; it changes if the transaction is re-included.",
             "format": "int64",
             "minimum": 0,
+            "type": "integer"
+          },
+          "block_time": {
+            "description": "Time of the block the transfer is in, Unix seconds.",
+            "format": "int64",
             "type": "integer"
           },
           "chain_id": {
@@ -920,7 +933,7 @@
             "type": "string"
           },
           "id": {
-            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id.",
+            "description": "`dep_` and the hex of the deposit's deterministic UUID,\n`uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}\")`, where\n`receipt_log_index` is the transfer's position among its transaction's receipt logs. A\ndeposit recorded at a position after the deposit there was reversed (`replaces`) has\nanother id, `uuid_v5(DEPOSIT_NAMESPACE, \"{chain_id}:{tx_hash}:{receipt_log_index}:{revision}\")`.",
             "type": "string"
           },
           "livemode": {
@@ -968,6 +981,12 @@
               }
             ]
           },
+          "receipt_log_index": {
+            "description": "Position of the transfer among its transaction's receipt logs: with `chain_id`, `tx_hash`,\nand `revision`, what `id` is derived from. Absent from an event rendered before it was\nadded, as are `revision`, `block_hash`, and `block_time`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "refunded": {
             "description": "Whether the deposit is fully refunded.",
             "type": "boolean"
@@ -992,6 +1011,12 @@
               "string",
               "null"
             ]
+          },
+          "revision": {
+            "description": "How many deposits at the same receipt position were reversed before this one: `0`, or\nthe revision of the deposit it `replaces` plus one.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           },
           "status": {
             "description": "`pending` (recorded at the route's confirmation and being valued and screened, or held\nwhile the account's or customer's `settlement` is paused), `credited`, `rejected` (see\n`rejection_reason`), or `reversed` (its transaction is not in the final chain: its credit is\ntaken back, `amount_reversed`). New values may be added.",
@@ -1493,6 +1518,13 @@
           "result": {
             "description": "`imported` (stored as delivered, with no delivery), `matches` (recorded already with the\nsame `data`), or `mismatch` (recorded already with other `data`, which is kept).",
             "type": "string"
+          },
+          "reversed_deposit": {
+            "description": "For a `deposit.reversed`, its deposit: `restored` (restored, reversed, from the delivery,\nso the rescan records the transfer now at its receipt position as the deposit that\nreplaced it); `recorded` (the ledger holds it already); `address_unknown` (its address is\nnot issued in the event's account and mode: re-issue it, then import the event again);\n`rescanned` (the rescan recorded its receipt position first, with a deposit that is not\nreversed at its revision or below: not restored; escalate); or\n`identity_missing` (the delivery\ncarries no `receipt_log_index`, `revision`, `block_hash`, and `block_time`, so it is not\nrestored). `null` for other events.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2216,7 +2248,7 @@
             "type": "string"
           },
           "address": {
-            "description": "The address the merchant holds (the top-level `address` or a network's); the version is\nfound by deriving the customer's versions over the account's current treasuries.",
+            "description": "The address the merchant holds (the top-level `address` or a network's); the version is\nfound by deriving the customer's versions over each treasury of the account in force since\nthe restore point.",
             "type": [
               "string",
               "null"
@@ -2325,7 +2357,7 @@
         "example": {
           "deliveries": [
             {
-              "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790553600,\"data\":{\"object\":{\"address\":\"0x2f3e91325b2288bce392711f85f5359661062a91\",\"amount\":2500,\"amount_atomic\":\"202510000000000000000\",\"amount_refunded\":0,\"amount_refunded_atomic\":\"0\",\"amount_reversed\":0,\"asset\":\"PHA\",\"asset_contract\":\"0x6c5ba91642f10282b576d91922ae6448c9d52f4e\",\"block_number\":21000000,\"chain_id\":1,\"client_reference_id\":\"team-42\",\"created\":1790553624,\"currency\":\"usd\",\"deposit_address\":null,\"exchange_rate\":\"0.12345679\",\"final\":true,\"final_at\":1790554572,\"from_address\":\"0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a\",\"id\":\"dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516\",\"livemode\":false,\"log_index\":212,\"metadata\":{\"order_id\":\"ord_1001\"},\"object\":\"deposit\",\"price_source\":\"quote\",\"quote\":\"qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10\",\"refunded\":false,\"rejection_reason\":null,\"replaced_by\":null,\"replaces\":null,\"status\":\"credited\",\"swept\":false,\"tx_hash\":\"0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e\",\"valued_at\":1790553630}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"deposit.credited\"}",
+              "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790553600,\"data\":{\"object\":{\"address\":\"0x2f3e91325b2288bce392711f85f5359661062a91\",\"amount\":2500,\"amount_atomic\":\"202510000000000000000\",\"amount_refunded\":0,\"amount_refunded_atomic\":\"0\",\"amount_reversed\":0,\"asset\":\"PHA\",\"asset_contract\":\"0x6c5ba91642f10282b576d91922ae6448c9d52f4e\",\"block_hash\":\"0x9a1c3e5b7d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c\",\"block_number\":21000000,\"block_time\":1790553612,\"chain_id\":1,\"client_reference_id\":\"team-42\",\"created\":1790553624,\"currency\":\"usd\",\"deposit_address\":null,\"exchange_rate\":\"0.12345679\",\"final\":true,\"final_at\":1790554572,\"from_address\":\"0x1775c1326aa633546b0b5634ae2bef0ba7cbfc9a\",\"id\":\"dep_8a1f4e2b6c3d49e0a7b5c1d2e3f40516\",\"livemode\":false,\"log_index\":212,\"metadata\":{\"order_id\":\"ord_1001\"},\"object\":\"deposit\",\"price_source\":\"quote\",\"quote\":\"qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10\",\"receipt_log_index\":0,\"refunded\":false,\"rejection_reason\":null,\"replaced_by\":null,\"replaces\":null,\"revision\":0,\"status\":\"credited\",\"swept\":false,\"tx_hash\":\"0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e\",\"valued_at\":1790553630}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"deposit.credited\"}",
               "webhook_id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
               "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
               "webhook_timestamp": "1790553631"
@@ -2358,7 +2390,8 @@
           "data": [
             {
               "id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
-              "result": "imported"
+              "result": "imported",
+              "reversed_deposit": null
             }
           ],
           "object": "list"
@@ -2724,6 +2757,71 @@
           "frozen",
           "rescan",
           "delivered_events"
+        ],
+        "type": "object"
+      },
+      "RestoreTreasuryApplyRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/admin/restore/treasuries/apply` body: the delivery of the `treasury.updated` that\nannounced a treasury change applying after the restore point, as the merchant's receiver got\nit.",
+        "example": {
+          "delivery": {
+            "body": "{\"account\":\"acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10\",\"actor\":\"system\",\"created\":1790555360,\"data\":{\"object\":{\"address\":\"0x936c1991f8da9a919fa11b557a3514719f5a4504\",\"canceled_at\":null,\"cancellation_reason\":null,\"chain_id\":1,\"created\":1790467200,\"crediting_paused\":false,\"crediting_paused_by\":[],\"effective_at\":1790467200,\"id\":\"trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9\",\"kind\":\"contract\",\"livemode\":false,\"object\":\"treasury\",\"replaced_at\":null,\"status\":\"active\"},\"previous_attributes\":{\"status\":\"pending\"}},\"id\":\"evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0\",\"livemode\":false,\"object\":\"event\",\"request\":null,\"type\":\"treasury.updated\"}",
+            "webhook_id": "evt_2b4d6f8a0c1e43b5d7f9a1c3e5b7d9f0",
+            "webhook_signature": "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==",
+            "webhook_timestamp": "1790555361"
+          },
+          "reason": "applied after the restore point, from the merchant's receiver; INC-12"
+        },
+        "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/DeliveredWebhook",
+            "description": "The delivery exactly as received: a `treasury.updated` whose object is `active` and whose\n`previous_attributes.status` is `pending`."
+          },
+          "reason": {
+            "description": "Why, 1 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "RestoreTreasuryApplyResponse": {
+        "description": "`POST /v1/admin/restore/treasuries/apply` response.",
+        "example": {
+          "applied": true,
+          "treasury": {
+            "address": "0x936c1991f8da9a919fa11b557a3514719f5a4504",
+            "canceled_at": null,
+            "cancellation_reason": null,
+            "chain_id": 1,
+            "created": 1790467200,
+            "crediting_paused": false,
+            "crediting_paused_by": [],
+            "effective_at": 1790467200,
+            "id": "trs_4d8a2c6e0b1f47a3c5e7d9b1a3c5e7f9",
+            "kind": "contract",
+            "livemode": false,
+            "object": "treasury",
+            "replaced_at": null,
+            "status": "active"
+          }
+        },
+        "properties": {
+          "applied": {
+            "description": "Whether the change applied now; `false` when the treasury was in force already.",
+            "type": "boolean"
+          },
+          "treasury": {
+            "$ref": "#/components/schemas/Treasury",
+            "description": "The treasury."
+          }
+        },
+        "required": [
+          "applied",
+          "treasury"
         ],
         "type": "object"
       },
@@ -3141,7 +3239,7 @@
             "type": "string"
           },
           "result": {
-            "description": "`matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,\nthe restore undid it: cancel it with `reapply`); `missing` (created after the\nrestore point: the merchant creates it again after the unfreeze); or `differs` (another\nstatus, chain, or address; a change that applied after the restore point applies again).",
+            "description": "`matches`; `canceled` (canceled again now); `cancellation_lost` (the merchant canceled it,\nthe restore undid it: cancel it with `reapply`); `application_lost` (the merchant received\nit `active` and the restore left it pending: restore it with its signed `treasury.updated`,\n`POST /v1/admin/restore/treasuries/apply`); `replacement_lost` (the merchant received it\n`replaced` and the restore left it current, while the chain's pending change is one sent\nhere as `active`, same id and address: the other half of that `application_lost`, whose\nrestore replaces it); `missing` (created after the\nrestore point: the merchant creates it again after the unfreeze); or `differs` (another\nstatus, chain, or address: escalate).",
             "type": "string"
           },
           "status": {
@@ -5229,7 +5327,7 @@
                 }
               }
             },
-            "description": "Bad Request: the address is not the customer's over the account's current treasuries (re-apply treasury changes first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`",
+            "description": "Bad Request: the address is not the customer's over a treasury of the account in force since the restore point (restore a lost treasury change first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5299,7 +5397,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Re-issues a deposit address the merchant gave a customer after the restore point, from the\nmerchant's record of its address or version: the salt is derived from the account, mode,\ncustomer, and version, so it is the same address, backfilled from the restored cursor so the\nrescan credits payments made to it since. Audited.",
+        "summary": "Re-issues a deposit address the merchant gave a customer after the restore point, from the\nmerchant's record of its address or version: the salt is derived from the account, mode,\ncustomer, and version, so it is the same address over the treasury its network paid (one in\nforce since the restore point), backfilled from the restored cursor so the rescan credits\npayments made to it since. Audited.",
         "tags": [
           "admin"
         ]
@@ -5479,7 +5577,7 @@
                 }
               }
             },
-            "description": "Bad Request: the address is not the quote's over the account's current treasury of the chain (re-apply treasury changes first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
+            "description": "Bad Request: the address is not the quote's over the account's treasury of the chain in force at its `created` (restore a lost treasury change first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5549,7 +5647,141 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Re-issues a quote the merchant created after the restore point, from its record of the quote\nobject: the address salt is derived from the account, customer, and `qt_` id, so only the\nquote's own address is accepted, backfilled from the restored cursor so the rescan finds a\npayment made to it since. A `client_secret` the service issued for the quote to the account is\nkept, so the payer's page reads it again. The terms are stored as recorded but never applied:\na payment to the quote is credited at spot unless an imported `deposit.credited` for it, which\nthe service signed, carries its credit, and the payment window closes at the restore's\ndetection at the latest. Audited.",
+        "summary": "Re-issues a quote the merchant created after the restore point, from its record of the quote\nobject: the address salt is derived from the account, customer, and `qt_` id, so only the\nquote's own address over the treasury in force at its `created` is accepted, backfilled from\nthe restored cursor so the rescan finds a\npayment made to it since. A `client_secret` the service issued for the quote to the account is\nkept, so the payer's page reads it again. The terms are stored as recorded but never applied:\na payment to the quote is credited at spot unless an imported `deposit.credited` for it, which\nthe service signed, carries its credit, and the payment window closes at the restore's\ndetection at the latest. Audited.",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/restore/treasuries/apply": {
+      "post": {
+        "operationId": "apply_treasury",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreTreasuryApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreTreasuryApplyResponse"
+                }
+              }
+            },
+            "description": "OK: applied, or in force already",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, its time-lock had not ended, or a sanctions list names it now; or `restore_not_frozen`",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no account has the event's `account`, or the restored database lacks the treasury (proven after the restore point: the merchant proves it again after the unfreeze)",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable: the webhook keys cannot be derived; retry",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Applies again a treasury change that applied after the restore point and was lost with it,\nfrom the merchant's delivery of its `treasury.updated`: only a delivery the service signed\n(with one of the account's webhook keys in its mode) of a pending treasury becoming `active`\nis accepted. The change applies as its time-lock applied it, at the event's `created`, so the\ndeposit addresses and quotes issued over it are re-issued over it while frozen, and those\nissued before it over the treasury it replaced. It is screened again when screening is\navailable; no event is sent again. Audited in the transaction that applies it.",
         "tags": [
           "admin"
         ]
@@ -5647,7 +5879,7 @@
             "http_message_signature": []
           }
         ],
-        "summary": "Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,\nwith `reapply`, cancels again each pending change the merchant canceled after the restore point\n(while frozen no treasury change applies, so none takes effect first) and pauses or resumes\ncrediting again as the merchant last did. Audited, each change announced as `treasury.*`.",
+        "summary": "Compares the treasuries of the merchant's latest `treasury` events with the restored ones and,\nwith `reapply`, cancels again each pending change the merchant canceled after the restore point\n(while frozen no treasury change applies, so none takes effect first) and pauses or resumes\ncrediting again as the merchant last did. A change that applied after the restore point is\n`application_lost`: it is restored from its signed `treasury.updated`\n([`apply_treasury`]). Audited, each change announced as `treasury.*`.",
         "tags": [
           "admin"
         ]
