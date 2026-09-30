@@ -29,14 +29,13 @@ the merchant's steps with the account's keys, never with the admin key.
   offers the OS image `dstack-0.5.9` ([deploy/README.md, "OS image"](../deploy/README.md#os-image)).
 - **An S3-compatible object store** for the encrypted WAL-G backups: a bucket or prefix per
   Environment that the other Environment's credentials cannot reach, and a read-write token for it.
-  Cloudflare R2 needs no further settings; any other store also sets `AWS_REGION` and
-  `AWS_S3_FORCE_PATH_STYLE`.
+  The environment directory sets its endpoint, region, and addressing (R2: `auto` and path-style).
 - **Two RPC providers per chain**, from different companies, over HTTPS: an endpoint serves one
   chain, so each chain of your routes has two of its own. Public gateways rate-limit; use paid
   plans for a mainnet. The chain must carry the canonical Multicall3
   ([deploy/contracts/multicall3.json](../deploy/contracts/multicall3.json)).
 - **A domain in DNS you control** for the API, for example `pay-api.example.com`: a CNAME and a TXT
-  record per instance, not proxied. It becomes your `TOPUP_DOMAIN` and your merchants' service
+  record per instance, not proxied. It becomes your `public_origin` and your merchants' service
   URL, so choose one you will keep: changing it later changes every merchant's configuration.
 - **A GitHub fork** of this repository, to run the Release images and Deploy workflows from its
   `main`.
@@ -58,8 +57,8 @@ the merchant's steps with the account's keys, never with the admin key.
    repository's `GITHUB_TOKEN`, and Deploy accepts only the images of a Release images run of the
    same repository. The packages must then be made public (section 4).
 3. **Create the admin key** on the machine that will keep it, one per Environment. The seed
-   never leaves that machine; the printed `public_key` is the Environment variable
-   `TOPUP_ADMIN_PUBLIC_KEY`, and `admin/<Environment>-v1` is the key id Deploy derives:
+   never leaves that machine; the printed `public_key` and the key id go into the environment
+   directory's `topup.yaml` (step 5):
 
    ```sh
    cd sdk/python
@@ -69,31 +68,39 @@ the merchant's steps with the account's keys, never with the admin key.
 4. **Environments.** Settings > Environments: `production` and, for a pre-production instance
    with test routes only, `staging` (the only names Deploy offers). Deployment branches: `main`
    only. The only secret is `PHALA_CLOUD_API_KEY`, the workspace's API key.
-5. **Environment variables**, per Environment:
+5. **The environment directory**, per Environment: copy
+   [deploy/environments/example/topup](../deploy/environments/example/topup) to
+   `deploy/environments/<your GitHub owner, lowercased>/<Environment>/topup/`, fill it in, and
+   commit it by pull request. Deploy renders only the directory of its repository's owner, so
+   Phala's directory is never yours, and Deploy fails until yours exists. Preflight refuses the
+   example's placeholders.
 
-   | Name | Value |
+   | File | Settings |
    |---|---|
-   | `PHALA_WORKSPACE` | the display name of the API key's workspace |
-   | `TOPUP_CVM_ID` | empty until the first provisioning |
-   | `TOPUP_DOMAIN` | your API's domain, for example `pay-api.example.com` |
-   | `AWS_ENDPOINT` | the object store's endpoint, for example `https://<account>.r2.cloudflarestorage.com` |
-   | `WALG_S3_PREFIX` | `s3://BUCKET/PATH`, empty and used by no other app |
-   | `TOPUP_ADMIN_PUBLIC_KEY` | step 3's `public_key` |
-   | `TOPUP_RPC_PROVIDER_A_URL`, `TOPUP_RPC_PROVIDER_B_URL` | the committed Sepolia routes' two providers' URLs, with `{key}` in place of an API key; a route on another chain adds one `TOPUP_RPC_<ID>_URL` per provider it names (section 3) |
-   | `TOPUP_RPC_BASE_SEPOLIA_A_URL`, `TOPUP_RPC_BASE_SEPOLIA_B_URL` | the committed Base Sepolia routes' two providers' URLs; the first must serve `eth_getLogs` over 2 000 blocks and with no contract address ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |
+   | `topup.yaml` ([reference](configuration.md#the-configuration-file)) | `environment` (the Sentry environment), `public_origin` (`https://` + your domain), `admin_key` (step 3), `rpc_providers` (each chain's two providers' URLs, with `{key}` in place of an API key; the first must serve `eth_getLogs` over 2 000 blocks and with no contract address, [deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)), and `routes` (section 3) |
+   | `compose.yaml` | `WALG_S3_PREFIX` (`s3://BUCKET/PATH`, empty and used by no other app), `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN` (your domain), and one `TOPUP_RPC_<ID>_KEY` line per keyed provider |
 
-   The meaning of each, the derived settings (`AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`,
-   `TOPUP_ADMIN_KID`, `SENTRY_ENVIRONMENT`), and why all but the first two are attested are in
-   [deploy/README.md, "One-time setup"](../deploy/README.md#one-time-setup-human-only-repository-owner)
-   and ["Attested settings"](../deploy/README.md#attested-settings). The reference product's
-   variables (`STAGING_PRODUCT_CVM_ID`, `PRODUCT_DOMAIN`, `PRODUCT_DRIVER_PUBLIC_KEY`) are for
-   Phala's demo ([Phala's instance](../deploy/phala.md)) and not needed.
+   `deploy/render.sh` and `topup config check` take the directory from any path, so you can check
+   it before committing:
+
+   ```sh
+   deploy/render.sh --images images.json --gateway-domain gateway.example.net \
+     deploy/environments/<owner>/production/topup >/dev/null
+   cargo run --locked -p topup -- config check deploy/environments/<owner>/production/topup/topup.yaml
+   ```
+
+   The Environment's variables are only deployment state: `PHALA_WORKSPACE` (the display name of
+   the API key's workspace) and `TOPUP_CVM_ID` (empty until the first provisioning). Why every
+   other setting is committed and attested is in
+   [deploy/README.md, "Attested settings"](../deploy/README.md#attested-settings). The reference
+   product (`STAGING_PRODUCT_CVM_ID`, `deploy/environments/<owner>/staging/product/`) is Phala's demo
+   ([Phala's instance](../deploy/phala.md)) and not needed.
 6. **The other workflows a fork inherits.** CI runs on pull requests and needs no settings.
    [Restore drill](../.github/workflows/restore-drill.yml) runs weekly on a local stack, with no
-   secrets. [Verify contracts](../.github/workflows/verify-contracts.yml) runs daily in the
-   `staging` Environment against Sepolia with its RPC URL variables as they are, so they must be
-   keyless there, and checks the Safe of [safe-expectations.json](../deploy/contracts/safe-expectations.json), which
-   is Phala's: record your own Safe there or disable the workflow. Release SDKs and API reference
+   secrets. [Verify contracts](../.github/workflows/verify-contracts.yml) runs daily against
+   Sepolia through the keyless providers of Phala's staging configuration, and checks the Safe of
+   [safe-expectations.json](../deploy/contracts/safe-expectations.json), which is Phala's: point it
+   at your own configuration and Safe, or disable the workflow. Release SDKs and API reference
    publish Phala's SDKs and reference; a fork needs neither.
 
 ## 3. Routes and contracts
@@ -102,41 +109,35 @@ A route is one chain and token that accounts quote on and are paid through, in o
 files are committed and attested: a new route is a pull request to your fork and a Deploy
 `upgrade`, never a runtime setting.
 
-- **The committed routes** are in test mode on Sepolia and Base Sepolia, and any instance can use
-  them; keep them for a first instance in test mode:
-  `phala-cloud-sepolia-pha-usd`
-  ([deploy/config/routes/phala-cloud-sepolia-pha.yaml](../deploy/config/routes/phala-cloud-sepolia-pha.yaml)),
-  a test PHA token (`MockERC20`, public `mint`), and `phala-cloud-sepolia-usdc-usd`
-  ([deploy/config/routes/phala-cloud-sepolia-usdc.yaml](../deploy/config/routes/phala-cloud-sepolia-usdc.yaml)),
-  Circle's testnet USDC ([faucet](https://faucet.circle.com)), priced as a stablecoin; and the
-  same two tokens on Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and
-  `phala-cloud-base-sepolia-usdc-usd`, credited at the OP-stack `safe` head, with providers of
-  their own ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
-- **Your own routes.** The fields and their defaults are in
-  [architecture §14](architecture.md#14-configuration-and-deployment), and
-  [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example. A
-  route `NAME.yaml` goes in `deploy/config/routes/`, its identical copy in the `configs` of
-  [deploy/docker-compose.yml](../deploy/docker-compose.yml) as `topup_route_<NAME, - as _>`,
-  mounted at `/etc/topup/routes/NAME.yaml` in the `topup` and `restore-check` services and passed
-  in their `--route` arguments; [validate-compose.sh](../deploy/validate-compose.sh) checks the
-  compose against the files, and [cvm-rehearsal.sh](../deploy/local/cvm-rehearsal.sh) names a local
-  stand-in token for each route. `cargo run --locked -p topup -- route validate FILE` checks a file
-  and `route show FILE` prints it resolved. Deploy refuses a live route on a test network, a test
-  route on a mainnet,
-  any live route in `staging`, and a chain that [check-route-modes.sh](../deploy/check-route-modes.sh)
-  does not list; add a chain there, and to
-  [networks.json](../deploy/contracts/networks.json) for the contract scripts, after review. A
-  chain without a Chainalysis sanctions oracle needs `chain.sanctions_oracle`.
+- **The routes of Phala's staging** are in test mode on Sepolia and Base Sepolia, and any instance
+  can copy them from its
+  [topup.yaml](../deploy/environments/phala-network/staging/topup/topup.yaml) for a first
+  instance in test mode. They are:
+  - `phala-cloud-sepolia-pha-usd`, a test PHA token (`MockERC20`, public `mint`);
+  - `phala-cloud-sepolia-usdc-usd`, Circle's testnet USDC ([faucet](https://faucet.circle.com)),
+    priced as a stablecoin;
+  - `phala-cloud-base-sepolia-pha-usd` and `phala-cloud-base-sepolia-usdc-usd`, the same two
+    tokens on Base Sepolia, credited at the OP-stack `safe` head, with providers of their own
+    ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
+- **Your own routes** are items of `topup.yaml`'s `routes`, written as route files are. The fields
+  and their defaults are in [architecture §14](architecture.md#14-configuration-and-deployment),
+  and [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example.
+  `cargo run --locked -p topup -- config check FILE` checks the file, and `config show FILE`
+  prints it resolved.
+- **What Deploy refuses:** a live route on a test network, a test route on a mainnet, any live
+  route in `staging`, and a chain that [check-route-modes.sh](../deploy/check-route-modes.sh) does
+  not list. Add a chain there, and to [networks.json](../deploy/contracts/networks.json) for the
+  contract scripts, after review. A chain without a Chainalysis sanctions oracle needs
+  `chain.sanctions_oracle`.
 - **Its RPC providers.** A route names its chain's providers by id, `chain.rpc_providers:
   [alchemy-base-sepolia, drpc-base-sepolia]` (lowercase letters, digits, `-`); one that names none
-  uses `provider-a` and `provider-b`, the Sepolia routes'. Each id is listed once in the
-  `x-rpc-providers` block of the compose: its URL, the Environment variable `TOPUP_RPC_<ID>_URL`
-  (the id upper-cased, `-` as `_`), and, for a provider that puts an API key in its URL, the
-  sealed `TOPUP_RPC_<ID>_KEY`, which also goes in
-  [staging.env.example](../deploy/staging.env.example) and the `allowed_envs` of
-  [app-compose.example.json](../deploy/app-compose.example.json). A provider serves one chain, so
-  another chain's route names providers of its own; preflight checks that each reports the chain
-  of every route naming it ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)).
+  uses `provider-a` and `provider-b`, the Sepolia routes'. `rpc_providers` gives each id its URL,
+  with `{key}` as a whole path segment or query value for a provider that puts an API key in its
+  URL. The key itself is sealed as `TOPUP_RPC_<ID>_KEY` (the id upper-cased, `-` as `_`) and
+  declared in the directory's `compose.yaml`. A provider serves one chain, so another chain's route
+  names providers of its own. `topup config check` enforces these rules, and preflight checks that
+  each provider reports the chain of every route naming it
+  ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)).
 - **The contracts.** The `ForwarderFactory` has no owner, no roles, and no admin, and is deployed
   deterministically through the Arachnid proxy at `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   with its implementation at `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain. Reuse it;
@@ -153,8 +154,9 @@ files are committed and attested: a new route is a pull request to your fork and
 
 1. **Build the images.** Run **Release images** on `main` (`gh workflow run release-images.yml
    --ref main`) and note its run id. It pushes `phala-pay`, `postgres-walg`, and
-   `phala-pay-reference-product` by digest; `phala-pay` builds bit for bit twice, so anyone can
-   rebuild the commit and compare. **HUMAN-ONLY, once:** make the three packages public (package
+   `phala-pay-reference-product` by digest, in its `images.json` artifact keyed by image name.
+   `phala-pay` builds bit for bit twice, so anyone can rebuild the commit and compare
+   ([Official images](#official-images)). **HUMAN-ONLY, once:** make the three packages public (package
    settings; irreversible): CVMs pull without credentials, and preflight refuses a private image.
 2. **Provision.** Run **Deploy** with `environment: production`, `target: topup`,
    `mode: provision`, and the release run id. It runs preflight, creates the CVM with Phala
@@ -164,26 +166,27 @@ files are committed and attested: a new route is a pull request to your fork and
    ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)).
 3. **Seal the secrets** (**HUMAN-ONLY**). The CVM waits for them: PostgreSQL initializes only
    after it can list the empty backup prefix. Write `.env.production` (mode 0600) with exactly the
-   names of [staging.env.example](../deploy/staging.env.example): `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be empty), and each provider's `TOPUP_RPC_<ID>_KEY`
-   (`TOPUP_RPC_PROVIDER_A_KEY`, `TOPUP_RPC_PROVIDER_B_KEY`; empty for a keyless URL). From a
-   checkout of the deployed commit,
-   with the rendered compose from the run's artifact and `PHALA_CLOUD_API_KEY` exported:
+   rendered compose's sealed names, which the provision summary lists: `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be empty), and each `TOPUP_RPC_<ID>_KEY` your
+   directory declares. From a checkout of the deployed commit, with the rendered compose from the
+   run's artifact and `PHALA_CLOUD_API_KEY` exported:
 
    ```sh
-   deploy/preflight.sh --env .env.production --compose docker-compose.production.yml --offline
+   docker pull <the compose's phala-pay image>   # preflight --offline checks the configuration in it
+   deploy/preflight.sh --env .env.production --compose docker-compose.production.yml \
+     --environment-dir deploy/environments/<owner>/production/topup --offline
    npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.production
    ```
 
    [Sealing the secrets](../deploy/README.md#sealing-the-secrets) has the rules; never change a
    setting this way.
-4. **Create the DNS records** (**HUMAN-ONLY**) the summary lists: a CNAME from `$TOPUP_DOMAIN` to
-   the node's gateway and a TXT `_dstack-app-address.$TOPUP_DOMAIN` naming the instance, not
+4. **Create the DNS records** (**HUMAN-ONLY**) the summary lists: a CNAME from your domain to
+   the node's gateway and a TXT `_dstack-app-address.<domain>` naming the instance, not
    proxied. dstack-ingress in the CVM then obtains a Let's Encrypt certificate itself, through
    port 443 (`tls-alpn-01`); the CVM holds no DNS credentials
    ([Custom domain](../deploy/README.md#custom-domain)).
 5. **Upgrade once with the same release.** Run Deploy with `mode: upgrade`: it waits for
-   `https://$TOPUP_DOMAIN/healthz` and verifies the attestation and the certificate evidence.
+   `<public_origin>/healthz` and verifies the attestation and the certificate evidence.
    Backups have started once a WAL segment younger than two minutes is listed:
 
    ```sh
@@ -208,14 +211,14 @@ npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
-deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.production.yml
-deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.production.yml service
+deploy/verify-ingress-evidence.sh "<your domain>" "$APP_ID"
 ```
 
 The official dstack verifier checks the TDX quote, TCB, event log, and OS image; the script then
 requires the app id, the compose hash of exactly the rendered compose, the sealed env names, and
-`dstack-ingress` on 443 as the only published port
-([deploy/README.md](../deploy/README.md#attestation-ingress-and-egress)). Give your merchants the
+the policy of [compose-policy.jq](../deploy/compose-policy.jq), under which `dstack-ingress` on 443
+is the only published port ([deploy/README.md](../deploy/README.md#attestation-ingress-and-egress)). Give your merchants the
 app id and the compose hash (`jq -j '.compose_file' attestation.json | sha256sum`): they check
 their webhook keys' attestation against them ([integration.md §5.3](integration.md#53-pin-your-accounts-webhook-keys)),
 and each upgrade changes the compose hash.
@@ -227,8 +230,8 @@ diligence is done offline; the service records only its reference, date, and rev
 
 1. **Admin helper.** Convert the seed to the PEM the signer uses, once, and load the
    [runbooks' `admin` helper](../deploy/runbooks/README.md#environment) with
-   `BASE_URL=https://$TOPUP_DOMAIN` (exactly `TOPUP_PUBLIC_ORIGIN`, or signatures answer `401`) and
-   `ADMIN_KEY_ID` equal to `TOPUP_ADMIN_KID` (`admin/production-v1`):
+   `BASE_URL` set to exactly `topup.yaml`'s `public_origin` (or signatures answer `401`) and
+   `ADMIN_KEY_ID` to its `admin_key.id` (`admin/production-v1`):
 
    ```sh
    (umask 077 && { printf '302e020100300506032b657004220420'; tr -d '\n' < admin.seed; } |
@@ -246,7 +249,7 @@ Live mode (`charges_enabled: true`, which returns the first live key), the per-a
 
 ## 7. The merchant's side
 
-Each merchant does these steps with its own secret key, against your `https://$TOPUP_DOMAIN`; the
+Each merchant does these steps with its own secret key, against your `public_origin`; the
 [integration guide](integration.md) is its reference, and [deploy/README.md, "Merchant
 setup"](../deploy/README.md#merchant-setup) the summary.
 
@@ -274,7 +277,7 @@ one deposit end to end: it creates a quote, pays it from a Foundry keystore hold
 (minting the test token), and waits for the verified `deposit.credited` webhook, about 30 seconds
 after the payment. Write the configuration and run it as in
 [deploy/sandbox/README.md, "Running the scenarios against a deployed service"](../deploy/sandbox/README.md#running-the-scenarios-against-a-deployed-service),
-with `service_url` set to `https://$TOPUP_DOMAIN`:
+with `service_url` set to your `public_origin`:
 
 ```sh
 uv run --locked --project sdk/python python deploy/sandbox/smoke.py --config sandbox.json
@@ -287,8 +290,8 @@ directory's scenarios play late, partial, rejected, and refunded payments.
 
 ## 9. Going live
 
-1. A reviewed route PR with the live route, the factory verified on its chain, and the provider
-   URLs of that chain; then Deploy `upgrade` ([Deploy](../deploy/README.md#deploy)).
+1. A reviewed PR adding the live route and its chain's providers to `topup.yaml`, with the factory
+   verified on its chain; then Deploy `upgrade` ([Deploy](../deploy/README.md#deploy)).
 2. Your own sign-off of the limits: route bounds, each account's caps, and
    `max_unfinalized_credit` ([architecture §17](architecture.md#17-delivery) lists Phala's), and a
    passed restore drill (section 10).
@@ -315,7 +318,8 @@ read the old app's backups, so never delete the app, and give a new app a new pr
 ## 11. Upgrades and operations
 
 - **Upgrades.** Merge upstream changes into your fork's `main` by pull request and review them:
-  each changes the attested compose. Then Release images and Deploy `upgrade`. An upgrade sends
+  each changes the attested compose; your environment directory is yours and merges cleanly. Then
+  Release images and Deploy `upgrade`. An upgrade sends
   only the compose, so the sealed secrets stay; rollback is an upgrade to an earlier release, and
   a schema is never rolled back ([Deploy](../deploy/README.md#deploy)). Tell merchants the new
   compose hash. The OS image is fixed; moving to dstack 0.6 changes every derived key
@@ -327,7 +331,21 @@ read the old app's backups, so never delete the app, and give a new app a new pr
   [Incident communication](../deploy/runbooks/incident-communication.md).
 - **Security.** Report vulnerabilities in the software as in [SECURITY.md](../SECURITY.md);
   incidents of your instance are yours to handle and disclose.
-- **Local rehearsal.** `make up`, `make cvm-rehearsal` (the release artifact against Anvil and the
-  dstack simulator, through sealing, onboarding, and one credited deposit), and
-  `make sandbox-local` run the same compose without Phala Cloud
+- **Local rehearsal.** `make up`, `make cvm-rehearsal` (a staging-shaped artifact against Anvil and
+  the dstack simulator, through sealing, onboarding, and one credited deposit),
+  `make upgrade-rehearsal` (an upgrade in place from a release, with real data, and its rollback),
+  and `make sandbox-local` run the same compose without Phala Cloud
   ([Local verification](../deploy/README.md#local-verification)).
+
+## Official images
+
+An instance may run the images of Phala's own releases instead of building its own. Pick a
+**Release images** run on Phala-Network/phala-pay's `main`. Its summary and `images.json` artifact
+name the source commit and each image's `repository@sha256` digest. Pin that commit, not a branch:
+its `deploy/` renders your environment directory, and its `images.json` is `render.sh`'s
+`--images`. Verify the digest before you trust it. `phala-pay` builds bit for bit, so
+`make verify-image` at the pinned commit rebuilds it twice and prints the digest it must equal.
+`postgres-walg` is not reproducible (apt and dpkg timestamps), so review its
+[Dockerfile](../deploy/Dockerfile.postgres-walg) at that commit, or build and publish your own.
+Deploying without a fork, from a versioned release kit, is planned
+([design §10](design/deploy-config.md#10-self-hosting-without-a-fork)).

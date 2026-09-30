@@ -337,6 +337,11 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- The attested compose of a deployment takes a new form: its public settings sit in one inline
+  configuration file (routes, RPC provider URLs, origin, admin key), and it is written in
+  Compose's canonical form. The API is unchanged, and so is every account's webhook key, which
+  derives from the same app id. The first upgrade to it has a new compose hash, like any upgrade:
+  re-pin it as in integration.md §5.3.
 - While the service is frozen after a restore, a merchant request without a well-formed API key
   answers `401 api_key_missing` or `401 api_key_invalid`, as when not frozen (it answered
   `503 service_restoring`): the key's form and checksum are checked first, without a database

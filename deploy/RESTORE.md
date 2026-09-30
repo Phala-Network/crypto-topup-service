@@ -19,6 +19,9 @@ instance of the same dstack app boots with an empty volume, and PostgreSQL itsel
 newest base backup, replays the archived WAL, and promotes. The instance boots the
 [restore-check variant](#the-restore-check-variant), which verifies the result read-only; a real
 restore then [resumes](#resume) by upgrading it to the service compose. No step runs inside a CVM.
+The same bootstrap is why an upgrade must keep the volumes: a service that booted on an empty
+`pgdata` would restore from backup and look healthy while losing the unarchived tail;
+[local/upgrade-rehearsal.sh](local/upgrade-rehearsal.sh) proves that an upgrade never does.
 
 ## Backup key
 
@@ -61,19 +64,29 @@ minute even when idle; after each successful upload `walg-cron` refreshes the ma
 
 ## The restore-check variant
 
-`deploy/render-compose.sh --restore-check` renders the same source with three attested
-differences, so a verification instance has its own compose hash:
+`deploy/render.sh --restore-check` renders the Environment's directory with
+[compose.restore-check.yaml](compose.restore-check.yaml) instead of the service overlay. That
+gives the verification instance its own compose hash. [compose-policy.jq](compose-policy.jq)
+requires each of these differences of the merged artifact, wherever it is checked (`render.sh`,
+`validate-compose.sh`, preflight, `verify-attestation.sh`):
 
-- `TOPUP_RESTORE_FROM_BACKUP=on`: a base backup is required (an empty prefix fails), archiving is
-  off, and `backup` idles, so nothing writes to or deletes from the prefix.
-- `TOPUP_SERVICE_ENABLED=read-only`: `topup` answers only `GET`, `HEAD`, and the operator's
-  restore reconciliation under `/v1/admin/restore/` (anything else `503 service_restoring`, and so
-  is every request with a merchant API key: `restore-check` records the freeze in parallel, and may
-  fail before it does), runs
-  no loop and takes no lease-owner lock, and reports to Sentry as `<environment>-restore`;
-  `heartbeat` exits.
-- No `dstack-ingress`: `topup` is published on 8081 instead
-  ([why](#addressing-the-restore-check-instance)), and its origin is that gateway URL.
+- **Only `keys`, `postgres`, `migrate`, `topup`, and `restore-check` run.** There is no `backup`,
+  `heartbeat`, `smokescreen`, or `dstack-ingress`, so no base backup is pushed or deleted and no
+  webhook leaves.
+- **PostgreSQL restores and never archives.** Its `TOPUP_RESTORE_FROM_BACKUP=on` requires a base
+  backup (an empty prefix fails) and makes the entrypoint set `archive_mode=off` after any other
+  argument. The policy forbids overriding the image's entrypoint or command.
+- **Its storage credentials are its own:** `RESTORE_AWS_ACCESS_KEY_ID` and
+  `RESTORE_AWS_SECRET_ACCESS_KEY`, a read-only token. The variant reads no `AWS_*` name, so an
+  instance that inherits the live read-write env (created without `--env-file`) cannot list the
+  prefix and never starts.
+- **`topup` runs `--read-only`.** It answers only `GET`, `HEAD`, and the operator's restore
+  reconciliation under `/v1/admin/restore/`; anything else answers `503 service_restoring`, and so
+  does every request with a merchant API key (`restore-check` records the freeze in parallel, and
+  may fail before it does). It runs no loop, takes no lease-owner lock, and reports to Sentry as
+  `<environment>-restore`.
+- **`topup` is published on 8081 and nothing else** ([why](#addressing-the-restore-check-instance)).
+  Its origin is that gateway URL, the render's `--origin`.
 
 After PostgreSQL promotes (its health check passes only out of recovery; the start period is the
 one-hour RTO) and `migrate` confirms the schema, `restore-check` runs once: it records the restore,
@@ -127,32 +140,32 @@ muting: the live instance keeps checking in.
 
 ### Render it and its env file
 
-Render from the commit of the live compose, with the live images and every
-[attested setting](README.md#attested-settings) exported (the derived ones too, with the values
-Deploy derived: `SENTRY_ENVIRONMENT` the Environment's name, `AWS_REGION=auto` and
-`AWS_S3_FORCE_PATH_STYLE=true` for R2, `TOPUP_ADMIN_KID=admin/<Environment>-v1`), but a
-provisional `TOPUP_DOMAIN` (the instance's gateway host is known only after creation; the variant
-needs no `TOPUP_GATEWAY_DOMAIN`):
+Render from a checkout of the live compose's commit, with the live release's `images.json` (from
+the Release images run Deploy used). Pass a provisional origin: the instance's gateway host is
+known only after creation, and the variant needs no gateway domain.
 
 ```sh
-export TOPUP_IMAGE=<live phala-pay digest> POSTGRES_WALG_IMAGE=<live postgres-walg digest>
-TOPUP_DOMAIN=pending.invalid deploy/render-compose.sh --restore-check >restore-check.yml
+deploy/render.sh --restore-check --images images.json --origin https://pending.invalid \
+  deploy/environments/<owner>/<Environment>/topup >restore-check.yml
 ```
 
-The env holds the sealed names of [staging.env.example](staging.env.example), but with storage
-credentials that can only list and read the prefix: on R2, an API token with **Object Read only**
-on the backup bucket only. Create it on the operator's machine, for this restore only, and shred it
-once the instance exists or the restore is abandoned:
+The env holds the variant's sealed names, `RESTORE_AWS_ACCESS_KEY_ID` and
+`RESTORE_AWS_SECRET_ACCESS_KEY` among them. Those are storage credentials that can only list and
+read the prefix: on R2, an API token with **Object Read only** on the backup bucket only. Create it
+on the operator's machine, for this restore only, and shred it once the instance exists or the
+restore is abandoned:
 
 ```sh
 umask 077
 export RESTORE_ENV_DIR="$(mktemp -d)"
-# One line per name of staging.env.example: every TOPUP_RPC_<ID>_KEY as well.
-printf '%s\n' 'AWS_ACCESS_KEY_ID=<read-only key id>' 'AWS_SECRET_ACCESS_KEY=<read-only secret>' \
-  'SENTRY_DSN=<the live DSN, or empty>' 'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
+# Exactly the sealed names of restore-check.yml: every TOPUP_RPC_<ID>_KEY as well.
+printf '%s\n' 'RESTORE_AWS_ACCESS_KEY_ID=<read-only key id>' \
+  'RESTORE_AWS_SECRET_ACCESS_KEY=<read-only secret>' 'SENTRY_DSN=<the live DSN, or empty>' \
+  'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
   'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"
+docker pull <restore-check.yml's phala-pay image>   # --offline checks the configuration in it
 deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
-  --restore-check --offline
+  --environment-dir deploy/environments/<owner>/<Environment>/topup --restore-check --offline
 # after creating the instance:
 shred -u "$RESTORE_ENV_DIR/restore.env" && rm -rf "$RESTORE_ENV_DIR"
 ```
@@ -230,13 +243,14 @@ live_isolated() {
    ```
 
 4. **Set its own origin**, so admin-signed requests verify (the admin API checks RFC 9421
-   signatures against `TOPUP_PUBLIC_ORIGIN`, which the render derives from `TOPUP_DOMAIN`), and the
-   reconciliation's steps 2 to 5 can run here: render the variant again with
-   `TOPUP_DOMAIN` set to the host of `$RESTORE_URL` and upgrade this instance only (no `-e`, so
-   its env stays). It restarts on its non-empty data directory and `restore-check` runs again:
+   signatures against the service's origin) and the reconciliation's steps 2 to 5 can run here.
+   Render the variant again with `--origin "$RESTORE_URL"`, and upgrade this instance only (no
+   `-e`, so its env stays). It restarts on its non-empty data directory, and `restore-check` runs
+   again:
 
    ```sh
-   TOPUP_DOMAIN=${RESTORE_URL#https://} deploy/render-compose.sh --restore-check >restore-check.yml
+   deploy/render.sh --restore-check --images images.json --origin "$RESTORE_URL" \
+     deploy/environments/<owner>/<Environment>/topup >restore-check.yml
    npx --yes phala@1.1.22 deploy --json --cvm-id "$RESTORE_CVM_ID" --compose restore-check.yml \
      --no-public-logs --no-public-sysinfo --wait
    ```
@@ -272,12 +286,13 @@ after steps 1 to 5 of the [reconciliation](runbooks/restore.md) (they run on thi
 the failed instance, so only one instance holds the keys and archives into the prefix; merchants
 were sent the restore point in the reconciliation's step 2
 ([incident communication](runbooks/incident-communication.md)), and their API requests answer
-`503 service_restoring` until the unfreeze. Then
-render the service variant (`deploy/render-compose.sh`, no flag) with the Environment's settings
-(its `TOPUP_DOMAIN`, the origin merchants call and admin requests are signed for), upgrade the instance to it (`phala deploy --cvm-id
-"$RESTORE_CVM_ID" --compose <file>`, no `-e`), set `TOPUP_CVM_ID` to `$RESTORE_CVM_ID`, and seal
-the read-write credentials (`phala envs update "$RESTORE_CVM_ID" -e <env file>`, the same three
-names). The domain's TXT record still names the failed instance: set
+`503 service_restoring` until the unfreeze. Then render the service variant (`deploy/render.sh
+--images images.json --gateway-domain <the instance's gateway> <the Environment's directory>`).
+Its origin is the one merchants call and admin requests are signed for. Upgrade the instance to it
+(`phala deploy --cvm-id "$RESTORE_CVM_ID" --compose <file>`, no `-e`), and set `TOPUP_CVM_ID` to
+`$RESTORE_CVM_ID`. Then seal the service's names with the read-write credentials
+(`phala envs update "$RESTORE_CVM_ID" -e <env file>`, with `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` in place of the `RESTORE_AWS_*` pair). The domain's TXT record still names the failed instance: set
 `_dstack-app-address.$TOPUP_DOMAIN` to `$INSTANCE_ID:443` (step 2) so the gateway routes the
 domain here and dstack-ingress, whose account and certificate volume is new, can obtain a
 certificate; update a CAA record that pins the old ACME account. Require:
@@ -309,9 +324,9 @@ copy app cannot derive the backup key) and never goes past step 5 of [Restore](#
 restore-check variant guarantees it never writes to the prefix (its promoted timeline would divert
 a later real restore), never runs `backup` or the full `topup`, and never takes live traffic.
 
-1. Issue a read-only token for the Environment's bucket, build the env file, render the variant
-   with its live images and settings, and require that it publishes only 8081:
-   `docker compose -f restore-check.yml config --format json | jq -e '[.services[] | .ports[]? | .published] == ["8081"]'`.
+1. Issue a read-only token for the Environment's bucket, build the env file, and render the
+   variant with its live images. `render.sh` and preflight apply
+   [compose-policy.jq](compose-policy.jq), which requires it to publish only 8081.
 2. Require `live_isolated` to pass before the instance exists, with
    `LIVE_URL=https://$TOPUP_DOMAIN` (Phala's staging: `https://pay-api-staging.phala.com`).
 3. Record the start time (the RPO anchor), run steps 1-5 of [Restore](#restore), and record the
@@ -332,10 +347,16 @@ Never upgrade a drill instance to the service compose or seal read-write credent
 `make restore-drill` ([local/restore-drill.sh](local/restore-drill.sh)) runs two modes against
 local object storage: `controlled` forces a WAL switch and requires the last marker and LSN;
 `crash` kills PostgreSQL after a natural upload and reports the observed loss. Both require that a
-wrong key fails the restore command (`126`), then boot the whole restore-check variant on an empty
-volume with read-only credentials and require promotion with archiving off, an `ok` report with a
-complete reconciliation, `503` on writes, the RPO and an RTO of at most 3600 seconds, and an
-unchanged object listing. `controlled` also runs the business-consistency scenario, with the
+wrong key fails the restore command (`126`). Then they boot the whole restore-check variant on an
+empty volume, with its read-only `RESTORE_AWS_*` credentials while the live read-write names stay in
+its environment. They require:
+- PostgreSQL using only the read-only credentials;
+- promotion with archiving off;
+- no heartbeat, backup, egress, or ingress running;
+- an `ok` report with a complete reconciliation;
+- `503` on writes;
+- the RPO, and an RTO of at most 3600 seconds;
+- an unchanged object listing. `controlled` also runs the business-consistency scenario, with the
 reference product ([Staging reference product](phala.md#staging-reference-product)) as the
 account's merchant. Before the backup, the account's treasury is in force and a change to a second
 treasury, T2, is pending with its time-lock over. After the last archived WAL, and before

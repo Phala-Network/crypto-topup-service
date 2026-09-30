@@ -25,10 +25,12 @@ environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
    WAL-G's `WALG_*`/`AWS_*` and dstack-ingress's `DOMAIN`. These are written as literals in the
    environment's compose overlay, never taken from the environment at render time.
 3. **Variants are standard Compose overrides.**
-   - `compose.yaml` is the service stack. `restore-check` sits in it inert, under
-     `profiles: [restore-check]`, which `config` leaves out of the output.
-   - `compose.restore-check.yaml` removes the service-only services with `!reset null`, and
-     activates `restore-check` with `profiles: !reset []`.
+   - `compose.yaml` holds every service of the topup CVM.
+   - Each variant is an override that removes what it does not run with `!reset null`:
+     `compose.service.yaml` removes `restore-check`, and `compose.restore-check.yaml` removes
+     `dstack-ingress`, `smokescreen`, `heartbeat`, and `backup`.
+   - (An inert `profiles:` entry would not do: Compose v2.26 keeps inactive-profile services in
+     `config` output, still carrying `profiles:`.)
    - The `# only-in:` template language and `render-compose.sh` are deleted.
 4. **Public settings move out of GitHub into reviewed files.** Environment variables go from 13
    (plus 3 optional overrides and 4 derived values) to 3 deployment-state variables.
@@ -100,10 +102,11 @@ Phala value, and preflight refuses its placeholders.
 
 ```text
 deploy/
-  compose.yaml                   service stack + inert restore-check (topology; pointers into docs)
+  compose.yaml                   every service of a topup CVM (topology; pointers into docs)
+  compose.service.yaml           variant: !reset null restore-check
   compose.restore-check.yaml     variant: !reset null dstack-ingress, smokescreen, heartbeat, backup;
-                                 read-only topup on 8081; restore-check active; archiving off;
-                                 read-only storage credentials under their own names
+                                 read-only topup on 8081; archiving off; read-only storage
+                                 credentials under their own names
   compose-policy.jq              the policy of the merged artifact (§1.6)
   render.sh                      pinned compose config + the three deploy-time inputs
   pinned-compose.sh              Docker Compose v2.26.0 by sha256, cached; --no-download for offline use
@@ -112,7 +115,8 @@ deploy/
     example/topup/               a generic environment: compose.yaml + topup.yaml, no Phala values
     phala-network/staging/topup/ compose.yaml (ingress DOMAIN, WAL-G location, RPC key names) + topup.yaml
     phala-network/staging/product/ compose.yaml (ingress DOMAIN) + config.json (every value literal)
-  local/topup.yaml               the local stacks' config (Anvil providers, local admin key)
+  local/environment.sh           writes the local stacks' environment: staging's routes under a local
+                                 header (placeholder providers, a local admin key)
 ```
 
 Deleted:
@@ -186,9 +190,10 @@ deploy/render.sh --images images.json --gateway-domain … deploy/environments/p
 Rendering runs in three steps:
 
 1. The pinned Compose merges the files: `-p dstack --project-directory deploy -f STACK -f ENV/compose.yaml
-   [-f compose.restore-check.yaml] config --no-interpolate --format json`. Here `STACK` is
-   `compose.yaml`, or `product/compose.yaml` when the directory has a `config.json`. This keeps
-   the secret references and `$$` escapes.
+   -f VARIANT config --no-interpolate --format json`. Here `STACK` is `compose.yaml`, or
+   `product/compose.yaml` (with no variant) when the directory has a `config.json`. This keeps the
+   secret references and `$$` escapes. Merged environments come out as `KEY=VALUE` lists, and
+   render.sh turns them back into maps.
 2. `jq` applies the inputs:
    - pins each `phala-pay`, `postgres-walg`, and `phala-pay-reference-product` image to the
      release's `repository@sha256`, and fails on any unpinned image;
@@ -204,8 +209,8 @@ is a lowercase host name. `--origin` is an `https://` origin, restore-check only
 
 Verified on v2.26.0 and v5.5.1:
 - `--no-interpolate` keeps `${S:-}` and `$$`;
-- `!reset null` removes a service, and `profiles: !reset []` activates one;
-- an inactive-profile service is left out of the output;
+- `!reset null` removes a service;
+- an inactive-profile service stays in the output, with its `profiles:`;
 - both versions produce byte-identical output, which v2.26.0 loads.
 
 The output bakes the project name into resource names (`name: dstack`, `dstack_pgdata`), and these
@@ -299,8 +304,8 @@ it, so recreation is about container identity, not uptime. §11 measures the act
 ## 7. Alternatives rejected, with evidence
 
 - **`profiles` as the variant switch.** The switch is runtime state (`--profile`/`COMPOSE_PROFILES`)
-  outside the attested file, and dstack passes neither. It is used here only to keep
-  `restore-check` inert in the base; the overlay, not a profile, selects the variant.
+  outside the attested file, and dstack passes neither. Compose v2.26 also keeps an inactive
+  profile's service in `config` output, so the artifact would still carry it.
 - **`include`.** It imports whole projects and cannot modify an existing service.
 - **Compose `secrets:` with `environment:` sources.** v2.26.0 writes a secret only when it creates
   the container. After `phala envs update` (a restart, with an unchanged hash) every container would
@@ -317,7 +322,7 @@ it, so recreation is about container identity, not uptime. §11 measures the act
 
 - **Every config consumer switches to `--config`:** `topup run`, `reconcile`, and `restore-check`
   in the composes, the local stacks, the sandbox, the drill, and the rehearsals. `cargo test` runs
-  `Config::parse` on every committed `topup.yaml` (example, staging, local, sandbox template).
+  `Config::parse` on every committed `topup.yaml` (example and staging).
 - **`compose-policy.jq`** (§1.6) is included by `validate-compose.sh`, preflight, and
   `verify-attestation.sh`.
   - Service variant: exactly `keys postgres migrate topup smokescreen dstack-ingress heartbeat
@@ -356,9 +361,11 @@ it, so recreation is about container identity, not uptime. §11 measures the act
   `topup.yaml` (`topup config show`). It fails if one needs a `{key}`, since the workflow holds no
   key. It validates that config instead of the deleted route directory. It no longer needs the
   `staging` Environment.
-- **Local stacks** (`make up`, the sandbox, the drill) run the source files with
-  `local/topup.yaml` under their own project. The CVM rehearsal renders with
-  `render.sh --project-name`.
+- **Local stacks** (`make up`, the sandbox, the drill) render a local environment with
+  `render.sh --project-name <their project>`. That environment is `local/environment.sh`'s, or
+  the sandbox's or drill's own. The configs are therefore inline, and nothing is bind-mounted on
+  CI's runner. They then add the local overlay and its per-variant part (`local/service.yml` or
+  `local/restore-check.yml`). The CVM rehearsal and the upgrade rehearsal render the same way.
 - **Docs** move the compose's design prose out; the compose keeps one-line pointers. Affected:
   - `deploy/README.md`;
   - `RESTORE.md` (render commands; the `RESTORE_AWS_*` names);
@@ -400,8 +407,9 @@ it, so recreation is about container identity, not uptime. §11 measures the act
    - The standard path: revert the merge on `main`, run Release images, and Deploy `upgrade`.
    - The emergency path (HUMAN-ONLY, owner): redeploy the saved artifact byte for byte with
      `phala deploy --cvm-id "$TOPUP_CVM_ID" --compose <saved> --no-public-logs --no-public-sysinfo
-     --wait`, with no `-e`, so the sealed env stays. Then verify it with `verify-attestation.sh`
-     against the saved hash. Its images stay in GHCR.
+     --wait`, with no `-e`, so the sealed env stays. Then verify it with the old commit's
+     `verify-attestation.sh` (its four-argument form), against the saved hash. The new policy
+     judges the new artifact form only. Its images stay in GHCR.
 7. **Afterwards**, delete the unused `staging` variables: `TOPUP_DOMAIN`, `AWS_ENDPOINT`,
    `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, the four `TOPUP_RPC_*_URL`, `PRODUCT_DOMAIN`, and
    `PRODUCT_DRIVER_PUBLIC_KEY`. Nothing reads them any more.

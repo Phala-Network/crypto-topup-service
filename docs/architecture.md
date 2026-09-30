@@ -251,7 +251,7 @@ crates/core       pure, no I/O: money, route schema, CREATE2 math, state machine
 crates/adapters   chain::evm, signer::dstack, pricing::{coinmetrics,binance,kraken}, risk::oracle
 crates/topup      binary: db, pump, scanner, finality, outbox, reconciler, api, cli
 contracts/        Forwarder.sol, ForwarderFactory.sol, deploy scripts, Foundry tests
-deploy/           compose, deployment scripts, runbooks; deploy/config/routes: route files (attested)
+deploy/           compose, deployment scripts, runbooks; deploy/environments: each deployment's attested settings and routes
 crates/topup/tests  integration tests on PostgreSQL and Anvil
 ```
 
@@ -702,7 +702,7 @@ account sets one treasury per chain and mode through the API; quotes and new dep
 networks pay the chain's current one (`400 treasury_not_set` without one), and each `addresses`
 row keeps the treasury it was issued over, so a quote created before a change keeps its address.
 `POST /v1/treasuries/challenge {chain_id, address}` issues an EIP-4361 message: `domain` is the
-authority of `TOPUP_PUBLIC_ORIGIN` and `URI` the origin, the statement names the account and mode,
+authority of the configured `public_origin` and `URI` the origin, the statement names the account and mode,
 `Chain ID` is the chain, the nonce is single-use and bound to the account, mode, chain, and
 address, and the message expires after 10 minutes, or 24 hours when the address holds code at
 provider A's latest block (a Safe's owners collect signatures, or approve on chain and wait for
@@ -829,7 +829,7 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
   oldest undelivered event is older than `failing_for_hours` (24 by default). The merchant sees
   the same health on its endpoint objects (`pending_deliveries`, `oldest_pending_at`,
   `last_attempt`) and lists what an endpoint missed with `GET /v1/events?delivery_success=false`.
-- Every delivery leaves through the smokescreen sidecar (`TOPUP_WEBHOOK_PROXY`), the only filter
+- Every delivery leaves through the smokescreen sidecar (`topup run --webhook-proxy`), the only filter
   of the addresses a merchant's URL may reach: it refuses loopback, private, link-local and cloud
   metadata, CGNAT, and IPv4-embedding IPv6 addresses, and IPv4-mapped IPv6 as the IPv4 it maps
   (design §8; deploy/README.md, "Webhook egress"). The service itself checks only the URL's
@@ -947,7 +947,7 @@ with a subset of the grantable permissions), list, roll (the old key works for u
 revoked at once; a key rolling itself keeps working for at least an hour, so the response of a
 roll it lost can be recovered with it), and revoke, except the mode's last secret key that is neither revoked nor
 expiring. The operator's admin API, authenticated with RFC 9421 signatures of the
-admin key (verified against the configured public origin `TOPUP_PUBLIC_ORIGIN`, §14, single-use
+admin key (verified against the configured `public_origin`, §14, single-use
 within the acceptance window), creates accounts with their contact, due diligence record, live
 mode, and first keys, updates them, issues recovery keys, pauses and resumes, nudges, and lifts
 reconciliation blocks (§13); it never registers or replays a merchant's webhooks. Each change
@@ -1382,7 +1382,7 @@ carries `"unit_decimals": 2` and is now refused: delete that key. The defaults a
 | `chain.confirmations` | per chain family (§8): 2 on Ethereum L1, `safe` on OP-stack, `finalized` elsewhere; a route may require more (for example `finalized`), and a family accepts only its values |
 | `chain.implementation` | the factory's first `CREATE` (nonce 1), which its constructor deploys; startup verifies `implementation()` on chain (§4) |
 | `chain.sanctions_oracle` | the Chainalysis oracle published for the chain (Ethereum and most EVM chains `0x40C5…aC8fb`, Base `0x3A91…D739B`); required on any other chain, such as Sepolia |
-| `chain.rpc_providers` | `[provider-a, provider-b]`; an id (lowercase letters, digits, `-`) names its attested URL `TOPUP_RPC_<ID>_URL` and sealed key `TOPUP_RPC_<ID>_KEY`, and serves one chain ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |
+| `chain.rpc_providers` | `[provider-a, provider-b]`; an id (lowercase letters, digits, `-`) names its attested URL in the configuration's `rpc_providers` and its sealed key `TOPUP_RPC_<ID>_KEY`, and serves one chain ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |
 | `asset.backstop` | `token`: every transfer of the token is requested and kept locally, one request per block range whatever the address count; `addresses` for a token with many transfers per block, such as USDC (§8) |
 | `pricing.mode`, `pricing.check.fx` | `spot`; Kraken `USDT/USD` for a USDT-quoted market, required otherwise |
 | `pricing.max_age_s`, `max_deviation_bps`, `max_fx_deviation_bps` | 120 (two Coin Metrics intervals), 100, 50 |
@@ -1427,17 +1427,19 @@ metric (`ReferenceRateUSD`, 1m) are fixed by §8 and §11, not configured.
 
 ```yaml
 services:
-  topup:    { image: ghcr.io/phala-network/phala-pay@sha256:…, command: ["topup", "run"] }
+  topup:    { image: ghcr.io/phala-network/phala-pay@sha256:…, command: ["topup", "run", "--config", "/etc/topup/topup.yaml", …] }
   smokescreen: { image: ghcr.io/phala-network/phala-pay@sha256:…, command: ["smokescreen", …] }  # webhook egress (§11)
   postgres: { image: ghcr.io/phala-network/postgres-walg@sha256:…,     # postgres:18 + WAL-G
               volumes: [pgdata:/var/lib/postgresql] }   # archive_timeout=60, archive_command=walg-cron wal-push %p
   backup:   { image: ghcr.io/phala-network/postgres-walg@sha256:…, command: ["walg-cron", "backup-push", "0 3 * * *"] }
 ```
 
-`TOPUP_PUBLIC_ORIGIN` is the service's public scheme and authority, `https://<custom domain>`
-(no path), whose TLS the official dstack-ingress terminates inside the CVM with the certificate
-evidence published (`deploy/README.md`, "Custom domain"); `topup run` refuses to start without a
-valid value.
+Every public setting is in the configuration file `topup run --config` reads, committed per
+deployment and inlined into the attested compose (`docs/configuration.md`,
+`docs/design/deploy-config.md`); the env holds only secrets. Its `public_origin` is the service's
+public scheme and authority, `https://<custom domain>` (no path), whose TLS the official
+dstack-ingress terminates inside the CVM with the certificate evidence published
+(`deploy/README.md`, "Custom domain"); `topup run` refuses to start without a valid value.
 
 Postgres on the CVM's encrypted disk; WAL-G daily base backups and continuous WAL with
 `archive_timeout=60` and a one-row heartbeat a minute, encrypted with `get_key("backup/v1")`

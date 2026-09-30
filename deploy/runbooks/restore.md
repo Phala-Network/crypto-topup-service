@@ -31,7 +31,7 @@ rescanned.
 
 Work through the steps in order, with the runbook environment of the [README](README.md#environment)
 and `BASE_URL` set to the instance's origin: `$RESTORE_URL` on the restore-check instance (after
-[Restore](../RESTORE.md#restore) step 5), `https://$TOPUP_DOMAIN` once resumed. Every write below
+[Restore](../RESTORE.md#restore) step 5), the Environment's `public_origin` once resumed. Every write below
 but the discard of step 6 needs the freeze (`400 restore_not_frozen` otherwise), and each writes
 `audit`. Steps 2 to 5 can run on
 the restore-check instance, before the service resumes; do the security steps as early as possible.

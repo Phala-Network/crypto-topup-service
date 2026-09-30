@@ -122,8 +122,8 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The committed Sepolia routes (`deploy/config/routes/phala-cloud-sepolia-pha.yaml` and
-`phala-cloud-sepolia-usdc.yaml`) use the #202 build's deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
+The committed Sepolia routes (`phala-cloud-sepolia-pha-usd` and `phala-cloud-sepolia-usdc-usd` in
+`deploy/environments/phala-network/staging/topup/topup.yaml`) use the #202 build's deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
 (`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
 `topup run` checks the factory's `implementation()` and both runtime code hashes at startup.
@@ -164,8 +164,8 @@ implementation runtime code hashes, `implementation()`, the implementation's `fa
 
 ## Base Sepolia
 
-The committed Base Sepolia routes (`deploy/config/routes/phala-cloud-base-sepolia-pha.yaml` and
-`phala-cloud-base-sepolia-usdc.yaml`) use the same deployment, **deployed on Base Sepolia (84532)
+The committed Base Sepolia routes (`phala-cloud-base-sepolia-pha-usd` and
+`phala-cloud-base-sepolia-usdc-usd`, in the same file) use the same deployment, **deployed on Base Sepolia (84532)
 and verified**: `verify-deployment.sh --rpc base-sepolia/a=… --rpc base-sepolia/b=…` passes on both
 staging providers (September 2026), and every runtime code hash equals Sepolia's. Preflight
 re-checks it on every Deploy; the Verify contracts workflow checks Sepolia only.
@@ -222,16 +222,13 @@ implementation, every sample forwarder, and runtime code hashes must be identica
 A route file carries only `chain.forwarder_factory`; the implementation is derived as the
 factory's first CREATE (`chain.implementation` is optional), and at startup `topup run` requires
 the factory's `implementation()` to be it and both runtime code hashes to match the build. Put the
-verified factory into the route file under `deploy/config/routes/` and the identical inline copy in `deploy/docker-compose.yml` (its
-`configs`); `deploy/validate-compose.sh` fails if the inline copy differs from the file. Create a
-new route version; never mutate the contract tuple of an enabled version. Then run:
+verified factory into the route in the Environment's `topup.yaml`
+(`deploy/environments/<owner>/<Environment>/topup/topup.yaml`), which the attested compose inlines.
+Create a new route version; never mutate the contract tuple of an enabled version. Then run:
 
 ```sh
-deploy/validate-compose.sh
-# Export the attested settings first: the Environment's variables
-# (deploy/README.md, "Attested settings").
-deploy/render-compose.sh > deploy/docker-compose.staging.yml
-docker compose -f deploy/docker-compose.staging.yml config >/dev/null
+cargo run --locked -p topup -- config check deploy/environments/<owner>/<Environment>/topup/topup.yaml
+deploy/validate-compose.sh   # renders every committed environment against deploy/compose-policy.jq
 ```
 
 Deploy the merged route with the Deploy workflow in mode `upgrade` (`deploy/README.md`, "Deploy"),

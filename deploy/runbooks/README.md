@@ -27,14 +27,14 @@ round's findings on its `/healthz`.
 
 ## Environment
 
-Load values from the attested route and the admin's key store, never from chat or a ticket.
-`BASE_URL` must be the service's `TOPUP_PUBLIC_ORIGIN`, `https://$TOPUP_DOMAIN` (Phala's instance:
-`https://pay-api.phala.com`, staging `https://pay-api-staging.phala.com`), or signatures fail with
-`401`; `ADMIN_KEY_ID` is the deployment's `TOPUP_ADMIN_KID`, `admin/<Environment>-v1` unless
-rotated ([deploy/README.md, "One-time setup"](../README.md#one-time-setup-human-only-repository-owner)).
+Load values from the attested configuration and the admin's key store, never from chat or a
+ticket. `BASE_URL` must be the service's `public_origin` (the Environment's `topup.yaml`; Phala's
+instance: `https://pay-api.phala.com`, staging `https://pay-api-staging.phala.com`), or signatures
+fail with `401`; `ADMIN_KEY_ID` is its `admin_key.id`, `admin/<Environment>-v1` unless rotated
+([deploy/README.md, "Attested settings"](../README.md#attested-settings)).
 
 ```sh
-export BASE_URL="https://$TOPUP_DOMAIN"
+export BASE_URL="https://pay-api-staging.phala.com"   # the Environment's public_origin
 # The affected route; staging also serves phala-cloud-sepolia-usdc-usd, and on Base Sepolia
 # (CHAIN_ID=84532, providers base-sepolia-a/-b) phala-cloud-base-sepolia-{pha,usdc}-usd.
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111

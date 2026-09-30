@@ -440,7 +440,7 @@ npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
 deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
-export TOPUP_PUBLIC_ORIGIN="https://$TOPUP_DOMAIN"   # topup.yaml's public_origin
+export ORIGIN="https://$TOPUP_DOMAIN"   # topup.yaml's public_origin
 deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
 ```
 
@@ -462,7 +462,7 @@ that account and mode (merchants run the same check, docs/integration.md §5.3):
 ```sh
 export NONCE="$(openssl rand -hex 32)"
 curl -fsS -H "Authorization: Bearer $SECRET_KEY" \
-  "$TOPUP_PUBLIC_ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
+  "$ORIGIN/v1/attestation?nonce=$NONCE" > public-attestation.json
 jq '{quote: null, attestation: .tdx_quote}' public-attestation.json |
   deploy/dstack-verifier.sh > public-verification.json
 jq -e --arg app "$(jq -r '.app_id | ltrimstr("0x") | ascii_downcase' cvm.json)" \
