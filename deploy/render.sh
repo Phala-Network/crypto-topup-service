@@ -83,7 +83,7 @@ jq -e 'type == "object" and all(to_entries[];
 
 compose=$("$root/deploy/pinned-compose.sh" "${download[@]}")
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/topup-render.XXXXXX")
-trap '[[ -n "${RENDER_KEEP_TMP:-}" ]] || rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"' EXIT
 
 # The environment's own configuration file stands in for the stack's placeholder.
 jq -n --arg name "$config_name" --arg file "$config_file" '{configs: {($name): {file: $file}}}' \
