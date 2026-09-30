@@ -35,7 +35,7 @@ A prefix never changes its key. Rotation is a new prefix: one upgrade changes `B
 (`crates/core/src/signer.rs`, for example to `backup/v2`) and `WALG_S3_PREFIX`; `backup` finds no
 base backup of the running timeline in the new prefix and takes one at once. Keep the old prefix
 until the new one holds `WALG_RETENTION_FULL` (7) base backups; until then it restores with the
-restore-check variant rendered from the last commit before the change.
+restore-check variant rendered with the kit and images of the last release before the change.
 
 `wal-g backup-list` does not decrypt anything and is never a key test; only fetching a base backup
 and reading its `PG_VERSION` is.
@@ -140,13 +140,17 @@ muting: the live instance keeps checking in.
 
 ### Render it and its env file
 
-Render from a checkout of the live compose's commit, with the live release's `images.json` (from
-the Release images run Deploy used). Pass a provisional origin: the instance's gateway host is
-known only after creation, and the variant needs no gateway domain.
+Render with the live release (the `version` Deploy last deployed to the Environment): its
+`images.json` and deploy kit, downloaded and verified as in
+[Verify a release](../docs/self-hosting.md#verify-a-release), the kit extracted to `kit/`. The
+environment directory is the live one, at the commit Deploy rendered: for example
+`production/topup` in the operator's environment repository, and for Phala's staging
+`deploy/environments/phala-network/staging/topup`. Pass a provisional origin: the instance's
+gateway host is known only after creation, and the variant needs no gateway domain.
 
 ```sh
-deploy/render.sh --restore-check --images images.json --origin https://pending.invalid \
-  deploy/environments/<owner>/<Environment>/topup >restore-check.yml
+kit/deploy/render.sh --restore-check --images images.json --origin https://pending.invalid \
+  <your environment directory> >restore-check.yml
 ```
 
 The env holds the variant's sealed names, `RESTORE_AWS_ACCESS_KEY_ID` and
@@ -164,8 +168,8 @@ printf '%s\n' 'RESTORE_AWS_ACCESS_KEY_ID=<read-only key id>' \
   'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
   'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"
 docker pull <restore-check.yml's phala-pay image>   # --offline checks the configuration in it
-deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
-  --environment-dir deploy/environments/<owner>/<Environment>/topup --restore-check --offline
+kit/deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
+  --environment-dir <your environment directory> --restore-check --offline
 # after creating the instance:
 shred -u "$RESTORE_ENV_DIR/restore.env" && rm -rf "$RESTORE_ENV_DIR"
 ```
@@ -229,7 +233,8 @@ live_isolated() {
      attestation.json)"
    curl -fsS "https://$INSTANCE_ID-8090.$(jq -er '.gateway.base_domain' restore-cvm.json)/prpc/Info" \
      >info.json
-   deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml restore-check
+   kit/deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml \
+     restore-check
    ```
 
 3. **Wait for the report** (at most the RTO) and require `.restore_check.status == "ok"`,
@@ -249,8 +254,8 @@ live_isolated() {
    again:
 
    ```sh
-   deploy/render.sh --restore-check --images images.json --origin "$RESTORE_URL" \
-     deploy/environments/<owner>/<Environment>/topup >restore-check.yml
+   kit/deploy/render.sh --restore-check --images images.json --origin "$RESTORE_URL" \
+     <your environment directory> >restore-check.yml
    npx --yes phala@1.1.22 deploy --json --cvm-id "$RESTORE_CVM_ID" --compose restore-check.yml \
      --no-public-logs --no-public-sysinfo --wait
    ```
@@ -286,8 +291,9 @@ after steps 1 to 5 of the [reconciliation](runbooks/restore.md) (they run on thi
 the failed instance, so only one instance holds the keys and archives into the prefix; merchants
 were sent the restore point in the reconciliation's step 2
 ([incident communication](runbooks/incident-communication.md)), and their API requests answer
-`503 service_restoring` until the unfreeze. Then render the service variant (`deploy/render.sh
---images images.json --gateway-domain <the instance's gateway> <the Environment's directory>`).
+`503 service_restoring` until the unfreeze. Then render the service variant with the same kit
+(`kit/deploy/render.sh --images images.json --gateway-domain <the instance's gateway> <your
+environment directory>`).
 Its origin is the one merchants call and admin requests are signed for. Upgrade the instance to it
 (`phala deploy --cvm-id "$RESTORE_CVM_ID" --compose <file>`, no `-e`), and set `TOPUP_CVM_ID` to
 `$RESTORE_CVM_ID`. Then seal the service's names with the read-write credentials

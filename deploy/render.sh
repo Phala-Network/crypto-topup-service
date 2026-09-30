@@ -4,34 +4,38 @@
 #
 #   1. Merges the stack with the environment directory ENV_DIR (`compose.yaml` and `topup.yaml` for
 #      a topup CVM, `compose.yaml` and `config.json` for the reference product,
-#      deploy/product/compose.yaml) and, for a topup CVM, its variant: compose.service.yaml, or
-#      compose.restore-check.yaml with --restore-check.
+#      deploy/product/compose.yaml) and, for a topup CVM, its variant: compose.service.yaml,
+#      compose.restore-check.yaml with --restore-check, or compose.template.yaml with --template
+#      (the Phala Cloud template).
 #      `config --no-interpolate` keeps the sealed secrets as `${NAME:-}` references.
 #   2. Applies the three deploy-time inputs and nothing else: --images pins each image the stack
 #      names by image name, --gateway-domain is dstack-ingress's gateway (the service variant and
 #      the product), and --origin is the restore instance's own origin (restore-check only). Every
 #      config file is inlined as content named after its digest, so a changed file changes the
-#      definition of exactly the services that mount it.
+#      definition of exactly the services that mount it. Its `$` are escaped, except, in the
+#      template variant, the runtime references the policy allows there.
 #   3. Prints Compose's canonical YAML after deploy/compose-policy.jq accepted it.
 #
 # The project is `dstack`, the name dstack gives the stack it runs in /dstack, so the volumes keep
 # their names; --project-name is for local rehearsals only. Values are never printed on error.
 #
-# Usage: deploy/render.sh [--restore-check] --images FILE [--gateway-domain HOST | --origin URL]
-#          [--project-name NAME] [--no-download] ENV_DIR >docker-compose.yml
+# Usage: deploy/render.sh [--restore-check | --template] --images FILE
+#          [--gateway-domain HOST | --origin URL] [--project-name NAME] [--no-download] ENV_DIR
+#          >docker-compose.yml
 set -euo pipefail
 export LC_ALL=C
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 usage() {
-    echo "usage: $0 [--restore-check] --images FILE [--gateway-domain HOST | --origin URL]" \
-        "[--project-name NAME] [--no-download] ENV_DIR" >&2
+    echo "usage: $0 [--restore-check | --template] --images FILE" \
+        "[--gateway-domain HOST | --origin URL] [--project-name NAME] [--no-download] ENV_DIR" >&2
     exit 64
 }
-restore_check=0 images="" gateway="" origin="" project=dstack download=()
+restore_check=0 template=0 images="" gateway="" origin="" project=dstack download=()
 while (($#)); do
     case "$1" in
         --restore-check) restore_check=1; shift ;;
+        --template) template=1; shift ;;
         --images) images=${2:-}; shift 2 ;;
         --gateway-domain) gateway=${2:-}; shift 2 ;;
         --origin) origin=${2:-}; shift 2 ;;
@@ -53,12 +57,21 @@ if [[ -f "$env_dir/topup.yaml" && ! -f "$env_dir/config.json" ]]; then
 elif [[ -f "$env_dir/config.json" && ! -f "$env_dir/topup.yaml" ]]; then
     stack=(-f "$root/deploy/product/compose.yaml") config_name=product
     config_file="$env_dir/config.json" variant=product
-    ((!restore_check)) || { echo "--restore-check renders a topup environment only" >&2; exit 64; }
+    ((!restore_check && !template)) ||
+        { echo "--restore-check and --template render a topup environment only" >&2; exit 64; }
 else
     echo "$env_dir must hold topup.yaml (a topup CVM) or config.json (the product)" >&2
     exit 64
 fi
-if ((restore_check)); then
+((!restore_check || !template)) || usage
+if ((template)); then
+    variant=template
+    stack+=(-f "$env_dir/compose.yaml" -f "$root/deploy/compose.template.yaml")
+    [[ -z "$gateway" && -z "$origin" ]] || {
+        echo "--template serves the app's gateway domain: no --gateway-domain or --origin" >&2
+        exit 64
+    }
+elif ((restore_check)); then
     variant=restore-check
     stack+=(-f "$env_dir/compose.yaml" -f "$root/deploy/compose.restore-check.yaml")
     [[ -z "$gateway" && "$origin" =~ ^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$ ]] || {
@@ -97,8 +110,11 @@ while IFS=$'\t' read -r name file; do
     [[ -f "$file" ]] || { echo "config $name: $file does not exist" >&2; exit 1; }
     digest=$(if command -v sha256sum >/dev/null; then sha256sum "$file"; else shasum -a 256 "$file"; fi |
         cut -c1-12)
-    jq -n --arg name "$name" --arg digest "$digest" --rawfile content "$file" \
-        '{name: $name, renamed: "\($name)_\($digest)", content: ($content | gsub("\\$"; "$$"))}' \
+    jq -n --arg name "$name" --arg digest "$digest" --rawfile content "$file" --arg variant "$variant" \
+        '{name: $name, renamed: "\($name)_\($digest)", content: ($content | gsub("\\$"; "$$")
+            | if $variant == "template" and $name == "topup"
+              then gsub("\\$\\$\\{(?<v>DSTACK_APP_DOMAIN|TOPUP_ADMIN_PUBLIC_KEY):-\\}"; "${\(.v):-}")
+              else . end)}' \
         >>"$tmp/contents.jsonl"
 done < <(jq -r '.configs // {} | to_entries[] | select(.value.file) | [.key, .value.file] | @tsv' \
     "$tmp/merged.json")
@@ -116,6 +132,7 @@ jq --slurpfile images "$images" --slurpfile configs <(jq -s . "$tmp/contents.jso
         {key: $files[.key].renamed, value: {content: $files[.key].content}} else . end)
     | if $variant == "restore-check" then
         .services.topup.command += ["--public-origin", $origin]
+      elif $variant == "template" then .
       else
         .services["dstack-ingress"].environment.GATEWAY_DOMAIN = $gateway
       end
@@ -128,7 +145,7 @@ violations=$(jq -r -L "$root/deploy" --arg variant "$variant" --arg project "$pr
     'include "compose-policy"; violations($variant; $project)[]' "$tmp/rendered.json")
 if [[ -n "$violations" ]]; then
     echo "render.sh: the rendered $variant compose breaks deploy/compose-policy.jq:" >&2
-    printf '  %s\n' "$violations" >&2
+    printf '  %s\n' "${violations//$'\n'/$'\n'  }" >&2
     exit 1
 fi
 cat "$tmp/rendered.yml"

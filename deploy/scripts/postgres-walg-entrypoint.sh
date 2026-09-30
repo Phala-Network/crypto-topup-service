@@ -13,6 +13,27 @@ if [ "$(id -u)" -eq 0 ]; then
     chown postgres:postgres "$marker_dir"
 fi
 
+# The object store's settings, checked before WAL-G reads or writes anything: in the Phala Cloud
+# template they come from the deploy form, outside the attestation (deploy/compose.template.yaml).
+# An empty one fails later, where WAL-G cannot list the prefix.
+newline='
+'
+check_setting() {
+    case "$2" in
+        *"$newline"*) valid=1 ;;
+        *) printf '%s\n' "$2" | grep -Eqx "$3" && valid=0 || valid=1 ;;
+    esac
+    if [ -n "$2" ] && [ "$valid" -ne 0 ]; then
+        echo "$1 is not $4" >&2
+        exit 64
+    fi
+}
+check_setting WALG_S3_PREFIX "${WALG_S3_PREFIX:-}" 's3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._~/-]*)?' \
+    "s3://BUCKET[/PATH]"
+check_setting AWS_ENDPOINT "${AWS_ENDPOINT:-}" 'https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?/?' \
+    "an http(s) origin, https://HOST[:PORT]"
+check_setting AWS_REGION "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' "a region name such as auto or us-east-1"
+
 case "$1" in
     postgres) ;;
     -*) set -- postgres "$@" ;;

@@ -2,8 +2,10 @@
 
 This page is the reference for the `topup` binary: its commands, its configuration file, its flags,
 and the few environment variables it reads. A deployment's configuration file is committed in its
-environment directory, `deploy/environments/<owner>/<environment>/topup/topup.yaml`, and inlined
-into the attested compose. A change is therefore a pull request and a Deploy `upgrade`
+environment directory in the operator's environment repository, for example
+`production/topup/topup.yaml` (Phala's staging:
+`deploy/environments/phala-network/staging/topup/topup.yaml`), and inlined into the attested
+compose. A change is therefore a pull request and a Deploy `upgrade`
 ([deploy/README.md, "Attested settings"](../deploy/README.md#attested-settings)). The only
 environment variables are the database login's and the two kinds of secret the owner seals into
 the CVM's encrypted environment: `SENTRY_DSN` and each `TOPUP_RPC_<ID>_KEY`
@@ -63,8 +65,15 @@ routes:                                    # every enabled route version, as rou
 - **`routes`** are route files, one list item each; their fields and defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment).
 
-`topup config check` refuses a file that the service would refuse, without reading a secret. That
-includes:
+`topup config check` refuses a file that the service would refuse, without reading a secret.
+Preflight runs it in the compose's pinned image; to run it by hand, use the release's image:
+
+```sh
+docker run --rm -i "$(jq -r '."phala-pay"' images.json)" topup config check /dev/stdin \
+  <production/topup/topup.yaml
+```
+
+The files it refuses include:
 
 - an invalid origin or admin key;
 - a route that fails validation, or routes that disagree on a chain;

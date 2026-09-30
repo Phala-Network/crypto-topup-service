@@ -1,0 +1,12 @@
+# The Phala Cloud template variant (docs/self-hosting.md, "The Phala Cloud template"), merged by
+# `deploy/render.sh --template` after the environment's overlay, instead of compose.service.yaml: a
+# testnet quick start served at the app's own Phala Cloud gateway domain, with no custom domain.
+# deploy/compose-policy.jq checks the merged result, including the few per-deployment values it
+# leaves to the deploy form.
+services:
+  restore-check: !reset null
+  # The gateway terminates TLS for https://<app-id>.<gateway-domain> and forwards to port 80.
+  dstack-ingress: !reset null
+  topup:
+    ports:
+      - "80:8080"

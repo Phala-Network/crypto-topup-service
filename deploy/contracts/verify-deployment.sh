@@ -17,13 +17,12 @@ done
 require_command cast
 require_command jq
 
-"$DEPLOY_CONTRACTS_DIR/check-build.sh" --check >/dev/null
-
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-verification.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-reference="$tmp_dir/reference.json"
-"$DEPLOY_CONTRACTS_DIR/reference-manifest.sh" --output "$reference" >/dev/null
+# The reference deployment of the pinned build, committed and checked against a fresh build in CI
+# (reference-manifest.sh --check), so this needs no Solidity build and runs from the deploy kit.
+reference="$DEPLOY_CONTRACTS_DIR/reference.json"
 
 factory="$(jq -er '.factory' "$reference")"
 implementation="$(jq -er '.implementation' "$reference")"

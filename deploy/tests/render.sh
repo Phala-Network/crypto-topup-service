@@ -77,7 +77,7 @@ refused http-origin "--restore-check needs --origin https://HOST" --images "$tmp
 refused gateway-in-restore-check "--restore-check needs --origin" --images "$tmp/images.json" \
     "${origin[@]}" "${gateway[@]}" "$staging"
 render "${origin[@]}" "$staging" >"$tmp/restore-check.yml"
-refused product-restore-check "--restore-check renders a topup environment only" \
+refused product-restore-check "--restore-check and --template render a topup environment only" \
     --images "$tmp/images.json" "${origin[@]}" "$root/deploy/environments/phala-network/staging/product"
 
 # overlay NAME YAML: staging's environment with YAML appended to its overlay.
@@ -187,6 +187,46 @@ cat >>"$tmp/live-credentials/compose.yaml" <<'YAML'
 YAML
 refused live-credentials "a sealed value may not fill services.migrate.environment.AWS_ACCESS_KEY_ID" \
     --images "$tmp/images.json" "${origin[@]}" "$tmp/live-credentials"
+
+# The template variant: the service without dstack-ingress, topup on port 80 for the gateway, and
+# only the deploy form's values at runtime (deploy/compose.template.yaml).
+template="$root/deploy/environments/phala-cloud-template/topup"
+render --template "$template" >"$tmp/template.yml"
+[[ "$("$compose" -f "$tmp/template.yml" config --variables | awk 'NR > 1 { print $1 }' | sort |
+    tr '\n' ' ')" == "AWS_ACCESS_KEY_ID AWS_ENDPOINT AWS_REGION AWS_SECRET_ACCESS_KEY DSTACK_APP_DOMAIN SENTRY_DSN TOPUP_ADMIN_PUBLIC_KEY WALG_S3_PREFIX " ]] ||
+    { echo "the template's runtime names changed" >&2; exit 1; }
+refused template-gateway "--template serves the app's gateway domain" --images "$tmp/images.json" \
+    --template "${gateway[@]}" "$template"
+refused template-restore-check "usage:" --images "$tmp/images.json" --template "${origin[@]}" "$template"
+refused template-as-service "a sealed value may not fill services.postgres.environment.WALG_S3_PREFIX" \
+    --images "$tmp/images.json" "${gateway[@]}" "$template"
+refused service-as-template "the template's public_origin must be the app's gateway domain" \
+    --images "$tmp/images.json" --template "$staging"
+# A runtime value fills only the form's settings: not another line of topup.yaml, not another
+# service's environment; and topup publishes only port 80.
+cp -r "$template" "$tmp/template-key-id"
+sed -i 's|id: admin/v1|id: ${TOPUP_ADMIN_PUBLIC_KEY:-}|' "$tmp/template-key-id/topup.yaml"
+refused template-key-id "a sealed value may not fill configs.topup_" --images "$tmp/images.json" \
+    --template "$tmp/template-key-id"
+cp -r "$template" "$tmp/template-rpc"
+sed -i 's|^  provider-a: .*|  provider-a: https://${DSTACK_APP_DOMAIN:-}|' "$tmp/template-rpc/topup.yaml"
+refused template-rpc "a sealed value may not fill configs.topup_" --images "$tmp/images.json" \
+    --template "$tmp/template-rpc"
+cp -r "$template" "$tmp/template-topup-env"
+cat >>"$tmp/template-topup-env/compose.yaml" <<'YAML'
+  topup:
+    environment:
+      WALG_S3_PREFIX: ${WALG_S3_PREFIX:-}
+YAML
+refused template-topup-env "a sealed value may not fill services.topup.environment.WALG_S3_PREFIX" \
+    --images "$tmp/images.json" --template "$tmp/template-topup-env"
+cp -r "$template" "$tmp/template-port"
+cat >>"$tmp/template-port/compose.yaml" <<'YAML'
+  migrate:
+    ports: ["5432:5432"]
+YAML
+refused template-port "only topup may publish a port, 80" --images "$tmp/images.json" --template \
+    "$tmp/template-port"
 
 # The product: its one sealed name, and its public_url on its domain.
 product="$root/deploy/environments/phala-network/staging/product"

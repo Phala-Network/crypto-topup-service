@@ -1,14 +1,32 @@
 # Changelog
 
-Integrator-visible changes to the HTTP API and webhook payloads. Additive fields are not breaking;
-webhook receivers must ignore unknown fields. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the SDKs keep their own changelogs in
-`sdk/js` and `sdk/python`.
+The service's releases: changes to the HTTP API and webhook payloads that integrators see, and to
+the deployment operators run. Additive fields are not breaking; webhook receivers must ignore
+unknown fields. Each version's section is its GitHub release's notes (CONTRIBUTING.md, "Releasing
+the service"). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
+versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html); the SDKs keep their
+own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
 ### Added
 
+- Versioned releases. A `v<version>` tag publishes the images to GHCR, each with a GitHub build
+  provenance attestation, and a GitHub release whose assets are `images.json` (the image digests),
+  the deploy kit `phala-pay-deploy-v<version>.tar.gz` (the composes, `render.sh`, the policy,
+  preflight, the verifiers, the example environments, and the operator documentation), the Phala
+  Cloud template's compose `phala-cloud-template.yml`, and `SHA256SUMS`, each attested too.
+  Operators verify them with `gh attestation verify`, and can rebuild `phala-pay` and the kit from
+  the tag to the same digests.
+- Self-hosting without a fork: an operator's repository holds only its environment directory and
+  a workflow that calls Deploy at a release's tag (`docs/self-hosting.md`), or runs the kit's
+  commands.
+- The Phala Cloud template variant (`deploy/render.sh --template`): Phala's staging routes on a
+  one-click testnet instance served at the app's gateway domain. Its policy leaves exactly the
+  deploy form's values unattested (the admin public key, the origin, and the backup location),
+  and topup and postgres-walg check their format at startup.
 - Deposits carry `receipt_log_index` and `revision`, the position and revision their `id` is
   derived from, and `block_hash` and `block_time` (Unix seconds), in the object and every
   `deposit.*` snapshot. A snapshot rendered before this release lacks them, so they are optional
@@ -337,6 +355,15 @@ webhook receivers must ignore unknown fields. The format follows
 
 ### Changed
 
+- **Breaking** for operators: Deploy is a reusable workflow that deploys a release (`version`),
+  not a Release images run (`release_run_id`), from the caller's `environment_dir`; Phala's
+  instance deploys through "Deploy Phala's instance". Images are published only by the Release
+  workflow, from a tag, tagged with the version.
+- `deploy/contracts/verify-deployment.sh` compares each chain with the committed reference
+  deployment `deploy/contracts/reference.json`, which CI checks against a fresh build
+  (`reference-manifest.sh --check`), so it needs no Solidity build and runs from the kit.
+- The example environment's header no longer names a value preflight refuses, so a filled-in copy
+  that keeps its comments passes.
 - The attested compose of a deployment takes a new form: its public settings sit in one inline
   configuration file (routes, RPC provider URLs, origin, admin key), and it is written in
   Compose's canonical form. The API is unchanged, and so is every account's webhook key, which
@@ -674,6 +701,8 @@ happens only from two-provider finalized data.
 
 ### Removed
 
+- The Release images workflow and the fork requirement: nobody needs a fork or their own image
+  build to deploy (building from source stays possible and yields the same `phala-pay` digest).
 - The reference product's `team_addresses` table, written with each quote and deposit address but
   never read: the quote and deposit address records hold them. Its ledger (`PRAGMA user_version`
   2) drops the table when the product starts; start it once before a read-only
@@ -784,3 +813,6 @@ happens only from two-provider finalized data.
   taken down, the endpoint cooled down and every probe picked the failing notice first, so new
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
+
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.0

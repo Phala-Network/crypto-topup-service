@@ -2,11 +2,13 @@
 
 ## Supported versions
 
-Phala Pay is pre-1.0. Fixes are made on `main`, and SDK fixes ship in a new release of the SDK.
+Phala Pay is pre-1.0. Fixes are made on `main`, service fixes ship in a new release of the
+service, and SDK fixes ship in a new release of the SDK.
 
 | Component | Supported |
 |---|---|
-| The service, contracts, and deployment files on `main` | Yes. The service has no versioned releases; operators deploy a commit of `main` from their fork. |
+| The service, contracts, and deployment files: the latest release (its `v<version>` tag, images, and deploy kit) and `main` | Yes. Operators deploy releases. |
+| Earlier service releases | No. |
 | `@phala/pay` (npm) and `phala-pay` (PyPI) | The latest release of each. |
 | Earlier SDK releases | No. |
 

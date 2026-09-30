@@ -1,12 +1,14 @@
 # Deployment reference
 
 How an operator deploys and runs its own Phala Pay instance. Phala Pay is self-hosted: each
-operator deploys from its own fork, to its own Phala Cloud workspace, on its own domain; the
+operator deploys a verified [release](#releases) with the settings of its own environment
+repository, to its own Phala Cloud workspace, on its own domain; the
 [self-hosting guide](../docs/self-hosting.md) is the order of the steps, and this document their
 reference. Names in `$VARIABLES` are the operator's own values; Phala's are given only as labelled
 examples, and Phala's own instance, with the demo that only Phala runs, is in [Phala's instance](phala.md).
 
-Every CVM is deployed by GitHub Actions from the fork's `main`; nothing is deployed from a laptop.
+Every CVM is deployed by GitHub Actions, by the release's [Deploy](#deploy) workflow called from the
+environment repository's `main`; nothing is deployed from a laptop.
 Steps outside the workflows that change a registry, Phala Cloud, a CVM, a Safe, a contract, DNS, or
 a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md). Incident response:
 [runbooks](runbooks/README.md). Contracts: [CONTRACTS.md](CONTRACTS.md).
@@ -20,7 +22,7 @@ a secret are marked **HUMAN-ONLY**. Backup and restore: [RESTORE.md](RESTORE.md)
 | Object storage (S3-compatible; Phala's instance: Cloudflare R2) | encrypted WAL-G base backups and WAL under `WALG_S3_PREFIX` | owner |
 | The operator's Sentry project (optional; Phala's: `phala-network/crypto-topup-service`) | errors, alerts, Crons and Uptime monitors | the service itself |
 | EVM chains of the routes (the committed routes: Sepolia and Base Sepolia) | the permissionless forwarder factory, at one deterministic address on every chain; forwarders; each account's own treasury | factory: any deployer ([CONTRACTS.md](CONTRACTS.md)); treasuries: each merchant, through the API |
-| GitHub Actions | [Release images](../.github/workflows/release-images.yml), [Deploy](../.github/workflows/deploy.yml), [Verify contracts](../.github/workflows/verify-contracts.yml) (daily, read-only), [Restore drill](../.github/workflows/restore-drill.yml) (weekly, local stack) | — |
+| GitHub Actions | Phala Pay's repository: [Release](../.github/workflows/release.yml) (on a `v<version>` tag), [Verify contracts](../.github/workflows/verify-contracts.yml) (daily, read-only), [Restore drill](../.github/workflows/restore-drill.yml) (weekly, local stack). The operator's environment repository: a workflow that calls the release's [Deploy](../.github/workflows/deploy.yml) | — |
 
 Production CVMs have no SSH, no logs, and no database access. Everything an operator sees comes
 from the public endpoints, the admin API, Sentry, and the chain.
@@ -47,11 +49,11 @@ key, and the database passwords: that is a key migration, not an image bump.
 
 ## One-time setup (HUMAN-ONLY, repository owner)
 
-0. **Fork.** Fork the repository and enable Actions on the fork. Release images publishes to the
-   repository owner's namespace, `ghcr.io/<owner, lowercased>/` (Phala's: `ghcr.io/phala-network/`),
-   the only one its `GITHUB_TOKEN` can push to, so a fork changes nothing; its packages are made
-   public in step 6. Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER`
-   names another runner.
+In the operator's environment repository ([self-hosting, "Your environment
+repository"](../docs/self-hosting.md#2-your-environment-repository)); Phala's is this repository,
+through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workflows run on
+`ubuntu-latest` unless the repository variable `CI_RUNNER` names another runner.
+
 1. **Environments.** Repository Settings > Environments: `production` and, for a pre-production
    instance with test routes only, `staging` (the names Deploy offers), deployment branches `main`
    only. Required reviewers are optional (Phala's repository has none: its plan does not offer
@@ -70,15 +72,14 @@ key, and the database passwords: that is a key migration, not an image bump.
    | `TOPUP_CVM_ID` | empty until the first provisioning, then the CVM id from the run summary |
    | `STAGING_PRODUCT_CVM_ID` | `staging` only, for the optional [staging reference product](phala.md#staging-reference-product) |
 
-   Every setting of the CVM is committed instead, in the Environment's directory
-   `deploy/environments/<owner, lowercased>/<Environment>/topup/` (Phala's:
+   Every setting of the CVM is committed instead, in the Environment's directory, for example
+   `production/topup/` (Phala's:
    [deploy/environments/phala-network/staging/topup](environments/phala-network/staging/topup)), copied
-   from [deploy/environments/example](environments/example/topup) ([Attested settings](#attested-settings)):
+   from the kit's [deploy/environments/example](environments/example/topup) ([Attested settings](#attested-settings)):
    the domain, the object store's endpoint and backup prefix, the admin public key (from
    `topup-sdk keygen --keyid admin/<Environment>-v1`, a separate key per Environment; the seed stays
    with the admin), the RPC providers, and the routes. Deploy renders that directory and nothing
-   else, so a setting changes only through a reviewed commit and a Deploy `upgrade`, and a fork
-   deploys nothing until it commits a directory of its own owner.
+   else, so a setting changes only through a reviewed commit and a Deploy `upgrade`.
 
    No setting names a treasury or a transaction-signing key: treasuries are each account's own, set
    through the API, and the service sends no transactions.
@@ -92,31 +93,48 @@ key, and the database passwords: that is a key migration, not an image bump.
      1 minute, timeout 10 seconds, environment = the Environment's name.
    - The project DSN (Settings > Client Keys) is sealed as `SENTRY_DSN` ([Sealing the
      secrets](#sealing-the-secrets)).
-6. **Packages.** After the first Release images run, make `phala-pay`, `postgres-walg`, and
-   `phala-pay-reference-product` public (the owner's Packages > package > Package settings >
-   Change visibility; an organization must allow public container packages). This is
-   irreversible. CVMs pull without credentials, and preflight fails on a private image.
 
 ## Release and deploy
 
-### Build and publish images
+### Releases
 
-Run **Release images** on `main` (Actions tab, or `gh workflow run release-images.yml --ref
-main`). It builds `phala-pay`, `postgres-walg`, and `phala-pay-reference-product`, checks
-that the reproducible ones build bit for bit twice, pushes them tagged `sha-<12 hex commit>`, and
-records the `repository@sha256` references in its summary and its `images.json` artifact.
-`postgres-walg` is not bit-for-bit reproducible (apt and dpkg timestamps). The same two-build
-check runs locally without pushing: `make verify-image`.
+A release is a `v<version>` tag of Phala Pay on a commit of `main`, the Cargo workspace version
+([CONTRIBUTING.md, "Releasing the service"](../CONTRIBUTING.md#releasing-the-service)). The tag runs
+[Release](../.github/workflows/release.yml):
+
+- It builds `phala-pay`, `postgres-walg`, and `phala-pay-reference-product`, checks that
+  `phala-pay` and the reference product build bit for bit twice, pushes them to
+  `ghcr.io/phala-network/` tagged `v<version>` (public packages: CVMs pull without credentials),
+  and creates a GitHub build provenance attestation for each digest. `postgres-walg` is not
+  bit-for-bit reproducible (apt and dpkg timestamps). The same two-build check runs locally
+  without pushing: `make verify-image`.
+- It publishes the GitHub release with four assets, each attested: `images.json` (the
+  `repository@sha256` references by image name, [render.sh](render.sh)'s `--images`); the deploy
+  kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): `git archive` of the
+  tag's composes, `render.sh`, the policy, preflight, the verifiers, the example environments, and
+  the operator documentation, at their repository paths); `phala-cloud-template.yml`
+  ([The Phala Cloud template variant](#the-phala-cloud-template-variant)); and `SHA256SUMS`.
+  Before it publishes, the kit renders the example environment and Phala's with the images.
+
+Operators verify a release with `gh attestation verify`
+([self-hosting, "Verify a release"](../docs/self-hosting.md#verify-a-release)); Deploy verifies it
+again on every run. A pre-release (`v<version>-rc.N`) is a candidate for Phala's staging.
 
 ### Deploy
 
 [Deploy](../.github/workflows/deploy.yml) is the source of truth for what a deployment checks and
-does; its inputs are `environment`, `target` (`topup` or `product`), `mode` (`provision` or
-`upgrade`), and `release_run_id`. It deploys only the digests of a successful Release images run
-on `main`, runs preflight, verifies the attested compose with the official dstack verifier after
-every deploy, and uploads the rendered compose and the verification as the run's record.
+does. It is a reusable workflow: the operator's environment repository calls it at a release's
+tag (`uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@v<version>`, `secrets: inherit`),
+and Phala's own instance through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml).
+Its inputs are `version` (the same release), `environment` (the GitHub Environment), `target`
+(`topup`, or `product` for Phala's reference product), `mode` (`provision` or `upgrade`), and
+`environment_dir` (the target's directory in the caller's repository). It downloads the
+release's `images.json` and kit, checks `SHA256SUMS` and the build provenance of both and of every
+image the target runs, renders the directory with the kit, runs preflight, deploys, verifies the
+attested compose with the official dstack verifier, and uploads the rendered compose and the
+verification as the run's record. Every script it runs is the kit's.
 
-1. Merge the change to `main` and run Release images.
+1. Merge the change to the environment repository's `main`: a setting, or a new `version`.
 2. First deployment: Deploy with `mode: provision`, then set `TOPUP_CVM_ID` (or, for the product,
    `STAGING_PRODUCT_CVM_ID`) to the CVM id in the summary, [seal the
    secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. If a provision run fails after the summary shows a CVM id, set
@@ -160,13 +178,14 @@ only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-fro
 `deploy/validate-compose.sh` fails if staging's sealed names change, since that needs the re-seal
 below.
 
-**HUMAN-ONLY, owner, from their own machine**, in a checkout of the deployed commit with the
-rendered compose from the run's artifact (the provision summary prints these commands):
+**HUMAN-ONLY, owner, from their own machine**, with the deployed release's verified kit in `kit/`,
+the environment repository at the deployed commit, and the rendered compose from the run's
+artifact (the provision summary prints these commands):
 
 ```sh
 docker pull <the compose's phala-pay image>   # --offline pulls nothing; it runs topup config check in it
-deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml \
-  --environment-dir deploy/environments/<owner>/ENV/topup --offline      # .env.ENV: mode 0600
+kit/deploy/preflight.sh --env .env.ENV --compose docker-compose.ENV.yml \
+  --environment-dir ENV/topup --offline      # .env.ENV: mode 0600
 npx --yes phala@1.1.22 envs update "$TOPUP_CVM_ID" -e .env.ENV
 ```
 
@@ -195,7 +214,7 @@ are four kinds of input, each with one home ([design](../docs/design/deploy-conf
 | Kind | Home |
 |---|---|
 | Topology: the services, their mounts, ports, and flags | [compose.yaml](compose.yaml), [compose.service.yaml](compose.service.yaml), [compose.restore-check.yaml](compose.restore-check.yaml) (and [product/compose.yaml](product/compose.yaml)) |
-| The Environment's public settings | its directory `deploy/environments/<owner>/<Environment>/topup/`: `topup.yaml` ([the configuration file](../docs/configuration.md#the-configuration-file): `public_origin`, `admin_key`, `rpc_providers`, `routes`) and a `compose.yaml` overlay with the env interfaces of third-party images: WAL-G's `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN`, and the keyed providers' sealed key names |
+| The Environment's public settings | its directory in the environment repository, for example `production/topup/`: `topup.yaml` ([the configuration file](../docs/configuration.md#the-configuration-file): `public_origin`, `admin_key`, `rpc_providers`, `routes`) and a `compose.yaml` overlay with the env interfaces of third-party images: WAL-G's `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN`, and the keyed providers' sealed key names |
 | Deploy-time facts | [render.sh](render.sh)'s three inputs: `--images` (the release's `images.json`), `--gateway-domain` (the CVM node's gateway, dstack-ingress's `GATEWAY_DOMAIN`), and, for the restore-check variant only, `--origin` (the restore instance's own origin) |
 | Secrets | the CVM's sealed env ([Sealing the secrets](#sealing-the-secrets)) |
 
@@ -203,8 +222,8 @@ are four kinds of input, each with one home ([design](../docs/design/deploy-conf
 sha256 ([pinned-compose.sh](pinned-compose.sh)):
 
 ```sh
-deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.phala.network \
-  deploy/environments/phala-network/staging/topup >docker-compose.staging.yml
+kit/deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.phala.network \
+  production/topup >docker-compose.production.yml
 ```
 
 - It merges the stack, the environment overlay, and the variant overlay with
@@ -227,8 +246,34 @@ deploy/render.sh --images images.json --gateway-domain gateway.dstack-pha-prod5.
     never fill the origin, the admin key, or an RPC host.
 
 `topup.yaml` itself is validated by `topup config check`, which reads no secret. To change a
-setting, change its file by pull request and run Deploy `upgrade`. The product renders the same
-way from `deploy/environments/<owner>/staging/product/` (its `config.json` and domain).
+setting, change its file by pull request and run Deploy `upgrade`. Phala's reference product
+renders the same way from
+[deploy/environments/phala-network/staging/product](environments/phala-network/staging/product)
+(its `config.json` and domain).
+
+### The Phala Cloud template variant
+
+`render.sh --template` renders the Phala Cloud template, a one-click testnet quick start
+([self-hosting, "The Phala Cloud template"](../docs/self-hosting.md#the-phala-cloud-template)),
+from [environments/phala-cloud-template](environments/phala-cloud-template/topup): Phala's staging
+routes and keyless providers. Each release publishes it as `phala-cloud-template.yml`, and
+Phala Cloud's template is that file byte for byte. [compose.template.yaml](compose.template.yaml)
+removes `dstack-ingress` and `restore-check`, and topup publishes `80:8080`, which the Phala Cloud
+gateway serves as `https://<app-id>.<gateway-domain>`.
+
+A template's per-deployment values come from its deploy form, in the CVM's env, so the policy's
+`template` variant allows a runtime reference in exactly these places, and nowhere else:
+
+| Value | Where | Checked at startup by |
+|---|---|---|
+| `${DSTACK_APP_DOMAIN:-}` | `public_origin: https://${DSTACK_APP_DOMAIN:-}` in `topup.yaml`; Phala Cloud's pre-launch script, part of the attested app-compose, exports it from the app id and the gateway domain | topup (`PublicOrigin`) |
+| `${TOPUP_ADMIN_PUBLIC_KEY:-}` | `admin_key.public_key` in `topup.yaml` | topup (an ed25519 public key) |
+| `${WALG_S3_PREFIX:-}`, `${AWS_ENDPOINT:-}`, `${AWS_REGION:-}` | `postgres` and `backup` environment | the postgres-walg entrypoint (`s3://BUCKET[/PATH]`, an http(s) origin, a region name) |
+
+These values are not attested: whoever controls the workspace can change them without changing the
+compose hash. Everything else is: the services, the routes and providers, smokescreen, the
+credential volumes, and the sealed names. [verify-attestation.sh](verify-attestation.sh) checks a
+template CVM with the variant `template`. An instance with merchants uses the service variant.
 
 ### RPC providers
 
@@ -272,8 +317,9 @@ on it.
    `chain.rpc_providers` naming two new ids and those ids in `rpc_providers`.
 2. For a keyed provider, add its `TOPUP_RPC_<ID>_KEY` to the environment's overlay, and re-seal
    with it before the upgrade ([Sealing the secrets](#sealing-the-secrets)).
-3. Add the chain to [check-route-modes.sh](check-route-modes.sh) and
-   [contracts/networks.json](contracts/networks.json) if they lack it.
+3. If [check-route-modes.sh](check-route-modes.sh) and
+   [contracts/networks.json](contracts/networks.json) lack the chain, add it there by a pull
+   request to Phala Pay; it ships in the next release.
 
 ### Custom domain
 
@@ -326,7 +372,7 @@ chain with the official verifier (the quote is app `APP_ID`'s and binds the file
 domain serves exactly that certificate; Deploy runs it after every topup upgrade:
 
 ```sh
-deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+kit/deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
 ```
 
 The quote dates from the last issuance, so its compose hash can be an earlier compose of the app.
@@ -436,17 +482,17 @@ compare the prediction with the counters before relying on it.
 ## Attestation, ingress, and egress
 
 **HUMAN-ONLY, verifier**, before onboarding any account. Deploy already verifies the attested
-compose; to re-check a CVM from a checkout of the deployed commit, with the run's rendered compose
-and `PHALA_CLOUD_API_KEY` exported:
+compose; to re-check a CVM with the deployed release's verified kit in `kit/`, the run's rendered
+compose, and `PHALA_CLOUD_API_KEY` exported:
 
 ```sh
 npx --yes phala@1.1.22 cvms get "$CVM_ID" --json > cvm.json
 npx --yes phala@1.1.22 cvms attestation "$CVM_ID" --json > attestation.json
 APP_ID=$(jq -er '.app_id' cvm.json) && GATEWAY_DOMAIN=$(jq -er '.gateway.base_domain' cvm.json)
 curl -fsS "https://${APP_ID#0x}-8090.$GATEWAY_DOMAIN/prpc/Info" > info.json
-deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
+kit/deploy/verify-attestation.sh attestation.json info.json "$APP_ID" docker-compose.ENV.yml service
 export ORIGIN="https://$TOPUP_DOMAIN"   # topup.yaml's public_origin
-deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
+kit/deploy/verify-ingress-evidence.sh "$TOPUP_DOMAIN" "$APP_ID"
 ```
 
 [verify-attestation.sh](verify-attestation.sh) runs the official dstack verifier
@@ -544,8 +590,10 @@ code there, so the factory is deployed on a chain before any compose with a rout
 An operator reuses the factory wherever it is deployed (it is on Sepolia and Base Sepolia;
 `verify-deployment.sh` below checks a chain read-only) and deploys it only on a chain where it is
 missing.
-**HUMAN-ONLY, deployer with a funded throwaway EOA**, once per chain ([CONTRACTS.md](CONTRACTS.md)
-has the checks each script makes; `$SEPOLIA_RPC_A` and `$SEPOLIA_RPC_B` are two providers):
+**HUMAN-ONLY, deployer with a funded throwaway EOA**, once per chain, from a clone of Phala Pay at
+the release's tag with its submodules, since deploying builds the contracts
+([CONTRACTS.md](CONTRACTS.md) has the checks each script makes; `$SEPOLIA_RPC_A` and
+`$SEPOLIA_RPC_B` are two providers):
 
 ```sh
 read -rsp "Deployer private key: " PRIVATE_KEY && printf '\n' && export PRIVATE_KEY

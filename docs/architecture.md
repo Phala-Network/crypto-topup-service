@@ -1358,8 +1358,10 @@ lift writes `audit` with the reason and the removed block in the same transactio
 ```mermaid
 flowchart LR
     pr["Pull request<br/>CI: lint, test, sdk, image, ..."] --> main["main"]
-    main --> release["Release images<br/>two reproducible builds, push by digest"]
-    release --> deploy["Deploy (staging or production)<br/>render attested compose, preflight"]
+    main --> tag["Tag vX.Y.Z"]
+    tag --> release["Release<br/>two reproducible builds, push by digest;<br/>attested images and deploy kit"]
+    release --> deploy["Deploy (reusable; staging or production)<br/>verify release, render attested compose, preflight"]
+    envrepo["Operator's environment repository<br/>compose.yaml, topup.yaml"] --> deploy
     deploy --> cvm["Phala Cloud CVM upgrade"]
     cvm --> verify["Verify<br/>dstack verifier: quote, TCB, compose hash;<br/>ingress certificate evidence"]
 ```
@@ -1511,8 +1513,10 @@ staging's real backups. Ingress via the
 dstack gateway to dstack-ingress, which terminates TLS for the custom domain in the CVM; egress limited to providers, price sources, object storage, Sentry, and merchants' webhook URLs,
 which leave only through the smokescreen proxy (§11). The CVM runs the non-dev OS image `dstack-0.5.9`, the latest dstack release a Phala
 Cloud node offers; deploy preflight refuses any other image and a node set that does not offer
-it. Upgrade = reproducible build → digest (Release images on `main`) → compose hash → CI
-deploy (the dispatcher is accountable; no approval gate) → attested read-back. Keys come from Phala Cloud's
+it. Upgrade = release tag on `main` → reproducible build → digest and attested deploy kit (Release)
+→ compose hash of the operator's environment directory → CI deploy (the reusable Deploy workflow,
+called from the operator's environment repository; the dispatcher is accountable; no approval
+gate) → attested read-back. Keys come from Phala Cloud's
 KMS, with no on-chain compose-hash allow-list: funds go only to the immutable treasury, so a
 malicious upgrade could cause downtime, read service data, or sign credits no deposit backs, up
 to whatever caps the merchant keeps (§3, §11), but not move funds; the attested compose hash makes

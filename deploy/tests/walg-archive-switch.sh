@@ -1,10 +1,11 @@
 #!/bin/sh
 # Starts the postgres-walg image and proves its bootstrap and archive switch: an empty data
 # directory is initialized only when the backup prefix is listed and holds no base backup, and
-# never after a listing error; the service archives; TOPUP_RESTORE_FROM_BACKUP=on (the
-# restore-check variant) forces archiving off even against user-supplied flags, requires a base
-# backup, and never touches a data directory that holds anything. WAL-G's file storage stands in
-# for object storage. deploy/local/restore-drill.sh runs the restore itself end to end.
+# never after a listing error; a malformed object-store setting stops it; the service archives;
+# TOPUP_RESTORE_FROM_BACKUP=on (the restore-check variant) forces archiving off even against
+# user-supplied flags, requires a base backup, and never touches a data directory that holds
+# anything. WAL-G's file storage stands in for object storage. deploy/local/restore-drill.sh runs
+# the restore itself end to end.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -91,6 +92,12 @@ expect_exit() {
 
 expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" -e WALG_FILE_PREFIX=/tmp \
     -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image"
+# A malformed object-store setting (the Phala Cloud template takes them from its deploy form) stops
+# the container before WAL-G runs, for the backup job as for PostgreSQL.
+expect_exit 64 "WALG_S3_PREFIX is not s3://BUCKET[/PATH]" -e "WALG_S3_PREFIX=s3://bucket/a b" "$image"
+expect_exit 64 "AWS_ENDPOINT is not an http(s) origin" -e "AWS_ENDPOINT=https://store.example/path?x" \
+    "$image" walg-cron backup-push "0 3 * * *"
+expect_exit 64 "AWS_REGION is not a region name" -e "AWS_REGION=us east" "$image"
 
 # A listing error (here: a prefix that does not exist) must fail, not fall back to initdb, in
 # either variant; so must the restore-check variant with nothing to restore.

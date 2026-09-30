@@ -1,0 +1,62 @@
+{
+  "proxy": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+  "proxy_code_hash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989",
+  "factory_salt": "0x26f1d8427b0c2db52d02ee55402198e592a278fb8541ba4dfaefbd1ea7b09eee",
+  "factory_init_code_hash": "0x203adb4390529b9b885e094a08abea4f88d25de3e0f6ef202d7532d5bbe6cbd5",
+  "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
+  "factory_code_hash": "0x7ceec5e6f4848d2b971a25d70304d44b5bd792df4279031e006d919e6d465b8d",
+  "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
+  "implementation_code_hash": "0x9b98e3d295372cb6518b00af8505c7156d839e9d192e92054c082799b9104e70",
+  "sample_forwarders": [
+    {
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "salt": "0x49ca4d3e9742aabea0012fd487b01b3e193c6dc51e241cee16d05e81e52d795f",
+      "address": "0x8602C01ef9f12c269AD98392B0c304cC7b75d3e3"
+    },
+    {
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "salt": "0x92facbbe5883cf2b43c3f602d276cf18f734f4c88f758f9dea9a6b76cf7ed8f7",
+      "address": "0xddcb5E6221Faf6C8A9B5980Fa00617913Bc42A99"
+    },
+    {
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "salt": "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
+      "address": "0x2d0B44773c686C3ef4Be0a4FB3EC56481B075836"
+    },
+    {
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "salt": "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
+      "address": "0x7bD5A8E216D5BCa7192C74B03D3110D9AFE2C3D7"
+    },
+    {
+      "treasury": "0x0000000000000000000000000000000000007EA5",
+      "salt": "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745",
+      "address": "0x0953a96B2Dac49CD4624d0ec4454dc3C17677cf3"
+    },
+    {
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "salt": "0x49ca4d3e9742aabea0012fd487b01b3e193c6dc51e241cee16d05e81e52d795f",
+      "address": "0x9408939cA2fBd1e75B4307522E85AfA18cf8858d"
+    },
+    {
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "salt": "0x92facbbe5883cf2b43c3f602d276cf18f734f4c88f758f9dea9a6b76cf7ed8f7",
+      "address": "0x6D3e7ff4006b15C25D8E6073A13a2c031C52404f"
+    },
+    {
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "salt": "0x65a91bfe657fb221f7625609c8a99f832ab500e5df744ef0ad50d3453e1d183c",
+      "address": "0x455fAfC5CD62edB1527E3a864E7D354916eAdeEa"
+    },
+    {
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "salt": "0x600a851d7f8efef3e23088892d68eb8e999c6e191ccd22664ac1f2bc00497294",
+      "address": "0x3575635f753c69d1deFefBaD40a8915E01A03874"
+    },
+    {
+      "treasury": "0x936c1991f8dA9a919fa11b557a3514719f5A4504",
+      "salt": "0x58fcd60812b825a4fa1422f1227e36e3eb921de903ca6c253b3e79e8371d2745",
+      "address": "0x5b1427175023013f08b898B52D1077b22fA21AF6"
+    }
+  ]
+}

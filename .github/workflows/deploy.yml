@@ -1,29 +1,31 @@
 name: Deploy
 
-# Provisions or upgrades one CVM on Phala Cloud (deploy/README.md, "Deploy"): target `topup`, the
-# service, in the GitHub Environment `staging` or `production`; or target `product`, the staging
-# reference product (deploy/phala.md, "Staging reference product"), in `staging` only. Nothing is
-# deployed from a laptop.
+# Provisions or upgrades one CVM on Phala Cloud from a release of Phala-Network/phala-pay
+# (deploy/README.md, "Deploy"): a reusable workflow, called at the release's tag from the operator's
+# environment repository (docs/self-hosting.md) and by Phala's own "Deploy Phala's instance" for
+# its staging. Target `topup` is the service; target `product` is Phala's staging reference product
+# (deploy/phala.md, "Staging reference product"). Nothing is deployed from a laptop.
 #
-# Controls: only a user with write access can dispatch this workflow; the job runs only from
-# `main`, in the Environment chosen by the input (deployment branches: `main` only), whose only
-# secret is PHALA_CLOUD_API_KEY. There is no approval step (required reviewers are not available
-# on this repository's plan): whoever dispatches a run is accountable for it, and the run's
-# attested compose and verifier read-back are the audit trail. The images are those of a
-# successful Release images run on `main`, read from its `images.json` artifact, never typed in.
-# Every setting is public, attested, and committed: the target's environment directory,
-# deploy/environments/<repository owner>/<Environment>/<target> (deploy/README.md, "Attested
-# settings"), which deploy/render.sh renders with the release's images and the CVM node's gateway.
-# A changed setting is a pull request and a new compose hash, in force only through `upgrade`. A
-# fork has no directory of Phala's owner, so it deploys nothing until it commits its own. The CVM's
-# env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references, which
-# never enter GitHub: `provision` sends them empty, and the owner then seals them from their own
-# machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed env
-# stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
+# What it deploys: the release `version` (its tag, the same as the ref the caller uses), whose
+# images.json and deploy kit it downloads and verifies against their build provenance attestations
+# (Phala-Network/phala-pay's Release workflow at that tag), with every image the target runs; and
+# the caller's committed environment directory `environment_dir`, which the kit's render.sh renders
+# with those images and the CVM node's gateway (deploy/README.md, "Attested settings"). A changed
+# setting is a pull request in the caller's repository and a new compose hash, in force only
+# through `upgrade`. Every script it runs is the kit's.
+#
+# Controls, in the caller's repository: the job runs only from its `main`, in the GitHub
+# Environment `environment` (deployment branches: `main` only), whose only secret is
+# PHALA_CLOUD_API_KEY (the caller passes `secrets: inherit`). Whoever dispatches a run is
+# accountable for it; the run's attested compose and verifier read-back are the audit trail. The
+# CVM's env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references,
+# which never enter GitHub: `provision` sends them empty, and the owner then seals them from their
+# own machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed
+# env stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
 # (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for it.
 #
-# Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by
-# deploy/phala-cvm.sh:
+# Phala Cloud CLI 1.1.22 (checked against Phala-Network/phala-cloud tag cli-v1.1.22), run by the
+# kit's deploy/phala-cvm.sh:
 # - Authentication is the PHALA_CLOUD_API_KEY environment variable, which the CLI prefers over a
 #   stored profile; PHALA_CLOUD_DIR points at an empty directory so no profile or API prefix from
 #   the runner's home can be read. The API key belongs to the workspace in vars.PHALA_WORKSPACE.
@@ -31,42 +33,37 @@ name: Deploy
 #   no DstackApp contract, no provisioner key, and an update applies directly.
 # - `deploy --json` ignores `--wait` on a new CVM; this workflow waits by polling `cvms get`.
 #
-# Runner constraints (org self-hosted runner): a container that drives the host Docker daemon
-# through its socket, so nothing bind-mounts a workspace path (preflight and the dstack verifier
-# take their input on stdin, or files are parsed client-side); `ss` and `envsubst` are not installed.
+# Runner constraints (Phala's org self-hosted runner): a container that drives the host Docker
+# daemon through its socket, so nothing bind-mounts a workspace path (preflight and the dstack
+# verifier take their input on stdin, or files are parsed client-side); `ss` and `envsubst` are not
+# installed.
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      version:
+        description: "The release to deploy, v<version>: the tag the caller uses this workflow at"
+        type: string
+        required: true
       environment:
-        description: GitHub Environment to deploy
-        type: choice
-        options: [staging, production]
+        description: "The GitHub Environment: staging or production"
+        type: string
         required: true
       target:
-        description: "topup: the service CVM (vars.TOPUP_CVM_ID); product: the staging reference-product CVM (vars.STAGING_PRODUCT_CVM_ID)"
-        type: choice
-        options: [topup, product]
-        required: true
+        description: "topup: the service CVM (vars.TOPUP_CVM_ID); product: Phala's staging reference-product CVM (vars.STAGING_PRODUCT_CVM_ID)"
+        type: string
+        default: topup
       mode:
         description: "provision: create the target's first CVM; upgrade: update the target's CVM"
-        type: choice
-        options: [provision, upgrade]
+        type: string
         required: true
-      release_run_id:
-        description: "Run id of a successful Release images run on main (its images are deployed)"
+      environment_dir:
+        description: "The target's environment directory in the caller's repository"
         type: string
         required: true
 
-# actions: read reads the Release images run and downloads its artifact.
 permissions:
-  actions: read
   contents: read
-
-# One deployment per CVM at a time; a queued run never cancels one in progress.
-concurrency:
-  group: deploy-${{ inputs.environment }}-${{ inputs.target }}
-  cancel-in-progress: false
 
 # `bash -eo pipefail` for every step, so a failing command in a pipeline fails the step.
 defaults:
@@ -78,12 +75,18 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     environment: ${{ inputs.environment }}
+    # One deployment per CVM at a time; a queued run never cancels one in progress.
+    concurrency:
+      group: deploy-${{ inputs.environment }}-${{ inputs.target }}
+      cancel-in-progress: false
     timeout-minutes: 90
     env:
+      RELEASE_REPOSITORY: Phala-Network/phala-pay
+      VERSION: ${{ inputs.version }}
       DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
       TARGET: ${{ inputs.target }}
       MODE: ${{ inputs.mode }}
-      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+      ENVIRONMENT_DIR: ${{ inputs.environment_dir }}
       # The owner-approved OS image (architecture §14); preflight refuses any other.
       DSTACK_OS_IMAGE: dstack-0.5.9
       # Deployment state and the workspace preflight checks; not settings of the CVM.
@@ -91,34 +94,39 @@ jobs:
       STAGING_PRODUCT_CVM_ID: ${{ vars.STAGING_PRODUCT_CVM_ID }}
       PHALA_WORKSPACE: ${{ vars.PHALA_WORKSPACE }}
     steps:
-      # Fixes the target's environment directory, preflight, and CVM for the later steps.
+      # Fixes the target's kit scripts and CVM for the later steps.
       - name: Check inputs and Environment settings
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           status=0
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
             { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
           [[ -n "$PHALA_WORKSPACE" ]] ||
             { echo "::error::Environment variable PHALA_WORKSPACE is not set"; status=1; }
+          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
+            { echo "::error::version must be a release tag, v<semver>"; status=1; }
+          [[ "$DEPLOY_ENVIRONMENT" == staging || "$DEPLOY_ENVIRONMENT" == production ]] ||
+            { echo "::error::environment must be staging or production"; status=1; }
+          [[ "$ENVIRONMENT_DIR" =~ ^[A-Za-z0-9._/-]+$ && "$ENVIRONMENT_DIR" != /* && "$ENVIRONMENT_DIR" != *..* ]] ||
+            { echo "::error::environment_dir must be a relative path in the repository"; status=1; }
+          kit="$RUNNER_TEMP/kit"
           case "$TARGET" in
             topup)
-              preflight=deploy/preflight.sh variant=service cvm_id_variable=TOPUP_CVM_ID
+              preflight=$kit/deploy/preflight.sh variant=service cvm_id_variable=TOPUP_CVM_ID
               cvm_name=phala-pay-$DEPLOY_ENVIRONMENT instance_type=tdx.medium
               images="phala-pay postgres-walg" compose_name=docker-compose.$DEPLOY_ENVIRONMENT.yml ;;
             product)
               [[ "$DEPLOY_ENVIRONMENT" == staging ]] ||
                 { echo "::error::the reference product deploys to staging only"; status=1; }
-              preflight=deploy/product/preflight.sh variant=product cvm_id_variable=STAGING_PRODUCT_CVM_ID
+              preflight=$kit/deploy/product/preflight.sh variant=product cvm_id_variable=STAGING_PRODUCT_CVM_ID
               cvm_name=phala-pay-staging-product instance_type=tdx.small
               images=phala-pay-reference-product compose_name=docker-compose.product.yml ;;
             *) echo "::error::unknown target $TARGET"; exit 1 ;;
           esac
           existing=${!cvm_id_variable}
           {
-            # The owner's own settings; GHCR and GitHub names are lowercase.
-            echo "ENVIRONMENT_DIR=deploy/environments/${GITHUB_REPOSITORY_OWNER,,}/$DEPLOY_ENVIRONMENT/$TARGET"
+            echo "KIT=$kit"
             echo "PREFLIGHT=$preflight"
             echo "VARIANT=$variant"
             echo "CVM_ID_VARIABLE=$cvm_id_variable"
@@ -139,26 +147,12 @@ jobs:
                 { echo "::error::mode upgrade needs the Environment variable $cvm_id_variable"; status=1; } ;;
             *) echo "::error::unknown mode $MODE"; status=1 ;;
           esac
-          api() {
-            curl -fsS --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
-              -H 'Accept: application/vnd.github+json' "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/$1"
-          }
-          # Only images a successful Release images run published from main.
-          if [[ "$RELEASE_RUN_ID" =~ ^[0-9]+$ ]] && release=$(api "actions/runs/$RELEASE_RUN_ID") &&
-            jq -e '(.path | split("@")[0]) == ".github/workflows/release-images.yml"
-              and .head_branch == "main" and .event == "workflow_dispatch"
-              and .conclusion == "success"' <<<"$release" >/dev/null; then
-            echo "RELEASE_SHA=$(jq -er .head_sha <<<"$release")" >>"$GITHUB_ENV"
-          else
-            echo "::error::release_run_id must be a successful Release images run on main"
-            status=1
-          fi
           exit "$status"
 
       - name: Prepare private working files
         run: |
           work="$RUNNER_TEMP/deploy"
-          mkdir -p "$work" "$RUNNER_TEMP/phala-cloud"
+          mkdir -p "$work/release" "$KIT" "$RUNNER_TEMP/phala-cloud"
           env_file=$(umask 077 && mktemp "$RUNNER_TEMP/deploy-env.XXXXXX")
           {
             echo "WORK=$work"
@@ -167,33 +161,57 @@ jobs:
             echo "COMPOSE=$work/$COMPOSE_NAME"
           } >>"$GITHUB_ENV"
 
-      - name: Download the release's images.json
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: images-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/deploy/release
-          run-id: ${{ inputs.release_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Take the target's images from the release
+      # `gh attestation verify` needs the GitHub CLI 2.49 or later; the pinned one if the runner
+      # has none.
+      - name: Install the GitHub CLI when the runner lacks it
         run: |
+          if gh attestation verify --help >/dev/null 2>&1; then
+            gh --version | head -n 1
+            exit 0
+          fi
+          version=2.101.0
+          sha256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+          archive="$RUNNER_TEMP/gh.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/cli/cli/releases/download/v$version/gh_${version}_linux_amd64.tar.gz"
+          echo "$sha256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gh_${version}_linux_amd64/bin" >>"$GITHUB_PATH"
+
+      # Only what Phala-Network/phala-pay's Release workflow built from the tag: the assets'
+      # checksums and build provenance, then each image the target runs.
+      - name: Download and verify the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release="$WORK/release" kit_archive="phala-pay-deploy-$VERSION.tar.gz"
+          gh release download "$VERSION" -R "$RELEASE_REPOSITORY" -D "$release" \
+            -p images.json -p "$kit_archive" -p SHA256SUMS
+          (cd "$release" && sha256sum -c --ignore-missing SHA256SUMS)
+          provenance=(-R "$RELEASE_REPOSITORY" --source-ref "refs/tags/$VERSION"
+            --signer-workflow "$RELEASE_REPOSITORY/.github/workflows/release.yml")
+          for asset in images.json "$kit_archive"; do
+            gh attestation verify "$release/$asset" "${provenance[@]}" >/dev/null
+            echo "verified $asset"
+          done
+          tar -xzf "$release/$kit_archive" -C "$KIT" --strip-components=1
           digest='^[a-z0-9]+([._/-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$'
           for name in $IMAGES; do
-            ref=$(jq -er --arg name "$name" '.[$name]' "$WORK/release/images.json") ||
+            ref=$(jq -er --arg name "$name" '.[$name]' "$release/images.json") ||
               { echo "::error::the release's images.json has no $name"; exit 1; }
             [[ "$ref" =~ $digest ]] ||
               { echo "::error::$name of the release is not repository@sha256:<64 lowercase hex>"; exit 1; }
+            gh attestation verify "oci://$ref" "${provenance[@]}" >/dev/null
+            echo "verified $ref"
           done
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # verify-deployment.sh (in topup's preflight) builds the contracts.
-          submodules: recursive
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
+      # cast, for preflight's chain checks.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
@@ -213,17 +231,17 @@ jobs:
           if [[ "$MODE" == provision ]]; then
             gateway=gateway.pending.invalid
           else
-            deploy/phala-cvm.sh get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
-            gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm-before.json")
+            "$KIT/deploy/phala-cvm.sh" get "$EXISTING_CVM_ID" >"$WORK/cvm-before.json"
+            gateway=$("$KIT/deploy/phala-cvm.sh" gateway-domain "$WORK/cvm-before.json")
           fi
           echo "GATEWAY=$gateway" | tee -a "$GITHUB_ENV"
 
-      - name: Render the compose from this commit with the release's digests
+      - name: Render the environment with the release's kit and images
         run: |
-          deploy/render.sh --images "$WORK/release/images.json" --gateway-domain "$GATEWAY" \
+          "$KIT/deploy/render.sh" --images "$WORK/release/images.json" --gateway-domain "$GATEWAY" \
             "$ENVIRONMENT_DIR" >"$COMPOSE"
           # The public URL is the domain dstack-ingress serves.
-          domain=$("$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --no-interpolate --format json |
+          domain=$("$("$KIT/deploy/pinned-compose.sh")" -f "$COMPOSE" config --no-interpolate --format json |
             jq -er '.services["dstack-ingress"].environment.DOMAIN')
           { echo "DOMAIN=$domain"; echo "PUBLIC_URL=https://$domain"; } | tee -a "$GITHUB_ENV"
 
@@ -232,7 +250,7 @@ jobs:
       # for preflight only and never sends it.
       - name: Write the unsealed env file
         run: |
-          "$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --variables |
+          "$("$KIT/deploy/pinned-compose.sh")" -f "$COMPOSE" config --variables |
             awk 'NR > 1 && NF > 0 { print $1 "=" }' | sort >"$ENV_FILE"
           echo "sealed names: $(cut -d= -f1 "$ENV_FILE" | tr '\n' ' ')"
 
@@ -253,7 +271,7 @@ jobs:
       # target is staging-only.
       - name: Check the routes' modes against the Environment
         if: inputs.target == 'topup'
-        run: deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
+        run: '"$KIT/deploy/check-route-modes.sh" "$DEPLOY_ENVIRONMENT" "$COMPOSE"'
 
       # The CLI output (JSON, no secrets: the key is only in the environment and env values are
       # encrypted client-side) goes to the log as well, so a failure shows its reason.
@@ -262,7 +280,7 @@ jobs:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
           if [[ "$MODE" == provision ]]; then
-            deploy/phala-cvm.sh deploy "$WORK/deploy.json" \
+            "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy.json" \
               --name "$CVM_NAME" \
               --compose "$COMPOSE" \
               -e "$ENV_FILE" \
@@ -279,7 +297,7 @@ jobs:
             # No -e: CLI 1.1.22 then sends neither allowed_envs nor encrypted_env in the PATCH
             # (cli/src/commands/deploy/handler.ts: resolveEnvVars returns undefined, and updateCvm
             # sets both fields only for a non-empty list), so the owner-sealed env stays.
-            deploy/phala-cvm.sh deploy "$WORK/deploy.json" \
+            "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy.json" \
               --cvm-id "$EXISTING_CVM_ID" \
               --compose "$COMPOSE" \
               --no-public-logs \
@@ -299,13 +317,12 @@ jobs:
             echo "|---|---|"
             echo "| CVM id | \`$cvm_id\` |"
             echo "| App id | \`$app_id\` |"
-            echo "| Commit | \`$GITHUB_SHA\` |"
-            echo "| Release images run | $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID (\`$RELEASE_SHA\`) |"
+            echo "| Release | $GITHUB_SERVER_URL/$RELEASE_REPOSITORY/releases/tag/$VERSION |"
             for name in $IMAGES; do
               echo "| $name | \`$(jq -r --arg name "$name" '.[$name]' "$WORK/release/images.json")\` |"
             done
             echo "| OS image | \`$DSTACK_OS_IMAGE\` |"
-            echo "| Environment directory | \`$ENVIRONMENT_DIR\` |"
+            echo "| Environment directory | \`$ENVIRONMENT_DIR\` at \`$GITHUB_SHA\` |"
             echo
             if [[ "$MODE" == provision ]]; then
               # Written now, so a later failure still leaves the id for recovery (mode upgrade).
@@ -314,7 +331,7 @@ jobs:
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-          deploy/phala-cvm.sh wait "$cvm_id" >"$WORK/cvm.json"
+          "$KIT/deploy/phala-cvm.sh" wait "$cvm_id" >"$WORK/cvm.json"
 
       # A new CVM lands on a node chosen by Phala Cloud. Its gateway (the domain's CNAME target, which
       # dstack-ingress names) is known only now, and is attested configuration: upgrade the new CVM
@@ -324,20 +341,20 @@ jobs:
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          gateway=$(deploy/phala-cvm.sh gateway-domain "$WORK/cvm.json")
-          deploy/render.sh --images "$WORK/release/images.json" --gateway-domain "$gateway" \
+          gateway=$("$KIT/deploy/phala-cvm.sh" gateway-domain "$WORK/cvm.json")
+          "$KIT/deploy/render.sh" --images "$WORK/release/images.json" --gateway-domain "$gateway" \
             "$ENVIRONMENT_DIR" >"$COMPOSE"
           echo "GATEWAY=$gateway" | tee -a "$GITHUB_ENV"
           "$PREFLIGHT" --env "$ENV_FILE" --compose "$COMPOSE" --environment-dir "$ENVIRONMENT_DIR" \
             --offline --unsealed
           previous=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
-          deploy/phala-cvm.sh deploy "$WORK/deploy-public-url.json" \
+          "$KIT/deploy/phala-cvm.sh" deploy "$WORK/deploy-public-url.json" \
             --cvm-id "$CVM_ID" \
             --compose "$COMPOSE" \
             --no-public-logs \
             --no-public-sysinfo \
             --wait
-          deploy/phala-cvm.sh wait "$CVM_ID" "$previous" >"$WORK/cvm.json"
+          "$KIT/deploy/phala-cvm.sh" wait "$CVM_ID" "$previous" >"$WORK/cvm.json"
 
       # After an upgrade the attestation can still describe the previous compose for a while.
       - name: Read back and verify the attested compose
@@ -345,11 +362,11 @@ jobs:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
           deployed=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$WORK/cvm.json")
-          deploy/phala-cvm.sh attestation "$CVM_ID" "$deployed" >"$WORK/attestation.json"
+          "$KIT/deploy/phala-cvm.sh" attestation "$CVM_ID" "$deployed" >"$WORK/attestation.json"
           # The guest agent's public info (port 8090, public tcbinfo) carries the vm_config.
           curl -fsS --max-time 30 --retry 5 --retry-all-errors \
-            "$(deploy/phala-cvm.sh url "$WORK/cvm.json" 8090)/prpc/Info" >"$WORK/info.json"
-          deploy/verify-attestation.sh "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
+            "$("$KIT/deploy/phala-cvm.sh" url "$WORK/cvm.json" 8090)/prpc/Info" >"$WORK/info.json"
+          "$KIT/deploy/verify-attestation.sh" "$WORK/attestation.json" "$WORK/info.json" "$APP_ID" \
             "$COMPOSE" "$VARIANT" 2>&1 | tee "$WORK/verification.txt"
           {
             echo "| | |"
@@ -373,8 +390,8 @@ jobs:
           {
             echo "### Owner: DNS records for \`$DOMAIN\`"
             echo
-            echo "In the domain's Cloudflare zone, DNS only (not proxied); keep them unchanged while this"
-            echo "instance serves the domain:"
+            echo "In the domain's DNS zone, not proxied (Cloudflare: DNS only); keep them unchanged while"
+            echo "this instance serves the domain:"
             echo
             echo "| Type | Name | Content |"
             echo "|---|---|---|"
@@ -391,20 +408,21 @@ jobs:
       # until the owner seals the storage credentials, so the first check is the upgrade's.
       - name: Wait for the service
         if: inputs.mode == 'upgrade'
-        run: deploy/phala-cvm.sh healthz "$PUBLIC_URL"
+        run: '"$KIT/deploy/phala-cvm.sh" healthz "$PUBLIC_URL"'
 
       - name: Verify the certificate evidence
         if: inputs.mode == 'upgrade'
         run: |
-          deploy/verify-ingress-evidence.sh "$DOMAIN" "$APP_ID" 2>&1 |
+          "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" 2>&1 |
             tee "$WORK/ingress-evidence.txt"
           { echo '```text'; cat "$WORK/ingress-evidence.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Print the owner's sealing step
         if: inputs.mode == 'provision'
         run: |
-          compose_json=$("$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --no-interpolate --format json)
+          compose_json=$("$("$KIT/deploy/pinned-compose.sh")" -f "$COMPOSE" config --no-interpolate --format json)
           names=$(cut -d= -f1 "$ENV_FILE" | awk '{ printf "%s`%s`", (count++ ? ", " : ""), $0 }')
+          kit_preflight=phala-pay-deploy-$VERSION/${PREFLIGHT#"$KIT/"}
           {
             if [[ "$TARGET" == topup ]]; then
               owner_env=.env.$DEPLOY_ENVIRONMENT
@@ -425,12 +443,13 @@ jobs:
               echo "the account API answers 503. From your own machine, write \`$owner_env\` with the"
               echo "single line \`PRODUCT_API_KEY=<the account's restricted ppay_rk_test_ key>\` (mode 0600)."
             fi
-            echo "From a checkout of \`$GITHUB_SHA\`, with \`$COMPOSE_NAME\` from this run's artifact"
-            echo "(preflight --offline checks the configuration in the pinned image, pulled first):"
+            echo "With the verified kit of \`$VERSION\` extracted beside a checkout of \`$GITHUB_SHA\`, and"
+            echo "\`$COMPOSE_NAME\` from this run's artifact (preflight --offline checks the configuration"
+            echo "in the pinned image, pulled first):"
             echo
             echo '```sh'
             echo "docker pull $image"
-            echo "$PREFLIGHT --env $owner_env --compose $COMPOSE_NAME --environment-dir $ENVIRONMENT_DIR --offline"
+            echo "$kit_preflight --env $owner_env --compose $COMPOSE_NAME --environment-dir $ENVIRONMENT_DIR --offline"
             echo "npx --yes phala@1.1.22 envs update $CVM_ID -e $owner_env"
             echo '```'
             if [[ "$TARGET" == topup ]]; then
@@ -466,9 +485,10 @@ jobs:
             ${{ runner.temp }}/deploy/verification.txt
             ${{ runner.temp }}/deploy/ingress-evidence.txt
 
-      - name: Delete the env file and CLI state
+      - name: Delete the env file, the kit, and CLI state
         if: always()
         run: |
           [[ -z "${ENV_FILE:-}" ]] || rm -f "$ENV_FILE" "$ENV_FILE.new"
           [[ -z "${PHALA_CLOUD_DIR:-}" ]] || rm -rf "$PHALA_CLOUD_DIR"
           [[ -z "${WORK:-}" ]] || rm -rf "$WORK"
+          [[ -z "${KIT:-}" ]] || rm -rf "$KIT"

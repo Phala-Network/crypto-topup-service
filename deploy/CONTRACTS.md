@@ -50,8 +50,8 @@ forwarder commits to the treasury it pays
 `verify-safe.sh` remains a check of one Safe: the `treasury` in
 `deploy/contracts/safe-expectations.json`. In this repository that is Phala's finance Safe, which
 Phala's finance proves as the treasury of Phala Cloud's account; an operator or merchant that wants
-the same check of its own Safe records that Safe in its fork. Run it before that proof and whenever
-the Safe's owners change (the Verify contracts workflow runs it daily on Sepolia). On every target it checks: the RPC's
+the same check of its own Safe records that Safe in that file of its own checkout. Run it before
+that proof and whenever the Safe's owners change (the Verify contracts workflow runs it daily on Sepolia). On every target it checks: the RPC's
 `eth_chainId` equals the committed chain id for the target network, the address has code (an EOA is rejected), the proxy
 runtime code hash is approved, storage slot 0 and `masterCopy()` both equal the approved singleton,
 the singleton's runtime code hash matches, owners match as a set, the threshold matches exactly,
@@ -76,9 +76,13 @@ it) until the Safe or the reviewed expectations are corrected.
 
 `expected-codehashes.json` records the pinned compiler profile, canonical proxy hash, fixed salt,
 and build artifact hashes. Runtime template hashes intentionally exclude immutable substitutions
-(the factory's `implementation`, the implementation's `factory`); the deployment and verification
-scripts create a temporary local reference deployment to derive exact factory and implementation
-runtime hashes. The file
+(the factory's `implementation`, the implementation's `factory`); the deployment scripts create a
+temporary local reference deployment to derive exact factory and implementation runtime hashes.
+[contracts/reference.json](contracts/reference.json) is that reference deployment's manifest,
+committed: the deterministic addresses, their runtime code hashes, and sample forwarder addresses.
+`verify-deployment.sh` compares chains against it, so it needs only `cast` and `jq`, no Solidity
+build, and runs from a release's deploy kit; `deploy/contracts/reference-manifest.sh --check`, in
+CI and `make deploy-check`, fails unless a fresh build reproduces it. The codehash file
 also records each immutable's 32-byte word offsets (`immutable_offsets`). At startup `topup run`
 requires the route's addresses at exactly those offsets and, with them zeroed, the runtime template
 hash; its compiled-in copies of these values are tested against this file. It also compares the
@@ -87,12 +91,14 @@ factory's `addressOf(treasury, sample salt)` with its own derivation.
 ```sh
 export PATH="$HOME/.foundry/bin:$HOME/.cargo/bin:$PATH"
 deploy/contracts/check-build.sh --check
+deploy/contracts/reference-manifest.sh --check
 make deploy-check
 ```
 
 If an intentional contract or compiler-profile change is approved, regenerate and review the
-fingerprints with `deploy/contracts/check-build.sh --write` and the local deployment vectors with
-`deploy/contracts/test-determinism.sh --write`. Never regenerate them merely to make a failed
+fingerprints with `deploy/contracts/check-build.sh --write`, the local deployment vectors with
+`deploy/contracts/test-determinism.sh --write`, and the reference deployment with
+`deploy/contracts/reference-manifest.sh --write`. Never regenerate them merely to make a failed
 deployment check pass. A contract change needs the independent review before mainnet
 ([architecture §4](../docs/architecture.md#4-contracts)).
 
@@ -159,8 +165,8 @@ implementation addresses before it sends. If the predicted factory already has c
 have deployed it), it accepts only the exact runtime hashes derived from the local build.
 
 `verify-deployment.sh` checks, on every target, the chain id, the proxy, factory, and
-implementation runtime code hashes, `implementation()`, the implementation's `factory()`, and
-`addressOf(treasury, salt)` for every sample forwarder of `contracts/test-vectors/create2.json`.
+implementation runtime code hashes of `reference.json`, `implementation()`, the implementation's
+`factory()`, and `addressOf(treasury, salt)` for every sample forwarder of `reference.json`.
 
 ## Base Sepolia
 
@@ -222,13 +228,17 @@ implementation, every sample forwarder, and runtime code hashes must be identica
 A route file carries only `chain.forwarder_factory`; the implementation is derived as the
 factory's first CREATE (`chain.implementation` is optional), and at startup `topup run` requires
 the factory's `implementation()` to be it and both runtime code hashes to match the build. Put the
-verified factory into the route in the Environment's `topup.yaml`
-(`deploy/environments/<owner>/<Environment>/topup/topup.yaml`), which the attested compose inlines.
-Create a new route version; never mutate the contract tuple of an enabled version. Then run:
+verified factory into the route in the environment's `topup.yaml` (in the operator's environment
+repository, for example `production/topup/topup.yaml`), which the attested compose inlines.
+Create a new route version; never mutate the contract tuple of an enabled version. Then check it
+with the `images.json` and deploy kit (extracted to `kit/`) of the release to deploy:
 
 ```sh
-cargo run --locked -p topup -- config check deploy/environments/<owner>/<Environment>/topup/topup.yaml
-deploy/validate-compose.sh   # renders every committed environment against deploy/compose-policy.jq
+docker run --rm -i "$(jq -r '."phala-pay"' images.json)" topup config check /dev/stdin \
+  <production/topup/topup.yaml
+# applies deploy/compose-policy.jq
+kit/deploy/render.sh --images images.json --gateway-domain <the CVM's gateway> production/topup \
+  >/dev/null
 ```
 
 Deploy the merged route with the Deploy workflow in mode `upgrade` (`deploy/README.md`, "Deploy"),

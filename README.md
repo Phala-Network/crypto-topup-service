@@ -11,6 +11,7 @@ Self-hosted, non-custodial crypto payments API for merchants: quotes, deposit ad
 webhooks, and refunds, running in an attested confidential VM.
 
 [![CI](https://github.com/Phala-Network/phala-pay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Phala-Network/phala-pay/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Phala-Network/phala-pay?filter=v*)](https://github.com/Phala-Network/phala-pay/releases)
 [![License](https://img.shields.io/github/license/Phala-Network/phala-pay)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@phala/pay?label=%40phala%2Fpay)](https://www.npmjs.com/package/@phala/pay)
 [![PyPI](https://img.shields.io/pypi/v/phala-pay?label=phala-pay)](https://pypi.org/project/phala-pay/)
@@ -39,7 +40,8 @@ Pick the path that matches your role:
 
 - **Merchants** integrating with an operator's instance: the
   [integration quickstart](docs/integration.md#quickstart).
-- **Operators** running their own instance: the [self-hosting guide](docs/self-hosting.md).
+- **Operators** running their own instance: deploy a verified release of Phala Pay from a
+  repository that holds only your settings ([self-hosting guide](docs/self-hosting.md)).
 - **Evaluators and contributors**: run the whole stack locally. The sandbox builds the images,
   starts PostgreSQL, the dstack simulator, and an Anvil chain, and pays and credits a quote end to
   end through the reference merchant backend.
@@ -116,7 +118,7 @@ flowchart LR
 |---|---|
 | Understand the model | [How Phala Pay works](docs/overview.md) |
 | Integrate as a merchant | [Integration guide](docs/integration.md), [API reference](https://phala-network.github.io/phala-pay/) |
-| Run my own instance | [Self-hosting guide](docs/self-hosting.md), [deployment reference](deploy/README.md), [runbooks](deploy/runbooks/README.md) |
+| Run my own instance | [Self-hosting guide](docs/self-hosting.md), [releases](https://github.com/Phala-Network/phala-pay/releases), [deployment reference](deploy/README.md), [runbooks](deploy/runbooks/README.md) |
 | Configure the service | [Service configuration](docs/configuration.md) |
 | Read the specification | [Architecture](docs/architecture.md), [design record](docs/design/multi-tenant.md) |
 

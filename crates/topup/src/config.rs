@@ -333,7 +333,8 @@ mod tests {
     }
 
     /// Every committed configuration validates without secrets, as CI and Deploy's unsealed
-    /// preflight run it.
+    /// preflight run it. The Phala Cloud template's two runtime references are filled as Compose
+    /// fills them on the CVM (deploy/compose.template.yaml).
     #[test]
     fn every_committed_configuration_validates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -351,7 +352,42 @@ mod tests {
         }
         assert!(files.len() >= 2, "{files:?}");
         for file in files {
-            Config::load(&file).unwrap_or_else(|error| panic!("{error}"));
+            let yaml = std::fs::read_to_string(&file).expect("configuration file");
+            let yaml = yaml
+                .replace(
+                    "${DSTACK_APP_DOMAIN:-}",
+                    "0123abcd.dstack-pha-prod5.phala.network",
+                )
+                .replace(
+                    "${TOPUP_ADMIN_PUBLIC_KEY:-}",
+                    "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+                );
+            Config::parse(&yaml).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        }
+    }
+
+    /// The Phala Cloud template's runtime values come from its deploy form, outside the
+    /// attestation: topup refuses to start unless each is present and well formed.
+    #[test]
+    fn template_runtime_values_are_checked_at_startup() {
+        let template =
+            include_str!("../../../deploy/environments/phala-cloud-template/topup/topup.yaml");
+        let fill = |domain: &str, key: &str| {
+            template
+                .replace("${DSTACK_APP_DOMAIN:-}", domain)
+                .replace("${TOPUP_ADMIN_PUBLIC_KEY:-}", key)
+        };
+        let key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+        let domain = "0123abcd.dstack-pha-prod5.phala.network";
+        Config::parse(&fill(domain, key)).expect("filled template");
+        for (yaml, reason) in [
+            (fill("", key), "public_origin"),
+            (fill("pay.example/path", key), "public_origin"),
+            (fill(domain, ""), "admin_key"),
+            (fill(domain, "not-a-key"), "admin_key"),
+        ] {
+            let error = Config::parse(&yaml).expect_err(reason);
+            assert!(error.contains(reason), "{reason}: {error}");
         }
     }
 }
