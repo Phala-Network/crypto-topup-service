@@ -4620,7 +4620,7 @@
         "operationId": "admin_get_deposit",
         "parameters": [
           {
-            "description": "Deposit id, `dep_…` or the UUID",
+            "description": "Deposit id, `dep_…`",
             "in": "path",
             "name": "id",
             "required": true,
@@ -4701,7 +4701,7 @@
         "operationId": "nudge_deposit",
         "parameters": [
           {
-            "description": "Deposit id, `dep_…` or the UUID",
+            "description": "Deposit id, `dep_…`",
             "in": "path",
             "name": "id",
             "required": true,

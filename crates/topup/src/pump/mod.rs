@@ -288,7 +288,7 @@ impl Pump {
         };
         let result = if crate::reconciler::chain_is_blocked(&self.pool, deposit.chain_id).await? {
             tracing::warn!(
-                deposit_id = %deposit.id,
+                deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                 chain = deposit.chain_id,
                 "deposit step deferred because reconciliation froze the chain"
             );
@@ -327,7 +327,7 @@ impl Pump {
             Ok(transition) => (result, transition),
             Err(error) => {
                 tracing::error!(
-                    deposit_id = %deposit.id,
+                    deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                     state = ?deposit.state,
                     %error,
                     "step returned an invalid outcome"
@@ -399,7 +399,7 @@ impl Pump {
             ApplyTransitionResult::Applied => {
                 transaction.commit().await?;
                 tracing::info!(
-                    deposit_id = %deposit.id,
+                    deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                     chain_id = deposit.chain_id,
                     state = ?deposit.state,
                     attempt,
@@ -410,7 +410,7 @@ impl Pump {
             ApplyTransitionResult::Stale => {
                 transaction.commit().await?;
                 tracing::debug!(
-                    deposit_id = %deposit.id,
+                    deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                     state = ?deposit.state,
                     "discarded stale deposit step result"
                 );
@@ -420,7 +420,7 @@ impl Pump {
                 transaction.rollback().await?;
                 db::release_deposit_lease(&self.pool, deposit.id, lease_token).await?;
                 tracing::info!(
-                    deposit_id = %deposit.id,
+                    deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                     "rate lock was consumed concurrently; deposit will retry at spot"
                 );
                 Ok(Persisted::Done(RunOnceResult::Contended { deposit_id }))

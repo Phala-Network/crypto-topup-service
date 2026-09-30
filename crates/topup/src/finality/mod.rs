@@ -248,7 +248,7 @@ impl FinalityWatch {
                         stats.failed = stats.failed.saturating_add(1);
                         tracing::warn!(
                             chain_id,
-                            deposit_id = %deposit.id,
+                            deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                             %error,
                             "finality read failed; the deposit is read again later"
                         );
@@ -389,7 +389,7 @@ impl FinalityWatch {
                         tags.alert = "TopupDepositPendingAfterReorg",
                         tags.chain_id = chain_id,
                         tags.state = db::state_code(deposit.state),
-                        deposit_id = %deposit.id,
+                        deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                         tx_hash = %deposit.tx_hash,
                         "a deposit's transaction left the chain and is still pending"
                     );
@@ -428,7 +428,7 @@ impl FinalityWatch {
                             tags.alert = "TopupDepositReversed",
                             tags.chain_id = chain_id,
                             tags.state = db::state_code(deposit.state),
-                            deposit_id = %deposit.id,
+                            deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                             tx_hash = %deposit.tx_hash,
                             successor_deposit_id = successor.map(tracing::field::display),
                             "a deposit's transfer is not in the final chain; the deposit is \

@@ -70,6 +70,21 @@ impl EventObject {
             | Self::WebhookEndpoint(id) => id,
         }
     }
+
+    /// The object's public id, as the API and the logs show it (`dep_…`, `qt_…`, …).
+    #[must_use]
+    pub fn public_id(self) -> String {
+        let prefix = match self {
+            Self::Deposit(_) => crate::ids::DEPOSIT,
+            Self::Quote(_) => crate::ids::QUOTE,
+            Self::ApiKey(_) => crate::ids::API_KEY,
+            Self::Account(_) => crate::ids::ACCOUNT,
+            Self::Refund(_) => crate::ids::REFUND,
+            Self::Treasury(_) => crate::ids::TREASURY,
+            Self::WebhookEndpoint(_) => crate::ids::WEBHOOK_ENDPOINT,
+        };
+        crate::ids::format(prefix, self.id())
+    }
 }
 
 /// Values used to enqueue an event.

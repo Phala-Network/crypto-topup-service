@@ -43,12 +43,12 @@ environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
    secret reference may appear.
 7. **Services:** `heartbeat`, `keys`, and `migrate` are services of their own (§5). Config names
    carry their content digest. `restore` is in the local drill overlay only.
-8. **Fork-independent inputs now, fork-free packaging later** (§8).
-   - `render.sh` and preflight accept any environment directory. The `<owner>/<env>` path is only
-     Deploy's guard.
-   - A generic example environment ships.
-   - The environment overlay declares its keyed providers' secrets.
-   - Release packaging and the Cloud template follow later.
+8. **Fork-free deployment from versioned releases** (§8).
+   - `render.sh` and preflight accept any environment directory; a generic example environment
+     ships, and the environment overlay declares its keyed providers' secrets.
+   - A `v<version>` tag publishes the images, the deploy kit, and the Phala Cloud template's
+     compose (`release.yml`); Deploy is a reusable workflow run at a release against the caller's
+     committed environment directory.
 9. **A `{key}` may only fill a whole path segment or a whole query value**, and substitution must
    leave the URL's authority unchanged (§4).
 
@@ -317,10 +317,13 @@ recreation is about container identity, not uptime. `make cvm-rehearsal` checks 
   any YAML form (block, flow, JSON) is checked. The environment is the one Deploy selected, its
   first argument; it never reads `topup.yaml`'s `environment`, so a staging config that claims
   `production` does not bypass it. It needs no network.
-- **`deploy.yml`** resolves the environment directory from the owner and Environment, renders,
-  writes the unsealed env from the artifact's names, and verifies the result.
-- **`release-images.yml`** writes `images.json` keyed by image name, builds with `SOURCE_COMMIT`,
-  and runs `render.sh`'s image check.
+- **`deploy.yml`**, a reusable workflow called at a release, verifies the release
+  (`verify-release.sh`), renders the caller's environment directory with the release's kit and
+  images, writes the unsealed env from the artifact's names, and verifies the result;
+  **`deploy-phala.yml`** calls it for Phala's own environments.
+- **`release.yml`**, on a `v<version>` tag, builds the images with `SOURCE_COMMIT` (the
+  reproducible ones twice), and publishes `images.json` keyed by image name, the deploy kit
+  (`build-kit.sh`), and the Phala Cloud template's compose, each attested.
 - **`verify-contracts.yml`** takes Sepolia's two provider URLs from the committed staging
   `topup.yaml` (`topup config show`). It fails if one needs a `{key}`, since the workflow holds no
   key. It needs no GitHub Environment.

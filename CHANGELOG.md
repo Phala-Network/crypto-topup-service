@@ -375,6 +375,10 @@ own changelogs in `sdk/js` and `sdk/python`.
   snapshot lacks them; `reversed_deposit` is never `identity_missing`.
 - **Breaking**: Admin: `POST /v1/admin/restore/events` and `/treasuries/apply` take event ids only
   as `evt_…`, as every delivery's `webhook-id` is.
+- **Breaking**: Admin: the deposit view and `nudge` take a deposit only by its `dep_…` id; a bare
+  UUID is `404`. The service's logs, and a nudge's audit subject, name deposits, events, refunds,
+  and an outbox delivery's object by their prefixed ids (`dep_…`, `evt_…`, `re_…`), the form the
+  API takes.
 - **Breaking** for operators: the database enforces what the service reads as constraints
   (`20261023000000_current_invariants`): a deposit carries its transaction's `tx_from` and
   `tx_nonce` unless it is a reversed deposit restored from a delivered event, every event's `data`
@@ -627,8 +631,7 @@ own changelogs in `sdk/js` and `sdk/python`.
   rather than 18 decimals. The rounding overpays by less than one unit of the last decimal; the
   quote's `amount` credit is unchanged.
 - The admin deposit `nudge` and refund `approve`/`record` paths take the `dep_` and `re_` ids the
-  product API returns, as the admin deposit view and outbox replay already did; the bare UUID
-  still works. Their responses (`AdminRefundResponse.id`, `NudgeResponse.deposit_id`, and the
+  product API returns, as the admin deposit view and outbox replay already did. Their responses (`AdminRefundResponse.id`, `NudgeResponse.deposit_id`, and the
   deposit view's `id`) show the prefixed id instead of the UUID.
 - A malformed path parameter, query string, or JSON body on any route, product or admin, answers
   the `400` error object (`parameter_invalid`, `parameter_missing`, or `parameter_unknown`, with

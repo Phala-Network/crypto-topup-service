@@ -379,12 +379,12 @@ where
         {
             Ok((Ok(primary), Ok(secondary))) => (primary, secondary),
             Ok((Err(error), _) | (_, Err(error))) => {
-                tracing::warn!(refund_id = %check.refund_id, %error, "refund verification chain read failed");
+                tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), %error, "refund verification chain read failed");
                 return Ok(Verification::Waiting);
             }
             Err(_) => {
                 persist_evidence(&self.pool, &check, &json!({"result": "observe_timeout"})).await?;
-                tracing::warn!(refund_id = %check.refund_id, "refund verification timed out");
+                tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "refund verification timed out");
                 return Ok(Verification::Waiting);
             }
         };
@@ -410,7 +410,7 @@ where
             _ => {
                 persist_evidence(&self.pool, &check, &json!({"result": "providers_disagree"}))
                     .await?;
-                tracing::warn!(refund_id = %check.refund_id, "providers disagree on a finalized refund transaction");
+                tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "providers disagree on a finalized refund transaction");
                 return Ok(Verification::Waiting);
             }
         };
@@ -462,7 +462,7 @@ where
             }
             Err(reason) => {
                 fail(&self.pool, &self.routes, &check, reason.code(), &evidence).await?;
-                tracing::warn!(refund_id = %check.refund_id, reason = reason.code(), "finalized refund transaction does not pay the refund");
+                tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), reason = reason.code(), "finalized refund transaction does not pay the refund");
                 Ok(Verification::Failed)
             }
         }
@@ -485,7 +485,7 @@ where
                 "paid_at": check.paid_at.timestamp(),
             });
             fail(&self.pool, &self.routes, check, reason.code(), &evidence).await?;
-            tracing::warn!(refund_id = %check.refund_id, "no provider ever returned the refund transaction");
+            tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "no provider ever returned the refund transaction");
             return Ok(Verification::Failed);
         };
         let reads = async {
@@ -499,7 +499,7 @@ where
         {
             Ok((Ok(primary), Ok(secondary))) => (primary, secondary),
             Ok((Err(error), _) | (_, Err(error))) => {
-                tracing::warn!(refund_id = %check.refund_id, %error, "refund nonce read failed");
+                tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), %error, "refund nonce read failed");
                 return Ok(Verification::Waiting);
             }
             Err(_) => {
@@ -529,7 +529,7 @@ where
             &evidence(reason.code()),
         )
         .await?;
-        tracing::warn!(refund_id = %check.refund_id, "the refund transaction was dropped and its nonce consumed");
+        tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "the refund transaction was dropped and its nonce consumed");
         Ok(Verification::Failed)
     }
 

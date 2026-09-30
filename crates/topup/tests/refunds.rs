@@ -1383,22 +1383,20 @@ async fn admin_nudge_reschedules_only_a_deposit_the_pump_claims() -> Result<()> 
             ))
         };
 
-        // The `dep_` id and the bare UUID the logs carry both name the deposit.
-        for (path, created) in [
-            (
-                format!("/v1/admin/deposits/dep_{}/nudge", detected.simple()),
-                now - 1,
-            ),
-            (format!("/v1/admin/deposits/{detected}/nudge"), now),
-        ] {
-            let response = nudge(path, created).await?;
-            ensure!(response.status() == StatusCode::OK);
-            let nudged = response_json(response).await?;
-            ensure!(
-                nudged["deposit_id"] == format!("dep_{}", detected.simple()),
-                "{nudged}"
-            );
-        }
+        // The deposit is named by its `dep_` id, the only form; a bare UUID names nothing.
+        let response = nudge(
+            format!("/v1/admin/deposits/dep_{}/nudge", detected.simple()),
+            now - 1,
+        )
+        .await?;
+        ensure!(response.status() == StatusCode::OK);
+        let nudged = response_json(response).await?;
+        ensure!(
+            nudged["deposit_id"] == format!("dep_{}", detected.simple()),
+            "{nudged}"
+        );
+        let bare = nudge(format!("/v1/admin/deposits/{detected}/nudge"), now).await?;
+        ensure!(bare.status() == StatusCode::NOT_FOUND);
         let (state, due): (String, bool) =
             sqlx::query_as("SELECT state, next_attempt_at <= now() FROM deposits WHERE id = $1")
                 .bind(detected)
@@ -1412,7 +1410,11 @@ async fn admin_nudge_reschedules_only_a_deposit_the_pump_claims() -> Result<()> 
             (credited, "credited", now + 1),
             (rejected, "rejected", now + 2),
         ] {
-            let response = nudge(format!("/v1/admin/deposits/{deposit}/nudge"), created).await?;
+            let response = nudge(
+                format!("/v1/admin/deposits/dep_{}/nudge", deposit.simple()),
+                created,
+            )
+            .await?;
             ensure!(response.status() == StatusCode::BAD_REQUEST);
             let error = response_json(response).await?;
             ensure!(
@@ -1432,7 +1434,7 @@ async fn admin_nudge_reschedules_only_a_deposit_the_pump_claims() -> Result<()> 
         .fetch_all(pool)
         .await?;
         ensure!(
-            audits == vec![format!("deposit:{detected}"); 2],
+            audits == vec![format!("deposit:dep_{}", detected.simple())],
             "{audits:?}"
         );
         Ok(())

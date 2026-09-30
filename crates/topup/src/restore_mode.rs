@@ -715,7 +715,7 @@ pub async fn import_delivered_event(
             ImportOutcome::Matches
         } else {
             tracing::error!(
-                event_id = %event.id,
+                event_id = %crate::ids::format(crate::ids::EVENT, event.id),
                 restore_id = %restore.id,
                 "a delivered event differs from the recorded one; the recorded snapshot is kept"
             );
@@ -990,8 +990,8 @@ async fn insert_credit(
             .is_some_and(|kept| kept.credit != *credit)
     {
         tracing::error!(
-            event_id = %event.id,
-            deposit_id = %event.deposit_id,
+            event_id = %crate::ids::format(crate::ids::EVENT, event.id),
+            deposit_id = %crate::ids::format(crate::ids::DEPOSIT, event.deposit_id),
             "delivered events of one deposit carry different credits; the first imported is kept"
         );
     }

@@ -440,7 +440,7 @@ where
         let span = crate::observability::outbox_delivery_span(
             event.id,
             &event.event_type,
-            event.object.map(EventObject::id),
+            event.object.map(EventObject::public_id),
             event.attempts,
         );
         let result = async {
@@ -460,7 +460,7 @@ where
         let age = Utc::now().signed_duration_since(event.created_at);
         if age > threshold {
             tracing::warn!(
-                event_id = %event.id,
+                event_id = %crate::ids::format(crate::ids::EVENT, event.id),
                 event_type = event.event_type,
                 age_seconds = age.num_seconds(),
                 threshold_seconds = threshold.num_seconds(),

@@ -196,7 +196,7 @@ impl ConfirmStep {
         {
             Ok(context) => context,
             Err(error) => {
-                tracing::error!(deposit_id = %deposit.id, %error, "confirm context load failed");
+                tracing::error!(deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id), %error, "confirm context load failed");
                 return retry(
                     RetryError::Transient,
                     json!({"stage": "context", "error": "database"}),
