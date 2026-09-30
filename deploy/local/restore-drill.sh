@@ -517,9 +517,14 @@ event_envelope() {
 # Signs the event on stdin as the service does and delivers it to the merchant's receiver, which
 # must keep it; prints the delivery.
 deliver_event() {
-    local delivery
+    local delivery status
     delivery=$(sign_delivery)
-    test "$(deliver_webhook <<<"$delivery")" = 204
+    status=$(deliver_webhook <<<"$delivery")
+    test "$status" = 204 || {
+        printf 'the product answered %s to %s\n' "$status" "$(jq -r .body <<<"$delivery")" >&2
+        dc logs --no-log-prefix --tail 20 product >&2
+        return 1
+    }
     printf '%s\n' "$delivery"
 }
 
@@ -1243,8 +1248,11 @@ test "$(printf '%s\n' "$restore_report" | jq -er '.status')" = ok || {
     exit 1
 }
 test "$(topup_status POST /v1/admin/accounts)" = 503
-# Frozen by restore-check: no merchant request is authenticated, reads included.
-test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 503
+# Frozen by restore-check: no merchant request is authenticated, reads included. One without a
+# well-formed key is refused before the freeze gate (401); any well-formed key, at it (503).
+test "$(topup_status GET '/v1/deposits?tx_hash=0x00')" = 401
+test "$(call_status "$(merchant_call GET '/v1/deposits?tx_hash=0x00' "$(new_api_key)" \
+    </dev/null)")" = 503
 
 # restore-check logged in as the owner, and the application login works too: the restored roles
 # carry the source's derived passwords, which the replacement derived again.
