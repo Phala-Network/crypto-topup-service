@@ -54,9 +54,11 @@ webhook receivers must ignore unknown fields. The format follows
   received, with its processing state, committed with its ledger effect; a redelivery with another
   body keeps the first and is logged) and each quote and deposit address response it gets, client
   secret included, in its ledger, now mode 0600; an existing ledger is migrated in place.
-  `python -m reference_product export-restore-records` prints them as the bodies of
-  `POST /v1/admin/restore/treasuries/verify`, `/treasuries/apply`, `/deposit_addresses`,
-  `/quotes`, and `/events`. The controlled restore drill runs the product's receiver and uses
+  `python -m reference_product export-restore-records` (from the ledger, read-only) or
+  `fetch-restore-records` (from its account API, `GET /accounts/restore-records`, signed with the
+  driver key) prints them as the bodies of `POST /v1/admin/restore/treasuries/verify`,
+  `/treasuries/apply`, `/deposit_addresses`, `/quotes`, and `/events`; `--since` keeps what was
+  created or recorded from five minutes before the restore point on. The controlled restore drill runs the product's receiver and uses
   only what it exports, not events the drill made up; it now also restores a treasury change lost
   with the restore, an unvalued reversed deposit, and a reorganized deposit's revisions.
 - Admin: `GET /v1/admin/attestation?account=&livemode=&nonce=` returns `GET /v1/attestation` of any

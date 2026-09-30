@@ -3,8 +3,9 @@
 `serve` runs the product service (reference_product.server); `deposit` drives one deposit through
 a running product (reference_product.driver); with no mode, both run in one process
 (deploy/sandbox/run-local.sh). `export-restore-records` prints the records a service restore asks
-the merchant for (reference_product.restore_records). See deploy/phala.md, "Staging reference
-product":
+the merchant for (reference_product.restore_records) from the ledger file, read-only, and
+`fetch-restore-records` fetches them from a running product's account API, signed with the driver
+key. See deploy/phala.md, "Staging reference product":
 
     PYTHONPATH=deploy/product uv run --locked --project sdk/python \\
         python -m reference_product [MODE] --config FILE
@@ -18,13 +19,14 @@ import logging
 import os
 import secrets
 import sys
+import tempfile
 from dataclasses import replace
 
 from topup_sdk import RequestSigner
 
 from .config import DRIVER_KEYID, EVM_ADDRESS, ProductConfig
-from .driver import run_deposit
-from .ledger import ProductLedger
+from .driver import ProductApi, run_deposit
+from .ledger import LedgerVersionError, ProductLedger
 from .restore_records import export_restore_records
 from .server import product_service, serve
 
@@ -38,12 +40,23 @@ def run_local(config: ProductConfig) -> None:
 
 
 def write_records(text: str, output: str | None) -> None:
-    """Writes the records, which hold client secrets, to stdout or to a new owner-only file."""
+    """Writes the records, which hold client secrets, to stdout or to a new owner-only file: a
+    temporary file in its directory (mode 0600), then linked to `output` whole, so it never shows
+    in part and an existing file is never replaced."""
     if output is None:
         sys.stdout.write(text)
         return
-    with os.fdopen(os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
-        file.write(text)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(output)), prefix=".restore-records-"
+    )
+    try:
+        with os.fdopen(descriptor, "w") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(temporary, output)
+    finally:
+        os.unlink(temporary)
 
 
 def main() -> int:
@@ -51,22 +64,23 @@ def main() -> int:
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=["serve", "deposit", "export-restore-records"],
+        choices=["serve", "deposit", "export-restore-records", "fetch-restore-records"],
         help="serve the product, drive one deposit through a running product, or export its "
-        "restore records; without a mode, serve and deposit in one process",
+        "restore records from its ledger file or fetch them from its account API; without a "
+        "mode, serve and deposit in one process",
     )
     parser.add_argument("--config", default=os.environ.get("SANDBOX_CONFIG"))
-    export = parser.add_argument_group("export-restore-records")
+    export = parser.add_argument_group("export-restore-records and fetch-restore-records")
     export.add_argument(
         "--since",
         type=int,
-        help="only records the service created from this Unix time on (the restore point)",
+        help="only records from this Unix time (the restore point) on, less five minutes",
     )
     export.add_argument(
         "--output",
         help="write the records to this new file, readable by its owner only (default: stdout)",
     )
-    deposit = parser.add_argument_group("deposit")
+    deposit = parser.add_argument_group("deposit and fetch-restore-records")
     deposit.add_argument("--driver-seed-file", help="seed file of the driver key (driver/v1)")
     deposit.add_argument("--amount-minor", type=int, default=2500, help="quote amount in cents")
     deposit.add_argument(
@@ -103,8 +117,10 @@ def main() -> int:
     args = parser.parse_args()
     if not args.config:
         parser.error("--config or SANDBOX_CONFIG is required")
-    if args.mode == "deposit" and not args.driver_seed_file:
-        parser.error("deposit needs --driver-seed-file")
+    if args.mode in ("deposit", "fetch-restore-records") and not args.driver_seed_file:
+        parser.error(f"{args.mode} needs --driver-seed-file")
+    if args.since is not None and args.since < 0:
+        parser.error("--since must be a Unix time")
     if args.pay_bps <= 0:
         parser.error("--pay-bps must be positive")
     if (args.until == "refunded") != (args.refund_to is not None):
@@ -122,9 +138,17 @@ def main() -> int:
     if args.mode == "export-restore-records":
         if not os.path.isfile(config.ledger_path):
             parser.error(f"the config's ledger_path {config.ledger_path!r} is not a ledger file")
-        records = export_restore_records(
-            config.account, ProductLedger(config.ledger_path), since=args.since
-        )
+        try:
+            ledger = ProductLedger(config.ledger_path, read_only=True)
+        except LedgerVersionError as error:
+            parser.error(str(error))
+        records = export_restore_records(config.account, ledger, since=args.since)
+        write_records(json.dumps(records, indent=2) + "\n", args.output)
+        return 0
+    if args.mode == "fetch-restore-records":
+        signer = RequestSigner.from_seed_file(DRIVER_KEYID, args.driver_seed_file)
+        with ProductApi(config.public_url, signer) as product:
+            records = product.restore_records(since=args.since)
         write_records(json.dumps(records, indent=2) + "\n", args.output)
         return 0
     if args.mode == "deposit":

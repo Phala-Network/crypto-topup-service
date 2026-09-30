@@ -1591,7 +1591,7 @@ parsing it, in the transaction that applies it. A `client_secret` is a capabilit
 quote or address: store it like a credential (restricted access, never logged), and send it to the
 operator only over the incident's channel. The reference product keeps all three in its ledger
 and prints them in the operator's request bodies with `python -m reference_product
-export-restore-records` ([deploy/phala.md](../deploy/phala.md#staging-reference-product)). A quote
+fetch-restore-records` ([deploy/phala.md](../deploy/phala.md#staging-reference-product)). A quote
 or a delivered credit you cannot produce is lost
 with the restore: a payment to a lost quote's address is not found, and a spot deposit whose
 `deposit.credited` you cannot produce is re-valued. Keys and endpoints you created after the restore point are

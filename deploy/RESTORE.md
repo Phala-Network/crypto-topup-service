@@ -342,7 +342,8 @@ the account's webhook key as the service signs it: no service runs on the source
 a chain) reaches the product's webhook receiver, which verifies it and keeps it in its inbox; the
 product's ledger also records both addresses and a quote created after the backup as the service
 returns them, with their client secrets. After the restore the operator uses only what the
-product's `export-restore-records` prints. The drill requires that the replacement is frozen
+product's `fetch-restore-records --since` the restore point returns (the same as
+`export-restore-records` from its ledger, read-only). The drill requires that the replacement is frozen
 (merchant writes and reads `503 service_restoring`, `GET /v1/admin/restore` `frozen`), that
 [Restore](#restore) step 5's admin attestation answers where the merchant's does not, with the
 account's webhook key, that the lost key is refused like every key while frozen and is revoked

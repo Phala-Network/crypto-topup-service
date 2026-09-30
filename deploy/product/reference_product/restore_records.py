@@ -17,12 +17,18 @@ it back, without the operator's `reason`:
   recorded, with its `client_secret`;
 - `events`: `POST /v1/admin/restore/events` bodies (step 5) of at most 100 deliveries each, every
   `deposit.credited`, `deposit.rejected`, and `deposit.reversed` delivery the webhook inbox kept,
-  its raw body and Standard Webhooks headers exactly as received.
+  its raw body and Standard Webhooks headers exactly as received, in the order of their deposits'
+  receipt positions and revisions, so a reversed deposit comes right before the one that replaced
+  it.
 
-With `since` (the restore point, Unix seconds), only records the service created from then on are
-exported; without it, everything, which is safe: a record the restored service still holds is
-answered `reissued: false` or `matches`. The export holds client secrets: hand it to the operator
-over the incident's channel only, and delete it once the restore is done.
+With `since` (the restore point, Unix seconds), a record is exported when the service created it
+or the product last recorded it (a deposit address posted again gets a fresh `client_secret`) at
+most `SINCE_MARGIN` seconds before: the service re-issues a quote it no longer holds that was
+created up to five minutes before the restore point. Without `since`, everything is exported,
+which is safe: a record the restored service still holds is answered `reissued: false` or
+`matches`. Quotes and deposit addresses created before the product recorded them, and events
+stored before the inbox kept deliveries, are not in the ledger. The export holds client secrets:
+hand it to the operator over the incident's channel only, and delete it once the restore is done.
 """
 
 from __future__ import annotations
@@ -41,6 +47,9 @@ RESTORED_EVENT_TYPES = ("deposit.credited", "deposit.rejected", "deposit.reverse
 TREASURY_EVENT_TYPES = ("treasury.created", "treasury.updated", "treasury.canceled")
 # Deliveries per `POST /v1/admin/restore/events`, and treasuries per `treasuries/verify`.
 MAX_DELIVERIES = 100
+# How long before `since` a record still counts: the service re-issues a quote it no longer holds
+# that was created up to five minutes before the restore point.
+SINCE_MARGIN = 300
 MAX_TREASURIES = 100
 # The treasury fields `treasuries/verify` compares.
 TREASURY_FIELDS = ("id", "status", "chain_id", "address", "crediting_paused_by")
@@ -67,31 +76,40 @@ def export_restore_records(
 ) -> dict[str, Any]:
     """The product's restore records for `account`, as the operator's admin requests take them."""
 
-    def after(created: object) -> bool:
-        return since is None or not isinstance(created, int) or created >= since
+    def after(created: object, recorded_at: float) -> bool:
+        """Whether the service created a record, or the product last recorded it, since."""
+        if since is None:
+            return True
+        latest = max(created, recorded_at) if isinstance(created, int) else recorded_at
+        return latest >= since - SINCE_MARGIN
 
     addresses = [
         deposit_address_request(account, response)
-        for response in ledger.deposit_address_records()
-        if after(response.get("created"))
+        for response, recorded_at in ledger.deposit_address_records()
+        if after(response.get("created"), recorded_at)
     ]
     quotes = [
         quote_request(account, response)
-        for response in ledger.quote_records()
-        if after(response.get("created"))
+        for response, recorded_at in ledger.quote_records()
+        if after(response.get("created"), recorded_at)
     ]
-    deliveries = []
-    for delivery in ledger.deliveries(RESTORED_EVENT_TYPES):
-        exported = delivery_request(delivery)
-        if exported is not None and after(json.loads(exported["body"]).get("created")):
-            deliveries.append(exported)
-    treasury_events = [
-        (json.loads(delivery.body), delivery)
-        for delivery in ledger.deliveries(TREASURY_EVENT_TYPES)
+
+    def kept(event_types: tuple[str, ...]) -> list[tuple[dict[str, Any], Delivery]]:
+        """The inbox's deliveries of `event_types` since, each with its parsed event."""
+        events = []
+        for delivery, received_at in ledger.deliveries(event_types):
+            event = json.loads(delivery.body)
+            if after(event.get("created"), received_at):
+                events.append((event, delivery))
+        return events
+
+    deposit_events = sorted(kept(RESTORED_EVENT_TYPES), key=lambda each: deposit_position(each[0]))
+    deliveries = [
+        request
+        for _, delivery in deposit_events
+        if (request := delivery_request(delivery)) is not None
     ]
-    treasury_events = [
-        (event, delivery) for event, delivery in treasury_events if after(event.get("created"))
-    ]
+    treasury_events = kept(TREASURY_EVENT_TYPES)
     missing = ledger.events_without_evidence(RESTORED_EVENT_TYPES + TREASURY_EVENT_TYPES)
     if missing:
         LOG.warning("%d events were stored before the inbox kept deliveries; not exported", missing)
@@ -111,6 +129,24 @@ def export_restore_records(
             for start in range(0, len(deliveries), MAX_DELIVERIES)
         ],
     }
+
+
+def deposit_position(event: Mapping[str, Any]) -> tuple[int, str, int, int]:
+    """A deposit event's receipt position and revision (chain, transaction, receipt log index,
+    revision), for ordering; a snapshot without them sorts by what it has."""
+    deposit = (event.get("data") or {}).get("object") or {}
+
+    def number(name: str) -> int:
+        value = deposit.get(name)
+        return value if type(value) is int else -1
+
+    tx_hash = deposit.get("tx_hash")
+    return (
+        number("chain_id"),
+        tx_hash.lower() if isinstance(tx_hash, str) else "",
+        number("receipt_log_index"),
+        number("revision"),
+    )
 
 
 def treasury_verify_requests(account: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:

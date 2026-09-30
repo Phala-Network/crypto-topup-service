@@ -27,7 +27,7 @@ from reference_product.config import (
     ProductConfig,
 )
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
-from reference_product.ledger import Delivery, ProductLedger
+from reference_product.ledger import Delivery, LedgerVersionError, ProductLedger
 from reference_product.restore_records import export_restore_records
 from reference_product.server import AccountApi
 from topup_sdk import (
@@ -396,7 +396,7 @@ def test_the_inbox_keeps_each_delivery_as_received_once(caplog: pytest.LogCaptur
     )["webhook-signature"]
     for _ in range(2):
         assert fulfillment.handle(received, spaced).status == 204
-    [delivery] = fulfillment.ledger.deliveries(["deposit.credited"])
+    [(delivery, _)] = fulfillment.ledger.deliveries(["deposit.credited"])
     assert delivery == Delivery(
         headers["webhook-id"],
         received["WEBHOOK-TIMESTAMP"],
@@ -406,7 +406,7 @@ def test_the_inbox_keeps_each_delivery_as_received_once(caplog: pytest.LogCaptur
     # A redelivery with another body (a service restored from backup re-valued the deposit)
     # changes nothing and is raised with the operator.
     assert fulfillment.handle(*_credited(amount_minor=2_600)).status == 204
-    assert fulfillment.ledger.deliveries(["deposit.credited"]) == [delivery]
+    assert [kept for kept, _ in fulfillment.ledger.deliveries(["deposit.credited"])] == [delivery]
     assert [amount for _, amount in fulfillment.ledger.credits_for(TEAM)] == [2_500]
     assert "repeats with another body" in caplog.text
 
@@ -438,17 +438,50 @@ def test_a_ledger_from_before_the_inbox_keeps_its_events(tmp_path: Path) -> None
         "INSERT INTO webhook_events VALUES ('evt_old', 'deposit.credited', '{\"object\": {}}', 1);"
     )
     old.close()
+    # A ledger before versioning (user_version 0) is migrated, not recreated.
     fulfillment = _fulfillment(ledger=ProductLedger(str(path)))
     fulfillment.ledger.add_team(TEAM)
     assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
     assert fulfillment.ledger.events_without_evidence(["deposit.credited"]) == 1
-    # Its redelivery is a duplicate, as before; new deliveries keep their evidence.
-    assert fulfillment.handle(*_delivery("deposit.credited", {}, event_id="evt_old")).status == 204
-    assert fulfillment.ledger.deliveries(["deposit.credited"]) == []
+    # Its redelivery is not applied again, but completes its evidence; new deliveries keep theirs.
+    redelivery = _delivery("deposit.credited", {}, event_id="evt_old")
+    assert fulfillment.handle(*redelivery).status == 204
+    assert [kept.body for kept, _ in fulfillment.ledger.deliveries(["deposit.credited"])] == [
+        redelivery[1]
+    ]
+    assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
+    assert fulfillment.ledger.credits_for(TEAM) == []
     assert fulfillment.handle(*_credited()).status == 204
-    assert len(fulfillment.ledger.deliveries(["deposit.credited"])) == 1
+    assert len(fulfillment.ledger.deliveries(["deposit.credited"])) == 2
     # The ledger holds client secrets: its file is its owner's alone.
     assert path.stat().st_mode & 0o777 == 0o600
+    # Opened again, it is at the latest version and changes nothing.
+    assert len(ProductLedger(str(path)).deliveries(["deposit.credited"])) == 2
+
+
+def test_a_new_ledger_file_is_its_owners_alone(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    ProductLedger(str(path)).add_team(TEAM)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_export_reads_the_ledger_without_changing_it(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.sqlite3"
+    fulfillment = _fulfillment(ledger=ProductLedger(str(path)))
+    fulfillment.ledger.add_team(TEAM)
+    assert fulfillment.handle(*_credited()).status == 204
+    before = path.read_bytes()
+    reader = ProductLedger(str(path), read_only=True)
+    assert len(export_restore_records(CONFIG.account, reader)["events"]) == 1
+    with pytest.raises(sqlite3.OperationalError):
+        reader.add_team("team-2")
+    assert path.read_bytes() == before
+    # A ledger the product has not migrated yet is refused, and left as it is.
+    legacy = tmp_path / "legacy.sqlite3"
+    sqlite3.connect(legacy).close()
+    with pytest.raises(LedgerVersionError):
+        ProductLedger(str(legacy), read_only=True)
+    assert legacy.read_bytes() == b""
 
 
 def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
@@ -778,18 +811,62 @@ def test_the_export_verifies_the_latest_treasuries_and_restores_signed_applicati
     assert records["events"] == []
 
 
-def test_the_export_starts_at_the_restore_point_and_batches_deliveries() -> None:
-    fulfillment = _fulfillment()
-    ledger = fulfillment.ledger
-    ledger.record_quote(TEAM, _quote(created=1_000))
-    ledger.record_deposit_address(TEAM, _deposit_address(created=1_000))
-    for number in range(1, 106):
-        assert fulfillment.handle(*_credited(number, amount_minor=1)).status == 204
-    records = export_restore_records(CONFIG.account, ledger, since=2_000)
-    assert records["quotes"] == records["deposit_addresses"] == []
-    assert [len(batch["deliveries"]) for batch in records["events"]] == [100, 5]
+def test_the_export_starts_five_minutes_before_the_restore_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restore_point = 1_790_000_000
+    ledger = ProductLedger()
+    ledger.add_team(TEAM)
+    # Recorded an hour before the restore point.
+    monkeypatch.setattr("reference_product.ledger.time.time", lambda: restore_point - 3_600)
+    ledger.record_quote(TEAM, {**_quote(created=restore_point - 299), "id": QUOTE_ID})
+    ledger.record_quote(TEAM, {**_quote(created=restore_point - 301), "id": "qt_" + "0e" * 16})
+    ledger.record_deposit_address(TEAM, _deposit_address(created=restore_point - 3_600))
+    records = export_restore_records(CONFIG.account, ledger, since=restore_point)
+    # The service re-issues a quote it no longer holds created up to five minutes before.
+    assert [quote["id"] for quote in records["quotes"]] == [QUOTE_ID]
+    assert records["deposit_addresses"] == []
+    # Posted again after the restore point, the address has a new client secret the service
+    # must keep, though it was created long before.
+    fresh = f"{ADDRESS_ID}_secret_" + "ef" * 24
+    monkeypatch.setattr("reference_product.ledger.time.time", lambda: restore_point + 10)
+    ledger.record_deposit_address(
+        TEAM, {**_deposit_address(created=restore_point - 3_600), "client_secret": fresh}
+    )
+    records = export_restore_records(CONFIG.account, ledger, since=restore_point)
+    assert [address["client_secret"] for address in records["deposit_addresses"]] == [fresh]
     everything = export_restore_records(CONFIG.account, ledger, since=None)
-    assert len(everything["quotes"]) == len(everything["deposit_addresses"]) == 1
+    assert len(everything["quotes"]) == 2
+
+
+def test_the_export_orders_deliveries_by_deposit_position_and_batches_them() -> None:
+    fulfillment = _fulfillment()
+    # D1 (revision 1) arrives before D0, which it replaced, and another deposit between them.
+    tx_hash = "0x" + "7c" * 32
+    replaced, replacing = (
+        _credited(
+            9,
+            event_type="deposit.reversed",
+            status="reversed",
+            tx_hash=tx_hash,
+            receipt_log_index=0,
+            revision=0,
+        ),
+        _credited(9, tx_hash=tx_hash, receipt_log_index=0, revision=1),
+    )
+    for delivery in (replacing, _credited(1, amount_minor=1), replaced):
+        assert fulfillment.handle(*delivery).status == 204
+    [batch] = export_restore_records(CONFIG.account, fulfillment.ledger)["events"]
+    order = [json.loads(each["body"])["data"]["object"] for each in batch["deliveries"]]
+    assert [(deposit["tx_hash"], deposit.get("revision")) for deposit in order] == [
+        ("0x" + "01" * 32, None),
+        (tx_hash, 0),
+        (tx_hash, 1),
+    ]
+    for number in range(10, 110):
+        assert fulfillment.handle(*_credited(number, amount_minor=1)).status == 204
+    records = export_restore_records(CONFIG.account, fulfillment.ledger, since=None)
+    assert [len(batch["deliveries"]) for batch in records["events"]] == [100, 3]
 
 
 def test_a_later_deposit_address_response_replaces_the_record() -> None:
@@ -808,4 +885,26 @@ def test_an_export_file_is_new_and_its_owners_alone(tmp_path: Path) -> None:
     assert output.read_text() == "{}\n"
     assert output.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
-        write_records("{}\n", str(output))
+        write_records("[]\n", str(output))
+    # Never replaced, and no temporary file is left behind.
+    assert output.read_text() == "{}\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["records.json"]
+
+
+def test_the_account_api_serves_the_restore_records_to_the_driver_only() -> None:
+    fulfillment = _fulfillment()
+    ledger = fulfillment.ledger
+    ledger.record_quote(TEAM, _quote())
+    assert fulfillment.handle(*_credited()).status == 204
+    api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    answer = _account_call(api, "GET", "/accounts/restore-records", b"")
+    assert (answer.status, answer.body) == (200, export_restore_records(CONFIG.account, ledger))
+    answer = _account_call(api, "GET", "/accounts/restore-records?since=1790000000", b"")
+    assert answer.body == export_restore_records(CONFIG.account, ledger, since=1_790_000_000)
+    other = RequestSigner.from_seed(DRIVER_KEYID, bytes([8] * 32))
+    assert _account_call(api, "GET", "/accounts/restore-records", b"", other).status == 401
+    for query in ("?since=-1", "?since=x", "?since=1&since=2", "?other=1"):
+        assert _account_call(api, "GET", "/accounts/restore-records" + query, b"").status == 400
+    # Its path is not a workspace's.
+    register = json.dumps({"account_id": "restore-records"}).encode()
+    assert _account_call(api, "POST", "/accounts", register).status == 400

@@ -269,6 +269,10 @@ consistency_salt_v3=0x022d0f0b136e5721ff46ee4522a0b741609049f8f67b9345f2c6cb3683
 consistency_address_v3=0x2ab8636aa082933ff69e28dcb938ca8dc8fae00b
 consistency_address_v3_id=da_99999999999999999999999999999993
 treasury_applied_at=
+# The seed of the product's driver key (driver/v1), hex, with which the operator fetches the
+# merchant's records; restore_point is the restore's, from GET /v1/admin/restore.
+driver_seed=
+restore_point=
 # When the merchant created the quote, after the backup: re-issue refuses a quote the backup does
 # not hold that was created more than five minutes before the restore point.
 quote_created=
@@ -442,7 +446,10 @@ start_merchant_product() {
     TOPUP_DRILL_TREASURY=$consistency_treasury
     TOPUP_DRILL_PRODUCT_API_KEY=$kept_key
     TOPUP_DRILL_WEBHOOK_PUBLIC_KEY=$(webhook_public_key)
+    # An ed25519 private key's DER ends with its 32-byte seed.
     openssl genpkey -algorithm ed25519 -out "$admin_dir/driver.pem" 2>/dev/null
+    driver_seed=$(openssl pkey -in "$admin_dir/driver.pem" -outform DER | tail -c 32 |
+        od -An -tx1 | tr -d ' \n')
     TOPUP_DRILL_DRIVER_PUBLIC_KEY=$(openssl pkey -in "$admin_dir/driver.pem" -pubout \
         -outform DER | tail -c 32 | base64)
     rm -f "$admin_dir/driver.pem"
@@ -726,10 +733,20 @@ expect_call() {
     }
 }
 
-# The records the merchant's product exports for the operator (deploy/runbooks/restore.md,
-# step 2), each already the body of its admin request, without the reason.
+# The records the merchant's product exports for the operator since the restore point ($1;
+# deploy/runbooks/restore.md, step 2), each already the body of its admin request, without the
+# reason: fetched from its account API signed with the driver key, as an operator does for the
+# staging product, and the same as the export from its ledger file, opened read-only next to the
+# running product.
 merchant_records() {
-    product_python -m reference_product export-restore-records --config /etc/product/config.json
+    local fetched exported
+    fetched=$(product_python -m reference_product fetch-restore-records \
+        --config /etc/product/config.json --driver-seed-file /dev/stdin \
+        --since "$1" <<<"$driver_seed")
+    exported=$(product_python -m reference_product export-restore-records \
+        --config /etc/product/config.json --since "$1" </dev/null)
+    test "$fetched" = "$exported"
+    printf '%s\n' "$fetched"
 }
 
 # Verifies the merchant's treasuries, B's then A's, and requires the result and restored status of
@@ -759,6 +776,7 @@ check_consistency_after_restore() {
     expect_call 200 "$answer"
     call_body "$answer" | jq -e --arg id "$(jq -r .restore_id <<<"$restore_report")" \
         '.frozen and .restore.detected_by == "restore_check" and .restore.id == $id' >/dev/null
+    restore_point=$(call_body "$answer" | jq -er '.restore.restore_point')
     answer=$(merchant_call POST /v1/deposit_addresses "$kept_key" \
         <<<'{"client_reference_id":"restore-drill-da"}')
     expect_call 503 "$answer"
@@ -799,7 +817,7 @@ check_consistency_after_restore() {
     # The merchant's product exports what it recorded: the treasuries of its treasury events, the
     # addresses and quote as the service returned them, and the deliveries as its receiver got
     # them.
-    records=$(merchant_records)
+    records=$(merchant_records "$restore_point")
 
     # The address given out after the backup is re-issued identically from the merchant's record,
     # with its client secret, so the payer's page reads it again.

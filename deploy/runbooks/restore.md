@@ -68,7 +68,8 @@ receiver's store, its database, or an `export_account` taken before the loss):
    imported, so a re-serialized body or a missing header cannot be used.
 
 A merchant running the reference product exports items 2 and 4 to 6 with
-`python -m reference_product export-restore-records`, each already the body of its request in
+`python -m reference_product fetch-restore-records --since <restore point>` (or
+`export-restore-records` next to its ledger), each already the body of its request in
 steps 3 to 5 without `reason`: `treasuries` (`treasuries/verify`), `treasury_applications`
 (`treasuries/apply`), `deposit_addresses`, `quotes`, and `events` ([Staging reference
 product](../phala.md#staging-reference-product)).

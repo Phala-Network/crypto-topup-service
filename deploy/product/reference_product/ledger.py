@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 ORDER_FLOW_CODE = "crypto-top-up"
@@ -82,19 +83,22 @@ CREATE TABLE IF NOT EXISTS bonus_credits (
 -- The webhook inbox: every verified delivery once, by its `webhook-id` (the event's `evt_` id),
 -- committed with its ledger effect. `data` is the event's parsed `data`, for the product's own
 -- reads; `body` and the three Standard Webhooks headers are the delivery exactly as received, the
--- evidence a service restore imports (deploy/runbooks/restore.md, step 5). A ledger from before
--- the inbox gains these columns, NULL on its earlier rows (MIGRATIONS). `state` is `processed`,
--- or `ignored` for a `deposit.*` event whose deposit was malformed.
+-- evidence a service restore imports (deploy/runbooks/restore.md, step 5). They are NULL on events
+-- stored before the inbox (MIGRATIONS[0]) until one is delivered again.
 CREATE TABLE IF NOT EXISTS webhook_events (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     data TEXT NOT NULL,
-    received_at REAL NOT NULL
+    received_at REAL NOT NULL,
+    body BLOB,
+    webhook_timestamp TEXT,
+    webhook_signature TEXT
 );
 -- Each quote and deposit address the product created, as the service returned it, its
 -- `client_secret` included: the merchant's records a service restore re-issues them from
 -- (deploy/runbooks/restore.md, step 4). A client secret is a capability: the ledger file is
--- readable by its owner only, and nothing logs it.
+-- readable by its owner only, and nothing logs it. `recorded_at` is when the product last got
+-- the response. Quotes and addresses created before these tables existed are not recorded.
 CREATE TABLE IF NOT EXISTS quote_records (
     id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL REFERENCES teams (id),
@@ -115,16 +119,22 @@ WHERE provider_order_id LIKE 'deposit:%';
 """
 
 
-# Columns added to existing tables since their creation, applied once when a ledger lacks them.
-MIGRATIONS = {
-    "webhook_events": (
-        ("body", "BLOB"),
-        ("webhook_timestamp", "TEXT"),
-        ("webhook_signature", "TEXT"),
-        ("state", "TEXT NOT NULL DEFAULT 'processed'"),
-        ("processed_at", "REAL"),
-    ),
-}
+# Changes to a ledger created before them, in order: migration `i` takes `PRAGMA user_version`
+# from `i` to `i + 1`. SCHEMA creates the latest tables, so a new ledger starts at
+# `SCHEMA_VERSION`; a ledger at 0 that already has tables predates versioning.
+MIGRATIONS = (
+    # 1: the webhook inbox keeps each delivery as received.
+    """
+    ALTER TABLE webhook_events ADD COLUMN body BLOB;
+    ALTER TABLE webhook_events ADD COLUMN webhook_timestamp TEXT;
+    ALTER TABLE webhook_events ADD COLUMN webhook_signature TEXT;
+    """,
+)
+SCHEMA_VERSION = len(MIGRATIONS)
+
+
+class LedgerVersionError(Exception):
+    """A read-only ledger is not at `SCHEMA_VERSION`: start the product once to migrate it."""
 
 
 @dataclass(frozen=True)
@@ -184,7 +194,22 @@ class StoredOrder:
 class ProductLedger:
     """SQLite stand-in for the product database; every write is one serialized transaction."""
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(self, path: str = ":memory:", *, read_only: bool = False) -> None:
+        """Opens the ledger at `path`, creating and migrating it; with `read_only`, opens an
+        existing ledger for reading only (the restore export next to a running product): no file
+        is created, changed, or migrated."""
+        self._lock = threading.RLock()
+        self.events_changed = threading.Condition(self._lock)
+        if read_only:
+            uri = Path(path).absolute().as_uri() + "?mode=ro"
+            self._connection = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            version = self._connection.execute("PRAGMA user_version").fetchone()[0]
+            if version != SCHEMA_VERSION:
+                raise LedgerVersionError(
+                    f"the ledger is at version {version}, not {SCHEMA_VERSION}: start the "
+                    "product once to migrate it"
+                )
+            return
         if path != ":memory:":
             # The ledger holds client secrets: owner-only, and SQLite gives its journal the
             # database file's mode.
@@ -192,15 +217,23 @@ class ProductLedger:
             os.chmod(path, 0o600)
         self._connection = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.executescript(SCHEMA)
-        self._lock = threading.RLock()
-        self.events_changed = threading.Condition(self._lock)
-        with self.transaction() as db:
-            for table, added in MIGRATIONS.items():
-                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
-                for name, declaration in added:
-                    if name not in columns:
-                        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Brings the ledger to `SCHEMA_VERSION` in one transaction."""
+        db = self._connection
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        existing = db.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'webhook_events'"
+        ).fetchone()[0]
+        pending = MIGRATIONS[version:] if existing else ()
+        script = "".join(pending) + SCHEMA + f"PRAGMA user_version = {SCHEMA_VERSION};"
+        try:
+            db.executescript("BEGIN IMMEDIATE;" + script + "COMMIT;")
+        except sqlite3.Error:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -260,21 +293,22 @@ class ProductLedger:
             (address.lower(), team_id, ref),
         )
 
-    def quote_records(self) -> list[dict[str, Any]]:
-        """Every recorded quote response, oldest first."""
+    def quote_records(self) -> list[tuple[dict[str, Any], float]]:
+        """Every recorded quote response, with when it was recorded, oldest first."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT response FROM quote_records ORDER BY recorded_at, id"
+                "SELECT response, recorded_at FROM quote_records ORDER BY recorded_at, id"
             ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [(json.loads(row[0]), float(row[1])) for row in rows]
 
-    def deposit_address_records(self) -> list[dict[str, Any]]:
-        """Every recorded deposit address response, oldest first."""
+    def deposit_address_records(self) -> list[tuple[dict[str, Any], float]]:
+        """Every recorded deposit address response, with when it was last recorded, oldest
+        first."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT response FROM deposit_address_records ORDER BY recorded_at, id"
+                "SELECT response, recorded_at FROM deposit_address_records ORDER BY recorded_at, id"
             ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [(json.loads(row[0]), float(row[1])) for row in rows]
 
     def find_order(self, provider_order_id: str) -> StoredOrder | None:
         with self._lock:
@@ -392,43 +426,50 @@ class ProductLedger:
         return None if row is None else bytes(row[0] or b"")
 
     def record_delivery(
-        self,
-        db: sqlite3.Connection,
-        delivery: Delivery,
-        event_type: str,
-        data: Mapping[str, Any],
-        state: str,
+        self, db: sqlite3.Connection, delivery: Delivery, event_type: str, data: Mapping[str, Any]
     ) -> None:
         """Adds a verified delivery to the inbox, in `db`'s transaction with its ledger effect."""
-        now = time.time()
         db.execute(
             "INSERT INTO webhook_events (id, type, data, received_at, body, webhook_timestamp, "
-            "webhook_signature, state, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "webhook_signature) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 delivery.webhook_id,
                 event_type,
                 json.dumps(data, sort_keys=True),
-                now,
+                time.time(),
                 delivery.body,
                 delivery.webhook_timestamp,
                 delivery.webhook_signature,
-                state,
-                now,
             ),
         )
         self.events_changed.notify_all()
 
-    def deliveries(self, event_types: Sequence[str]) -> list[Delivery]:
-        """The inbox's deliveries of `event_types` with their raw evidence, oldest first; events
-        recorded before the inbox kept it are left out."""
+    @staticmethod
+    def keep_evidence(db: sqlite3.Connection, delivery: Delivery) -> None:
+        """Keeps the evidence of a redelivered event stored before the inbox kept deliveries."""
+        db.execute(
+            "UPDATE webhook_events SET body = ?, webhook_timestamp = ?, webhook_signature = ? "
+            "WHERE id = ? AND body IS NULL",
+            (
+                delivery.body,
+                delivery.webhook_timestamp,
+                delivery.webhook_signature,
+                delivery.webhook_id,
+            ),
+        )
+
+    def deliveries(self, event_types: Sequence[str]) -> list[tuple[Delivery, float]]:
+        """The inbox's deliveries of `event_types` with their raw evidence and when each was
+        received, oldest first; events stored before the inbox kept it are left out."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id, webhook_timestamp, webhook_signature, body FROM webhook_events "
+                "SELECT id, webhook_timestamp, webhook_signature, body, received_at "
+                "FROM webhook_events "
                 "WHERE body IS NOT NULL AND type IN (SELECT value FROM json_each(?)) "
                 "ORDER BY received_at, id",
                 (json.dumps(list(event_types)),),
             ).fetchall()
-        return [Delivery(row[0], row[1], row[2], bytes(row[3])) for row in rows]
+        return [(Delivery(row[0], row[1], row[2], bytes(row[3])), float(row[4])) for row in rows]
 
     def events_without_evidence(self, event_types: Sequence[str]) -> int:
         """How many stored events of `event_types` predate the inbox, so have no raw delivery."""

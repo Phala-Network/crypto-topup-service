@@ -14,9 +14,10 @@ The service credits a deposit once it is priced and screened, and tells the prod
 
 Every verified delivery is kept once, by its `webhook-id`, in the ledger's webhook inbox: its raw
 body and Standard Webhooks headers as received, in the same transaction as its ledger effect. A
-redelivery changes nothing; one with another body (only a service restored from backup sends one)
-keeps the first and is logged for the operator. The kept deliveries are the evidence a service
-restore imports (reference_product.restore_records).
+redelivery changes nothing, but completes the evidence of an event stored before the inbox kept
+deliveries; one with another body (only a service restored from backup sends one) keeps the first
+and is logged for the operator. The kept deliveries are the evidence a service restore imports
+(reference_product.restore_records).
 
 `deposit.refunded` and `deposit.reversed` take a credit back. Every `deposit.*` event carries the
 whole deposit with cumulative, service-computed claw-backs (`amount_refunded`, the refunded share
@@ -156,35 +157,36 @@ class Fulfillment:
         with self.ledger.transaction() as db:
             stored = ProductLedger.stored_body(db, event.id)
             if stored is not None:
-                if stored and stored != body:
+                if not stored:
+                    # Applied before the inbox kept deliveries: keep this one as its evidence.
+                    ProductLedger.keep_evidence(db, delivery)
+                elif stored != body:
                     LOG.error(
                         "webhook %s %s repeats with another body; the first is kept",
                         event.type,
                         event.id,
                     )
                 return Answer(HTTPStatus.NO_CONTENT)
-            state = self._apply(db, event)
-            self.ledger.record_delivery(db, delivery, event.type, event.data, state)
+            self._apply(db, event)
+            self.ledger.record_delivery(db, delivery, event.type, event.data)
         LOG.info("webhook %s %s", event.type, (event.object or {}).get("id", ""))
         return Answer(HTTPStatus.NO_CONTENT)
 
-    def _apply(self, db: sqlite3.Connection, event: WebhookEvent) -> str:
-        """Applies a verified event's ledger effect in `db`'s transaction; returns its inbox
-        state, `processed`, or `ignored` for a malformed deposit."""
+    def _apply(self, db: sqlite3.Connection, event: WebhookEvent) -> None:
+        """Applies a verified event's ledger effect in `db`'s transaction."""
         if event.type == CREDITED_EVENT:
             try:
                 credit = CreditedDeposit.from_event(event)
             except FulfillmentError as error:
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
-                return "ignored"
+                return
             self._fulfill(db, credit, event.object or {})
         elif event.type.startswith("deposit."):
             snapshot = deposit_view(event.object or {})
             if snapshot is None:
                 LOG.warning("ignoring %s %s: malformed deposit", event.type, event.id)
-                return "ignored"
+                return
             self._settle(db, *snapshot, reason=event.type)
-        return "processed"
 
     def fulfill(self, credit: CreditedDeposit, deposit: Mapping[str, Any] | None = None) -> str:
         """Credits the deposit once and returns its order status (`accepted` or `held`), or
