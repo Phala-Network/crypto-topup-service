@@ -16,7 +16,10 @@ use crate::tenancy::Scope;
 const SECOND: Duration = Duration::from_secs(1);
 /// Tracked scopes beyond which idle ones are dropped; an idle scope is indistinguishable from a
 /// new one.
-const PRUNE_ABOVE: usize = 4_096;
+pub(super) const PRUNE_ABOVE: usize = 4_096;
+
+/// The time source of a limiter: [`Instant::now`], or a test's clock.
+pub(super) type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
 
 /// Requests per second of each limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,10 +43,19 @@ impl Default for RateLimits {
 }
 
 /// The per-account and platform limits of authenticated merchant requests.
-#[derive(Debug)]
 pub struct ApiRateLimiter {
     limits: RateLimits,
+    clock: Clock,
     state: Mutex<State>,
+}
+
+impl std::fmt::Debug for ApiRateLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiRateLimiter")
+            .field("limits", &self.limits)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -63,8 +75,19 @@ impl ApiRateLimiter {
     /// A limiter enforcing `limits`.
     #[must_use]
     pub fn new(limits: RateLimits) -> Self {
+        Self::with_clock(limits, Instant::now)
+    }
+
+    /// A limiter enforcing `limits` at the instants `clock` reads, so a test decides how much
+    /// time passes between its requests instead of the machine it runs on.
+    #[must_use]
+    pub fn with_clock(
+        limits: RateLimits,
+        clock: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Self {
         Self {
             limits,
+            clock: Box::new(clock),
             state: Mutex::default(),
         }
     }
@@ -72,7 +95,7 @@ impl ApiRateLimiter {
     /// Counts one request of `scope`; `false` means it is over a limit and must be refused with
     /// `429`. A refused request counts against no limit.
     pub fn allow(&self, scope: Scope) -> bool {
-        self.allow_at(Instant::now(), scope)
+        self.allow_at((self.clock)(), scope)
     }
 
     fn allow_at(&self, now: Instant, scope: Scope) -> bool {
@@ -111,13 +134,26 @@ impl ApiRateLimiter {
 /// The next theoretical arrival time after admitting a request at `now`, or `None` when the
 /// request is over `rate` per second.
 fn next_arrival(current: Option<Instant>, now: Instant, rate: u32) -> Option<Instant> {
-    let interval = SECOND.checked_div(rate)?;
-    let tolerance = SECOND.saturating_sub(interval);
+    gcra(current, now, rate, SECOND).ok()
+}
+
+/// The GCRA of `count` requests per `period`, admitted in bursts of up to `count`: the next
+/// theoretical arrival time after admitting a request at `now`, from `current`, or how long until
+/// a request would be admitted.
+pub(super) fn gcra(
+    current: Option<Instant>,
+    now: Instant,
+    count: u32,
+    period: Duration,
+) -> Result<Instant, Duration> {
+    let interval = period.checked_div(count).ok_or(period)?;
+    let tolerance = period.saturating_sub(interval);
     let arrival = current.map_or(now, |current| current.max(now));
-    if arrival.saturating_duration_since(now) > tolerance {
-        return None;
+    let ahead = arrival.saturating_duration_since(now);
+    if ahead > tolerance {
+        return Err(ahead.saturating_sub(tolerance));
     }
-    arrival.checked_add(interval)
+    arrival.checked_add(interval).ok_or(period)
 }
 
 #[cfg(test)]

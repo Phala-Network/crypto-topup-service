@@ -22,7 +22,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::seed::{self, NewAccount};
-use support::{TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request};
+use support::{
+    ManualClock, TEST_ORIGIN, TestDatabase, merchant_request, public_key_base64, signed_request,
+};
 
 const ADMIN_KID: &str = "admin/v1";
 
@@ -58,7 +60,9 @@ impl Harness {
             attestor: Arc::new(DstackAttestor::new()),
             rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
             client_reads: Arc::default(),
-            rate_limits: Arc::new(topup::api::ApiRateLimiter::new(limits)),
+            // The limiter's clock stands still, so no limit refills between a test's requests
+            // however slowly the machine answers them.
+            rate_limits: Arc::new(ManualClock::new().rate_limiter(limits)),
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
@@ -1199,7 +1203,9 @@ async fn authorization_runs_before_an_idempotent_replay() -> Result<()> {
     result.and(cleanup)
 }
 
-/// Each account and mode has its own rate limit, and test mode shares a platform ceiling.
+/// Each account and mode has its own rate limit, and test mode shares a platform ceiling. The
+/// harness's limiter clock stands still, so every request lands in the same instant: with limits
+/// of a few per second, a real clock refills a token within the test's own requests.
 #[tokio::test]
 async fn requests_are_rate_limited_per_account_and_mode() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
