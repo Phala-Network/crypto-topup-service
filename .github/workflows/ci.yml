@@ -257,7 +257,6 @@ jobs:
           deploy/tests/walg-restore.sh
           deploy/tests/render.sh
           deploy/tests/render-route.sh
-          deploy/tests/check-route-modes.sh
           deploy/tests/preflight-phala.sh
           deploy/tests/product-preflight.sh
           PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile deploy/local/mock-product.py
@@ -269,11 +268,12 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-runbooks-${{ hashFiles('**/Cargo.lock') }}
-      # Preflight checks the configuration with topup; offline and in CI, this build's binary.
-      - name: Check preflight's local checks
+      # Preflight and the route-mode check read the configuration with topup; in CI, this build's.
+      - name: Check preflight's local checks and the route-mode check
         run: |
           cargo build --locked -q -p topup
           TOPUP="$PWD/target/debug/topup" deploy/tests/preflight.sh
+          TOPUP="$PWD/target/debug/topup" deploy/tests/check-route-modes.sh
       - name: Check runbook commands against the CLI and OpenAPI
         run: make runbook-check
       - name: Build postgres-walg image

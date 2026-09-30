@@ -351,10 +351,11 @@ it, so recreation is about container identity, not uptime. §11 measures the act
   - Online, it adds the anonymous pulls, RPC and asset checks from `topup config show` JSON,
     and the Phala Cloud checks.
   - `--unsealed` skips only `--secrets`.
-- **`check-route-modes.sh`** stays. It reads the routes from the artifact's `topup` config, and the
-  environment is the one Deploy selected: its first argument. It never reads `topup.yaml`'s
-  `environment`, so a staging config that claims `production` does not bypass it. It needs no
-  network.
+- **`check-route-modes.sh`** stays. It reads the routes as topup reads them: `topup config show`
+  on the artifact's inline `topup.yaml`, run from the pinned image preflight pulled, so a route in
+  any YAML form (block, flow, JSON) is checked. The environment is the one Deploy selected, its
+  first argument; it never reads `topup.yaml`'s `environment`, so a staging config that claims
+  `production` does not bypass it. It needs no network.
 - **`deploy.yml`** loses the settings `env`, the RPC copy step, and the derivations. It resolves the
   environment directory from the owner and Environment, renders, writes the unsealed env from the
   artifact's names, and runs the same verification as before.

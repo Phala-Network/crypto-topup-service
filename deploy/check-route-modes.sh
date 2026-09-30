@@ -7,12 +7,16 @@
 # money. The service validates `livemode` against the chain again when it loads a route.
 #
 # ENVIRONMENT is the one Deploy selected, never the configuration's own `environment` (a Sentry
-# tag), so a staging configuration that calls itself production is still checked as staging. It
-# reads the rendered compose only, with no network.
+# tag), so a staging configuration that calls itself production is still checked as staging. The
+# routes are topup's own reading of the compose's inline topup.yaml (`topup config show`), so a
+# route written in any YAML form is checked. It needs no network: the pinned Compose parses the
+# compose (deploy/pinned-compose.sh --no-download), and topup runs from the compose's image,
+# which must already be present (`--pull never`), or from TOPUP, a local topup binary (tests).
 #
 # Usage: deploy/check-route-modes.sh staging|production COMPOSE
 set -euo pipefail
 
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 environment=${1:?usage: $0 staging|production COMPOSE}
 compose=${2:?usage: $0 staging|production COMPOSE}
 case "$environment" in
@@ -27,18 +31,23 @@ testnets=" 11155111 17000 560048 84532 11155420 "
 # Anvil and Hardhat, Geth dev: never deployed.
 devnets=" 31337 1337 "
 
-# One "route livemode chain_id" line per route of the topup.yaml inlined in the compose. A route's
-# keys are its `route:` (a list item's first key), `livemode:`, and its chain's `chain_id:`;
-# nothing else in the compose uses them.
-routes=$(awk '
-    function flush() {
-        if (name != "") print name, (livemode == "" ? "-" : livemode), (chain == "" ? "-" : chain)
-    }
-    /^[[:space:]]+(- )?route:[[:space:]]/ { flush(); sub(/^[[:space:]]+(- )?route:[[:space:]]*/, ""); name = $1; livemode = ""; chain = ""; next }
-    name != "" && /^[[:space:]]+livemode:[[:space:]]/ { livemode = $2 }
-    name != "" && /^[[:space:]]+chain_id:[[:space:]]/ { chain = $2 }
-    END { flush() }
-' "$compose")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/check-route-modes.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+"$("$root/deploy/pinned-compose.sh" --no-download)" -f "$compose" config --no-interpolate \
+    --format json >"$tmp/compose.json"
+jq -j '. as $root | [.services.topup.configs[]? | select(.target == "/etc/topup/topup.yaml")
+    | .source][0] as $name | $root.configs[$name].content // ""' "$tmp/compose.json" |
+    sed 's/[$][$]/$/g' >"$tmp/topup.yaml"
+[[ -s "$tmp/topup.yaml" ]] || { echo "the compose carries no topup.yaml" >&2; exit 1; }
+if [[ -n "${TOPUP:-}" ]]; then
+    "$TOPUP" config show /dev/stdin <"$tmp/topup.yaml" >"$tmp/config.json"
+else
+    docker run --rm -i --pull never --network none "$(jq -r '.services.topup.image' "$tmp/compose.json")" \
+        topup config show /dev/stdin <"$tmp/topup.yaml" >"$tmp/config.json"
+fi || { echo "topup refused the compose's configuration" >&2; exit 1; }
+
+# One "route livemode chain_id" line per route, as topup reads them.
+routes=$(jq -r '.routes[] | "\(.route) \(.livemode) \(.chain.chain_id)"' "$tmp/config.json")
 [[ -n "$routes" ]] || { echo "the compose carries no route" >&2; exit 1; }
 
 failed=0
@@ -47,10 +56,6 @@ refuse() {
     failed=1
 }
 while read -r route livemode chain; do
-    case "$livemode" in
-        true | false) ;;
-        *) refuse "$route" "livemode must be true or false, not $livemode"; continue ;;
-    esac
     if [[ "$mainnets" == *" $chain "* ]]; then
         [[ "$livemode" == true ]] || refuse "$route" "chain $chain is a mainnet: livemode must be true"
     elif [[ "$testnets" == *" $chain "* ]]; then

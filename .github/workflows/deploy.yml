@@ -222,13 +222,6 @@ jobs:
         run: |
           deploy/render.sh --images "$WORK/release/images.json" --gateway-domain "$GATEWAY" \
             "$ENVIRONMENT_DIR" >"$COMPOSE"
-          # Every route's livemode must match its chain: production serves test mode on Sepolia
-          # beside live mode on mainnet, staging test mode only. The check takes this run's
-          # Environment, never the configuration's own name (deploy/check-route-modes.sh). Only
-          # topup's compose carries routes; the product target is staging-only.
-          if [[ "$TARGET" == topup ]]; then
-            deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
-          fi
           # The public URL is the domain dstack-ingress serves.
           domain=$("$(deploy/pinned-compose.sh)" -f "$COMPOSE" config --no-interpolate --format json |
             jq -er '.services["dstack-ingress"].environment.DOMAIN')
@@ -252,6 +245,15 @@ jobs:
         run: |
           "$PREFLIGHT" --env "$ENV_FILE" --compose "$COMPOSE" --environment-dir "$ENVIRONMENT_DIR" \
             --workspace "$PHALA_WORKSPACE" --os-image "$DSTACK_OS_IMAGE" --unsealed
+
+      # Every route's livemode must match its chain: production serves test mode on Sepolia beside
+      # live mode on mainnet, staging test mode only. The check reads the routes as topup does, in
+      # the image preflight pulled, and takes this run's Environment, never the configuration's own
+      # name (deploy/check-route-modes.sh). Only topup's compose carries routes; the product
+      # target is staging-only.
+      - name: Check the routes' modes against the Environment
+        if: inputs.target == 'topup'
+        run: deploy/check-route-modes.sh "$DEPLOY_ENVIRONMENT" "$COMPOSE"
 
       # The CLI output (JSON, no secrets: the key is only in the environment and env values are
       # encrypted client-side) goes to the log as well, so a failure shows its reason.

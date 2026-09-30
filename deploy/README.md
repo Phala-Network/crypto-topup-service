@@ -130,7 +130,8 @@ every deploy, and uploads the rendered compose and the verification as the run's
 of their chains ([CONTRACTS.md](CONTRACTS.md#mainnet), HUMAN-ONLY, only where it is missing) and a
 reviewed route PR putting the live routes into the compose. One production deployment serves both
 modes: live routes on mainnets and test routes (`livemode: false`) on test networks such as Sepolia.
-Deploy runs [check-route-modes.sh](check-route-modes.sh) on the rendered compose and refuses a route
+Deploy runs [check-route-modes.sh](check-route-modes.sh) on the rendered compose's routes, as topup
+reads them, and refuses a route
 whose `livemode` does not match its chain, a chain on neither of its lists, a local development
 chain, and any live route in `staging`. After the first deploy, in order: seal the secrets; [verify
 the attestation](#attestation-ingress-and-egress); have the operator's Finance, Risk, and Operations
