@@ -407,16 +407,21 @@ it, so recreation is about container identity, not uptime. §11 measures the act
    - a new `wal_005/` segment is listed within two minutes;
    - `topup-backup` checks in `ok`.
 5. **Product**: Deploy `upgrade` with target `product`; its `ledger` volume keeps its name.
-6. **Rollback.** No schema change is in this PR, so the old binary runs on the same database.
-   - The standard path: revert the merge on `main`, run Release images, and Deploy `upgrade`.
+6. **Rollback**, within the rollback window. No schema change is in this PR, so the old binary runs
+   on the same database (rehearsed by `make upgrade-rehearsal`).
+   - The standard path: revert the merge on `main`, run Release images, and Deploy `upgrade`. The
+     reverted workflows read the `staging` variables again, which is why step 7 keeps them until
+     the window closes.
    - The emergency path (HUMAN-ONLY, owner): redeploy the saved artifact byte for byte with
      `phala deploy --cvm-id "$TOPUP_CVM_ID" --compose <saved> --no-public-logs --no-public-sysinfo
      --wait`, with no `-e`, so the sealed env stays. Then verify it with the old commit's
      `verify-attestation.sh` (its four-argument form), against the saved hash. The new policy
      judges the new artifact form only. Its images stay in GHCR.
-7. **Afterwards**, delete the unused `staging` variables: `TOPUP_DOMAIN`, `AWS_ENDPOINT`,
-   `WALG_S3_PREFIX`, `TOPUP_ADMIN_PUBLIC_KEY`, the four `TOPUP_RPC_*_URL`, `PRODUCT_DOMAIN`, and
-   `PRODUCT_DRIVER_PUBLIC_KEY`. Nothing reads them any more.
+7. **The `staging` variables stay until the rollback window closes**, for example after one clean
+   week on the new release: the old Deploy, which a revert restores, cannot run without them.
+   Only then, as a separate, later step, delete `TOPUP_DOMAIN`, `AWS_ENDPOINT`, `WALG_S3_PREFIX`,
+   `TOPUP_ADMIN_PUBLIC_KEY`, the four `TOPUP_RPC_*_URL`, `PRODUCT_DOMAIN`, and
+   `PRODUCT_DRIVER_PUBLIC_KEY`. The new workflows never read them, so keeping them changes nothing.
 8. **A restore after the cutover** uses `RESTORE_AWS_*` in its env file (`RESTORE.md`).
 
 **Self-hosters (forks):**
