@@ -16,4 +16,6 @@ curl -sS -X POST "$BASE_URL/v1/admin/not-a-route"
 mapfile -t headers < <(deploy/runbooks/sign-admin-request.sh GET "$BASE_URL/v1/admin/routes/r/pause" /tmp/empty "$ADMIN_KEY_FILE" "$ADMIN_KEY_ID")
 curl -sS -X DELETE "$BASE_URL/v1/admin/reports/daily"
 admin PUT /v1/admin/products '{}'
+deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml
+deploy/render.sh --bogus --images images.json --origin https://x.example ENV_DIR OTHER
 ```

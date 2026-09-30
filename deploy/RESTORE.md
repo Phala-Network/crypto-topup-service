@@ -229,7 +229,7 @@ live_isolated() {
      attestation.json)"
    curl -fsS "https://$INSTANCE_ID-8090.$(jq -er '.gateway.base_domain' restore-cvm.json)/prpc/Info" \
      >info.json
-   deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml
+   deploy/verify-attestation.sh attestation.json info.json "$APP_ID" restore-check.yml restore-check
    ```
 
 3. **Wait for the report** (at most the RTO) and require `.restore_check.status == "ok"`,

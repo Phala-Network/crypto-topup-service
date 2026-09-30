@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks every shell command in the runbooks against the current-source `topup` CLI and the
-# committed OpenAPI documents, then proves the checker rejects a deliberately wrong fixture.
+# committed OpenAPI documents, every invocation of a deploy script in the documentation against
+# the script's arguments, then proves the checker rejects a deliberately wrong fixture.
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -53,15 +54,22 @@ jq -r '
     | sort -u > "$tmp/openapi.operations"
 
 # Joins backslash continuations and prints one line per shell command, skipping heredoc bodies.
+# Fences may be indented (a code block in a list item); the indentation is removed.
 extract_commands() {
     awk '
-        /^```(sh|bash|shell)[[:space:]]*$/ && !in_shell { in_shell = 1; continued = ""; heredoc = ""; next }
-        in_shell && /^```[[:space:]]*$/ {
+        /^[[:space:]]*```(sh|bash|shell)[[:space:]]*$/ && !in_shell {
+            in_shell = 1; continued = ""; heredoc = ""
+            match($0, /^[[:space:]]*/)
+            indent = RLENGTH
+            next
+        }
+        in_shell && /^[[:space:]]*```[[:space:]]*$/ {
             if (continued != "") print FILENAME ": " continued
             in_shell = 0
             next
         }
         !in_shell { next }
+        { $0 = substr($0, 1, indent) ~ /^[[:space:]]*$/ ? substr($0, indent + 1) : $0 }
         heredoc != "" {
             if ($0 == heredoc) heredoc = ""
             next
@@ -274,6 +282,60 @@ validate_api() {
     return "$fail"
 }
 
+# The arguments of the deploy scripts the documentation runs, by path under deploy/: its flags,
+# `--flag=` for one taking a value, and its number of positional arguments.
+declare -A script_flags=(
+    [render.sh]="--restore-check --images= --gateway-domain= --origin= --project-name= --no-download"
+    [preflight.sh]="--env= --compose= --environment-dir= --workspace= --os-image= --restore-check --offline --unsealed"
+    [product/preflight.sh]="--env= --compose= --environment-dir= --workspace= --os-image= --offline --unsealed"
+    [pinned-compose.sh]="--no-download"
+)
+declare -A script_positionals=(
+    [render.sh]=1 [preflight.sh]=0 [product/preflight.sh]=0 [pinned-compose.sh]=0
+    [verify-attestation.sh]=5 [verify-ingress-evidence.sh]=2 [check-route-modes.sh]=2
+    [validate-compose.sh]=0 [runbooks/sign-admin-request.sh]=5
+)
+
+# Checks one simple command that runs a deploy script of the table above: known flags, each
+# value present, and exactly the script's number of positional arguments.
+validate_script() {
+    local -a words
+    local index=0 name word flag positionals=0 fail=0
+    read -r -a words <<< "$1"
+    while (( index < ${#words[@]} )) && [[ "${words[index]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do
+        index=$((index + 1))
+    done
+    [[ "${words[index]:-}" =~ (^|/)deploy/(.+\.sh)$ ]] || return 0
+    name=${BASH_REMATCH[2]}
+    [[ -v "script_positionals[$name]" ]] || return 0
+    for ((index = index + 1; index < ${#words[@]}; index++)); do
+        word=${words[index]}
+        case "$word" in
+            '>' | '>>' | '<' | '2>') index=$((index + 1)); continue ;;
+            '>'* | '<'* | '2>'*) continue ;;
+            --*)
+                flag=${word%%=*}
+                if [[ " ${script_flags[$name]:-} " == *" $flag= "* ]]; then
+                    [[ "$word" == *=* ]] || index=$((index + 1))
+                    if (( index >= ${#words[@]} )) && [[ "$word" != *=* ]]; then
+                        echo "$2: $flag of deploy/$name needs a value" >&2
+                        fail=1
+                    fi
+                elif [[ " ${script_flags[$name]:-} " != *" $flag "* ]]; then
+                    echo "$2: unknown flag $flag for deploy/$name" >&2
+                    fail=1
+                fi
+                ;;
+            *) positionals=$((positionals + 1)) ;;
+        esac
+    done
+    if (( positionals != script_positionals[$name] )); then
+        echo "$2: deploy/$name takes ${script_positionals[$name]} arguments, not $positionals" >&2
+        fail=1
+    fi
+    return "$fail"
+}
+
 validate_commands() {
     local commands=$1 fail=0 source line command arguments
     while IFS= read -r line; do
@@ -286,6 +348,21 @@ validate_commands() {
                 validate_topup "${arguments#topup}" "$source" || fail=1
             fi
             validate_api "$command" "$source" || fail=1
+            validate_script "$command" "$source" || fail=1
+        done < <(split_commands "$line")
+    done < "$commands"
+    return "$fail"
+}
+
+# Only the deploy scripts' arguments, for documentation outside the runbooks.
+validate_script_commands() {
+    local commands=$1 fail=0 source line command
+    while IFS= read -r line; do
+        source=${line%%: *}
+        source=${source#"$root/"}
+        line=${line#*: }
+        while IFS= read -r command; do
+            validate_script "$command" "$source" || fail=1
         done < <(split_commands "$line")
     done < "$commands"
     return "$fail"
@@ -296,6 +373,12 @@ mapfile -t runbook_files < <(
 )
 extract_commands "${runbook_files[@]}" > "$tmp/runbook.commands"
 validate_commands "$tmp/runbook.commands"
+mapfile -t document_files < <(
+    find "$root/deploy" "$root/docs" "$root/CONTRIBUTING.md" -name '*.md' \
+        -not -path '*/node_modules/*' -not -path "$root/deploy/runbooks/*" | sort
+)
+extract_commands "${document_files[@]}" > "$tmp/document.commands"
+validate_script_commands "$tmp/document.commands"
 
 extract_commands "$root/deploy/runbooks/tests/valid.md" > "$tmp/valid.commands"
 if ! validate_commands "$tmp/valid.commands"; then
@@ -320,6 +403,9 @@ expected=(
     'unknown API operation: GET /v1/admin/routes/r/pause'
     'unknown API operation: DELETE /v1/admin/reports/daily'
     'unknown API operation: PUT /v1/admin/products'
+    'deploy/verify-attestation.sh takes 5 arguments, not 4'
+    'unknown flag --bogus for deploy/render.sh'
+    'deploy/render.sh takes 1 arguments, not 2'
 )
 for message in "${expected[@]}"; do
     if ! grep -Fq -- "$message" "$tmp/negative.out"; then
@@ -336,4 +422,5 @@ fi
 
 echo "runbook CLI references match current-source topup --help"
 echo "runbook API references match crates/topup/openapi.json and openapi.admin.json"
+echo "documented deploy script invocations match their arguments"
 echo "negative fixture failed with exactly ${#expected[@]} expected errors"

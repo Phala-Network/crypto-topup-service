@@ -129,10 +129,11 @@ sandbox-only contracts (a mintable test token, a second token for `unsupported_a
    [Custom domain](../README.md#custom-domain)), its admin key, its keyless Sepolia providers as
    `provider-a` and `provider-b`, and the rendered route as its only `routes` item. Its
    `compose.yaml` holds its own backup prefix, and the domain as dstack-ingress's `DOMAIN`. Then
-   render it as Deploy renders an Environment, with a release's `images.json`:
+   render it as Deploy renders an Environment, with a release's `images.json` and the sandbox
+   CVM's gateway (`$SANDBOX_GATEWAY_DOMAIN`, `gateway.<base domain>` of its node):
 
    ```sh
-   deploy/render.sh --images images.json --gateway-domain <the sandbox CVM's gateway> \
+   deploy/render.sh --images images.json --gateway-domain "$SANDBOX_GATEWAY_DOMAIN" \
      sandbox-environment >sandbox-compose.yml
    ```
 
