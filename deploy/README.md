@@ -108,7 +108,8 @@ The tag runs [Release](../.github/workflows/release.yml). It runs the whole CI w
 commit first, then builds each image on its own GitHub-hosted runner with
 [verify-image.sh](verify-image.sh) (Buildx v0.37.1 and BuildKit v0.33.0 pinned by digest; `make
 verify-image` rebuilds the same way), pushes it to `ghcr.io/phala-network/` tagged `v<version>`
-(public packages: CVMs pull without credentials), and attests its build provenance.
+(public packages: CVMs pull without credentials), and smoke-tests and attests it by the digest
+BuildKit reports for the push (`--metadata-file`), never by the tag.
 `phala-pay` and `phala-pay-reference-product` are reproducible: the pushed build must have the
 digest of an earlier build, and anyone rebuilds it from the tag. `postgres-walg` is not (apt and
 dpkg timestamps): it has provenance only. The GitHub release's assets, each attested, are:

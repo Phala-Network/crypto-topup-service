@@ -3,11 +3,13 @@
 # the commit's time as SOURCE_DATE_EPOCH and the commit as SOURCE_COMMIT, exactly as the Release
 # workflow does: Buildx v0.37.1 and a temporary builder running the pinned BuildKit image.
 #
-# By default the image must be reproducible: build 1 goes to an OCI archive, build 2 to another
-# archive or, with PUBLISH_IMAGE (a repository:tag), to the registry, and both must have the same
-# manifest and config digests; the registry must serve the manifest built. --once builds once and
-# publishes: postgres-walg, which is not reproducible (apt and dpkg record wall-clock times) and so
-# has provenance only. IMAGE_REF_FILE receives the published repository@sha256.
+# Every digest is the one BuildKit reports for what it built (`--metadata-file`,
+# `containerimage.digest` and `containerimage.config.digest`), never a tag read back. By default the
+# image must be reproducible: build 1 goes to an OCI archive, build 2 to another archive or, with
+# PUBLISH_IMAGE (a repository:tag), to the registry, and both must have the same manifest and config
+# digests. --once builds once and publishes: postgres-walg, which is not reproducible (apt and dpkg
+# record wall-clock times) and so has provenance only. IMAGE_REF_FILE receives
+# repository@<the pushed build's digest>, which the Release workflow smoke-tests and attests.
 #
 # Usage: deploy/verify-image.sh [--once]
 set -eu
@@ -48,7 +50,8 @@ trap cleanup EXIT INT TERM
 docker buildx create --name "$builder" --driver docker-container --driver-opt "image=$buildkit" \
     >/dev/null
 
-# build OUTPUT: one clean build to OUTPUT (a Buildx --output).
+# build N OUTPUT: clean build N to OUTPUT (a Buildx --output); prints the manifest and config
+# digests BuildKit reports for it.
 build() {
     docker buildx build \
         --builder "$builder" \
@@ -59,32 +62,24 @@ build() {
         --provenance=false \
         --sbom=false \
         --file "$dockerfile" \
-        --output "$1,rewrite-timestamp=true,oci-mediatypes=true" \
+        --metadata-file "$tmp/build-$1.json" \
+        --output "$2,rewrite-timestamp=true,oci-mediatypes=true" \
         "$root" >&2
+    jq -er '"\(."containerimage.digest") \(."containerimage.config.digest")"' "$tmp/build-$1.json"
 }
-# archived N: build N as an OCI archive; prints its manifest and config digests.
 archived() {
-    build "type=oci,dest=$tmp/build-$1.tar,name=phala-pay:repro"
-    mkdir "$tmp/build-$1"
-    tar -xf "$tmp/build-$1.tar" -C "$tmp/build-$1"
-    manifest=$(jq -er '.manifests[0].digest' "$tmp/build-$1/index.json")
-    printf '%s %s\n' "$manifest" "$(jq -er '.config.digest' "$tmp/build-$1/blobs/sha256/${manifest#sha256:}")"
+    build "$1" "type=oci,dest=$tmp/build-$1.tar,name=phala-pay:repro"
 }
-# published: build and push PUBLISH_IMAGE; prints the manifest and config digests the registry
-# serves (one platform and no attestations: a manifest, not an index).
 published() {
-    build "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false"
-    docker buildx imagetools inspect "$PUBLISH_IMAGE" --raw >"$tmp/registry.json"
-    printf 'sha256:%s %s\n' "$(sha256sum "$tmp/registry.json" | awk '{print $1}')" \
-        "$(jq -er '.config.digest' "$tmp/registry.json")"
+    build "$1" "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false"
 }
 
 if [ "$once" -eq 1 ]; then
-    built=$(published)
+    built=$(published 1)
     echo "published (not reproducible): manifest=${built% *} config=${built#* }"
 else
     first=$(archived 1)
-    if [ -n "${PUBLISH_IMAGE:-}" ]; then second=$(published); else second=$(archived 2); fi
+    if [ -n "${PUBLISH_IMAGE:-}" ]; then second=$(published 2); else second=$(archived 2); fi
     printf 'build 1: manifest=%s config=%s\nbuild 2: manifest=%s config=%s\n' \
         "${first% *}" "${first#* }" "${second% *}" "${second#* }"
     [ "$first" = "$second" ] || { echo "image reproducibility check failed" >&2; exit 1; }

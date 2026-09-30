@@ -29,6 +29,27 @@ matches() {
     printf '%s\n' "$1" | grep -Eqx "$2"
 }
 label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+# endpoint_is_origin URL: URL, parsed by Perl's URI (RFC 3986), is an https origin (or http, with the
+# local switch): a DNS name, an IPv4 address, or a bracketed IPv6 address; a port from 1 to 65535
+# (443 if none); no user information, path (but `/`), query, or fragment.
+endpoint_is_origin() {
+    ENDPOINT=$1 ALLOW_HTTP=${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off} \
+        perl -MURI -MSocket=inet_pton,AF_INET,AF_INET6 -e '
+        exit 1 if $ENV{ENDPOINT} =~ /[\s[:cntrl:]]/;
+        my $uri = URI->new($ENV{ENDPOINT});
+        my $scheme = $uri->scheme // "";
+        exit 1 unless $scheme eq "https" or ($scheme eq "http" and $ENV{ALLOW_HTTP} eq "on");
+        exit 1 if defined $uri->userinfo or defined $uri->query or defined $uri->fragment
+            or ($uri->path ne "" and $uri->path ne "/");
+        my $port = $uri->port // "";
+        exit 1 unless $port =~ /\A[0-9]{1,5}\z/ and $port >= 1 and $port <= 65535;
+        my $host = lc($uri->host // "");
+        exit(defined inet_pton(AF_INET6, $host) ? 0 : 1) if $uri->authority =~ /\A\[/;
+        exit(defined inet_pton(AF_INET, $host) ? 0 : 1) if $host =~ /\A[0-9.]+\z/;
+        exit 1 if $host eq "" or length $host > 253;
+        /\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\z/ or exit 1 for split /\./, $host, -1;
+        exit 0'
+}
 check_object_store() {
     if [ -n "${WALG_FILE_PREFIX:-}" ]; then
         [ -z "${WALG_S3_PREFIX:-}" ] || refuse "set WALG_FILE_PREFIX or WALG_S3_PREFIX, not both"
@@ -40,15 +61,9 @@ check_object_store() {
     matches "$prefix" "s3://$label(\\.$label)*(/[A-Za-z0-9._~/-]*)?" &&
         [ "${#bucket}" -ge 3 ] && [ "${#bucket}" -le 63 ] ||
         refuse "WALG_S3_PREFIX must be s3://BUCKET[/PATH] with a valid bucket name"
-    scheme=https
-    [ "${TOPUP_OBJECT_STORE_ALLOW_HTTP:-off}" != on ] || scheme='https?'
-    endpoint=${AWS_ENDPOINT:-} port=443
-    matches "$endpoint" "$scheme://$label(\\.$label)*(:[0-9]{1,5})?/?" ||
-        refuse "AWS_ENDPOINT must be an https origin, https://HOST[:PORT]"
-    authority=${endpoint#*://}
-    authority=${authority%/}
-    case "$authority" in *:*) port=${authority##*:} ;; esac
-    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || refuse "AWS_ENDPOINT's port must be 1 to 65535"
+    endpoint_is_origin "${AWS_ENDPOINT:-}" ||
+        refuse "AWS_ENDPOINT must be an https origin, https://HOST[:PORT]: a DNS name or an IP address," \
+            "a port from 1 to 65535, and no user, path, query, or fragment"
     matches "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' ||
         refuse "AWS_REGION must be a region name such as auto or us-east-1"
 }

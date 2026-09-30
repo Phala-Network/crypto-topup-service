@@ -4,7 +4,7 @@
 services:
   postgres:
     environment: &walg
-      WALG_S3_PREFIX: s3://crypto-topup-test/staging-mt-20260928
+      WALG_S3_PREFIX: s3://crypto-topup-test/staging-v030
       AWS_ENDPOINT: https://1d694c298092ffa09c793cbca4587812.r2.cloudflarestorage.com
       AWS_REGION: auto
       AWS_S3_FORCE_PATH_STYLE: "true"

@@ -104,16 +104,20 @@ expect_store() {
 store_bucket=s3://topup-backups/postgres
 expect_exit 64 "WALG_S3_PREFIX must be s3://BUCKET[/PATH]" "$image"
 expect_store 64 "WALG_S3_PREFIX must be s3://BUCKET[/PATH]" s3://a..b/p https://s3.example auto "$image"
-expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" "" auto "$image"
-expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" https://a..b:99999 auto \
-    "$image" walg-cron backup-push "0 3 * * *"
-expect_store 64 "AWS_ENDPOINT's port must be 1 to 65535" "$store_bucket" https://s3.example:99999 auto "$image"
 expect_store 64 "AWS_REGION must be a region name" "$store_bucket" https://s3.example "" "$image"
 expect_store 64 "set WALG_FILE_PREFIX or WALG_S3_PREFIX, not both" "$store_bucket" https://s3.example auto \
     -e WALG_FILE_PREFIX=/tmp "$image"
-# Plain http only with the local stacks' switch, which no attested compose can carry; the settings
-# then pass, and walg-cron itself refuses its missing arguments.
-expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" http://s3:3900 us-east-1 "$image"
+# AWS_ENDPOINT, parsed as a URL: an https origin with a DNS name or an IP address and a valid port.
+# An accepted one reaches walg-cron, which refuses its missing arguments.
+for endpoint in https://S3.EXAMPLE https://s3.example:443/ 'https://[2001:db8::1]:9000' https://192.0.2.1; do
+    expect_store 64 "usage: walg-cron" "$store_bucket" "$endpoint" auto "$image" walg-cron
+done
+for endpoint in "" s3.example http://s3.example https://999.999.999.999 https://1.2.3 'https://[zz::1]' \
+    https://a..b https://-a.example https://s3.example/path 'https://s3.example?x=1' \
+    'https://s3.example#f' https://user@s3.example https://s3.example:0 https://s3.example:99999; do
+    expect_store 64 "AWS_ENDPOINT must be an https origin" "$store_bucket" "$endpoint" auto "$image" walg-cron
+done
+# Plain http only with the local stacks' switch, which no attested compose can carry.
 expect_store 64 "usage: walg-cron" "$store_bucket" http://s3:3900 us-east-1 -e TOPUP_OBJECT_STORE_ALLOW_HTTP=on \
     "$image" walg-cron
 

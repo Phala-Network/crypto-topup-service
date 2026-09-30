@@ -85,7 +85,7 @@ expect_failure unsealed "AWS_ACCESS_KEY_ID is empty" \
 passes --env "$tmp/unsealed.env" --compose "$tmp/service.yml" --environment-dir "$staging" --unsealed
 
 # A stale or hand-edited render is refused; so is a policy violation it carries.
-sed 's|s3://crypto-topup-test/staging-mt-20260928|s3://other/postgres|' "$tmp/service.yml" >"$tmp/edited.yml"
+sed 's|s3://crypto-topup-test/staging-v030|s3://other/postgres|' "$tmp/service.yml" >"$tmp/edited.yml"
 expect_failure edited "differs from a fresh render" \
     --env "$tmp/complete.env" --compose "$tmp/edited.yml" --environment-dir "$staging"
 sed 's|DOMAIN: pay-api-staging.phala.com|DOMAIN: other.phala.com|' "$tmp/service.yml" >"$tmp/other-domain.yml"
