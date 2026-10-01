@@ -6,7 +6,12 @@ import type { ClientQuote } from "./quote.js";
  * `1,273.9185`. Every digit is kept: the service rounds a quote to a few decimals.
  */
 export function formatTokenAmount(quote: ClientQuote, locale?: string): string {
-  const [whole = "0", fraction] = tokenAmount(quote).split(".");
+  return formatUnitsGrouped(BigInt(quote.amount_atomic), quote.decimals, locale);
+}
+
+/** An atomic token amount, grouped for `locale` and without trailing zeros, as `formatTokenAmount`. */
+export function formatUnitsGrouped(atomic: bigint, decimals: number, locale?: string): string {
+  const [whole = "0", fraction] = formatUnits(atomic, decimals).split(".");
   const format = new Intl.NumberFormat(locale);
   const grouped = format.format(BigInt(whole));
   if (fraction === undefined) {

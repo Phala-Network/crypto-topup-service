@@ -1,7 +1,6 @@
 import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
-import { useMutation } from "@tanstack/react-query";
-import { Check, CircleAlert, Cloud, CircleCheck, Copy, ExternalLink, FlaskConical, Gift, Lock, Wallet } from "lucide-react";
+import { Check, CircleAlert, Cloud, CircleCheck, Copy, FlaskConical, Gift, Lock } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -18,10 +17,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Account, Asset, CreatedQuote, DepositAddressResponse, Network } from "./api.js";
 import { ChainIcon, TokenIcon, assetOf, networkOf, tokenFullName } from "./chains.js";
-import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
+import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, loadSdk } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
-import { dollars, percent, presetDollars, rate, signedDollars, tokenName } from "./format.js";
+import { atomicAmount, dollars, percent, presetDollars, rate, signedDollars, tokenName } from "./format.js";
+import { FundWallet, TestTokens, type Need } from "./Funding.js";
 import { useCreateQuote } from "./queries.js";
+import type { PaidWith } from "./testTokens.js";
 import { cn } from "@/lib/utils";
 
 const Checkout = lazy(() => loadSdk().then((sdk) => ({ default: sdk.Checkout })));
@@ -80,6 +81,16 @@ export function Product({
   });
   const network = networks?.find((each) => each.chain_id === choice.chainId) ?? networks?.[0];
   const asset = network?.assets.find((each) => each.asset === choice.asset) ?? network?.assets[0];
+  // The amount to send to the deposit address from the wallet, in the chosen token.
+  const [sendAmount, setSendAmount] = useState("25");
+  // The payment at hand, which the test token mint covers: the quote's, or the amount to send.
+  let need: Need | null = null;
+  if (method === "quote" && session !== null && session.chain_id === network?.chain_id) {
+    need = { asset: session.asset, atomic: BigInt(session.amount_atomic) };
+  } else if (method === "address" && address !== null && asset !== undefined) {
+    const atomic = atomicAmount(sendAmount, asset.decimals);
+    need = atomic === null ? null : { asset: asset.asset, atomic };
+  }
   const picker = (
     <PaymentOptions
       networks={networks}
@@ -189,6 +200,8 @@ export function Product({
                     appearance={appearance}
                     created={address}
                     onCreated={onAddress}
+                    sendAmount={sendAmount}
+                    onSendAmountChange={setSendAmount}
                   />
                 )}
               </TabsContent>
@@ -196,7 +209,7 @@ export function Product({
           </section>
         </div>
       </section>
-      {network?.testnet === true && <TestTokens key={network.chain_id} network={network} className="mt-1" />}
+      {network?.testnet === true && <TestTokens key={network.chain_id} network={network} need={need} className="mt-1" />}
     </div>
   );
 }
@@ -398,27 +411,6 @@ function TokenOption({ id, asset, testnet }: { id: string; asset: Asset; testnet
   );
 }
 
-/**
- * A row of the test tokens card, the same for its action and its links: the token's mark and what
- * the row does, and at its end the kind of action (the wallet, or a link out).
- */
-const TOKEN_ROW = "h-9 w-full justify-between";
-
-/** A faucet, off the page: its mark and name, and the external-link icon at the row's end. */
-function FaucetLink({ href, icon, title, children }: { href: string; icon: ReactNode; title?: string; children: ReactNode }) {
-  return (
-    <Button asChild variant="outline" className={TOKEN_ROW}>
-      <a href={href} target="_blank" rel="noreferrer" title={title}>
-        <span className="flex items-center gap-2">
-          {icon}
-          {children}
-        </span>
-        <ExternalLink aria-hidden="true" />
-      </a>
-    </Button>
-  );
-}
-
 function AmountPicker({
   account,
   network,
@@ -559,8 +551,11 @@ function QuoteCheckout({
   onNewTopUp: () => void;
 }) {
   const [status, setStatus] = useState<CheckoutStatus>("loading");
+  // The wallet that held too little for the quote, so the checkout sent nothing.
+  const [short, setShort] = useState<PaidWith | null>(null);
   const testnet = network?.testnet ?? true;
-  const bps = assetOf(network, session.asset)?.bonus_bps ?? 0;
+  const token = assetOf(network, session.asset);
+  const bps = token?.bonus_bps ?? 0;
   const symbol = session.asset.toUpperCase();
   return (
     <div className="flex flex-col gap-4">
@@ -589,9 +584,13 @@ function QuoteCheckout({
             apiBase={account.api_base}
             appearance={appearance}
             onChange={(state) => setStatus(state.status)}
+            onWalletError={(error, wallet) => setShort(error.code === "insufficient_balance" ? wallet : null)}
             onSuccess={onCredited}
           />
         </Suspense>
+      )}
+      {short !== null && status === "waiting" && network !== undefined && token !== undefined && (
+        <FundWallet network={network} token={token} needed={BigInt(session.amount_atomic)} wallet={short} />
       )}
       <Button type="button" variant="outline" className="w-full" onClick={onNewTopUp}>
         Add more credits
@@ -645,67 +644,5 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
         {bonus > 0 && <p className="mt-1 text-xs text-muted-foreground">The bonus is this demo merchant's promotion.</p>}
       </AlertDescription>
     </Alert>
-  );
-}
-
-/**
- * Where to get test tokens on the selected network, whatever token is selected: the mintable test
- * token's public mint, from the visitor's wallet (a button, marked with the wallet); then, as
- * links out, another test token's issuer faucet and the network's gas faucets.
- */
-function TestTokens({ network, className }: { network: Network; className?: string }) {
-  const mintable = network.assets.find((each) => each.mintable);
-  const fromFaucet = network.assets.find((each) => !each.mintable && each.faucet !== null);
-  const mint = useMutation({
-    mutationFn: async (token: Asset) => {
-      const { mintTestTokens } = await wallet();
-      return mintTestTokens(network.chain_id, token.contract, "1000", token.decimals);
-    },
-  });
-  const chain = network.name.replace(/ testnet$/, "");
-  return (
-    <div
-      role="note"
-      aria-label="Test tokens"
-      className={cn("rounded-xl border border-dashed text-sm", className)}
-    >
-      <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
-        <span className="font-medium">Need test tokens?</span>
-        <InfoTip label="About test tokens">
-          {mintable !== undefined && `Test ${mintable.symbol} is free: its contract lets anyone mint it, so your own wallet mints it. `}
-          {fromFaucet !== undefined && `Test ${fromFaucet.symbol} is free from Circle's faucet: pick ${chain} as the network there. `}
-          Gas is {chain} ETH, also free, from a public faucet.
-        </InfoTip>
-      </div>
-      <div className="flex flex-col gap-2 px-5 pt-3 pb-4 sm:px-6">
-        {mintable !== undefined && (
-          <Button type="button" variant="outline" className={TOKEN_ROW} onClick={() => mint.mutate(mintable)} disabled={mint.isPending}>
-            <span className="flex items-center gap-2">
-              <TokenIcon asset={mintable.asset} className="size-4" />
-              {mint.isPending ? "Confirm in your wallet…" : `Mint 1,000 test ${mintable.symbol}`}
-            </span>
-            <Wallet aria-hidden="true" />
-          </Button>
-        )}
-        {fromFaucet !== undefined && fromFaucet.faucet !== null && (
-          <FaucetLink href={fromFaucet.faucet} icon={<TokenIcon asset={fromFaucet.asset} className="size-4" />} title={`On the faucet, pick ${chain} as the network.`}>
-            Circle {fromFaucet.symbol} faucet
-          </FaucetLink>
-        )}
-        {network.faucet !== null && (
-          <FaucetLink href={network.faucet} icon={<ChainIcon chainId={network.chain_id} className="size-4 rounded-full" />}>
-            {chain} ETH faucets
-          </FaucetLink>
-        )}
-      </div>
-      <p aria-live="polite" className="border-t px-5 py-3 text-xs text-muted-foreground empty:hidden sm:px-6">
-        {mint.isSuccess && (
-          <>
-            Minted: <ExplorerLink chainId={network.chain_id} kind="tx" value={mint.data} copy />
-          </>
-        )}
-        {mint.isError && <span className="text-destructive">{errorMessage(mint.error, "Minting failed.")}</span>}
-      </p>
-    </div>
   );
 }

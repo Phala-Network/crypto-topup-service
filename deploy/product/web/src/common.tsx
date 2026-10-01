@@ -231,6 +231,14 @@ export function errorMessage(error: unknown, fallback: string): string {
   return message ?? fallback;
 }
 
+/**
+ * Whether the wallet held too little for a payment, which was not sent: the SDK's `WalletError`
+ * `insufficient_balance`, read by its code so the SDK stays out of the page's first load.
+ */
+export function isShortOfTokens(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "insufficient_balance";
+}
+
 /** Triggers a download of `value` as a JSON file (a Blob URL: no request leaves the page). */
 export function downloadJson(name: string, value: unknown): void {
   const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));

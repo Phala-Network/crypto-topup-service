@@ -2,7 +2,6 @@ import type { Appearance } from "@phala/pay/react";
 import { useMutation } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
-import { parseUnits } from "viem";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { FieldLabel } from "@/components/ui/field";
@@ -10,9 +9,10 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { Account, Asset, DepositAddressResponse, Network } from "./api.js";
-import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, loadSdk, wallet } from "./common.js";
+import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, errorMessage, isShortOfTokens, loadSdk, wallet } from "./common.js";
 import { assetOf, networkOf } from "./chains.js";
-import { dollars, price, signedDollars, statusLabel, tokenName, tokens } from "./format.js";
+import { atomicAmount, dollars, price, signedDollars, statusLabel, tokenName, tokens } from "./format.js";
+import { FundWallet } from "./Funding.js";
 import { useCreateDepositAddress, useNetworks } from "./queries.js";
 
 const DepositAddress = lazy(() => loadSdk().then((sdk) => ({ default: sdk.DepositAddress })));
@@ -31,6 +31,8 @@ export function DepositAddressPanel({
   appearance,
   created,
   onCreated,
+  sendAmount,
+  onSendAmountChange,
 }: {
   account: Account;
   /** The network and token choice, shown until the address is; the address's view starts there. */
@@ -40,6 +42,9 @@ export function DepositAddressPanel({
   appearance: Appearance;
   created: DepositAddressResponse | null;
   onCreated: (created: DepositAddressResponse) => void;
+  /** The amount to send from the browser wallet, as typed. */
+  sendAmount: string;
+  onSendAmountChange: (amount: string) => void;
 }) {
   const show = useCreateDepositAddress();
 
@@ -101,6 +106,8 @@ export function DepositAddressPanel({
       <PayFromWallet
         network={network}
         asset={asset}
+        amount={sendAmount}
+        onAmountChange={onSendAmountChange}
         to={
           view.networks.find((each) => each.chain_id === network?.chain_id)?.address ??
           view.address ??
@@ -177,13 +184,16 @@ function Credits({ account }: { account: Account }) {
 function PayFromWallet({
   network,
   asset,
+  amount,
+  onAmountChange,
   to,
 }: {
   network: Network | undefined;
   asset: Asset | undefined;
+  amount: string;
+  onAmountChange: (amount: string) => void;
   to: string;
 }) {
-  const [amount, setAmount] = useState("25");
   const [invalid, setInvalid] = useState<string | null>(null);
   const id = useId();
   const symbol = asset?.symbol ?? "tokens";
@@ -193,15 +203,13 @@ function PayFromWallet({
         throw new Error("Choose a network and a token first.");
       }
       const { transferTokens } = await wallet();
-      return transferTokens(network.chain_id, asset.contract, to, atomic);
+      return transferTokens(network.chain_id, asset, to, atomic);
     },
   });
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    let atomic: bigint;
-    try {
-      atomic = parseUnits(amount.trim(), asset?.decimals ?? 18);
-    } catch {
+    const atomic = atomicAmount(amount, asset?.decimals ?? 18);
+    if (atomic === null) {
       setInvalid(`Enter an amount of ${symbol}.`);
       return;
     }
@@ -224,7 +232,13 @@ function PayFromWallet({
           className="h-10 tabular-nums"
           inputMode="decimal"
           value={amount}
-          onChange={(event) => setAmount(event.target.value)}
+          // Fixed while the wallet confirms the transfer: the transfer is for this amount.
+          disabled={send.isPending}
+          onChange={(event) => {
+            onAmountChange(event.target.value);
+            // A refusal, and its mint, were for the amount before.
+            send.reset();
+          }}
         />
         <Button type="submit" variant="outline" size="lg" className="h-10" disabled={send.isPending || to === ""}>
           {send.isPending ? "Confirm in your wallet…" : "Send"}
@@ -242,6 +256,9 @@ function PayFromWallet({
           </>
         )}
       </p>
+      {invalid === null && isShortOfTokens(send.error) && network !== undefined && asset !== undefined && send.variables !== undefined && (
+        <FundWallet network={network} token={asset} needed={send.variables} />
+      )}
     </form>
   );
 }

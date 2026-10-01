@@ -1,9 +1,9 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
-import { createWalletClient, custom } from "viem";
+import { createWalletClient, custom, encodeFunctionResult, erc20Abi } from "viem";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Checkout } from "../src/react/index.js";
-import type { CheckoutState, ClientQuote, EthereumProvider } from "../src/index.js";
+import type { CheckoutState, ClientQuote, EthereumProvider, WalletError } from "../src/index.js";
 import { ADDRESS, API_BASE, CLIENT_SECRET, TOKEN, quote } from "./fixtures.js";
 
 const NOW = (quote().expires_at - 14 * 60 - 32) * 1000;
@@ -32,6 +32,30 @@ async function renderCheckout(props: Partial<Parameters<typeof Checkout>[0]> = {
   );
   await screen.findByText("Waiting for your payment");
   return view;
+}
+
+/** A browser wallet on the quote's chain whose account holds `balance` of the token; it records
+ * the methods called. */
+function browserWallet(hash: string, balance = 10n ** 30n) {
+  const methods: string[] = [];
+  const provider: EthereumProvider = {
+    request: ({ method }) => {
+      methods.push(method);
+      switch (method) {
+        case "eth_requestAccounts":
+          return Promise.resolve([ADDRESS]);
+        case "eth_chainId":
+          return Promise.resolve(`0x${quote().chain_id.toString(16)}`);
+        case "eth_call":
+          return Promise.resolve(encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: balance }));
+        case "eth_sendTransaction":
+          return Promise.resolve(hash);
+        default:
+          return Promise.reject(new Error(`unexpected ${method}`));
+      }
+    },
+  };
+  return { provider, methods };
 }
 
 async function poll() {
@@ -147,21 +171,7 @@ describe("Checkout", () => {
 
   it("shows the full transaction hash after a wallet payment, linked to the explorer", async () => {
     const hash = `0x${"ab".repeat(32)}`;
-    const provider: EthereumProvider = {
-      request: ({ method }) => {
-        switch (method) {
-          case "eth_requestAccounts":
-            return Promise.resolve([ADDRESS]);
-          case "eth_chainId":
-            return Promise.resolve(`0x${quote().chain_id.toString(16)}`);
-          case "eth_sendTransaction":
-            return Promise.resolve(hash);
-          default:
-            return Promise.reject(new Error(`unexpected ${method}`));
-        }
-      },
-    };
-    vi.stubGlobal("ethereum", provider);
+    vi.stubGlobal("ethereum", browserWallet(hash).provider);
     const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
     await renderCheckout();
     await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
@@ -171,20 +181,7 @@ describe("Checkout", () => {
 
   it("pays with the page's own wallet client instead of discovered wallets", async () => {
     const hash = `0x${"cd".repeat(32)}`;
-    const methods: string[] = [];
-    const provider: EthereumProvider = {
-      request: ({ method }) => {
-        methods.push(method);
-        switch (method) {
-          case "eth_chainId":
-            return Promise.resolve(`0x${quote().chain_id.toString(16)}`);
-          case "eth_sendTransaction":
-            return Promise.resolve(hash);
-          default:
-            return Promise.reject(new Error(`unexpected ${method}`));
-        }
-      },
-    };
+    const { provider, methods } = browserWallet(hash);
     vi.stubGlobal("ethereum", provider);
     const walletClient = createWalletClient({ account: ADDRESS, transport: custom(provider) });
     const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
@@ -196,5 +193,20 @@ describe("Checkout", () => {
     await user.click(within(panel).getByRole("button", { name: "Pay with crypto" }));
     await screen.findByRole("link", { name: hash });
     expect(methods).not.toContain("eth_requestAccounts");
+  });
+
+  it("sends nothing from a wallet holding too little, says so, and reports it to the page", async () => {
+    const { provider, methods } = browserWallet(`0x${"ef".repeat(32)}`, 10n ** 18n);
+    vi.stubGlobal("ethereum", provider);
+    const errors: [WalletError, unknown][] = [];
+    const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
+    await renderCheckout({ onWalletError: (error, wallet) => errors.push([error, wallet]) });
+    await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
+    await screen.findByText(
+      "Your wallet holds 1 PHA, less than the 100.502512562814070352 PHA to pay. Nothing was sent.",
+    );
+    // With the wallet that tried, so the page funds that one.
+    expect(errors.map(([error, wallet]) => [error.code, wallet])).toEqual([["insufficient_balance", provider]]);
+    expect(methods).not.toContain("eth_sendTransaction");
   });
 });
