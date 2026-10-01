@@ -336,7 +336,8 @@ jobs:
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-          # A new CVM is unsealed, so it settles without running (deploy/phala-cvm.sh, wait).
+          # A new CVM is unsealed: it may settle without running, but only with its console's
+          # evidence of the unsealed failure and nothing else (deploy/phala-cvm.sh, wait).
           if [[ "$MODE" == provision ]]; then
             "$KIT/deploy/phala-cvm.sh" wait --unsealed "$cvm_id" >"$WORK/cvm.json"
           else
@@ -346,7 +347,7 @@ jobs:
       # A new CVM lands on a node chosen by Phala Cloud. Its gateway (the domain's CNAME target, which
       # dstack-ingress names) is known only now, and is attested configuration: upgrade the new CVM
       # to the compose rendered with it (no -e: the env stays). Still unsealed, it does not run, so
-      # no --wait (the CLI's waits for `running`): it waits for the CVM to settle.
+      # no --wait (the CLI's waits for `running`): it waits as the provision did.
       - name: Set the values known only after provisioning
         if: inputs.mode == 'provision'
         env:
@@ -421,11 +422,23 @@ jobs:
         if: inputs.mode == 'upgrade'
         run: '"$KIT/deploy/phala-cvm.sh" healthz "$PUBLIC_URL"'
 
+      # Right after a DNS change the domain can still reach the previous instance, from a resolver's
+      # cache, or the new one can still be obtaining its certificate: retried for 15 minutes.
       - name: Verify the certificate evidence
         if: inputs.mode == 'upgrade'
         run: |
-          "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" 2>&1 |
-            tee "$WORK/ingress-evidence.txt"
+          for attempt in $(seq 30); do
+            if "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" >"$WORK/ingress-evidence.txt" 2>&1; then
+              cat "$WORK/ingress-evidence.txt"
+              break
+            fi
+            cat "$WORK/ingress-evidence.txt"
+            if ((attempt == 30)); then
+              echo "::error::the certificate evidence of $DOMAIN did not verify within 15 minutes"
+              exit 1
+            fi
+            sleep 30
+          done
           { echo '```text'; cat "$WORK/ingress-evidence.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Print the owner's sealing step

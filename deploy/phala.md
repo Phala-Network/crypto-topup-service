@@ -79,9 +79,12 @@ mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-comp
 npm ci --prefix kit/deploy/tools --ignore-scripts
 ```
 
-The reset runs v0.3.1, called by [deploy-phala.yml](../.github/workflows/deploy-phala.yml) at its
-commit: v0.3.0's Deploy cannot provision (it waits for the unsealed CVM to run, and reuses the CVM
-name). Already in place: staging's
+Run a reset with v0.3.1 or later. v0.3.0's Deploy cannot provision: it waits for the unsealed CVM to
+run, and reuses the CVM name (the v0.3.0 cutover recovered by hand: seal, then upgrade, as
+[Deploy](README.md#deploy) step 2 says). **Until `v0.3.1` is tagged,
+[deploy-phala.yml](../.github/workflows/deploy-phala.yml) pins v0.3.0's commit;** right after the
+tag, its own adoption pull request moves `uses:` and `version` to the v0.3.1 commit SHA, before any
+reset. Already in place: staging's
 [compose.yaml](environments/phala-network/staging/topup/compose.yaml) names the new, empty prefix
 `s3://crypto-topup-test/staging-v030` (committed ahead of the cutover: until the reset, never
 upgrade the old staging CVM from `main`). The factory
