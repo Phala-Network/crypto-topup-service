@@ -18,7 +18,7 @@ Report vulnerabilities through GitHub's
 [private vulnerability reporting](https://github.com/Phala-Network/phala-pay/security/advisories/new)
 for this repository
 ([how it works](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)).
-If it is unavailable, email [security@phala.network](mailto:security@phala.network).
+If it is unavailable, email [support@phala.network](mailto:support@phala.network).
 
 Do not open public issues, discussions, or pull requests for exploitable vulnerabilities. This
 applies in particular to anything that could move or strand funds, credit a deposit that was not
