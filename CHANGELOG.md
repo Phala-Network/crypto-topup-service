@@ -9,6 +9,8 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-01
+
 ### Added
 
 - A one-command deploy, `curl -fsSL https://pay.phala.com/deploy.sh | bash`
@@ -904,6 +906,7 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.0
