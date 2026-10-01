@@ -2,6 +2,7 @@
 
 **Trigger:** on a route of Tether's USDT ([examples/phala-cloud-usdt.yaml](../../examples/phala-cloud-usdt.yaml)),
 any of these:
+
 - the fee check below finds a nonzero fee;
 - Tether emits `Params`;
 - a merchant's sweep of a USDT forwarder ends in `FlushFailed` with an empty `reason`;
@@ -11,6 +12,7 @@ The service raises no alert for any of these.
 
 **Impact:** Tether's `TetherToken` keeps two controls that a plain ERC-20 lacks, and the service
 cannot undo either one:
+
 - **The fee switch.** `setParams` caps it at under 20 basis points and under 50 USDT per transfer,
   and it is zero today. While it is on, every transfer, a flush included, delivers less than it
   moves. `Flushed.amount` is what left the forwarder (`contracts/src/Forwarder.sol`), so the
