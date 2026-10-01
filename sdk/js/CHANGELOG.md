@@ -16,6 +16,24 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 - `<Checkout onWalletError>`: called with the `WalletError` and the wallet it tried (the chosen
   browser wallet's provider, or `walletClient`) when the wallet tab could not send the payment, for
   example to offer your own way to fund that wallet on `insufficient_balance`.
+- `ClientQuote.amount_credited`, what a credited payment credited in cents (it differs from
+  `amount` for a payment of another amount or a late one), and `ClientQuote.typical_credit_seconds`,
+  the typical credit time at the quote's confirmation.
+
+### Changed (breaking)
+
+- `parseClientQuote`, and so `<Checkout>` and `createCheckout`, require `amount_credited` (an
+  integer or `null`) and `typical_credit_seconds`, which the service sends from the release after
+  v0.3.3: upgrade the service before the SDK.
+
+### Fixed
+
+- `<Checkout>` showed the quoted amount as credited ("Payment credited: $25.00" for a $25 quote
+  paid with $10). It now shows what was credited and, when that differs from the quote, says so
+  ("Payment credited: $10.00 of $25.00"); `onSuccess(quote)` carries it as `amount_credited`.
+- `<Checkout>` told a payer "crediting in about 30 seconds" on every chain. It now states the
+  quote's typical wait: about 5 minutes at Base's `safe` block, 15 minutes under a `finalized`
+  policy.
 
 ## [0.3.0] - 2026-10-01
 

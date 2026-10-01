@@ -23,15 +23,20 @@ class ClientQuote:
 
         Example:
             {'address': '0x2f3e91325b2288bce392711f85f5359661062a91', 'amount': 2500, 'amount_atomic':
-                '202510000000000000000', 'asset': 'PHA', 'chain_id': 1, 'confirmations': 1, 'currency': 'usd', 'decimals': 18,
-                'expires_at': 1790554500, 'id': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'livemode': False, 'object': 'quote',
-                'payment_status': 'seen', 'payment_uri': 'ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address
-                =0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000', 'status': 'open'}
+                '202510000000000000000', 'amount_credited': None, 'asset': 'PHA', 'chain_id': 1, 'confirmations': 1, 'currency':
+                'usd', 'decimals': 18, 'expires_at': 1790554500, 'id': 'qt_5f1c0b6a2d9e4f3a8b7c6d5e4f3a2b10', 'livemode': False,
+                'object': 'quote', 'payment_status': 'seen', 'payment_uri': 'ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e
+                @1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000', 'status': 'open',
+                'typical_credit_seconds': 30}
 
         Attributes:
             address (str): Single-use forwarder address to pay.
             amount (int): Credit in the currency's minor unit.
             amount_atomic (str): The exact token amount to pay, in base units, as a decimal string.
+            amount_credited (int | None): While `credited`: the credit of the payment in the currency's minor unit, the
+                credited
+                deposit's `amount`. It differs from `amount` for a payment valued at spot (another amount,
+                or paid late); otherwise `null`.
             asset (str): Asset code.
             chain_id (int): EVM chain identifier.
             confirmations (int | None): While `seen`: blocks on top of and including the payment's block; otherwise `null`.
@@ -50,11 +55,15 @@ class ClientQuote:
             payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
             status (str): `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
                 `expires_at` has passed.
+            typical_credit_seconds (int): Typical time from payment to credit, in seconds, at the confirmation the quote's
+                payments
+                are credited at, as `GET /v1/config` reports it.
     """
 
     address: str
     amount: int
     amount_atomic: str
+    amount_credited: int | None
     asset: str
     chain_id: int
     confirmations: int | None
@@ -67,6 +76,7 @@ class ClientQuote:
     payment_status: str
     payment_uri: str
     status: str
+    typical_credit_seconds: int
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,6 +85,9 @@ class ClientQuote:
         amount = self.amount
 
         amount_atomic = self.amount_atomic
+
+        amount_credited: int | None
+        amount_credited = self.amount_credited
 
         asset = self.asset
 
@@ -101,6 +114,8 @@ class ClientQuote:
 
         status = self.status
 
+        typical_credit_seconds = self.typical_credit_seconds
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -108,6 +123,7 @@ class ClientQuote:
                 "address": address,
                 "amount": amount,
                 "amount_atomic": amount_atomic,
+                "amount_credited": amount_credited,
                 "asset": asset,
                 "chain_id": chain_id,
                 "confirmations": confirmations,
@@ -120,6 +136,7 @@ class ClientQuote:
                 "payment_status": payment_status,
                 "payment_uri": payment_uri,
                 "status": status,
+                "typical_credit_seconds": typical_credit_seconds,
             }
         )
 
@@ -133,6 +150,13 @@ class ClientQuote:
         amount = d.pop("amount")
 
         amount_atomic = d.pop("amount_atomic")
+
+        def _parse_amount_credited(data: object) -> int | None:
+            if data is None:
+                return data
+            return cast(int | None, data)
+
+        amount_credited = _parse_amount_credited(d.pop("amount_credited"))
 
         asset = d.pop("asset")
 
@@ -163,10 +187,13 @@ class ClientQuote:
 
         status = d.pop("status")
 
+        typical_credit_seconds = d.pop("typical_credit_seconds")
+
         client_quote = cls(
             address=address,
             amount=amount,
             amount_atomic=amount_atomic,
+            amount_credited=amount_credited,
             asset=asset,
             chain_id=chain_id,
             confirmations=confirmations,
@@ -179,6 +206,7 @@ class ClientQuote:
             payment_status=payment_status,
             payment_uri=payment_uri,
             status=status,
+            typical_credit_seconds=typical_credit_seconds,
         )
 
         client_quote.additional_properties = d

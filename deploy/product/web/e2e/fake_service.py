@@ -566,7 +566,10 @@ class FakeTopup:
     def client_quote(self, quote: dict[str, Any]) -> dict[str, Any]:
         transfers = self.transfers_at(quote["address"], quote["chain_id"])
         payment_status, confirmations = "none", None
-        if quote["deposit"] is not None or any(t["id"] in self.deposits for t in transfers):
+        credited = self.deposits.get(quote["deposit"]) or next(
+            (self.deposits[t["id"]] for t in transfers if t["id"] in self.deposits), None
+        )
+        if credited is not None:
             payment_status = "credited"
         elif transfers:
             payment_status = "seen"
@@ -581,6 +584,8 @@ class FakeTopup:
             decimals=quote["_decimals"],
             payment_status=payment_status,
             confirmations=confirmations,
+            amount_credited=None if credited is None else credited["amount"],
+            typical_credit_seconds=CREDIT_DEPTH * 12 + 6,
         )
         return view
 

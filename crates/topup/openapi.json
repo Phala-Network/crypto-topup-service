@@ -571,6 +571,7 @@
           "address": "0x2f3e91325b2288bce392711f85f5359661062a91",
           "amount": 2500,
           "amount_atomic": "202510000000000000000",
+          "amount_credited": null,
           "asset": "PHA",
           "chain_id": 1,
           "confirmations": 1,
@@ -582,7 +583,8 @@
           "object": "quote",
           "payment_status": "seen",
           "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
-          "status": "open"
+          "status": "open",
+          "typical_credit_seconds": 30
         },
         "properties": {
           "address": {
@@ -598,6 +600,15 @@
           "amount_atomic": {
             "description": "The exact token amount to pay, in base units, as a decimal string.",
             "type": "string"
+          },
+          "amount_credited": {
+            "description": "While `credited`: the credit of the payment in the currency's minor unit, the credited\ndeposit's `amount`. It differs from `amount` for a payment valued at spot (another amount,\nor paid late); otherwise `null`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "asset": {
             "description": "Asset code.",
@@ -659,6 +670,12 @@
           "status": {
             "description": "`open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once\n`expires_at` has passed.",
             "type": "string"
+          },
+          "typical_credit_seconds": {
+            "description": "Typical time from payment to credit, in seconds, at the confirmation the quote's payments\nare credited at, as `GET /v1/config` reports it.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -676,7 +693,9 @@
           "payment_uri",
           "expires_at",
           "payment_status",
-          "confirmations"
+          "confirmations",
+          "amount_credited",
+          "typical_credit_seconds"
         ],
         "type": "object"
       },

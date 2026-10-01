@@ -27,6 +27,8 @@ describe("parseClientQuote", () => {
     ["a numeric token amount", { ...quote(), amount_atomic: 100 }],
     ["a malformed address", { ...quote(), address: "0x1234" }],
     ["fractional cents", { ...quote(), amount: 25.5 }],
+    ["fractional credited cents", { ...quote(), amount_credited: 10.5 }],
+    ["no typical credit time", { ...quote(), typical_credit_seconds: undefined }],
   ])("rejects %s", (_, value) => {
     expect(() => parseClientQuote(value)).toThrow(TypeError);
   });

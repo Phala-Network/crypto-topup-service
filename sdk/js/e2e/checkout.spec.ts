@@ -61,6 +61,8 @@ function newQuote(overrides: Partial<ClientQuote> = {}): { quote: ClientQuote; s
       expires_at: Math.floor(Date.now() / 1000) + 900,
       payment_status: "none",
       confirmations: null,
+      amount_credited: null,
+      typical_credit_seconds: 30,
       ...overrides,
     },
   };
@@ -93,7 +95,7 @@ async function serveQuote(page: Page, quote: ClientQuote, secret: string) {
       ? quote
       : reads++ === 0
         ? { ...quote, payment_status: "seen", confirmations: 1 }
-        : { ...quote, status: "complete", payment_status: "credited" };
+        : { ...quote, status: "complete", payment_status: "credited", amount_credited: quote.amount };
     await route.fulfill({ status: 200, headers: cors, json: body });
   });
   return requests;
