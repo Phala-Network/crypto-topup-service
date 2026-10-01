@@ -36,11 +36,12 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
   },
   credited: {
-    usually: "~15 s",
+    usually: "~30 s",
     title: "Credited",
     hint:
-      "Usually about 15 s after sending: at 2 confirmations, once both RPC providers report the " +
-      "same block, the deposit is valued and screened.",
+      "Usually about 30 s after sending on Ethereum, at 2 confirmations, and about 5 minutes on " +
+      "Base, at its safe block: once both RPC providers report the same block, the deposit is " +
+      "valued and screened.",
     failed: "The deposit was rejected and will not be credited.",
   },
   webhook_received: {

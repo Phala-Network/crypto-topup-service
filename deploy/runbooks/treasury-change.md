@@ -58,7 +58,7 @@ admin POST "/v1/admin/accounts/$ACCOUNT/resume" \
 ```
 
    Addresses issued over the listed treasury keep paying it; its funds are the merchant's
-   compliance matter (design §17, item 2).
+   compliance matter (architecture §15, "Compliance").
 
 ## Done when
 

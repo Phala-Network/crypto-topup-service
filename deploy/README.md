@@ -177,7 +177,7 @@ whose `livemode` does not match its chain, a chain on neither of its lists, a lo
 chain, and any live route in `staging`. After the first deploy, in order: seal the secrets; [verify
 the attestation](#attestation-ingress-and-egress); have the operator's Finance, Risk, and Operations
 approve the pilot limits (route bounds, each account's caps (`limits`: open quotes and their credit
-per account and per customer) and `max_unfinalized_credit`; architecture §17) and a passed restore
+per account and per customer) and `max_unfinalized_credit`; architecture §14) and a passed restore
 drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) accounts with
 `charges_enabled` (Phala's instance adds its own [onboarding policy](phala.md#onboarding-policy)).
 
@@ -294,9 +294,10 @@ renders the same way from
 ([self-hosting, "The Phala Cloud template"](../docs/self-hosting.md#the-phala-cloud-template)),
 from [environments/phala-cloud-template](environments/phala-cloud-template/topup): Phala's staging
 routes and keyless providers. Each release publishes it as `phala-cloud-template.yml`, and
-Phala Cloud's template is that file byte for byte. [compose.template.yaml](compose.template.yaml)
-removes `dstack-ingress` and `restore-check`, and topup publishes `80:8080`, which the Phala Cloud
-gateway serves as `https://<app-id>.<gateway-domain>`.
+Phala Cloud's template, once published, is that file byte for byte.
+[compose.template.yaml](compose.template.yaml) removes `dstack-ingress` and `restore-check`, and
+topup publishes `80:8080`, which the Phala Cloud gateway serves as
+`https://<app-id>.<gateway-domain>`.
 
 A template's per-deployment values come from the CVM's env, never from `topup.yaml`, whose `$` are
 escaped like every environment's. The policy's `template` variant allows a runtime reference as
@@ -836,11 +837,3 @@ resumed, any re-valued deposit flagged, and events after the restore point deliv
 
 Phala's own deployment (its staging routes, the staging reset, the reference product behind the
 demo, the website, and its onboarding policy) is in [Phala's instance](phala.md).
-
-### Staging reset (HUMAN-ONLY)
-
-Moved to [Phala's instance, "Staging reset"](phala.md#staging-reset-human-only).
-
-### Staging reference product
-
-Moved to [Phala's instance, "Staging reference product"](phala.md#staging-reference-product).

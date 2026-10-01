@@ -114,6 +114,14 @@ make sdk-generate                               # Python: regenerate the client 
 A pull request that changes `crates/topup/openapi.json` regenerates the Python client in the same
 pull request; CI fails if regeneration is not a no-op.
 
+The Python SDK's RFC 9421 signer serves only the operator's admin API. Regenerate its vectors only
+after an intentional change to the signing profile, then rerun the Rust test:
+
+```sh
+(cd sdk/python && uv run --locked python -m tests.vectors)
+cargo test -p topup --lib api::auth
+```
+
 ### Documentation
 
 CI lints every Markdown file with [markdownlint](https://github.com/DavidAnson/markdownlint-cli2)

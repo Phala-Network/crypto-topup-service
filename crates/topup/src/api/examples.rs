@@ -213,7 +213,7 @@ pub(super) fn schema(name: &str) -> Option<Value> {
                 "decimals": 18,
                 "pricing": "spot",
                 "confirmations": "2",
-                "typical_credit_seconds": 24,
+                "typical_credit_seconds": 30,
                 "typical_finality_seconds": 900,
                 "min_amount": 100,
                 "max_deposit_atomic": "1000000000000000000000000",

@@ -1,8 +1,8 @@
 # Design: standard multi-tenant Phala Pay
 
 Status: accepted (the owner delegated every decision; owner rulings of 2026-09-27, 2026-09-28,
-and 2026-09-29 are applied). Scope: turn Phala Pay from Phala Cloud's internal cashier into a
-Stripe-shaped, API-only crypto payments **software service** for any merchant the operator
+2026-09-29, and 2026-10-01 are applied). Scope: turn Phala Pay from Phala Cloud's internal cashier
+into a Stripe-shaped, API-only crypto payments **software service** for any merchant the operator
 onboards. Phala Cloud becomes an ordinary account. This document records decisions; the
 [architecture](../architecture.md) stays the specification and is rewritten by the PRs in §16.
 
@@ -19,6 +19,13 @@ login, passkeys, members, sessions, and email are removed; PRs 1–3 are impleme
 **Amendment of 2026-09-29 (owner ruling): self-hosted.** Phala Pay is open-source, self-hosted
 software ([self-hosting](../self-hosting.md)). Phala's instance serves only Phala Cloud; Phala
 offers no hosted service.
+
+**Amendment of 2026-10-01 (owner ruling): compliance is the operator's.** Phala Pay is software,
+and each operator is responsible for its own compliance, including KYC, KYT, and the Travel Rule
+for its merchants and their customers. Phala's instance serves only Phala Cloud, which collects its
+own revenue, so the legal review that was to gate live mode for third-party merchants on Phala's
+instance (D12, the former §17) no longer applies and is removed. Direct sanctions screening (§8)
+stays a product feature.
 
 **Amendment of 2026-09-28 (owner ruling, PR 8 review): webhooks are never auto-disabled.** The
 3-day retry limit followed by disabling the endpoint (Stripe's live mode) is reversed: deliveries
@@ -187,7 +194,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 
 | # | Topic | Decision | Standard followed |
 |---|---|---|---|
-| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2 ≈ 24 s; OP-stack `safe`); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
+| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2, about 30 s after paying; OP-stack `safe`, about 5 minutes); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
 | D2 | Custody | Non-custodial: forwarders pay only the merchant's treasury | BTCPay Server; FinCEN FIN-2019-G001 §1.1, §4.2 |
 | D3 | Contracts | One permissionless factory per chain; clones carry `treasury` as the only immutable arg; public `flush` with per-target failure isolation | OZ `Clones.cloneDeterministicWithImmutableArgs` (pinned 5.7.0); BitGo public `flush()`; Multicall3 `allowFailure` |
 | D4 | Sweeping | The merchant sweeps with its own wallet or Safe and pays gas; the SDK builds the call or a Safe Transaction Builder batch | BTCPay (merchant wallet); Safe Transaction Builder JSON |
@@ -198,7 +205,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D9 | Test/live | One deployment; key selects mode; `livemode` on every row, object, and event; Sepolia = test | Stripe test mode |
 | D10 | Treasury | Set through the API with an EIP-4361 proof (EOA) or EIP-1271 (deployed Safe); live changes time-locked 48 h, cancellable, announced as events | EIP-4361, EIP-1271; timelock; Stripe `account.external_account.updated` |
 | D11 | Webhooks | Standard Webhooks `v1a` with one key **per account and mode**; endpoints per account; retries until delivered, never auto-disabled (owner decision, 2026-09-28); only `410 Gone` or the merchant stops an endpoint | Standard Webhooks; Stripe endpoints |
-| D12 | Go-live | The operator sets `charges_enabled` when creating the account (or later, same endpoint); third parties only after legal sign-off | Stripe `charges_enabled` |
+| D12 | Go-live | The operator sets `charges_enabled` when creating the account (or later, same endpoint) | Stripe `charges_enabled` |
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; each route's required permission declared with the routes; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 | D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
@@ -297,8 +304,7 @@ acting as intermediary has total independent control over the value"
 transmitters (§4.6), and notes that a "developer or seller of … a software application … may be
 exempt" (§1.1) while "suppliers of tools (communications, hardware, or software) … are engaged in
 trade and not money transmission" (§4.5.1(b)). Phala Pay never controls value, collects no fee,
-and sends no transactions. Phala's legal review (§17) confirms this before third-party merchants
-go live.
+and sends no transactions. Each operator assesses its own obligations (amendment of 2026-10-01).
 
 ### D3: contracts
 
@@ -591,7 +597,7 @@ a Stripe-hosted Dashboard" (`controller.stripe_dashboard.type = none`,
 
 1. **Due diligence, offline.** The operator reviews the business, its owners, sanctions screening
    (entity, owners, intended treasuries), jurisdiction, and the signed merchant agreement under
-   Phala's policy (§17). The product stores only a reference, the date, and the reviewer.
+   the operator's own policy. The product stores only a reference, the date, and the reviewer.
 2. **Create.** `POST /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason}`
    (RFC 9421 admin key) creates the account, decides live access (D12), and returns the first
    `ppay_sk_test_` key, and a `ppay_sk_live_` key when `charges_enabled`. Both creations are
@@ -704,9 +710,6 @@ the first live key: one mechanism, audited, announced as `account.updated`. The 
 profile, ToS click-through, screening, or geo-blocking runs in the product, and no document KYB:
 Phala Pay is software and never touches funds. Live payments also need a proven live treasury.
 New live accounts get default limits; the operator raises them on request.
-
-**Operator policy, not a product feature:** until legal sign-off (§17), the operator enables live
-mode only for Phala's own accounts (Phala Cloud first); after it, for any merchant that passes.
 
 ## 11. Webhooks (D11)
 
@@ -997,8 +1000,7 @@ POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   
 
 Each PR is sized for one agent, has its own branch and green CI, and updates the docs it touches.
 The **launch set** (PRs 1–11) lands before any account takes live payments; then the security
-review and the HUMAN-ONLY factory deployments let the operator enable Phala's accounts, and the
-legal sign-off (§17) third parties.
+review and the HUMAN-ONLY factory deployments let the operator enable live mode.
 
 **Re-numbering (2026-09-28).** The dashboard PRs (old 5, users and login; old 12, dashboard and
 onboarding) are removed. Old 6–11 are now 5–10, old 13 is 11, old 14–15 are 12–13. Code comments
@@ -1016,7 +1018,7 @@ citing old numbers are corrected by the PR that next touches them.
 | 8 | Webhook endpoints, account events, delivery | ✓ | 6 | done (#199) |
 | 9 | Refunds | ✓ | 4 | done (#192) |
 | 10 | API vocabulary, SDKs, sweep builder | ✓ | 5–9 | done (#200) |
-| 11 | Deploy, docs, staging reset | ✓ | 1–10 | in review |
+| 11 | Deploy, docs, staging reset | ✓ | 1–10 | done (#206) |
 | 12 | Restricted keys | ✓ (launch hardening) | 5 | done (#203) |
 | 13 | Account closure | | 5 | |
 
@@ -1089,16 +1091,3 @@ uses `client_reference_id` (team id), handles `deposit.reversed` like `deposit.r
 passes `expected_address` to `<Checkout>`. Finance sweeps periodically by importing the SDK's
 `safe_batch` file in the Safe Transaction Builder and pays refunds from the Safe, recording them
 with `mark_paid`.
-
-## 17. Legal review (gate for onboarding third-party merchants to live mode)
-
-Until Phala's legal review signs off, the operator enables live mode only for Phala's own accounts
-(D12). The review confirms:
-
-1. Phala Pay as pure software with no fee and no control of funds is outside money transmission
-   (US federal and state) and crypto-asset service licensing (EU
-   [MiCA](https://eur-lex.europa.eu/eli/reg/2023/1114/oj)) where Phala offers it.
-2. Obligations, if any, around sanctioned funds that public `flush` lets anyone sweep to a
-   merchant's treasury, and the screening scope (merchant, owners, treasury, payers).
-3. The operator's due-diligence policy (D8), the merchant agreement, prohibited businesses and
-   jurisdictions, privacy notice, data processing terms, and retention.
