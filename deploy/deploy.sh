@@ -35,12 +35,15 @@
 # environment directory: once the CVM exists, its id (no secret) goes to the environment
 # directory's cvm-id, or to CVM_NAME.cvm-id in the current directory for the quick start, and a
 # later run that finds it creates nothing and says how to finish that CVM. A run from elsewhere
-# cannot see that file, so before creating a CVM it also refuses a name the Phala Cloud workspace
-# already has, as the CLI's names are unique in a workspace. Once the CVM exists, every exit prints
-# what is known of it (its id, app id, and URL) and, after a failure, how to finish or remove it.
-# The quick start waits for the CVM to settle with its compose; a custom domain also for the
-# attestation of the compose with the node's gateway, whose event log names the instance id the TXT
-# record needs. A provision proves nothing about the CVM's health: /healthz and the attestation,
+# cannot see that file, so before writing anything (an admin seed included) it also refuses a name
+# the Phala Cloud workspace already has, as the CLI's names are unique in a workspace; an answer it
+# cannot read as one complete page of CVMs is refused too. Once the CVM exists, every exit, Ctrl-C
+# included, prints what is known of it (its id, app id, and URL) and, after a failure, how to
+# finish or remove it. The quick start waits for the CVM to settle with its compose; a custom
+# domain also for the attestation of the compose with the node's gateway, bound to this run's
+# rendered compose as Deploy binds it (deploy/attested-compose.sh: the API's compose hash and the
+# attested one must both be the hash of the app-compose carrying it), whose event log names the
+# instance id the TXT record needs. A provision proves nothing about the CVM's health: /healthz and the attestation,
 # and for a custom domain the certificate evidence, are the acceptance step.
 #
 # The inputs are prompted for on the terminal, or with --non-interactive read from the environment:
@@ -264,31 +267,6 @@ main() {
         recover "$recorded" "$recorded" >&2
         exit 1
     fi
-    if ((!existing)); then
-        ask TOPUP_ADMIN_PUBLIC_KEY "Admin public key (empty to generate a keypair here)" ""
-        if [[ -z "$TOPUP_ADMIN_PUBLIC_KEY" ]]; then
-            ask ADMIN_SEED_FILE "New file for the admin seed" "$PWD/$CVM_NAME-admin.seed"
-            local keygen
-            if command -v uvx >/dev/null; then
-                keygen=(uvx --from "$sdk" topup-sdk)
-            elif command -v pipx >/dev/null; then
-                keygen=(pipx run --spec "$sdk" topup-sdk)
-            else
-                die "generating the admin key needs uv or pipx (the Python SDK's topup-sdk keygen)"
-            fi
-            # keygen writes the seed mode 0600, refuses an existing file, and prints the public key.
-            TOPUP_ADMIN_PUBLIC_KEY=$("${keygen[@]}" keygen --keyid admin/v1 --seed-out "$ADMIN_SEED_FILE" \
-                </dev/null | jq -er '.public_key') || die "topup-sdk keygen failed"
-            say "the admin seed is in $ADMIN_SEED_FILE (mode 0600): keep it offline, it is the admin key"
-        fi
-        check TOPUP_ADMIN_PUBLIC_KEY '^[A-Za-z0-9+/]{43}=$' "a base64 ed25519 public key"
-        ask WALG_S3_PREFIX "Backup location s3://BUCKET/PATH (a new, empty prefix for this instance only)"
-        check WALG_S3_PREFIX '^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._~/-]*)?$' "s3://BUCKET[/PATH]"
-        ask AWS_ENDPOINT "Object store endpoint, e.g. https://ACCOUNT.r2.cloudflarestorage.com"
-        check AWS_ENDPOINT '^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?/?$' "an https origin"
-        ask AWS_REGION "Object store region" auto
-        check AWS_REGION '^[a-z0-9]+(-[a-z0-9]+)*$' "a region name such as auto or us-east-1"
-    fi
 
     say "== download and verify the release"
     trap finish EXIT
@@ -328,12 +306,20 @@ main() {
         die "log in to Phala Cloud with the release's locked CLI (kit/deploy/phala login:" \
             "$docs#2-your-environment-repository, step 1), or export PHALA_CLOUD_API_KEY"
     # A CVM's name is unique in its workspace: one there already, perhaps from a run elsewhere whose
-    # recorded id this run cannot see, is refused rather than duplicated.
+    # recorded id this run cannot see, is refused rather than duplicated, before anything is written
+    # (an admin seed included). The locked CLI's answer (cli/src/commands/cvms/list, CLI 1.1.22) must
+    # be one complete page: anything else is refused, never read as "no such name".
     local existing_cvms
     existing_cvms=$(phala_cli "$kit/deploy/phala" cvms list --search "$CVM_NAME" --page-size 100 --json </dev/null) ||
         die "could not list the workspace's CVMs"
-    jq -e '(.items | type) == "array" and .totalPages <= 1' <<<"$existing_cvms" >/dev/null ||
-        die "could not check the workspace's CVM names (more than 100 match $CVM_NAME, or another answer)"
+    jq -e 'def count: type == "number" and . >= 0 and . == floor;
+        type == "object" and .success == true
+        and all(.page, .pageSize, .total, .totalPages; count) and .page == 1 and .totalPages <= 1
+        and (.items | type) == "array" and (.items | length) <= .total and (.items | length) <= .pageSize
+        and all(.items[]; type == "object" and (.cvmName | type) == "string" and (.appId | type) == "string")' \
+        <<<"$existing_cvms" >/dev/null 2>&1 ||
+        die "could not check the workspace's CVM names: the CLI's answer is not one complete page of CVMs" \
+            "(more than 100 match $CVM_NAME, or another answer)"
     if jq -e --arg name "$CVM_NAME" 'any(.items[]; .cvmName | ascii_downcase == ($name | ascii_downcase))' \
         <<<"$existing_cvms" >/dev/null; then
         say "deploy.sh: the Phala Cloud workspace already has a CVM named $CVM_NAME; this run creates none."
@@ -343,6 +329,33 @@ main() {
         recover "$CVM_NAME" >&2
         say "Otherwise choose another instance name."
         exit 1
+    fi
+
+    say "== admin key and backup location"
+    if ((!existing)); then
+        ask TOPUP_ADMIN_PUBLIC_KEY "Admin public key (empty to generate a keypair here)" ""
+        if [[ -z "$TOPUP_ADMIN_PUBLIC_KEY" ]]; then
+            ask ADMIN_SEED_FILE "New file for the admin seed" "$PWD/$CVM_NAME-admin.seed"
+            local keygen
+            if command -v uvx >/dev/null; then
+                keygen=(uvx --from "$sdk" topup-sdk)
+            elif command -v pipx >/dev/null; then
+                keygen=(pipx run --spec "$sdk" topup-sdk)
+            else
+                die "generating the admin key needs uv or pipx (the Python SDK's topup-sdk keygen)"
+            fi
+            # keygen writes the seed mode 0600, refuses an existing file, and prints the public key.
+            TOPUP_ADMIN_PUBLIC_KEY=$("${keygen[@]}" keygen --keyid admin/v1 --seed-out "$ADMIN_SEED_FILE" \
+                </dev/null | jq -er '.public_key') || die "topup-sdk keygen failed"
+            say "the admin seed is in $ADMIN_SEED_FILE (mode 0600): keep it offline, it is the admin key"
+        fi
+        check TOPUP_ADMIN_PUBLIC_KEY '^[A-Za-z0-9+/]{43}=$' "a base64 ed25519 public key"
+        ask WALG_S3_PREFIX "Backup location s3://BUCKET/PATH (a new, empty prefix for this instance only)"
+        check WALG_S3_PREFIX '^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[A-Za-z0-9._~/-]*)?$' "s3://BUCKET[/PATH]"
+        ask AWS_ENDPOINT "Object store endpoint, e.g. https://ACCOUNT.r2.cloudflarestorage.com"
+        check AWS_ENDPOINT '^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?/?$' "an https origin"
+        ask AWS_REGION "Object store region" auto
+        check AWS_REGION '^[a-z0-9]+(-[a-z0-9]+)*$' "a region name such as auto or us-east-1"
     fi
 
     say "== render"
@@ -445,6 +458,15 @@ YAML
         deployed=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$work/cvm.json")
         say "waiting for the CVM to boot compose $deployed and attest it"
         phala_cvm attestation "$cvm_id" "$deployed" </dev/null >"$work/attestation.json"
+        # Bound to this run's compose, as Deploy's verify-attestation.sh binds it: the attested
+        # app-compose carries the rendered compose and the kit's pre-launch script, its hash is the
+        # event log's, and the API's new compose hash must be that one, not any other update's.
+        local attested
+        mkdir "$work/attested"
+        attested=$("$kit/deploy/attested-compose.sh" "$work/attestation.json" "$compose" "$work/attested") ||
+            die "CVM $cvm_id attests another compose than this run's"
+        [[ "$attested" == "$deployed" ]] ||
+            die "CVM $cvm_id reports compose hash $deployed, not this run's attested $attested"
         instance_id=$(phala_cvm instance-id "$work/attestation.json")
         record=$(dirname -- "$env_dir")/docker-compose.$CVM_NAME.yml
         cp "$compose" "$record"

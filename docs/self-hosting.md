@@ -78,7 +78,8 @@ the Python SDK `phala-pay==0.3.0`), and your Phala Cloud login (with a release's
    Cloud's gateway domain, testnet routes, its admin key and backup location in the CVM's env), or
    a **custom domain** (the service variant, every setting attested, from an environment directory
    it writes from the template's routes, or one of yours with its keyed RPC providers' keys);
-3. refuses an instance name your Phala Cloud workspace already has, renders the compose with the
+3. refuses an instance name your Phala Cloud workspace already has (before it generates an admin
+   key), or a workspace CVM list it cannot read, renders the compose with the
    kit's `render.sh`, runs `preflight.sh --offline` and `check-route-modes.sh`, and provisions the
    CVM with the kit's locked Phala Cloud CLI, pre-launch script, `--image dstack-0.5.9 --no-dev-os`,
    and Phala Cloud's KMS, sealing the secrets you gave from a mode 0600 file, on tmpfs
@@ -86,12 +87,13 @@ the Python SDK `phala-pay==0.3.0`), and your Phala Cloud login (with a release's
    shredded where `shred` exists and removed on every exit. It records the new CVM's id in the
    environment directory's `cvm-id` (the quick start: `NAME.cvm-id` in the directory you run it
    from), waits for the CVM to settle with its compose, and for a custom domain then sets the
-   node's gateway, as Deploy does, and waits for the attestation of that compose, whose event log
-   names the instance id of the TXT record. The CLI runs in an empty directory of its own, so a
+   node's gateway, as Deploy does, and waits for the attestation of that compose, which must carry
+   the compose it rendered and match the compose hash Phala Cloud reports, and whose event log names
+   the instance id of the TXT record. The CLI runs in an empty directory of its own, so a
    `phala.toml` where you run the script is never read;
 4. prints the CVM id, the URL, the DNS records of a custom domain, and how to verify the
-   attestation (section 5). If a step after the CVM's creation fails or times out, it still prints
-   the CVM id, the URL, and how to finish or remove the CVM.
+   attestation (section 5). If a step after the CVM's creation fails or times out, or you press
+   Ctrl-C, it still prints the CVM id, the URL, and how to finish or remove the CVM.
 
 `--non-interactive` takes the inputs from the environment instead (the script's header lists
 them). A secret is written as `NAME=VALUE`, which the Phala Cloud CLI reads as dotenv does, so a

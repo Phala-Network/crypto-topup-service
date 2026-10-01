@@ -22,12 +22,19 @@ own changelogs in `sdk/js` and `sdk/python`.
   (`deploy/phala-cvm.sh instance-id`), as Deploy's DNS records already did. The quick start waits
   for no instance id, as it is served at its gateway domain; a custom domain waits for the
   attestation of its gateway's compose and reads the TXT record's instance id from it.
+- The one-command deploy binds a custom domain's gateway upgrade to the compose it rendered, as
+  Deploy does: the attested app-compose must carry that compose and the kit's pre-launch script,
+  and both the compose hash the API reports and the event log's must be that app-compose's hash,
+  so another update's compose fails instead of being accepted as "a new hash". The binding is
+  `deploy/attested-compose.sh`, which `deploy/verify-attestation.sh` now uses too; it also requires
+  the event log to name that hash exactly once.
 - The one-command deploy prints the CVM id, the URL, and how to finish or remove the CVM on every
-  exit once the CVM exists, including a step that fails or times out later.
+  exit once the CVM exists, Ctrl-C included, including a step that fails or times out later.
 - The one-command deploy refuses an instance name the Phala Cloud workspace already has, before
-  creating anything, with how to find, finish, or remove that CVM: its recorded `cvm-id` is a file
-  in the directory it ran from or the chosen environment directory, which a run from elsewhere
-  cannot see.
+  writing anything (an admin seed included), with how to find, finish, or remove that CVM: its
+  recorded `cvm-id` is a file in the directory it ran from or the chosen environment directory,
+  which a run from elsewhere cannot see. It fails closed: a CVM list it cannot read as one complete
+  page of CVMs (its counts, each item's name and app id) is refused, never read as "no such name".
 - The one-command deploy writes the sealed env file on tmpfs (`$XDG_RUNTIME_DIR`) where the session
   has one, mode 0600, and shreds it (where `shred` exists) and removes it on every exit.
 - The one-command deploy generates an admin key with the Python SDK pinned to `phala-pay==0.3.0`,
