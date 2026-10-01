@@ -9,7 +9,7 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-30
+## [0.3.0] - 2026-10-01
 
 ### Added
 
