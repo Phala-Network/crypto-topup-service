@@ -188,8 +188,10 @@ The Phala Cloud CLI makes the names of the env file it sends the CVM's `allowed_
 [verify-attestation.sh](verify-attestation.sh) requires them to be among the sealed names
 ([compose-policy.jq](compose-policy.jq), `allowed_envs_violations`): another name is refused, since
 it would put in the env a value the compose does not reference. A sealed name left out is unset,
-like an empty one; a required secret is enforced where it is used, at startup (PostgreSQL refuses to
-start without the storage credentials), so the acceptance upgrade's `/healthz` catches it. The
+like an empty one; a required secret is enforced where it is used, on every start: the
+postgres-walg entrypoint refuses S3 storage unless both `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` are set, so neither PostgreSQL nor the backup job starts and the acceptance
+upgrade's `/healthz` fails, and topup refuses a keyed provider without its key. The
 names are part of the app-compose, so sealing with the names a CVM already allows keeps its compose
 hash. The sealed names are:
 
@@ -200,7 +202,9 @@ hash. The sealed names are:
   `compose.yaml` overlay. It is the API key topup puts in place of `{key}` in the provider's
   attested URL. Phala's staging has keyless providers and declares none.
 
-A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`. topup refuses a provider whose URL and key
+Each line is `NAME=VALUE`, the value as is. The Phala Cloud CLI reads the file as dotenv does, which
+would cut a value at `#` and strip quotes and surrounding whitespace, so preflight refuses a value
+with any of them. A key is at least 8 characters of `A-Z a-z 0-9 - . _ ~`. topup refuses a provider whose URL and key
 disagree: a `{key}` without a key, or a key without a `{key}`. Redaction keeps the URL and the key
 out of every log line and error. A new CVM waits for its secrets: PostgreSQL initializes a cluster
 only after listing an empty backup prefix ([RESTORE.md](RESTORE.md#bootstrap-from-backup)).

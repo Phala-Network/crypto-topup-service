@@ -15,9 +15,12 @@ fi
 
 # The object store, checked before PostgreSQL or a WAL-G job starts (in the Phala Cloud template its
 # settings come from the deploy form, outside the attestation): WAL-G's file backend
-# (WALG_FILE_PREFIX, the tests), or S3 with all three settings well formed. The endpoint is an
-# https origin; only the local stacks' overlays, applied after deploy/render.sh and so never in an
-# attested compose, set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for their plain-http store.
+# (WALG_FILE_PREFIX, the tests), or S3 with all three settings well formed and both credentials
+# set. The endpoint is an https origin; only the local stacks' overlays, applied after
+# deploy/render.sh and so never in an attested compose, set TOPUP_OBJECT_STORE_ALLOW_HTTP=on for
+# their plain-http store. It runs on every start: a data directory that holds a cluster never lists
+# the prefix, and a sealed credential left out of the CVM's env is unset, so nothing else would stop
+# a service that cannot archive.
 refuse() {
     echo "$*" >&2
     exit 64
@@ -66,6 +69,8 @@ check_object_store() {
             "a port from 1 to 65535, and no user, path, query, or fragment"
     matches "${AWS_REGION:-}" '[a-z0-9]+(-[a-z0-9]+)*' ||
         refuse "AWS_REGION must be a region name such as auto or us-east-1"
+    [ -n "${AWS_ACCESS_KEY_ID:-}" ] || refuse "AWS_ACCESS_KEY_ID must be set: S3 storage needs both credentials"
+    [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] || refuse "AWS_SECRET_ACCESS_KEY must be set: S3 storage needs both credentials"
 }
 
 case "$1" in

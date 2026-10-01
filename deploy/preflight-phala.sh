@@ -88,6 +88,27 @@ check_phala_cloud() {
     fi
 }
 
+# read_env_file FILE: FILE's KEY=VALUE lines into the array `env`, each value as written. The Phala
+# Cloud CLI reads the same file as dotenv does (@phala/cloud's parseEnv), which cuts a value at `#`
+# and strips quotes and surrounding whitespace; a value with any of those is refused, so that every
+# accepted value is the one the CLI seals. Values are never printed.
+read_env_file() {
+    local file=$1 line value
+    if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$file"; then
+        fail "$file has a line that is not KEY=VALUE"
+    fi
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
+        [[ -v "env[${line%%=*}]" ]] && fail "$file sets ${line%%=*} twice"
+        value=${line#*=}
+        if [[ "$value" == *[\#\'\"\`]* || "$value" == [[:space:]]* || "$value" == *[[:space:]] ]]; then
+            fail "$file: ${line%%=*} has a #, a quote, or surrounding whitespace, which the Phala Cloud" \
+                "CLI's env parser would change; such a value is not supported"
+        fi
+        env[${line%%=*}]=$value
+    done <"$file"
+}
+
 # check_artifact ENV_FILE COMPOSE ENV_DIR VARIANT: the checks every attested compose shares, run
 # with the pinned Compose (deploy/pinned-compose.sh, never downloaded here). Leaves the compose as
 # JSON in $tmp/compose.json, its images in $tmp/images, and the env file in the array `env`.
@@ -103,14 +124,7 @@ check_artifact() {
         return
     }
     echo "== env file"
-    if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$env_file"; then
-        fail "$env_file has a line that is not KEY=VALUE"
-    fi
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
-        [[ -v "env[${line%%=*}]" ]] && fail "$env_file sets ${line%%=*} twice"
-        env[${line%%=*}]=${line#*=}
-    done <"$env_file"
+    read_env_file "$env_file"
     echo "== compose"
     if ! "$compose_bin" -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \
         2>"$tmp/compose.err"; then

@@ -187,9 +187,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           dist="$RUNNER_TEMP/dist" notes="$RUNNER_TEMP/notes.md"
-          prerelease=()
+          # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; an SDK
+          # release never is (release-sdks.yml), nor a pre-release.
+          kind=(--latest)
           if [[ "$VERSION" == *-* ]]; then
-            prerelease=(--prerelease)
+            kind=(--prerelease --latest=false)
             echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md." >"$notes"
           else
             sdk/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
@@ -202,6 +204,20 @@ jobs:
             echo "checks this release as Deploy does ([self-hosting guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/self-hosting.md#verify-a-release))."
           } >>"$notes"
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Phala Pay $VERSION" \
-            --notes-file "$notes" "${prerelease[@]}" \
+            --notes-file "$notes" "${kind[@]}" \
             "$dist/images.json" "$dist/phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
             "$dist/phala-cloud-template.yml" "$dist/deploy.sh" "$dist/SHA256SUMS"
+      # The one-command deploy end to end: pay.phala.com's redirect, then GitHub's latest-release
+      # download, must serve this release's deploy.sh (GitHub's redirect can lag a few minutes).
+      - name: Check that https://pay.phala.com/deploy.sh serves this release
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          for _ in $(seq 20); do
+            if curl -fsSL --max-time 30 -o "$RUNNER_TEMP/served.sh" https://pay.phala.com/deploy.sh &&
+              cmp -s "$RUNNER_TEMP/served.sh" "$RUNNER_TEMP/dist/deploy.sh"; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::https://pay.phala.com/deploy.sh does not serve $GITHUB_REF_NAME's deploy.sh: is it the Latest release?"
+          exit 1

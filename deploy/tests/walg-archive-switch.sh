@@ -1,7 +1,8 @@
 #!/bin/sh
 # Starts the postgres-walg image and proves its bootstrap and archive switch: an empty data
 # directory is initialized only when the backup prefix is listed and holds no base backup, and
-# never after a listing error; a malformed object-store setting stops it; the service archives;
+# never after a listing error; a malformed object-store setting or a missing S3 credential stops it,
+# on every start; the service archives;
 # TOPUP_RESTORE_FROM_BACKUP=on (the restore-check variant) forces archiving off even against
 # user-supplied flags, requires a base backup, and never touches a data directory that holds
 # anything. WAL-G's file storage stands in for object storage. deploy/local/restore-drill.sh runs
@@ -93,13 +94,16 @@ expect_exit() {
 expect_exit 64 "TOPUP_RESTORE_FROM_BACKUP must be on or off" -e WALG_FILE_PREFIX=/tmp \
     -e TOPUP_RESTORE_FROM_BACKUP=maybe "$image"
 # PostgreSQL and the backup job start only with WAL-G's file backend or all three S3 settings well
-# formed (the Phala Cloud template takes them from its deploy form); other commands need none.
-# expect_store STATUS MESSAGE PREFIX ENDPOINT REGION ARGS...: expect_exit with those S3 settings.
+# formed (the Phala Cloud template takes them from its deploy form) and both credentials set; other
+# commands need none.
+# expect_store STATUS MESSAGE PREFIX ENDPOINT REGION ARGS...: expect_exit with those S3 settings and
+# both credentials (a later `-e NAME=` in ARGS empties one).
 expect_store() {
     store_status=$1 store_message=$2 store_prefix=$3 store_endpoint=$4 store_region=$5
     shift 5
     expect_exit "$store_status" "$store_message" -e "WALG_S3_PREFIX=$store_prefix" \
-        -e "AWS_ENDPOINT=$store_endpoint" -e "AWS_REGION=$store_region" "$@"
+        -e "AWS_ENDPOINT=$store_endpoint" -e "AWS_REGION=$store_region" \
+        -e AWS_ACCESS_KEY_ID=store-key-id -e AWS_SECRET_ACCESS_KEY=store-secret "$@"
 }
 store_bucket=s3://topup-backups/postgres
 expect_exit 64 "WALG_S3_PREFIX must be s3://BUCKET[/PATH]" "$image"
@@ -153,5 +157,15 @@ test "$(sql restored 'SELECT count(*) FROM pg_ls_archive_statusdir()')" -eq 0 ||
     echo "archive status files exist although TOPUP_RESTORE_FROM_BACKUP=on" >&2
     exit 1
 }
+
+docker rm -f "$prefix-restored" >/dev/null
+# On every start, not only an empty data directory's bootstrap: with the cluster in place (no
+# listing), S3 mode refuses each missing credential, in PostgreSQL and in the backup job.
+for missing in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    expect_store 64 "$missing must be set" "$store_bucket" https://s3.example auto \
+        -v "$volume:/var/lib/postgresql" -e "$missing=" "$image"
+    expect_store 64 "$missing must be set" "$store_bucket" https://s3.example auto \
+        -e "$missing=" "$image" walg-cron
+done
 
 echo "postgres-walg bootstrap and archive switch tests passed"

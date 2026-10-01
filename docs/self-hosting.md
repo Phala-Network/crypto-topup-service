@@ -41,8 +41,27 @@ curl -fsSL https://pay.phala.com/deploy.sh | bash              # the latest rele
 curl -fsSL https://pay.phala.com/deploy/v0.3.2.sh | bash       # a given release
 ```
 
-pay.phala.com only redirects to the release's `deploy.sh` asset on GitHub, which deploys that
-release; read it first if you like (`curl -fsSL https://pay.phala.com/deploy.sh | less`). It needs
+pay.phala.com redirects to the release's `deploy.sh` asset on GitHub, which deploys that release.
+This is an HTTPS bootstrap, as with rustup, Deno, Bun, or Homebrew: you trust pay.phala.com, its
+TLS, and Cloudflare, which publishes it, as well as GitHub and Phala Pay's releasers, to hand you
+the script. The checks it then runs cannot vouch for the script itself, and without the GitHub CLI
+its `SHA256SUMS` check catches a corrupted download, not a substituted release.
+
+**High-assurance path.** Download the script from the release, verify its build provenance
+against Phala Pay's repository, its Release workflow at the tag, and the tag's commit, read it, and
+run it with `--strict`, which refuses to go on unless the GitHub CLI verifies the release's
+provenance (as `PHALA_PAY_REQUIRE_ATTESTATION=1` does):
+
+```sh
+version=v0.3.2 repo=Phala-Network/phala-pay
+gh release download "$version" -R "$repo" -p deploy.sh
+gh attestation verify deploy.sh -R "$repo" --deny-self-hosted-runners \
+  --source-digest "$(gh api "repos/$repo/commits/$version" --jq .sha)" \
+  --cert-identity "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$version"
+bash deploy.sh --strict
+```
+
+It needs
 `curl`, `tar`, `jq`, bash 4.4, Node.js 22 and npm, Docker (preflight checks the configuration in the
 release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key, and
 your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it never stores. It:
@@ -50,7 +69,8 @@ your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it ne
 1. downloads the release into a private temporary directory, removed on exit, and verifies it:
    with the GitHub CLI 2.101 or later, logged in, as [Verify a release](#verify-a-release) does;
    without it, against `SHA256SUMS` only, which checks the download but not its provenance;
-2. asks for an instance name, the admin public key (or generates the keypair, the seed written
+2. asks for an instance name (5 to 63 letters, digits, and `-`, as Phala Cloud requires), the
+   admin public key (or generates the keypair, the seed written
    mode 0600 only to the file you name and never printed), the backup location and its token, an
    optional Sentry DSN, and either nothing, for the **quick start** (the template variant at Phala
    Cloud's gateway domain, testnet routes, its admin key and backup location in the CVM's env), or
@@ -59,13 +79,18 @@ your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it ne
 3. renders the compose with the kit's `render.sh`, runs `preflight.sh --offline` and
    `check-route-modes.sh`, and provisions the CVM with the kit's locked Phala Cloud CLI, pre-launch
    script, `--image dstack-0.5.9 --no-dev-os`, and Phala Cloud's KMS, sealing the secrets you gave
-   from a mode 0600 file in the temporary directory; for a custom domain it then sets the node's
-   gateway, as Deploy does;
+   from a mode 0600 file in the temporary directory, and records the new CVM's id in the
+   environment directory's `cvm-id` (the quick start: `./NAME.cvm-id`); for a custom domain it then
+   sets the node's gateway, as Deploy does. The CLI runs in an empty directory of its own, so a
+   `phala.toml` where you run the script is never read;
 4. prints the CVM id, the URL, the DNS records of a custom domain, and how to verify the
    attestation (section 5).
 
 `--non-interactive` takes the inputs from the environment instead (the script's header lists
-them). A provision proves nothing about the instance's health: it is accepted once `/healthz`
+them). A secret is written as `NAME=VALUE`, which the Phala Cloud CLI reads as dotenv does, so a
+value with a `#`, a quote, or surrounding whitespace is refused before anything is deployed. A run
+that finds a recorded `cvm-id` creates no other CVM: it prints how to finish that one with Deploy,
+or to delete it and the file to start over. A provision proves nothing about the instance's health: it is accepted once `/healthz`
 answers and you have verified the attestation, and for a custom domain once the DNS records
 resolve and Deploy's upgrade with the same release has passed (section 4, step 5). Commit the
 custom domain's environment directory to your environment repository and set `TOPUP_CVM_ID` to the

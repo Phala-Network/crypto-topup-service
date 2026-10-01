@@ -6,7 +6,10 @@
 # - the custom domain, verified by SHA256SUMS, writes the environment directory with a generated
 #   admin key, provisions the service variant, upgrades it to its node's gateway without an env,
 #   and prints the DNS records;
-# - a release that does not match its SHA256SUMS, or a refused attestation, deploys nothing.
+# - a phala.toml in the caller's directory never reaches the CLI, which runs in an empty directory;
+# - a run that created a CVM and then failed records it, and the rerun creates no other;
+# - a release that does not match its SHA256SUMS, a refused attestation, --strict without the GitHub
+#   CLI, an invalid instance name, or a secret the CLI would read differently deploys nothing.
 # Every run leaves no temporary directory and prints no secret. TOPUP names a local topup binary
 # for preflight and the route-mode check (CI's build).
 set -euo pipefail
@@ -89,9 +92,11 @@ cat >"$bin/uvx" <<'STUB'
 echo '{"keyid": "admin/v1", "public_key": "23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo="}'
 STUB
 # The Phala Cloud CLI: each deploy records its arguments and the env file it sends, and makes the
-# CVM report a new compose hash; the CVM has booted on node prod5.
+# CVM report a new compose hash; the CVM has booted on node prod5. The real CLI reads phala.toml from
+# its working directory; the stub records when one is there. Deploy number STUB_FAIL_DEPLOY fails.
 cat >"$bin/phala-cli" <<'STUB'
 #!/usr/bin/env bash
+[[ ! -e phala.toml ]] || echo "phala.toml in $PWD" >>"$STUB_LOG"
 case "$1" in
     whoami) echo "operator" ;;
     deploy)
@@ -100,7 +105,9 @@ case "$1" in
             [[ "$1" != -e ]] || { stat -c %a "$2" >"$STUB_STATE/env.mode"; cp "$2" "$STUB_STATE/env"; }
             shift
         done
-        echo $(($(cat "$STUB_STATE/deploys" 2>/dev/null || echo 0) + 1)) >"$STUB_STATE/deploys"
+        deploys=$(($(cat "$STUB_STATE/deploys" 2>/dev/null || echo 0) + 1))
+        [[ "$deploys" != "${STUB_FAIL_DEPLOY:-}" ]] || exit 1
+        echo "$deploys" >"$STUB_STATE/deploys"
         echo "Provisioning CVM ..."
         echo '{"success": true, "vm_uuid": "cvm-0123", "app_id": "0xabcdef0123456789abcdef0123456789abcdef01"}'
         ;;
@@ -139,7 +146,9 @@ deploys() {
     grep '^phala deploy' "$tmp/log" || true
 }
 
-# Quick start: the template, verified with the GitHub CLI, sealed at provision.
+# Quick start: the template, verified with the GitHub CLI, sealed at provision; a phala.toml in the
+# caller's directory that would make the CLI update another CVM with another env is never read.
+printf '%s\n' 'id = "another-cvm"' 'env_file = "other.env"' >"$tmp/phala.toml"
 succeeds quick TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= AWS_REGION=auto
 [[ "$(grep -c '^gh attestation verify' "$tmp/log")" == 8 ]] || fail "quick did not verify 5 assets and 3 images"
 [[ "$(deploys | wc -l)" == 1 ]] || fail "quick did not deploy exactly once"
@@ -158,6 +167,9 @@ WALG_S3_PREFIX=s3://operator-backups/quick
 ENV
 grep -qx '  URL       https://abcdef0123456789abcdef0123456789abcdef01.dstack-pha-prod5.phala.network' \
     "$tmp/quick.out" || fail "quick did not print the gateway URL"
+! grep -q '^phala.toml in' "$tmp/log" || fail "quick ran the CLI where a phala.toml is"
+[[ "$(cat "$tmp/quick.cvm-id")" == cvm-0123 ]] || fail "quick did not record its CVM"
+rm "$tmp/phala.toml"
 
 # Custom domain: SHA256SUMS only (an older GitHub CLI), a generated admin key, the service variant.
 succeeds custom STUB_GH_VERSION=2.100.0 DOMAIN=pay-api.operator.test \
@@ -180,17 +192,37 @@ grep -qx '  CNAME  pay-api.operator.test  gateway.dstack-pha-prod5.phala.network
 grep -qx "  TXT    _dstack-app-address.pay-api.operator.test  $(printf 'a%.0s' {1..40}):443" "$tmp/custom.out" ||
     fail "custom did not print the TXT record"
 
-# Fail closed: a release that does not verify deploys nothing and leaves nothing.
+# Fail closed: what does not verify or check out deploys nothing, leaves nothing, and prints no secret.
 # refused NAME MESSAGE [ENV...]
 refused() {
     local name=$1 message=$2
     shift 2
     ! run "$name" TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= "$@" ||
         fail "$name deployed"
-    grep -qF "$message" "$tmp/$name.err" || { cat "$tmp/$name.err" >&2; fail "$name failed for another reason"; }
+    grep -qF -- "$message" "$tmp/$name.err" || { cat "$tmp/$name.err" >&2; fail "$name failed for another reason"; }
     [[ -z "$(deploys)" ]] || fail "$name deployed"
     [[ -z "$(ls -A "$tmp/tmp")" ]] || fail "$name left $(ls "$tmp/tmp")"
+    ! grep -qF -e "${secrets[1]}" -e 'alpha#bravo' "$tmp/$name.out" "$tmp/$name.err" || fail "$name printed a secret"
 }
+
+# A rerun after a failure that followed the CVM's creation (here, setting its gateway) creates none,
+# and says how to finish it with Deploy.
+! run rerun STUB_GH_VERSION=2.100.0 DOMAIN=pay-api.rerun.test ENVIRONMENT_DIR="$tmp/rerun/topup" \
+    TOPUP_ADMIN_PUBLIC_KEY=23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo= STUB_FAIL_DEPLOY=2 ||
+    fail "rerun's first run passed although setting the gateway failed"
+[[ "$(cat "$tmp/rerun/topup/cvm-id" 2>/dev/null)" == cvm-0123 ]] ||
+    { cat "$tmp/rerun.err" >&2; fail "rerun's first run did not record its CVM"; }
+refused rerun "an earlier run created CVM cvm-0123 for this instance" STUB_GH_VERSION=2.100.0 \
+    DOMAIN=pay-api.rerun.test ENVIRONMENT_DIR="$tmp/rerun/topup"
+grep -qF "TOPUP_CVM_ID=cvm-0123, and run Deploy with mode upgrade" "$tmp/rerun.err" ||
+    fail "rerun did not say how to finish the CVM"
+
+refused short-name "CVM_NAME must be 5 to 63 characters" CVM_NAME=abcd
+refused bad--name "CVM_NAME must be letters, digits, and -"
+refused 1st-name "CVM_NAME must be letters, digits, and -"
+refused strict "--strict needs the GitHub CLI" STUB_GH_VERSION=2.100.0 PHALA_PAY_REQUIRE_ATTESTATION=1
+refused hash-secret "AWS_SECRET_ACCESS_KEY has a #, a quote, or surrounding whitespace" \
+    AWS_SECRET_ACCESS_KEY='alpha#bravo'
 cp "$assets/images.json" "$tmp/images.json"
 echo '{}' >"$assets/images.json"
 refused tampered "does not match its SHA256SUMS" STUB_GH_VERSION=2.100.0

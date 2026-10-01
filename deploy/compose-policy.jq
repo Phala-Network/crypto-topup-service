@@ -93,7 +93,8 @@ def sealed_names:
 # may name only sealed names of the compose, so the env can fill nothing the compose does not
 # reference; the template's DSTACK_APP_DOMAIN is none, since the pre-launch script exports it. A
 # sealed name it leaves out is unset in the CVM, as an empty one is: a required secret is enforced
-# where it is used, at startup (postgres-walg refuses to start without the storage credentials).
+# where it is used, at every start (deploy/scripts/postgres-walg-entrypoint.sh refuses S3 storage
+# without both credentials, in PostgreSQL and the backup job).
 def allowed_envs_violations($variant; $allowed):
     (sealed_names - if $variant == "template" then ["DSTACK_APP_DOMAIN"] else [] end) as $sealed
     | if ($allowed | type) == "array" and ($allowed | all(type == "string")) then

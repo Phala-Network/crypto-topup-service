@@ -144,5 +144,6 @@ jobs:
           sdk/changelog-section.sh "$changelog" "$version" >"$RUNNER_TEMP/notes.md"
           prerelease=()
           [[ "$version" != *-* ]] || prerelease=(--prerelease)
+          # Never Latest: releases/latest is the service's, where https://pay.phala.com/deploy.sh leads.
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "$package $version" \
-            --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}"
+            --notes-file "$RUNNER_TEMP/notes.md" "${prerelease[@]}" --latest=false

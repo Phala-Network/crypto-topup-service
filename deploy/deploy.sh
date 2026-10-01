@@ -4,10 +4,15 @@
 #
 #   curl -fsSL https://pay.phala.com/deploy.sh | bash
 #
-# Each release publishes this script as its asset deploy.sh, set to deploy that release. It
-# downloads the release into a private temporary directory, removed on exit, and verifies it: with
-# the GitHub CLI 2.101 or later, logged in, by the release's deploy/verify-release.sh (its commit,
-# SHA256SUMS, and every build provenance attestation, as Deploy does); otherwise by SHA256SUMS only.
+# Each release publishes this script as its asset deploy.sh, set to deploy that release. The command
+# above is an HTTPS bootstrap, like rustup's, Deno's, Bun's, or Homebrew's: it trusts pay.phala.com,
+# its TLS and Cloudflare, GitHub, and Phala Pay's releasers to serve this script. For high
+# assurance, verify the script's own attestation before running it (docs/self-hosting.md,
+# "One-command deploy"). It downloads the release into a private temporary directory, removed on
+# exit, and verifies it: with the GitHub CLI 2.101 or later, logged in, by the release's
+# deploy/verify-release.sh (its commit, SHA256SUMS, and every build provenance attestation, as
+# Deploy does); otherwise against SHA256SUMS only, which catches a corrupted download but proves no
+# provenance. --strict, or PHALA_PAY_REQUIRE_ATTESTATION=1, refuses to go on without the GitHub CLI.
 # It then runs only the verified kit's scripts, in Deploy's order (.github/workflows/deploy.yml):
 # render.sh, preflight.sh --offline, check-route-modes.sh, and the kit's locked Phala Cloud CLI
 # through phala-cvm.sh, with the kit's pre-launch script, OS image dstack-0.5.9, and Phala Cloud's
@@ -18,13 +23,19 @@
 #   it writes from the template's routes, or an existing one. It prints the DNS records to create.
 #
 # Unlike Deploy, it seals the secrets at provision, from the owner's machine: the env file, the
-# sealed names given a value and no other, is written mode 0600 in the temporary directory. No secret is printed or kept; a generated admin
-# seed goes only to the file the owner names. Phala Cloud authentication is the owner's CLI login or
-# PHALA_CLOUD_API_KEY, never stored. A provision proves nothing about the CVM's health: /healthz and
-# the attestation, and for a custom domain the certificate evidence, are the acceptance step.
+# sealed names given a value and no other, is written mode 0600 in the temporary directory, and
+# preflight refuses a value the CLI would read differently. No secret is printed or kept; a
+# generated admin seed goes only to the file the owner names. Phala Cloud authentication is the
+# owner's CLI login or PHALA_CLOUD_API_KEY, never stored. The CLI runs in an empty directory of its
+# own, with absolute paths, so no phala.toml in the caller's directory can turn the new CVM into an
+# update of another. Once the CVM exists, its id (no secret) goes to the environment directory's
+# cvm-id, or ./CVM_NAME.cvm-id for the quick start; a later run that finds it creates nothing and
+# says how to finish that CVM. A provision proves nothing about the CVM's health: /healthz and the
+# attestation, and for a custom domain the certificate evidence, are the acceptance step.
 #
 # The inputs are prompted for on the terminal, or with --non-interactive read from the environment:
-#   CVM_NAME                  the CVM's name
+#   CVM_NAME                  the CVM's name: 5 to 63 letters, digits, and -, from a letter to a
+#                             letter or digit, without --
 #   DOMAIN                    the API's custom domain; empty or unset for the quick start
 #   ENVIRONMENT_DIR           custom domain: the environment directory, written unless it exists
 #                             (default ./CVM_NAME/topup)
@@ -35,7 +46,7 @@
 #   SENTRY_DSN                optional
 #   TOPUP_RPC_<ID>_KEY        the key of each keyed RPC provider an existing directory declares
 #
-# Usage: deploy.sh [--non-interactive]
+# Usage: deploy.sh [--non-interactive] [--strict]
 set -euo pipefail
 
 repository=Phala-Network/phala-pay
@@ -77,20 +88,28 @@ check() {
 yaml_string() {
     jq -rn --arg value "$1" '$value | tojson'
 }
+# The Phala Cloud CLI reads phala.toml (a CVM id, an env file) from its working directory: it runs
+# in an empty one.
+phala_cli() {
+    (cd "$work/cli" && "$@")
+}
 phala_cvm() {
-    "$kit/deploy/phala-cvm.sh" "$@"
+    phala_cli "$kit/deploy/phala-cvm.sh" "$@"
 }
 
 # All of it in a function, so that bash has read the whole script before any command can read the
 # rest of a piped script from stdin.
 main() {
-    non_interactive=0
-    case "${1:-}" in
-        --non-interactive) non_interactive=1 ;;
-        "") ;;
-        *) die "usage: deploy.sh [--non-interactive]" ;;
-    esac
-    (($# <= 1)) || die "usage: deploy.sh [--non-interactive]"
+    non_interactive=0 strict=0
+    [[ "${PHALA_PAY_REQUIRE_ATTESTATION:-}" != 1 ]] || strict=1
+    local argument
+    for argument in "$@"; do
+        case "$argument" in
+            --non-interactive) non_interactive=1 ;;
+            --strict) strict=1 ;;
+            *) die "usage: deploy.sh [--non-interactive] [--strict]" ;;
+        esac
+    done
     ((non_interactive)) || { : </dev/tty; } 2>/dev/null ||
         die "no terminal to prompt on: run with --non-interactive and the inputs in the environment"
 
@@ -111,6 +130,7 @@ main() {
         fi
     fi
     if [[ -z "$provenance" ]]; then
+        ((!strict)) || die "--strict needs the GitHub CLI 2.101 or later, logged in (gh auth login)"
         say "note: without the GitHub CLI 2.101 or later, logged in, the release is checked against"
         say "      its SHA256SUMS only, not its build provenance; the full check: $docs#verify-a-release"
     fi
@@ -121,8 +141,11 @@ main() {
     check release '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$' "v<semver>"
 
     say "== Phala Pay $release: settings"
-    ask CVM_NAME "Instance name (the CVM's name)"
-    check CVM_NAME '^[a-z0-9]([a-z0-9-]{0,48}[a-z0-9])?$' "lowercase letters, digits, and -"
+    ask CVM_NAME "Instance name (the CVM's name: 5 to 63 letters, digits, and -)"
+    # The locked CLI's rule for a CVM name.
+    ((${#CVM_NAME} >= 5 && ${#CVM_NAME} <= 63)) || die "CVM_NAME must be 5 to 63 characters"
+    [[ "$CVM_NAME" =~ ^[A-Za-z]([A-Za-z0-9-]*[A-Za-z0-9])?$ && "$CVM_NAME" != *--* ]] ||
+        die "CVM_NAME must be letters, digits, and -, from a letter to a letter or digit, without --"
     say "Quick start: a testnet instance at Phala Cloud's gateway domain, its admin key and backup"
     say "location unattested. Custom domain: every setting attested, for an instance with merchants."
     ask DOMAIN "Custom domain for the API, e.g. pay-api.example.com (empty for the quick start)" ""
@@ -137,6 +160,23 @@ main() {
         elif [[ -e "$ENVIRONMENT_DIR" ]]; then
             die "$ENVIRONMENT_DIR exists without a topup.yaml"
         fi
+    fi
+    # One CVM per instance: the run that created it recorded its id, and a later run creates none.
+    local state=$PWD/$CVM_NAME.cvm-id recorded
+    [[ "$variant" == template ]] || state=$ENVIRONMENT_DIR/cvm-id
+    if [[ -f "$state" ]]; then
+        recorded=$(<"$state")
+        say "deploy.sh: an earlier run created CVM $recorded for this instance ($state); this run creates none."
+        if [[ "$variant" == service ]]; then
+            say "Finish it with Deploy, which renders the node's gateway, keeps the sealed env, and prints the"
+            say "DNS records: commit $ENVIRONMENT_DIR to your environment repository, set the Environment"
+            say "variable TOPUP_CVM_ID=$recorded, and run Deploy with mode upgrade at $release"
+            say "($docs#4-release-and-provision, step 5)."
+        else
+            say "See it in Phala Cloud's dashboard (npx phala cvms get $recorded); the quick start has no upgrade path."
+        fi
+        say "To start over instead, delete CVM $recorded in Phala Cloud, then $state."
+        exit 1
     fi
     if ((!existing)); then
         ask TOPUP_ADMIN_PUBLIC_KEY "Admin public key (empty to generate a keypair here)" ""
@@ -168,9 +208,10 @@ main() {
     work=$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-deploy.XXXXXX")
     trap 'rm -rf "$work"' EXIT
     trap 'exit 130' INT TERM
+    work=$(CDPATH='' cd -- "$work" && pwd)
     local assets=$work/release
     kit=$work/kit
-    mkdir -p "$assets" "$kit"
+    mkdir -p "$assets" "$kit" "$work/cli"
     if [[ "$provenance" == gh ]]; then
         gh api -H 'Accept: application/vnd.github.raw' \
             "repos/$repository/contents/deploy/verify-release.sh?ref=$release" >"$work/verify-release.sh"
@@ -190,7 +231,7 @@ main() {
     local images=$assets/images.json
     tar -xzf "$assets/phala-pay-deploy-$release.tar.gz" -C "$kit" --strip-components=1
     npm ci --prefix "$kit/deploy/tools" --ignore-scripts --no-audit --no-fund --loglevel=error </dev/null >&2
-    "$kit/deploy/phala" whoami </dev/null >&2 ||
+    phala_cli "$kit/deploy/phala" whoami </dev/null >&2 ||
         die "log in to Phala Cloud (npx phala login), or export PHALA_CLOUD_API_KEY"
 
     say "== render"
@@ -274,6 +315,7 @@ YAML
         --public-tcbinfo --secure-time </dev/null
     local cvm_id app_id
     cvm_id=$(jq -er '.vm_uuid' "$work/deploy.json")
+    printf '%s\n' "$cvm_id" >"$state"
     app_id=$(jq -er '.app_id' "$work/deploy.json")
     say "created CVM $cvm_id (app $app_id); waiting for it to boot"
     phala_cvm wait --unsealed "$cvm_id" </dev/null >"$work/cvm.json"
