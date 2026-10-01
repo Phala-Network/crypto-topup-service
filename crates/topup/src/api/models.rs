@@ -272,6 +272,14 @@ pub struct ClientQuote {
     /// While `seen`: blocks on top of and including the payment's block; otherwise `null`.
     #[schema(required = true)]
     pub confirmations: Option<u64>,
+    /// While `credited`: the credit of the payment in the currency's minor unit, the credited
+    /// deposit's `amount`. It differs from `amount` for a payment valued at spot (another amount,
+    /// or paid late); otherwise `null`.
+    #[schema(required = true)]
+    pub amount_credited: Option<u64>,
+    /// Typical time from payment to credit, in seconds, at the confirmation the quote's payments
+    /// are credited at, as `GET /v1/config` reports it.
+    pub typical_credit_seconds: u64,
 }
 
 /// `GET /v1/quotes/{id}` returns a `Quote` to a signed request and a `ClientQuote` to a request by

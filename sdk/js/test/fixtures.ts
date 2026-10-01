@@ -23,6 +23,8 @@ export function quote(overrides: Partial<ClientQuote> = {}): ClientQuote {
     expires_at: 1_790_410_500,
     payment_status: "none",
     confirmations: null,
+    amount_credited: null,
+    typical_credit_seconds: 30,
   };
   const merged = { ...base, ...overrides };
   return {

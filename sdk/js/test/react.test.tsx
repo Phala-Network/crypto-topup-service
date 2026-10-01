@@ -117,12 +117,35 @@ describe("Checkout", () => {
     );
     expect(screen.queryByRole("tablist")).toBeNull();
 
-    served = quote({ status: "complete", payment_status: "credited" });
+    served = quote({ status: "complete", payment_status: "credited", amount_credited: 2500 });
     await poll();
     await poll();
     expect(screen.getByRole("status").textContent).toBe("Payment credited: $25.00");
     expect(onSuccess).toHaveBeenCalledTimes(1);
     expect(onSuccess).toHaveBeenCalledWith(served);
+  });
+
+  it.each([
+    [300, "Payment received, 1 confirmation. Crediting in about 5 minutes"],
+    [900, "Payment received, 1 confirmation. Crediting in about 15 minutes"],
+  ])("tells the payer the typical wait of the quote's confirmation (%i s)", async (seconds, message) => {
+    served = quote({ typical_credit_seconds: seconds });
+    await renderCheckout();
+    served = quote({ typical_credit_seconds: seconds, payment_status: "seen", confirmations: 1 });
+    await poll();
+    expect(screen.getByRole("status").textContent).toBe(message);
+  });
+
+  it.each([
+    [1000, "Payment credited: $10.00 of $25.00"],
+    [3000, "Payment credited: $30.00, more than the $25.00 quoted"],
+  ])("states what a market-priced payment credited and passes it to onSuccess (%i)", async (credited, message) => {
+    const onSuccess = vi.fn<(quote: ClientQuote) => void>();
+    await renderCheckout({ onSuccess });
+    served = quote({ payment_status: "credited", amount_credited: credited });
+    await poll();
+    expect(screen.getByRole("status").textContent).toBe(message);
+    expect(onSuccess).toHaveBeenCalledWith(expect.objectContaining({ amount: 2500, amount_credited: credited }));
   });
 
   it("calls onChange once per status change, not on every poll", async () => {
