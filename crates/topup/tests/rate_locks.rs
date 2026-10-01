@@ -1566,7 +1566,9 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
 }
 
 /// The payer's view reports what was credited, not what was quoted: an underpayment valued at
-/// spot is credited at its own amount. Its typical credit time follows the account's policy.
+/// spot is credited at its own amount. Its typical credit time is that of the confirmation the
+/// account's payments on the chain wait for: Base's `safe` block, then `finalized` once the
+/// account's policy requires it.
 #[tokio::test]
 async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -1576,8 +1578,11 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
         let pool = &database.app_pool;
         let (product, product_key) = seed_product(pool, "phala-cloud").await?;
         seed_account(pool, product.id, "underpaid").await?;
+        const BASE: u64 = 8_453;
+        seed::set_treasury(pool, product.id, true, BASE, seed::FIXTURE_TREASURY).await?;
         let mut route = test_route();
-        route.chain.confirmations = topup_core::route::Confirmations::Depth(2);
+        route.chain.chain_id = BASE;
+        route.chain.confirmations = topup_core::route::Confirmations::Safe;
         let admin_key = SigningKey::from_bytes(&[44; 32]);
         let app = topup::api::router(AppState {
             pool: pool.clone(),
@@ -1600,11 +1605,16 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
         .0;
         let body = serde_json::to_vec(&json!({
             "client_reference_id": "underpaid", "amount": 100, "currency": "usd",
-            "chain_id": 1, "asset": "pha"
+            "chain_id": BASE, "asset": "pha"
         }))?;
         let created = app
             .clone()
-            .oneshot(merchant_request(Method::POST, "/v1/quotes", body, &product_key))
+            .oneshot(merchant_request(
+                Method::POST,
+                "/v1/quotes",
+                body,
+                &product_key,
+            ))
             .await?;
         ensure!(created.status() == StatusCode::OK);
         let created = response_json(created).await?;
@@ -1618,22 +1628,28 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
 
         let unpaid = read().await?;
         ensure!(unpaid["amount_credited"].is_null(), "{unpaid}");
-        ensure!(unpaid["typical_credit_seconds"] == 30, "{unpaid}");
-        // A stricter account policy is what the page waits for.
-        sqlx::query(
-            "INSERT INTO confirmation_policies (account_id, chain_id, required) VALUES ($1, 1, '12')",
-        )
-        .bind(product.id)
-        .execute(pool)
-        .await?;
-        ensure!(read().await?["typical_credit_seconds"] == 150);
+        ensure!(unpaid["typical_credit_seconds"] == 300, "{unpaid}");
+        let policy = serde_json::to_vec(&json!({
+            "confirmation_policies": [{"chain_id": BASE, "confirmations": "finalized"}]
+        }))?;
+        let updated = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::POST,
+                "/v1/account",
+                policy,
+                &product_key,
+            ))
+            .await?;
+        ensure!(updated.status() == StatusCode::OK);
+        ensure!(read().await?["typical_credit_seconds"] == 900);
 
         // 40 of the quoted 100 atomic units, valued at spot: 40 cents, not the quote's 100.
         let address_id = quote_address_id(pool, quote_id).await?;
         let inserted = topup::db::insert_deposit(
             pool,
             &topup::db::NewDeposit {
-                chain_id: 1,
+                chain_id: BASE,
                 tx_hash: B256::repeat_byte(0x81),
                 log_index: 0,
                 receipt_log_index: 0,

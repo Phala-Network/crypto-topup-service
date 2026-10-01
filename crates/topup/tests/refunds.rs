@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sqlx::Connection as _;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use topup::api::{AppState, PublicOrigin, VerificationKey};
+use topup::api::{AppState, ClientReadLimiter, PublicOrigin, VerificationKey};
 use topup::db::{Account, NewDeposit};
 use topup::deposit_addresses::{self, ChainContracts};
 use topup::outbox::{DeliveryConfig, DeliveryWorker};
@@ -895,7 +895,13 @@ async fn refunds_take_back_the_credit_pro_rata_in_each_deposit_snapshot() -> Res
     let result = async {
         let pool = &database.app_pool;
         let admin_key = SigningKey::from_bytes(&[51; 32]);
-        let app = test_router(pool, &admin_key);
+        let client_reads = Arc::new(ClientReadLimiter::default());
+        let app = test_router_with(
+            pool,
+            &admin_key,
+            Arc::new(StaticScreener::Listing),
+            Arc::clone(&client_reads),
+        );
         let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
         let deposit = seed_deposit(
             pool,
@@ -922,6 +928,21 @@ async fn refunds_take_back_the_credit_pro_rata_in_each_deposit_snapshot() -> Res
         )?]);
         let worker = test_worker(pool, vec![paying.clone()], vec![paying]);
         ensure!(worker.check_once().await? == Verification::Succeeded);
+        // The payer's view of the deposit's quote still states what the payment credited: a
+        // refund takes credit back in the merchant's ledger, it does not change the credit.
+        let quote: Uuid = sqlx::query_scalar(
+            "SELECT address.quote_id FROM deposits AS deposit \
+             JOIN addresses AS address ON address.id = deposit.address_id WHERE deposit.id = $1",
+        )
+        .bind(deposit)
+        .fetch_one(pool)
+        .await?;
+        let secret = support::issue_client_secret(pool, &client_reads, quote).await?;
+        let view = support::client_quote(&app, &secret).await?;
+        ensure!(
+            view["payment_status"] == "credited" && view["amount_credited"] == 1000,
+            "{view}"
+        );
         // The rest, paid by a second log of the same transaction, takes back all of it.
         let second = merchant.refund(deposit, "200").await?;
         merchant.mark_paid(&second, REFUND_TX).await?;
@@ -971,6 +992,11 @@ async fn refunds_take_back_the_credit_pro_rata_in_each_deposit_snapshot() -> Res
                 && current["refunded"] == true,
             "{current}"
         );
+        let view = support::client_quote(&app, &secret).await?;
+        ensure!(
+            view["payment_status"] == "credited" && view["amount_credited"] == current["amount"],
+            "{view}"
+        );
         Ok(())
     }
     .await;
@@ -1001,7 +1027,12 @@ async fn only_a_refundable_deposit_to_a_screened_destination_is_refunded() -> Re
         ensure!(error["error"]["param"] == "destination_address", "{error}");
         // Screening that cannot answer refuses too, for a retry.
         let unscreened = Merchant {
-            app: test_router_with(pool, &admin_key, Arc::new(StaticScreener::Unavailable)),
+            app: test_router_with(
+                pool,
+                &admin_key,
+                Arc::new(StaticScreener::Unavailable),
+                Arc::default(),
+            ),
             ..merchant.clone()
         };
         let (status, _) = unscreened
@@ -1966,13 +1997,19 @@ impl DestinationScreener for StaticScreener {
 }
 
 fn test_router(pool: &sqlx::PgPool, admin_key: &SigningKey) -> Router {
-    test_router_with(pool, admin_key, Arc::new(StaticScreener::Listing))
+    test_router_with(
+        pool,
+        admin_key,
+        Arc::new(StaticScreener::Listing),
+        Arc::default(),
+    )
 }
 
 fn test_router_with(
     pool: &sqlx::PgPool,
     admin_key: &SigningKey,
     screening: Arc<dyn DestinationScreener>,
+    client_reads: Arc<ClientReadLimiter>,
 ) -> Router {
     let state = AppState {
         pool: pool.clone(),
@@ -1985,7 +2022,7 @@ fn test_router_with(
         public_origin: PublicOrigin::parse(TEST_ORIGIN).expect("test origin is valid"),
         attestor: Arc::new(DstackAttestor::new()),
         rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
-        client_reads: Arc::default(),
+        client_reads,
         rate_limits: Arc::default(),
         screening,
         contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),

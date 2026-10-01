@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use tokio_util::sync::CancellationToken;
+use topup::api::{AppState, ClientReadLimiter, PublicOrigin, VerificationKey};
 use topup::audit::Actor;
 use topup::db;
 use topup::deposit_addresses;
@@ -27,6 +28,7 @@ use topup::scanner::{
 use topup::steps::confirm::ConfirmStep;
 use topup::steps::screen::{ScreenRoute, ScreenStep};
 use topup::tenancy::Scope;
+use topup_adapters::attestation::DstackAttestor;
 use topup_adapters::chain::evm::metrics::provider_call_counts;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, EvmClient, FinalizedHead, FinalizedReader, ReceiptLookup, TransferLog,
@@ -41,9 +43,9 @@ use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
-use support::TestDatabase;
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
 use support::seed::{self, NewAccount, NewAddress};
+use support::{TEST_ORIGIN, TestDatabase, public_key_base64};
 
 /// Anvil's second and third default accounts: the payer, and a sender whose transaction shifts
 /// the payer's log within a re-mined block.
@@ -220,6 +222,79 @@ async fn a_transaction_replaced_with_the_same_nonce_is_reversed_once() -> Result
             ensure!(again.watched == 0, "{again:?}");
             ensure!(chain.pump.run_once().await? == RunOnceResult::Idle);
             ensure!(chain.events("deposit.reversed").await?.len() == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The payer's view reports the credit of the one payment it shows, never a sum, and a fresh read
+/// after that payment is reversed shows the payment still standing.
+#[tokio::test]
+async fn the_payers_view_credits_the_shown_payment_and_drops_a_reversed_one() -> Result<()> {
+    run(&[], |chain| {
+        Box::pin(async move {
+            // Two partial payments, each credited at spot: the payer's, then another sender's,
+            // with gas to spare for when it is re-mined without the first one before it.
+            let nonce = chain.payer_nonce()?;
+            let first = chain.pay(300)?;
+            let second = send(
+                &chain.anvil,
+                OTHER_KEY,
+                &[
+                    "--gas-limit",
+                    "100000",
+                    &format!("{:#x}", chain.token),
+                    "transfer(address,uint256)",
+                    &format!("{:#x}", chain.address),
+                    "400",
+                ],
+            )?;
+            let second: B256 = serde_json::from_slice::<Value>(&second.stdout)?["transactionHash"]
+                .as_str()
+                .context("transaction hash")?
+                .parse()?;
+            chain.anvil.mine(1)?;
+            ensure!(chain.scan().await? == 2);
+            chain.settle().await?;
+            let credit = |deposit: &db::Deposit| deposit.credit_minor.map(|credit| credit.value());
+            let (first_deposit, second_deposit) =
+                (chain.deposit(first).await?, chain.deposit(second).await?);
+            for deposit in [&first_deposit, &second_deposit] {
+                ensure!(deposit.state == DepositState::Credited);
+                ensure!(deposit.price_source.as_deref() == Some("spot"));
+            }
+            let (first_credit, second_credit) = (credit(&first_deposit), credit(&second_deposit));
+            ensure!(
+                first_credit.is_some() && second_credit.is_some() && first_credit != second_credit
+            );
+            let view = chain.client_quote().await?;
+            ensure!(
+                view["payment_status"] == "credited"
+                    && view["amount"] == 90
+                    && view["amount_credited"].as_u64() == first_credit
+                    && view["typical_credit_seconds"] == 30,
+                "{view}"
+            );
+
+            // The payer's nonce is spent on another transaction; the other sender's payment is
+            // re-mined. At finality the first deposit is reversed and the second one stands.
+            let raw = chain.raw_transaction(second)?;
+            let replacement = chain.payer_replacement(nonce)?;
+            chain.reorg(3, &[(&replacement, 0), (&raw, 1)])?;
+            ensure!(chain.receipt_block(first)?.is_none());
+            ensure!(chain.receipt_block(second)?.is_some());
+            chain.anvil.mine(FINALITY_DEPTH + 2)?;
+            let stats = chain.watch().await?;
+            ensure!(stats.reversed == 1 && stats.finalized == 1, "{stats:?}");
+            ensure!(chain.deposit(first).await?.state == DepositState::Reversed);
+            ensure!(chain.deposit(second).await?.state == DepositState::Credited);
+            let view = chain.client_quote().await?;
+            ensure!(
+                view["payment_status"] == "credited"
+                    && view["amount_credited"].as_u64() == second_credit,
+                "{view}"
+            );
             Ok(())
         })
     })
@@ -644,6 +719,8 @@ struct FastChain {
     reader: FinalizedReader,
     pump: Pump,
     watch: FinalityWatch,
+    api: axum::Router,
+    client_reads: Arc<ClientReadLimiter>,
 }
 
 impl FastChain {
@@ -727,11 +804,29 @@ impl FastChain {
         )?;
         let watch = FinalityWatch::single(
             pool.clone(),
-            route_set,
+            Arc::clone(&route_set),
             CHAIN_ID,
             reader(&anvil.rpc_url)?,
             secondary(&anvil.rpc_url)?,
         );
+        let client_reads = Arc::new(ClientReadLimiter::default());
+        let api = topup::api::router(AppState {
+            pool: pool.clone(),
+            routes: route_set,
+            admin_key: VerificationKey::from_base64(
+                "admin/v1".to_owned(),
+                &public_key_base64(&ed25519_dalek::SigningKey::from_bytes(&[49; 32])),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: Arc::new(topup::locks::UnavailableQuoteProvider),
+            client_reads: Arc::clone(&client_reads),
+            rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        })
+        .0;
         let reader = reader(&anvil.rpc_url)?;
         // The finalized scanner's first pass writes the cursor the fast scan starts above.
         scan_once(&pool, &reader, &routes).await?;
@@ -747,6 +842,8 @@ impl FastChain {
             reader,
             pump,
             watch,
+            api,
+            client_reads,
         };
         // Every address is a quote's; the fast scan watches open quotes.
         chain.open_quote().await?;
@@ -963,6 +1060,16 @@ impl FastChain {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The payer's view of the address's quote, read with a client secret issued for it.
+    async fn client_quote(&self) -> Result<Value> {
+        let quote: Uuid = sqlx::query_scalar("SELECT quote_id FROM addresses WHERE id = $1")
+            .bind(self.address_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let secret = support::issue_client_secret(&self.pool, &self.client_reads, quote).await?;
+        support::client_quote(&self.api, &secret).await
     }
 
     async fn quote_status(&self) -> Result<(String, Option<Uuid>)> {
