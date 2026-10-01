@@ -184,7 +184,7 @@ pub(crate) async fn issue_api_key(
 #[utoipa::path(
     get,
     path = "/v1/admin/deposits/{id}",
-    params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
+    params(("id" = String, Path, description = "Deposit id, `dep_…`")),
     responses(
         (status = 200, description = "OK: the deposit as its account sees it, with `admin`", body = Deposit),
         (status = 400, description = "Bad Request", body = ErrorResponse),
@@ -199,7 +199,7 @@ pub(crate) async fn admin_get_deposit(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
 ) -> ApiResult<Json<Deposit>> {
-    let id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
+    let id = crate::ids::parse(crate::ids::DEPOSIT, &id).ok_or_else(ApiError::not_found)?;
     let (scope, admin) = repository::admin_deposit(&state.pool, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -431,7 +431,7 @@ pub(crate) async fn resume_route(
 #[utoipa::path(
     post,
     path = "/v1/admin/deposits/{id}/nudge",
-    params(("id" = String, Path, description = "Deposit id, `dep_…` or the UUID")),
+    params(("id" = String, Path, description = "Deposit id, `dep_…`")),
     responses(
         (status = 200, description = "OK", body = NudgeResponse),
         (status = 400, description = "Bad Request", body = ErrorResponse),
@@ -445,8 +445,8 @@ pub(crate) async fn nudge_deposit(
     AdminActor(actor): AdminActor,
     ApiPath(deposit_id): ApiPath<String>,
 ) -> ApiResult<Json<NudgeResponse>> {
-    let deposit_id = crate::ids::parse_or_uuid(crate::ids::DEPOSIT, &deposit_id)
-        .ok_or_else(ApiError::not_found)?;
+    let deposit_id =
+        crate::ids::parse(crate::ids::DEPOSIT, &deposit_id).ok_or_else(ApiError::not_found)?;
     Ok(Json(
         repository::nudge_deposit(&state.pool, deposit_id, &actor).await?,
     ))

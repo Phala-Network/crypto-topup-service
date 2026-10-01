@@ -26,8 +26,7 @@ or the product last recorded it (a deposit address posted again gets a fresh `cl
 most `SINCE_MARGIN` seconds before: the service re-issues a quote it no longer holds that was
 created up to five minutes before the restore point. Without `since`, everything is exported,
 which is safe: a record the restored service still holds is answered `reissued: false` or
-`matches`. Quotes and deposit addresses created before the product recorded them, and events
-stored before the inbox kept deliveries, are not in the ledger. The export holds client secrets:
+`matches`. The export holds client secrets:
 hand it to the operator over the incident's channel only, and delete it once the restore is done.
 """
 
@@ -110,9 +109,6 @@ def export_restore_records(
         if (request := delivery_request(delivery)) is not None
     ]
     treasury_events = kept(TREASURY_EVENT_TYPES)
-    missing = ledger.events_without_evidence(RESTORED_EVENT_TYPES + TREASURY_EVENT_TYPES)
-    if missing:
-        LOG.warning("%d events were stored before the inbox kept deliveries; not exported", missing)
     return {
         "account": account,
         "since": since,
@@ -133,19 +129,13 @@ def export_restore_records(
 
 def deposit_position(event: Mapping[str, Any]) -> tuple[int, str, int, int]:
     """A deposit event's receipt position and revision (chain, transaction, receipt log index,
-    revision), for ordering; a snapshot without them sorts by what it has."""
-    deposit = (event.get("data") or {}).get("object") or {}
-
-    def number(name: str) -> int:
-        value = deposit.get(name)
-        return value if type(value) is int else -1
-
-    tx_hash = deposit.get("tx_hash")
+    revision), for ordering."""
+    deposit = event["data"]["object"]
     return (
-        number("chain_id"),
-        tx_hash.lower() if isinstance(tx_hash, str) else "",
-        number("receipt_log_index"),
-        number("revision"),
+        int(deposit["chain_id"]),
+        str(deposit["tx_hash"]).lower(),
+        int(deposit["receipt_log_index"]),
+        int(deposit["revision"]),
     )
 
 

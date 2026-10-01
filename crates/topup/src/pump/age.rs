@@ -145,7 +145,7 @@ impl AgeAlerter {
                     tags.alert = "TopupDepositStateAgeExceeded",
                     tags.route = route,
                     tags.state = state_code(state),
-                    deposit_id = %row.id,
+                    deposit_id = %crate::ids::format(crate::ids::DEPOSIT, row.id),
                     route,
                     route_version = version,
                     state = ?state,

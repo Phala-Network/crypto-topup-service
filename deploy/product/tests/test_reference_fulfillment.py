@@ -27,7 +27,7 @@ from reference_product.config import (
     ProductConfig,
 )
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
-from reference_product.ledger import Delivery, LedgerVersionError, ProductLedger
+from reference_product.ledger import Delivery, ProductLedger
 from reference_product.restore_records import export_restore_records
 from reference_product.server import AccountApi
 from topup_sdk import (
@@ -123,8 +123,12 @@ def _credited(
             "address": "0x" + "66" * 20,
             "from_address": "0x" + "77" * 20,
             "tx_hash": tx_hash,
+            "receipt_log_index": 0,
+            "revision": 0,
             "log_index": 0,
             "block_number": 100,
+            "block_hash": "0x" + "10" * 32,
+            "block_time": 1_790_410_290,
             "amount_refunded_atomic": "0",
             "refunded": False,
             "amount_refunded": 0,
@@ -157,6 +161,8 @@ def _delivery(
             "livemode": livemode,
             "type": event_type,
             "created": created,
+            "actor": "system",
+            "request": None,
             "data": {"object": obj},
         }
     ).encode()
@@ -359,22 +365,6 @@ def test_a_credit_for_an_unknown_workspace_is_held() -> None:
     assert (order.status, order.reason, order.team_id) == ("held", "unknown_account", None)
 
 
-def test_a_legacy_credited_event_is_refused_without_a_credit() -> None:
-    # The envelope before `evt_` ids names no account, so it no longer verifies.
-    fulfillment = _fulfillment()
-    legacy_id = str(uuid.UUID(int=7))
-    legacy = {
-        "event_id": legacy_id,
-        "type": "deposit.credited",
-        "created_at": "2026-09-28T00:00:00Z",
-        "data": {"deposit_id": str(uuid.UUID(int=8)), "external_id": TEAM, "state": "credited"},
-    }
-    legacy_body = json.dumps(legacy).encode()
-    legacy_headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), legacy_body)
-    assert fulfillment.handle(legacy_headers, legacy_body).status == 400
-    assert fulfillment.ledger.credits_for(TEAM) == []
-
-
 def test_another_accounts_or_modes_event_is_refused_without_a_credit() -> None:
     fulfillment = _fulfillment()
     for delivery in (
@@ -429,36 +419,6 @@ def test_a_delivery_is_kept_only_with_its_ledger_effect(monkeypatch: pytest.Monk
     assert fulfillment.ledger.balance_for(TEAM) == 2_500
 
 
-def test_a_ledger_from_before_the_inbox_keeps_its_events(tmp_path: Path) -> None:
-    path = tmp_path / "ledger.sqlite3"
-    old = sqlite3.connect(path)
-    old.executescript(
-        "CREATE TABLE webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, "
-        "data TEXT NOT NULL, received_at REAL NOT NULL);"
-        "INSERT INTO webhook_events VALUES ('evt_old', 'deposit.credited', '{\"object\": {}}', 1);"
-    )
-    old.close()
-    # A ledger before versioning (user_version 0) is migrated, not recreated.
-    fulfillment = _fulfillment(ledger=ProductLedger(str(path)))
-    fulfillment.ledger.add_team(TEAM)
-    assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
-    assert fulfillment.ledger.events_without_evidence(["deposit.credited"]) == 1
-    # Its redelivery is not applied again, but completes its evidence; new deliveries keep theirs.
-    redelivery = _delivery("deposit.credited", {}, event_id="evt_old")
-    assert fulfillment.handle(*redelivery).status == 204
-    assert [kept.body for kept, _ in fulfillment.ledger.deliveries(["deposit.credited"])] == [
-        redelivery[1]
-    ]
-    assert fulfillment.ledger.events("deposit.credited") == [{"object": {}}]
-    assert fulfillment.ledger.credits_for(TEAM) == []
-    assert fulfillment.handle(*_credited()).status == 204
-    assert len(fulfillment.ledger.deliveries(["deposit.credited"])) == 2
-    # The ledger holds client secrets: its file is its owner's alone.
-    assert path.stat().st_mode & 0o777 == 0o600
-    # Opened again, it is at the latest version and changes nothing.
-    assert len(ProductLedger(str(path)).deliveries(["deposit.credited"])) == 2
-
-
 def test_a_new_ledger_file_is_its_owners_alone(tmp_path: Path) -> None:
     path = tmp_path / "ledger.sqlite3"
     ProductLedger(str(path)).add_team(TEAM)
@@ -476,12 +436,6 @@ def test_the_export_reads_the_ledger_without_changing_it(tmp_path: Path) -> None
     with pytest.raises(sqlite3.OperationalError):
         reader.add_team("team-2")
     assert path.read_bytes() == before
-    # A ledger the product has not migrated yet is refused, and left as it is.
-    legacy = tmp_path / "legacy.sqlite3"
-    sqlite3.connect(legacy).close()
-    with pytest.raises(LedgerVersionError):
-        ProductLedger(str(legacy), read_only=True)
-    assert legacy.read_bytes() == b""
 
 
 def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
@@ -490,59 +444,6 @@ def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
 
     fulfillment = Fulfillment(CONFIG, ProductLedger(), unpinned)
     assert fulfillment.handle(*_credited()).status == 503
-
-
-def test_orders_keyed_by_the_old_deposit_key_are_migrated(tmp_path: Path) -> None:
-    deposit = uuid.UUID(int=9)
-    path = str(tmp_path / "ledger.sqlite")
-    before = ProductLedger(path)
-    before.add_team(TEAM)
-    with before.transaction() as db:
-        db.execute(
-            "INSERT INTO orders (id, team_id, provider, order_flow_code, provider_order_id, "
-            "payload, status, created_at) VALUES ('o1', ?, 'crypto_topup', 'crypto-top-up', ?, "
-            "'{}', 'accepted', 0)",
-            (TEAM, f"deposit:{deposit}"),
-        )
-    # Opening the ledger applies the schema, which rewrites the old keys.
-    assert ProductLedger(path).find_order(f"dep_{deposit.hex}") is not None
-
-
-def test_a_version_1_ledger_drops_the_unread_address_table(tmp_path: Path) -> None:
-    path = tmp_path / "ledger.sqlite3"
-    ledger = ProductLedger(str(path))
-    ledger.add_team(TEAM)
-    ledger.record_quote(TEAM, _quote())
-    ledger.record_deposit_address(TEAM, _deposit_address())
-    # Version 1 also wrote each quote's and network's address to `team_addresses`, never read.
-    old = sqlite3.connect(path)
-    old.executescript(
-        "CREATE TABLE team_addresses (address TEXT PRIMARY KEY, "
-        "team_id TEXT NOT NULL REFERENCES teams (id), kind TEXT NOT NULL, version INTEGER, "
-        "lock_ref TEXT);"
-        "PRAGMA user_version = 1;"
-    )
-    with old:
-        old.execute("INSERT INTO team_addresses VALUES ('0xabc', ?, 'lock', NULL, 'qt_1')", (TEAM,))
-    old.close()
-    with pytest.raises(LedgerVersionError):
-        ProductLedger(str(path), read_only=True)
-    migrated = ProductLedger(str(path))
-    tables = {
-        row[0]
-        for row in sqlite3.connect(path).execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        )
-    }
-    assert "team_addresses" not in tables
-    # The records a restore re-issues from are kept, and the export reads them.
-    assert [record for record, _ in migrated.quote_records()] == [_quote()]
-    assert [record for record, _ in migrated.deposit_address_records()] == [_deposit_address()]
-    reader = ProductLedger(str(path), read_only=True)
-    assert len(reader.quote_records()) == 1
-    # Recording again writes no address table.
-    migrated.record_quote(TEAM, {**_quote(), "id": "qt_" + "0e" * 16})
-    assert len(migrated.quote_records()) == 2
 
 
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))
@@ -895,8 +796,8 @@ def test_the_export_orders_deliveries_by_deposit_position_and_batches_them() -> 
         assert fulfillment.handle(*delivery).status == 204
     [batch] = export_restore_records(CONFIG.account, fulfillment.ledger)["events"]
     order = [json.loads(each["body"])["data"]["object"] for each in batch["deliveries"]]
-    assert [(deposit["tx_hash"], deposit.get("revision")) for deposit in order] == [
-        ("0x" + "01" * 32, None),
+    assert [(deposit["tx_hash"], deposit["revision"]) for deposit in order] == [
+        ("0x" + "01" * 32, 0),
         (tx_hash, 0),
         (tx_hash, 1),
     ]

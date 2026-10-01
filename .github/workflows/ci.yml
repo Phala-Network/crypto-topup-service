@@ -256,7 +256,6 @@ jobs:
             docker run --rm -i "$SHELLCHECK_IMAGE" sh -c 'mkdir /src && cd /src && tar -x && shellcheck "$@"' sh "${scripts[@]}"
       - name: Validate deployment scripts
         run: |
-          deploy/tests/walg-cron.sh
           deploy/tests/walg-restore.sh
           deploy/tests/render.sh
           deploy/tests/render-route.sh
@@ -288,6 +287,8 @@ jobs:
         run: docker run --rm postgres-walg:ci wal-g --version
       - name: postgres-walg carries TLS roots for the object store
         run: docker run --rm --entrypoint sh postgres-walg:ci -c 'test -s /etc/ssl/certs/ca-certificates.crt'
+      - name: Check walg-cron and its backup-age marker
+        run: deploy/tests/walg-cron.sh postgres-walg:ci
       - name: Check the PostgreSQL bootstrap and WAL archive switch
         run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 

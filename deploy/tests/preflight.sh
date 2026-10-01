@@ -109,24 +109,30 @@ env_file example-values "$tmp/example.yml" TOPUP_RPC_ALCHEMY_SEPOLIA_KEY=sealed-
 expect_failure example "still holds values of deploy/environments/example" \
     --env "$tmp/example-values.env" --compose "$tmp/example.yml" --environment-dir "$example"
 
-# edited_environment NAME SED_SCRIPT: staging's environment with its topup.yaml edited.
+# edited_environment NAME SED_SCRIPT [KEY_NAME]: staging's environment with its topup.yaml edited,
+# its overlay declaring the sealed provider key KEY_NAME to topup, as a keyed provider's does.
 edited_environment() {
     cp -r "$staging" "$tmp/$1"
     sed -i "$2" "$tmp/$1/topup.yaml"
+    if [[ -n "${3:-}" ]]; then
+        printf '  topup:\n    environment:\n      %s: ${%s:-}\n' "$3" "$3" >>"$tmp/$1/compose.yaml"
+    fi
     render "$1" "$tmp/$1"
 }
 # A keyed provider is attested with {key}, and its sealed key must fit it: checked with --secrets,
 # skipped with --unsealed, and never printed.
-edited_environment keyed 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/{key}|'
+edited_environment keyed 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/{key}|' \
+    TOPUP_RPC_PROVIDER_A_KEY
 env_file keyed "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789
 passes --env "$tmp/keyed.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
 env_file keyless "$tmp/keyed.yml"
 expect_failure missing-key "TOPUP_RPC_PROVIDER_A_KEY is required by the {key} placeholder" \
     --env "$tmp/keyless.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
 passes --env "$tmp/keyless.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed" --unsealed
-env_file stray-key "$tmp/service.yml" TOPUP_RPC_PROVIDER_B_KEY=sealed-key-0123456789
-expect_failure stray-key "TOPUP_RPC_PROVIDER_B_KEY is set, but the URL has no {key} placeholder" \
-    --env "$tmp/stray-key.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+edited_environment stray '' TOPUP_RPC_PROVIDER_A_KEY
+env_file stray-key "$tmp/stray.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789
+expect_failure stray-key "TOPUP_RPC_PROVIDER_A_KEY is set, but the URL has no {key} placeholder" \
+    --env "$tmp/stray-key.env" --compose "$tmp/stray.yml" --environment-dir "$tmp/stray"
 env_file bad-key "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed/key
 expect_failure bad-key "TOPUP_RPC_PROVIDER_A_KEY must be at least 8 characters" \
     --env "$tmp/bad-key.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"

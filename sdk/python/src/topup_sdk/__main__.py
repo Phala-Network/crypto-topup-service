@@ -1,7 +1,9 @@
 """Command-line helpers for integrators.
 
-`keygen` creates a product signing key for credential issuance: the seed file stays with the
-integrator, and only the printed public key and key id are sent to the service operator.
+`keygen` creates an ed25519 seed file, such as an operator's admin key or a test webhook key, and
+prints its key id and public key: `public_key` for an RFC 9421 request-signing key, and
+`webhook_public_key`, the same key in Standard Webhooks' `whpk_` form, for a webhook key. The seed
+file never leaves its machine; `public-key` prints the same for an existing seed file.
 
 `send-test-event` exercises a product's webhook receiver the way `stripe trigger` does: it signs a
 synthetic test-mode `deposit.credited` of `--account` with a test seed the receiver's test
@@ -28,13 +30,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .addresses import deposit_id
 from .fulfillment import CREDITED_EVENT, credited_event_id
 from .signing import RequestSigner
-from .webhooks import sign_webhook
+from .webhooks import WEBHOOK_PUBLIC_KEY_PREFIX, sign_webhook
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="topup-sdk")
     commands = parser.add_subparsers(dest="command", required=True)
-    keygen = commands.add_parser("keygen", help="create an ed25519 product signing key")
+    keygen = commands.add_parser("keygen", help="create an ed25519 signing key")
     keygen.add_argument("--keyid", required=True, help="key identifier, for example acme/v1")
     keygen.add_argument("--seed-out", required=True, type=Path, help="new file for the seed")
     public = commands.add_parser("public-key", help="print the public key of a seed file")
@@ -80,7 +82,16 @@ def main(argv: list[str] | None = None) -> int:
         signer = RequestSigner.from_seed(args.keyid, seed)
     else:
         signer = RequestSigner.from_seed_file(args.keyid, args.seed_file)
-    print(json.dumps({"keyid": signer.keyid, "public_key": signer.public_key_base64()}))
+    public_key = signer.public_key_base64()
+    print(
+        json.dumps(
+            {
+                "keyid": signer.keyid,
+                "public_key": public_key,
+                "webhook_public_key": WEBHOOK_PUBLIC_KEY_PREFIX + public_key,
+            }
+        )
+    )
     return 0
 
 
@@ -106,6 +117,8 @@ def send_test_event(
         "livemode": False,
         "type": CREDITED_EVENT,
         "created": now,
+        "actor": "system",
+        "request": None,
         "data": {
             "object": {
                 "id": deposit,
@@ -116,6 +129,8 @@ def send_test_event(
                 "deposit_address": None,
                 "status": "credited",
                 "final": False,
+                "final_at": None,
+                "swept": False,
                 "rejection_reason": None,
                 "chain_id": 31337,
                 "asset": "test",
@@ -129,12 +144,18 @@ def send_test_event(
                 "address": "0x" + "00" * 20,
                 "from_address": "0x" + "00" * 20,
                 "tx_hash": tx_hash,
+                "receipt_log_index": 0,
+                "revision": 0,
                 "log_index": 0,
                 "block_number": 1,
+                "block_hash": "0x" + "00" * 32,
+                "block_time": now,
                 "amount_refunded_atomic": "0",
                 "refunded": False,
                 "amount_refunded": 0,
                 "amount_reversed": 0,
+                "replaces": None,
+                "replaced_by": None,
                 "created": now,
                 "metadata": {},
             }

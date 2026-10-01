@@ -10,7 +10,6 @@ from ..types import UNSET, Unset
 
 from ..models.client_quote_object import check_client_quote_object
 from ..models.client_quote_object import ClientQuoteObject
-from ..types import UNSET, Unset
 from typing import cast
 
 
@@ -35,6 +34,7 @@ class ClientQuote:
             amount_atomic (str): The exact token amount to pay, in base units, as a decimal string.
             asset (str): Asset code.
             chain_id (int): EVM chain identifier.
+            confirmations (int | None): While `seen`: blocks on top of and including the payment's block; otherwise `null`.
             currency (str): `usd`.
             decimals (int): The token's decimals, to display `amount_atomic`.
             expires_at (int): End of the payment window, Unix seconds.
@@ -50,8 +50,6 @@ class ClientQuote:
             payment_uri (str): EIP-681 URI carrying the token, chain, address, and amount.
             status (str): `open`, `complete`, `expired`, or `canceled`, as on `Quote`; hide the address once
                 `expires_at` has passed.
-            confirmations (int | None | Unset): While `seen`: blocks on top of and including the payment's block; otherwise
-                `null`.
     """
 
     address: str
@@ -59,6 +57,7 @@ class ClientQuote:
     amount_atomic: str
     asset: str
     chain_id: int
+    confirmations: int | None
     currency: str
     decimals: int
     expires_at: int
@@ -68,7 +67,6 @@ class ClientQuote:
     payment_status: str
     payment_uri: str
     status: str
-    confirmations: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +79,9 @@ class ClientQuote:
         asset = self.asset
 
         chain_id = self.chain_id
+
+        confirmations: int | None
+        confirmations = self.confirmations
 
         currency = self.currency
 
@@ -100,12 +101,6 @@ class ClientQuote:
 
         status = self.status
 
-        confirmations: int | None | Unset
-        if isinstance(self.confirmations, Unset):
-            confirmations = UNSET
-        else:
-            confirmations = self.confirmations
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -115,6 +110,7 @@ class ClientQuote:
                 "amount_atomic": amount_atomic,
                 "asset": asset,
                 "chain_id": chain_id,
+                "confirmations": confirmations,
                 "currency": currency,
                 "decimals": decimals,
                 "expires_at": expires_at,
@@ -126,8 +122,6 @@ class ClientQuote:
                 "status": status,
             }
         )
-        if confirmations is not UNSET:
-            field_dict["confirmations"] = confirmations
 
         return field_dict
 
@@ -143,6 +137,13 @@ class ClientQuote:
         asset = d.pop("asset")
 
         chain_id = d.pop("chain_id")
+
+        def _parse_confirmations(data: object) -> int | None:
+            if data is None:
+                return data
+            return cast(int | None, data)
+
+        confirmations = _parse_confirmations(d.pop("confirmations"))
 
         currency = d.pop("currency")
 
@@ -162,21 +163,13 @@ class ClientQuote:
 
         status = d.pop("status")
 
-        def _parse_confirmations(data: object) -> int | None | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(int | None | Unset, data)
-
-        confirmations = _parse_confirmations(d.pop("confirmations", UNSET))
-
         client_quote = cls(
             address=address,
             amount=amount,
             amount_atomic=amount_atomic,
             asset=asset,
             chain_id=chain_id,
+            confirmations=confirmations,
             currency=currency,
             decimals=decimals,
             expires_at=expires_at,
@@ -186,7 +179,6 @@ class ClientQuote:
             payment_status=payment_status,
             payment_uri=payment_uri,
             status=status,
-            confirmations=confirmations,
         )
 
         client_quote.additional_properties = d

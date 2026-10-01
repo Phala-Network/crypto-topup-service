@@ -64,8 +64,11 @@ Mainnet needs paid providers from two different companies.
 ## Staging reset (HUMAN-ONLY)
 
 Staging is reset at the v0.3.0 cutover: a fresh provision on an empty backup prefix, with every
-account created again, instead of an upgrade. Nothing on staging is live, so no funds or merchants
-are affected; the new app id derives new webhook keys for every account. Every step is HUMAN-ONLY,
+account created again, instead of an upgrade. v0.3.0 reads no row of an earlier release: its
+schema requires every deposit's transaction origin and every deposit event's receipt position,
+revision, and block (`20261023000000_current_invariants`), which rows staging recorded before them
+lack, and its reference product creates its ledger fresh. Nothing on staging is live, so no funds
+or merchants are affected; the new app id derives new webhook keys (`whpk_…`) for every account. Every step is HUMAN-ONLY,
 by the staging owner, except the workflow runs, which the owner dispatches; agents and CI run none
 of them. Run them from a checkout of `main` with `PHALA_CLOUD_API_KEY` of the `staging` Environment
 exported and the release's verified kit in `kit/`:
@@ -118,8 +121,9 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
 
 4. **Reseal the service's secrets** with the commands the summary prints
    ([Sealing the secrets](README.md#sealing-the-secrets)): `.env.staging` (mode 0600) holds exactly
-   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN`, and the empty
-   `TOPUP_RPC_PROVIDER_A_KEY` and `TOPUP_RPC_PROVIDER_B_KEY`.
+   the rendered compose's sealed names, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+   `SENTRY_DSN`. Staging's providers are keyless, so it seals no `TOPUP_RPC_<ID>_KEY`, and the old
+   CVM's two empty provider names are not sealed again.
 5. **Switch DNS** for `pay-api-staging.phala.com` to the records the summary lists: the CNAME to
    the new node's gateway and the `_dstack-app-address` TXT to the new instance, DNS only
    ([Custom domain](README.md#custom-domain)).
@@ -130,12 +134,16 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
 7. **Re-onboard the accounts** ([Operator onboarding](README.md#operator-onboarding), steps 1–3,
    `charges_enabled: false`): the reference product's first, then each internal merchant's (Phala
    Cloud's staging backend), and send each contact its `acct_…` and key. Set up the reference
-   product's account ([Staging reference product](#staging-reference-product), setup steps 1–3).
+   product's account ([Staging reference product](#staging-reference-product), setup steps 1–3),
+   which proves the staging Safe again as the account's treasury on each chain: the owners sign
+   the new instance's challenge as a Safe message, verified by EIP-1271
+   ([Treasury setup](README.md#treasury-setup)), since the new database holds no treasury.
    The cutover pull request, not this one, sets that new `acct_…` as `account` in
    [product/config.json](environments/phala-network/staging/product/config.json); merge it.
 8. **Provision, reseal, and switch the reference product** (setup step 4): dispatch with
-   `-f target=product -f mode=provision`, `gh variable set STAGING_PRODUCT_CVM_ID --env staging`,
-   seal `.env.product` with `PRODUCT_API_KEY` as the summary prints, switch the DNS records of
+   `-f target=product -f mode=provision` (the new CVM's volume starts the product's ledger empty),
+   `gh variable set STAGING_PRODUCT_CVM_ID --env staging`, seal `.env.product` with the new
+   account's restricted key as `PRODUCT_API_KEY`, as the summary prints, switch the DNS records of
    `pay-demo-api.phala.com`, dispatch `-f target=product -f mode=upgrade`, and register its webhook
    endpoint. Run one deposit of each collection method (setup step 5) and one
    [sweep](README.md#sweeping) from the Safe; confirm `swept` and the daily report.
@@ -187,7 +195,7 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
 - **Attested settings.** Every value is committed in its environment directory,
   [environments/phala-network/staging/product](environments/phala-network/staging/product):
   `config.json` holds `service_url` (staging topup's `public_origin`), `public_url`
-  (`https://$PRODUCT_DOMAIN`, its [custom domain](README.md#custom-domain)), and
+  (`https://pay-demo-api.phala.com`, its [custom domain](README.md#custom-domain)), and
   `driver_public_key`. The overlay holds dstack-ingress's `DOMAIN`, and the CVM's gateway is
   Deploy's input. The config also commits each chain's `rpc_url`, a keyless public RPC (publicnode's; the product seals no RPC key,
   and its preflight refuses a keyed URL and checks online that each reports its chain and that the
@@ -219,16 +227,14 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   ```
 
   Next to the ledger file (a local stack), `export-restore-records --config FILE` prints the same
-  from the ledger, opened read-only. A ledger from before the inbox is migrated when the product
-  starts; quotes and deposit addresses it created earlier were not recorded, and its earlier
-  events have no raw delivery until one is delivered again. The controlled
+  from the ledger, opened read-only. The controlled
   [restore drill](RESTORE.md#local-and-ci-drills) runs this receiver and imports what it fetches.
 - **Its networks.** The page offers a configured chain only once the service serves assets there
   (`GET /v1/config`): Base Sepolia appears when its route is deployed, with no product change.
 - **Its custom domain.** The same pinned dstack-ingress as topup's
-  ([Custom domain](README.md#custom-domain)) terminates TLS for `$PRODUCT_DOMAIN` (Phala's:
+  ([Custom domain](README.md#custom-domain)) terminates TLS for the overlay's `DOMAIN` (Phala's:
   `pay-demo-api.phala.com`) in the product's compose and forwards to `product:8089`, so the demo's
-  API, the product's webhook endpoint, and its account API are at `https://$PRODUCT_DOMAIN`.
+  API, the product's webhook endpoint, and its account API are at `https://pay-demo-api.phala.com`.
   Phala's website, `pay.phala.com`, is not a CVM's: Cloudflare serves it ([Website](#website)).
 
 The product serves the JSON API of the live demo on the public **Phala Pay website**
@@ -294,9 +300,9 @@ Setup, in order, during the [staging reset](#staging-reset-human-only)'s steps 7
    [config.json](environments/phala-network/staging/product/config.json) to the new `acct_…` id,
    and merge it.
 4. Run Deploy Phala's instance (`staging`, target `product`, `provision`), set `STAGING_PRODUCT_CVM_ID`, create the
-   [DNS records](README.md#custom-domain) for `$PRODUCT_DOMAIN` the summary lists, seal `.env.product`
+   [DNS records](README.md#custom-domain) for `pay-demo-api.phala.com` the summary lists, seal `.env.product`
    holding `PRODUCT_API_KEY=<ppay_rk_test_…>` with the two commands it prints, and run it with
-   `upgrade`, which waits for `https://$PRODUCT_DOMAIN/healthz` and verifies
+   `upgrade`, which waits for `https://pay-demo-api.phala.com/healthz` and verifies
    the certificate evidence. Then, with the secret key, register the product's endpoint:
    `POST /v1/webhook_endpoints {"url": "<public_url>/webhooks", "enabled_events": ["*"]}`
    and `POST /v1/webhook_endpoints/{id}/test`.
@@ -388,7 +394,3 @@ on their old settings until each is edited too.
   fixed-name icons, manifest, link preview image, `robots.txt`, and `sitemap.xml`, and
   `X-Robots-Tag: noindex` on `workers.dev`. `vite preview` serves the Build Output in the Workers
   runtime with these headers, as the end-to-end tests do.
-- **Moving from Wrangler.** The site was deployed with Wrangler until cf replaced it. The build
-  settings above name scripts only this configuration has, so they were set just before merging
-  the change that adds them, and its branch Preview was checked first; the merge then deploys
-  `main` with cf.

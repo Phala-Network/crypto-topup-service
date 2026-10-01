@@ -21,7 +21,8 @@ newest base backup, replays the archived WAL, and promotes. The instance boots t
 restore then [resumes](#resume) by upgrading it to the service compose. No step runs inside a CVM.
 The same bootstrap is why an upgrade must keep the volumes: a service that booted on an empty
 `pgdata` would restore from backup and look healthy while losing the unarchived tail;
-[local/upgrade-rehearsal.sh](local/upgrade-rehearsal.sh) proves that an upgrade never does.
+[local/cvm-rehearsal.sh](local/cvm-rehearsal.sh) checks that a configuration upgrade recreates
+topup only and keeps PostgreSQL and its volume.
 
 ## Backup key
 
@@ -163,11 +164,11 @@ restore is abandoned:
 ```sh
 umask 077
 export RESTORE_ENV_DIR="$(mktemp -d)"
-# Exactly the sealed names of restore-check.yml: every TOPUP_RPC_<ID>_KEY as well.
+# Exactly the sealed names of restore-check.yml, with a TOPUP_RPC_<ID>_KEY=<the live key> line
+# for each keyed provider the environment declares (Phala's staging declares none).
 printf '%s\n' 'RESTORE_AWS_ACCESS_KEY_ID=<read-only key id>' \
-  'RESTORE_AWS_SECRET_ACCESS_KEY=<read-only secret>' 'SENTRY_DSN=<the live DSN, or empty>' \
-  'TOPUP_RPC_PROVIDER_A_KEY=<the live key, or empty>' \
-  'TOPUP_RPC_PROVIDER_B_KEY=<the live key, or empty>' >"$RESTORE_ENV_DIR/restore.env"
+  'RESTORE_AWS_SECRET_ACCESS_KEY=<read-only secret>' \
+  'SENTRY_DSN=<the live DSN, or empty>' >"$RESTORE_ENV_DIR/restore.env"
 docker pull <restore-check.yml's phala-pay image>   # --offline checks the configuration in it
 kit/deploy/preflight.sh --env "$RESTORE_ENV_DIR/restore.env" --compose restore-check.yml \
   --environment-dir "$ENV_DIR" --restore-check --offline
@@ -186,7 +187,8 @@ its [custom domain](README.md#custom-domain) to the one instance the domain's TX
 The restore-check variant runs no ingress, so it never obtains a certificate for or answers on the
 live domain, and publishes topup on 8081, which the service never does:
 
-- `https://$TOPUP_DOMAIN` reaches only the live instance;
+- `https://$DOMAIN`, the live [custom domain](README.md#custom-domain), reaches only the live
+  instance;
 - `https://<app_id>-8081.<gateway domain>` (`RESTORE_URL`) reaches only the restore-check instance.
 
 The live isolation check detects a failure; during a staging drill it is a hard abort:
@@ -300,11 +302,11 @@ Its origin is the one merchants call and admin requests are signed for. Upgrade 
 `$RESTORE_CVM_ID`. Then seal the service's names with the read-write credentials
 (`kit/deploy/phala envs update "$RESTORE_CVM_ID" -e <env file>`, with `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` in place of the `RESTORE_AWS_*` pair). The domain's TXT record still names the failed instance: set
-`_dstack-app-address.$TOPUP_DOMAIN` to `$INSTANCE_ID:443` (step 2) so the gateway routes the
+`_dstack-app-address.$DOMAIN` to `$INSTANCE_ID:443` (step 2) so the gateway routes the
 domain here and dstack-ingress, whose account and certificate volume is new, can obtain a
 certificate; update a CAA record that pins the old ACME account. Require:
 
-- `/healthz` at `https://$TOPUP_DOMAIN` answers `200` with an empty body, its [certificate
+- `/healthz` at `https://$DOMAIN` answers `200` with an empty body, its [certificate
   evidence](README.md#custom-domain) verifies for the app id, and 8081 no longer answers;
 - a `base_…` backup newer than the switch is listed and new segments of the promoted timeline
   appear under `wal_005/` (`backup` takes that base backup at once; until then the new timeline
@@ -335,7 +337,7 @@ a later real restore), never runs `backup` or the full `topup`, and never takes 
    variant with its live images. `render.sh` and preflight apply
    [compose-policy.jq](compose-policy.jq), which requires it to publish only 8081.
 2. Require `live_isolated` to pass before the instance exists, with
-   `LIVE_URL=https://$TOPUP_DOMAIN` (Phala's staging: `https://pay-api-staging.phala.com`).
+   `LIVE_URL=https://$DOMAIN` (Phala's staging: `https://pay-api-staging.phala.com`).
 3. Record the start time (the RPO anchor), run steps 1-5 of [Restore](#restore), and record the
    report, RPO, and RTO. **Hard abort:** run `live_isolated` right after creation, before each
    step, and at least every five minutes; if it fails once, delete the instance at once and record

@@ -85,7 +85,7 @@ trait WatchReader: Send + Sync {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
-        known: Option<KnownTransfer>,
+        known: KnownTransfer,
     ) -> Result<ReceiptLookup, ChainError>;
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError>;
 }
@@ -100,14 +100,9 @@ impl<R: ChainReader + Send + Sync> WatchReader for R {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
-        known: Option<KnownTransfer>,
+        known: KnownTransfer,
     ) -> Result<ReceiptLookup, ChainError> {
-        match known {
-            Some(known) => {
-                ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
-            }
-            None => ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await,
-        }
+        ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
     }
 
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
@@ -253,7 +248,7 @@ impl FinalityWatch {
                         stats.failed = stats.failed.saturating_add(1);
                         tracing::warn!(
                             chain_id,
-                            deposit_id = %deposit.id,
+                            deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                             %error,
                             "finality read failed; the deposit is read again later"
                         );
@@ -279,11 +274,12 @@ impl FinalityWatch {
         primary_finalized: u64,
         secondary_finalized: u64,
     ) -> Result<Applied, FinalityError> {
-        let known = deposit.origin.map(|(_, tx_nonce)| KnownTransfer {
+        let (from, tx_nonce) = deposit.origin;
+        let known = KnownTransfer {
             block_hash: deposit.block_hash,
             block_time: deposit.block_time,
             tx_nonce,
-        });
+        };
         let (primary, secondary) = tokio::try_join!(
             chain
                 .primary
@@ -292,13 +288,11 @@ impl FinalityWatch {
                 .secondary
                 .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
         )?;
-        let nonces = match (&primary, &secondary, deposit.origin) {
-            (ReceiptLookup::Missing, ReceiptLookup::Missing, Some((from, _))) => {
-                Some(tokio::try_join!(
-                    chain.primary.nonce_at(from, primary_finalized),
-                    chain.secondary.nonce_at(from, secondary_finalized),
-                )?)
-            }
+        let nonces = match (&primary, &secondary) {
+            (ReceiptLookup::Missing, ReceiptLookup::Missing) => Some(tokio::try_join!(
+                chain.primary.nonce_at(from, primary_finalized),
+                chain.secondary.nonce_at(from, secondary_finalized),
+            )?),
             _ => None,
         };
         let verdict = decide(
@@ -395,7 +389,7 @@ impl FinalityWatch {
                         tags.alert = "TopupDepositPendingAfterReorg",
                         tags.chain_id = chain_id,
                         tags.state = db::state_code(deposit.state),
-                        deposit_id = %deposit.id,
+                        deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                         tx_hash = %deposit.tx_hash,
                         "a deposit's transaction left the chain and is still pending"
                     );
@@ -434,7 +428,7 @@ impl FinalityWatch {
                             tags.alert = "TopupDepositReversed",
                             tags.chain_id = chain_id,
                             tags.state = db::state_code(deposit.state),
-                            deposit_id = %deposit.id,
+                            deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
                             tx_hash = %deposit.tx_hash,
                             successor_deposit_id = successor.map(tracing::field::display),
                             "a deposit's transfer is not in the final chain; the deposit is \
@@ -478,8 +472,8 @@ struct WatchedDeposit {
     asset_contract: Address,
     from_address: Address,
     amount_atomic: AtomicAmount,
-    /// The transaction's sender and nonce; absent on deposits recorded before fast credit.
-    origin: Option<(Address, u64)>,
+    /// The transaction's sender and nonce.
+    origin: (Address, u64),
 }
 
 impl WatchedDeposit {
@@ -595,7 +589,7 @@ fn decide(
             }
         }
         (ReceiptLookup::Missing, ReceiptLookup::Missing) => match (deposit.origin, nonces) {
-            (Some((from, nonce)), Some((primary_nonce, secondary_nonce)))
+            ((from, nonce), Some((primary_nonce, secondary_nonce)))
                 if primary_nonce > nonce && secondary_nonce > nonce =>
             {
                 Verdict::Reverse(
@@ -662,14 +656,10 @@ async fn claim_unfinal_deposits(
     let mut deposits = rows
         .into_iter()
         .map(|row| {
-            let tx_from: Option<String> = row.try_get("tx_from")?;
-            let tx_nonce: Option<String> = row.try_get("tx_nonce")?;
-            let origin = match (tx_from, tx_nonce) {
-                (Some(from), Some(nonce)) => {
-                    Some((parse(&from)?, nonce.parse::<u64>().map_err(decode_error)?))
-                }
-                _ => None,
-            };
+            let origin = (
+                parse(&row.try_get::<String, _>("tx_from")?)?,
+                parse(&row.try_get::<String, _>("tx_nonce")?)?,
+            );
             Ok(WatchedDeposit {
                 id: row.try_get("id")?,
                 state: db::parse_state(&row.try_get::<String, _>("state")?)?,
@@ -976,7 +966,7 @@ mod tests {
             asset_contract: Address::repeat_byte(4),
             from_address: Address::repeat_byte(5),
             amount_atomic: AtomicAmount::new(U256::from(7)),
-            origin: Some((Address::repeat_byte(6), 9)),
+            origin: (Address::repeat_byte(6), 9),
         }
     }
 
@@ -1061,17 +1051,6 @@ mod tests {
                 observed(200, &missing),
                 observed(200, &missing),
                 Some((10, 9))
-            ),
-            Verdict::Pending
-        );
-        let mut legacy = deposit.clone();
-        legacy.origin = None;
-        assert_eq!(
-            decide(
-                &legacy,
-                observed(200, &missing),
-                observed(200, &missing),
-                Some((10, 10))
             ),
             Verdict::Pending
         );

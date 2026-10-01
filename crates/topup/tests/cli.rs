@@ -283,7 +283,7 @@ fn dev_attestation_prints_the_required_json_shape() {
         value["webhook_keys"][0]["public_key"]
             .as_str()
             .map(str::len),
-        Some(64)
+        Some("whpk_".len() + 44)
     );
     assert_eq!(value["report_data"].as_str().map(str::len), Some(64));
     assert_eq!(value["tdx_quote"], "");
@@ -294,6 +294,8 @@ fn dev_attestation_prints_the_required_json_shape() {
 #[cfg(feature = "dev-signer")]
 #[test]
 fn dev_attestation_binds_the_nonce_account_mode_and_keys_like_the_api() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use topup_adapters::attestation::{AttestedWebhookKey, report_data};
 
     let output = topup(&[
@@ -319,8 +321,14 @@ fn dev_attestation_binds_the_nonce_account_mode_and_keys_like_the_api() {
         .map(|key| AttestedWebhookKey {
             version: u32::try_from(key["version"].as_u64().expect("version")).expect("u32"),
             public_key: topup_core::Ed25519PublicKey(
-                hex::decode(key["public_key"].as_str().expect("public key"))
-                    .expect("hex public key")
+                STANDARD
+                    .decode(
+                        key["public_key"]
+                            .as_str()
+                            .and_then(|key| key.strip_prefix("whpk_"))
+                            .expect("whpk_ public key"),
+                    )
+                    .expect("base64 public key")
                     .try_into()
                     .expect("32-byte public key"),
             ),
@@ -336,19 +344,6 @@ fn dev_attestation_binds_the_nonce_account_mode_and_keys_like_the_api() {
         value["report_data"],
         hex::encode(report_data(&[0, 1, 2, 3], ACCOUNT, true, &keys).expect("report data"))
     );
-
-    // The operator key is gone with the flusher; its options are no longer accepted.
-    let removed = topup(&[
-        "attest",
-        "--account",
-        ACCOUNT,
-        "--nonce",
-        "00",
-        "--dev",
-        "--operator-key-version",
-        "1",
-    ]);
-    assert!(!removed.status.success());
 }
 
 #[test]

@@ -22,13 +22,16 @@ from phala_pay import (
     Webhook,
 )
 from topup_client.models import DepositMetadata, QuoteMetadata
-from topup_sdk import deposit_address, load_public_key, quote_address, sign_webhook
+from topup_sdk import deposit_address, load_webhook_public_key, quote_address, sign_webhook
 
 API_KEY = "ppay_sk_test_" + "B" * 43 + "000000"
 SERVICE_KEY = Ed25519PrivateKey.from_private_bytes(bytes([9] * 32))
-SERVICE_PUBLIC_KEY = base64.b64encode(
-    SERVICE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-).decode()
+SERVICE_PUBLIC_KEY = (
+    "whpk_"
+    + base64.b64encode(
+        SERVICE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
+)
 QUOTE_ID = "qt_" + "0c" * 16
 EVENT_ID = "evt_" + "26" * 16
 REFUND_ID = "re_" + "0d" * 16
@@ -93,8 +96,12 @@ def _deposit(index: int = 1) -> dict[str, object]:
         "address": ADDRESS,
         "from_address": "0x" + "33" * 20,
         "tx_hash": "0x" + "ab" * 32,
+        "receipt_log_index": index,
+        "revision": 0,
         "log_index": index,
         "block_number": 1,
+        "block_hash": "0x" + "cd" * 32,
+        "block_time": 1_790_000_290,
         "amount_refunded_atomic": "0",
         "refunded": False,
         "amount_refunded": 0,
@@ -411,6 +418,7 @@ def _delivery(
             "livemode": livemode,
             "type": event_type,
             "created": 1_790_000_321,
+            "actor": "system",
             "request": None,
             "data": data,
             **(extra or {}),
@@ -453,7 +461,7 @@ def test_construct_event_parses_quote_events_and_accepts_text_and_any_header_cas
     event = Webhook.construct_event(
         body.decode(),
         {k.upper(): v for k, v in headers.items()},
-        load_public_key(SERVICE_PUBLIC_KEY),
+        load_webhook_public_key(SERVICE_PUBLIC_KEY),
         ACCOUNT,
         expected_livemode=False,
     )
@@ -536,19 +544,19 @@ def test_construct_event_rejects_forgeries(case: str, match: str) -> None:
 
 
 def test_construct_event_rejects_a_verified_body_that_is_not_an_event() -> None:
-    # The service's envelope before `evt_` ids, as an operator replay still sends it.
-    legacy_id = "0b6f1e1e-6f0c-4c43-9d7a-2f0d4b0f7a11"
-    body = json.dumps(
-        {
-            "event_id": legacy_id,
-            "type": "deposit.credited",
-            "created_at": "2026-09-26T00:00:00Z",
-            "data": {"deposit_id": legacy_id},
-        }
-    ).encode()
-    headers = sign_webhook(SERVICE_KEY, legacy_id, int(time.time()), body)
+    body = json.dumps({"id": EVENT_ID, "type": "deposit.credited", "data": {}}).encode()
+    headers = sign_webhook(SERVICE_KEY, EVENT_ID, int(time.time()), body)
     with pytest.raises(ValueError, match="not an event"):
         _construct(body, headers)
+    # An envelope without its actor or request, or with a malformed request, is not one either.
+    complete = json.loads(_delivery()[0])
+    without_actor = {key: value for key, value in complete.items() if key != "actor"}
+    without_request = {key: value for key, value in complete.items() if key != "request"}
+    for envelope in (without_actor, without_request, {**complete, "request": {"id": 7}}):
+        body = json.dumps(envelope).encode()
+        headers = sign_webhook(SERVICE_KEY, EVENT_ID, int(time.time()), body)
+        with pytest.raises(ValueError, match="not an event"):
+            _construct(body, headers)
 
 
 @pytest.mark.parametrize(
@@ -578,9 +586,12 @@ def test_construct_event_requires_the_expected_account() -> None:
 
 def test_construct_event_accepts_either_pinned_key_during_a_rotation() -> None:
     new_key = Ed25519PrivateKey.from_private_bytes(bytes([10] * 32))
-    new_public = base64.b64encode(
-        new_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    ).decode()
+    new_public = (
+        "whpk_"
+        + base64.b64encode(
+            new_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).decode()
+    )
     body, headers = _delivery(key=[new_key, SERVICE_KEY])
     for pinned in (SERVICE_PUBLIC_KEY, new_public, [new_public, SERVICE_PUBLIC_KEY]):
         assert _construct(body, headers, pinned).id == EVENT_ID
@@ -591,10 +602,14 @@ def test_construct_event_accepts_either_pinned_key_during_a_rotation() -> None:
     assert _construct(body, headers, [new_public, SERVICE_PUBLIC_KEY]).id == EVENT_ID
 
 
-def test_construct_event_accepts_a_standard_webhooks_public_key() -> None:
+def test_construct_event_accepts_a_public_key_only_in_the_whpk_form() -> None:
     raw = SERVICE_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     body, headers = _delivery()
-    pinned = f"whpk_{base64.b64encode(raw).decode()}"
-    assert _construct(body, headers, pinned).id == EVENT_ID
-    with pytest.raises(ValueError, match="32 bytes"):
-        _construct(body, headers, f"whpk_{base64.b64encode(raw[:16]).decode()}")
+    for refused in (
+        raw.hex(),
+        base64.b64encode(raw).decode(),
+        f"whpk_{raw.hex()}",
+        f"whpk_{base64.b64encode(raw[:16]).decode()}",
+    ):
+        with pytest.raises(ValueError, match="whpk_"):
+            _construct(body, headers, refused)

@@ -16,11 +16,11 @@ from topup_sdk import (
 
 # Fixed vector from crates/topup/src/outbox/signature.rs (seed [7; 32]).
 RUST_KEY = Ed25519PrivateKey.from_private_bytes(bytes([7] * 32))
-RUST_ID = "018d5f8e-8a7b-7d65-bc44-2c4f5f0a6d31"
+RUST_ID = "evt_018d5f8e8a7b7d65bc442c4f5f0a6d31"
 RUST_TIMESTAMP = 1_674_087_231
 RUST_BODY = b'{"type":"deposit.confirmed","data":{"deposit_id":"dep_123"}}'
 RUST_SIGNATURE = (
-    "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw=="
+    "v1a,YuPb4kzXzDJqX8EcTFjrfDziMBFmzlPS3V/ISzdG/7R3KS7G1TVLRBF7DOJGnAtOjjvfeFm1G32KO67JiiY0BQ=="
 )
 
 
@@ -86,6 +86,8 @@ ENVELOPE: dict[str, object] = {
     "livemode": True,
     "type": "deposit.credited",
     "created": 1_790_410_321,
+    "actor": "system",
+    "request": None,
     "data": {"object": {"id": "dep_3f1c2b9e6a8d5c479e210b7d4f6a8c13", "object": "deposit"}},
 }
 
@@ -144,11 +146,6 @@ def test_an_envelope_without_account_or_mode_fails_closed() -> None:
         headers, body = _signed(envelope, EVENT_ID)
         with pytest.raises(SignatureError, match="malformed"):
             _verify(headers, body)
-    # The envelope before `evt_` ids names no account: it no longer verifies.
-    legacy = {"event_id": RUST_ID, "type": "deposit.credited", "created_at": "", "data": {}}
-    headers, body = _signed(legacy, RUST_ID)
-    with pytest.raises(SignatureError, match="malformed"):
-        _verify(headers, body)
 
 
 def test_another_accounts_key_does_not_verify() -> None:

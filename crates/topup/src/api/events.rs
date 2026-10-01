@@ -301,7 +301,7 @@ fn select(scope: Scope) -> QueryBuilder<Postgres> {
 /// The row as the API shows it: its `data` as recorded with the change.
 fn event_object(row: EventRow) -> ApiResult<EventObjectResponse> {
     let data = serde_json::from_value::<EventData>(row.data).map_err(|error| {
-        tracing::error!(event_id = %row.id, %error, "a stored event has no object");
+        tracing::error!(event_id = %crate::ids::format(crate::ids::EVENT, row.id), %error, "a stored event has no object");
         ApiError::internal()
     })?;
     Ok(EventObjectResponse {

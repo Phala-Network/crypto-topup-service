@@ -29,6 +29,28 @@ DEFAULT_TOLERANCE_SECONDS = 300
 PublicKeys = Ed25519PublicKey | Sequence[Ed25519PublicKey]
 """One pinned webhook key, or several while a rotation overlaps."""
 
+WEBHOOK_PUBLIC_KEY_PREFIX = "whpk_"
+
+
+def webhook_public_key_bytes(encoded: str) -> bytes:
+    """The 32 raw bytes of a webhook public key in Standard Webhooks' form, `whpk_` and the
+    standard base64 of the key, as `GET /v1/attestation` lists it; raises `ValueError` on any
+    other form."""
+    if not encoded.startswith(WEBHOOK_PUBLIC_KEY_PREFIX):
+        raise ValueError("a webhook public key is whpk_ and the base64 of 32 bytes")
+    try:
+        raw = base64.b64decode(encoded.removeprefix(WEBHOOK_PUBLIC_KEY_PREFIX), validate=True)
+    except binascii.Error as error:
+        raise ValueError("a webhook public key is whpk_ and the base64 of 32 bytes") from error
+    if len(raw) != 32:
+        raise ValueError("a webhook public key is whpk_ and the base64 of 32 bytes")
+    return raw
+
+
+def load_webhook_public_key(encoded: str) -> Ed25519PublicKey:
+    """Parses a webhook public key in Standard Webhooks' form (`webhook_public_key_bytes`)."""
+    return Ed25519PublicKey.from_public_bytes(webhook_public_key_bytes(encoded))
+
 
 @dataclass(frozen=True)
 class WebhookEvent:

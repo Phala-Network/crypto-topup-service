@@ -158,7 +158,7 @@ if [[ -n "$api_key" ]]; then
     if curl -fsS --max-time 30 -H @- "$attestation_url" >"$tmp/attestation.json" \
         <<<"Authorization: Bearer $api_key" &&
         jq -e --arg account "$account" '.livemode == false and .account == $account
-            and (.webhook_keys[0].public_key | test("^[0-9a-f]{64}$"))' \
+            and (.webhook_keys[0].public_key | test("^whpk_[A-Za-z0-9+/]{43}=$"))' \
             "$tmp/attestation.json" >/dev/null; then
         ok "the service_url attests the product account's test-mode webhook key"
     else

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -21,11 +23,11 @@ from reference_product.demo import ApiRecorder, DemoConsole
 from reference_product.fulfillment import Fulfillment, PinnedKeys
 from reference_product.ledger import ProductLedger
 from topup_sdk import (
-    CreditedDeposit,
-    WebhookEvent,
+    credited_event_id,
     deposit_address_salt,
     forwarder_address,
     quote_salt,
+    sign_webhook,
 )
 
 NOW = 1_790_000_000
@@ -155,8 +157,12 @@ def _deposit(customer: str = "acct", **fields: Any) -> dict[str, Any]:
         "address": "0x" + "11" * 20,
         "from_address": "0x" + "33" * 20,
         "tx_hash": "0x" + "ab" * 32,
+        "receipt_log_index": 0,
+        "revision": 0,
         "log_index": 0,
         "block_number": 1,
+        "block_hash": "0x" + "10" * 32,
+        "block_time": NOW,
         "amount_refunded_atomic": "0",
         "refunded": False,
         "amount_refunded": 0,
@@ -730,7 +736,7 @@ def test_serves_only_the_api(demo: tuple[DemoConsole, Service]) -> None:
     console, _ = demo
     assert console.handles("/api/account")
     # The website is on Cloudflare: the API's origin serves no page and no asset.
-    for path in ["/", "/index.html", "/assets/index-0a1b2c.js", "/demo/", "/webhooks", "/healthz"]:
+    for path in ["/", "/index.html", "/assets/index-0a1b2c.js", "/webhooks", "/healthz"]:
         assert not console.handles(path)
         assert console.handle("GET", path, WEBSITE, b"").status == HTTPStatus.NOT_FOUND
     for path in ["/api/../index.html", "/api/unknown", "/api/assets/index-0a1b2c.js"]:
@@ -762,25 +768,6 @@ def test_the_config_requires_an_account_id() -> None:
         replace(CONFIG, account="phala-cloud")
 
 
-def test_a_ledger_from_before_quotes_kept_their_asset_and_chain_gains_the_columns(
-    tmp_path: Path,
-) -> None:
-    ledger = ProductLedger()
-    with ledger.transaction() as db:
-        db.execute(
-            "CREATE TABLE demo_quotes (id TEXT PRIMARY KEY, account TEXT NOT NULL, "
-            "amount INTEGER NOT NULL, amount_atomic TEXT NOT NULL, exchange_rate TEXT NOT NULL, "
-            "address TEXT NOT NULL, expires_at INTEGER NOT NULL, created INTEGER NOT NULL, "
-            "api TEXT NOT NULL)"
-        )
-    (tmp_path / "product.key").write_text("ppay_rk_test_" + "A" * 43 + "000000\n")
-    for _ in range(2):
-        DemoConsole(replace(CONFIG, api_key_file=str(tmp_path / "product.key")), ledger)
-    with ledger.transaction() as db:
-        columns = [row[1] for row in db.execute("PRAGMA table_info(demo_quotes)")]
-    assert columns[-2:] == ["asset", "chain_id"]
-
-
 def test_the_ledger_lines_show_the_bonus_apart_from_the_credit(
     demo: tuple[DemoConsole, Service],
 ) -> None:
@@ -789,16 +776,26 @@ def test_the_ledger_lines_show_the_bonus_apart_from_the_credit(
     customer = _customer(cookie)
     deposit = _deposit(customer, final=False)
     service.deposits = [deposit]
-    fulfillment = Fulfillment(console.config, console.ledger, lambda: PinnedKeys(False, []))
-    event = WebhookEvent(
-        id="evt_1",
-        type="deposit.credited",
-        created=NOW,
-        account=ACCOUNT,
-        livemode=False,
-        data={"object": deposit},
+    key = Ed25519PrivateKey.generate()
+    fulfillment = Fulfillment(
+        console.config, console.ledger, lambda: PinnedKeys(False, [key.public_key()])
     )
-    fulfillment.fulfill(CreditedDeposit.from_event(event), deposit)
+    event_id = credited_event_id(DEPOSIT)
+    body = json.dumps(
+        {
+            "id": event_id,
+            "object": "event",
+            "account": ACCOUNT,
+            "livemode": False,
+            "type": "deposit.credited",
+            "created": NOW,
+            "actor": "system",
+            "request": None,
+            "data": {"object": deposit},
+        }
+    ).encode()
+    answer = fulfillment.handle(sign_webhook(key, event_id, int(time.time()), body), body)
+    assert answer.status == HTTPStatus.NO_CONTENT
     _, account = _get(console, cookie, "account")
     assert account["balance"] == 2750
     assert {(line["kind"], line["reason"], line["amount"]) for line in account["ledger"]} == {

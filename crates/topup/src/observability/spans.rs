@@ -8,7 +8,7 @@ pub fn deposit_step_span(deposit: &Deposit) -> Span {
     let route = deposit.route.as_deref().unwrap_or_default();
     tracing::info_span!(
         "pump.step",
-        deposit_id = %deposit.id,
+        deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
         chain_id = deposit.chain_id,
         state = ?deposit.state,
         attempt = deposit.attempt,
@@ -35,14 +35,14 @@ pub fn scanner_window_span(chain: u64, from_block: u64, to_block: u64) -> Span {
 pub fn outbox_delivery_span(
     event_id: uuid::Uuid,
     event_type: &str,
-    object_id: Option<uuid::Uuid>,
+    object_id: Option<String>,
     attempt: i32,
 ) -> Span {
     tracing::info_span!(
         "outbox.delivery",
-        event_id = %event_id,
+        event_id = %crate::ids::format(crate::ids::EVENT, event_id),
         event_type,
-        object_id = ?object_id,
+        object_id = object_id.as_deref().unwrap_or_default(),
         attempt,
     )
 }
@@ -102,7 +102,7 @@ mod tests {
         tracing::info!("pump step test event");
 
         assert!(logs_contain(
-            "deposit_id=018f47f0-a9b2-7c31-8fa5-776a08f65201"
+            "deposit_id=dep_018f47f0a9b27c318fa5776a08f65201"
         ));
         assert!(logs_contain("chain_id=1"));
         assert!(logs_contain("state=Confirmed"));
@@ -114,13 +114,18 @@ mod tests {
     #[test]
     fn outbox_delivery_log_carries_event_span_fields() {
         let object = Uuid::parse_str("018f47f0-a9b2-7c31-8fa5-776a08f65201").expect("fixture UUID");
-        let span = outbox_delivery_span(Uuid::nil(), "deposit.credited", Some(object), 2);
+        let span = outbox_delivery_span(
+            Uuid::nil(),
+            "deposit.credited",
+            Some(crate::ids::format(crate::ids::DEPOSIT, object)),
+            2,
+        );
         let _guard = span.enter();
         tracing::info!("outbox step event test");
 
         assert!(logs_contain("event_type=\"deposit.credited\""));
         assert!(logs_contain(
-            "object_id=Some(018f47f0-a9b2-7c31-8fa5-776a08f65201)"
+            "object_id=\"dep_018f47f0a9b27c318fa5776a08f65201\""
         ));
         assert!(logs_contain("attempt=2"));
     }

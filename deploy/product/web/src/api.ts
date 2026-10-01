@@ -340,24 +340,7 @@ export async function getAccount(): Promise<Account> {
 
 export async function getNetworks(): Promise<Network[]> {
   const body = await request("assets");
-  // A product from before networks carried their explorer, faucets, and bonuses (the page ships
-  // before the product upgrades) gets the neutral defaults.
-  return expect<{ networks: Partial<Network>[] }>(body, ["networks"]).networks.map((network) => ({
-    chain_id: network.chain_id ?? 0,
-    name: network.name ?? "",
-    testnet: network.testnet ?? true,
-    explorer: network.explorer ?? null,
-    faucet: network.faucet ?? null,
-    treasury: network.treasury ?? "",
-    assets: (network.assets ?? []).map(
-      (asset: Omit<Asset, "mintable" | "faucet" | "bonus_bps"> & Partial<Asset>) => ({
-        ...asset,
-        mintable: asset.mintable ?? false,
-        faucet: asset.faucet ?? null,
-        bonus_bps: asset.bonus_bps ?? 0,
-      }),
-    ),
-  }));
+  return expect<{ networks: Network[] }>(body, ["networks"]).networks;
 }
 
 export async function createQuote({

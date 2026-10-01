@@ -14,10 +14,9 @@ The service credits a deposit once it is priced and screened, and tells the prod
 
 Every verified delivery is kept once, by its `webhook-id`, in the ledger's webhook inbox: its raw
 body and Standard Webhooks headers as received, in the same transaction as its ledger effect. A
-redelivery changes nothing, but completes the evidence of an event stored before the inbox kept
-deliveries; one with another body (only a service restored from backup sends one) keeps the first
-and is logged for the operator. The kept deliveries are the evidence a service restore imports
-(reference_product.restore_records).
+redelivery changes nothing; one with another body (only a service restored from backup sends one)
+keeps the first and is logged for the operator. The kept deliveries are the evidence a service
+restore imports (reference_product.restore_records).
 
 `deposit.refunded` and `deposit.reversed` take a credit back. Every `deposit.*` event carries the
 whole deposit with cumulative, service-computed claw-backs (`amount_refunded`, the refunded share
@@ -157,10 +156,7 @@ class Fulfillment:
         with self.ledger.transaction() as db:
             stored = ProductLedger.stored_body(db, event.id)
             if stored is not None:
-                if not stored:
-                    # Applied before the inbox kept deliveries: keep this one as its evidence.
-                    ProductLedger.keep_evidence(db, delivery)
-                elif stored != body:
+                if stored != body:
                     LOG.error(
                         "webhook %s %s repeats with another body; the first is kept",
                         event.type,
@@ -174,33 +170,22 @@ class Fulfillment:
 
     def _apply(self, db: sqlite3.Connection, event: WebhookEvent) -> None:
         """Applies a verified event's ledger effect in `db`'s transaction."""
+        if not event.type.startswith("deposit."):
+            return
+        snapshot = deposit_view(event.object or {})
+        if snapshot is None:
+            LOG.warning("ignoring %s %s: malformed deposit", event.type, event.id)
+            return
         if event.type == CREDITED_EVENT:
             try:
                 credit = CreditedDeposit.from_event(event)
             except FulfillmentError as error:
                 LOG.warning("ignoring deposit.credited %s: %s", event.id, error)
                 return
-            self._fulfill(db, credit, event.object or {})
-        elif event.type.startswith("deposit."):
-            snapshot = deposit_view(event.object or {})
-            if snapshot is None:
-                LOG.warning("ignoring %s %s: malformed deposit", event.type, event.id)
-                return
+            # The deposit's claw-backs apply to its credit at once.
+            self._settle(db, credit.fulfillment_key, snapshot[1], credit=credit, reason=event.type)
+        else:
             self._settle(db, *snapshot, reason=event.type)
-
-    def fulfill(self, credit: CreditedDeposit, deposit: Mapping[str, Any] | None = None) -> str:
-        """Credits the deposit once and returns its order status (`accepted` or `held`), or
-        `reversed` when an earlier snapshot showed the deposit reversed, leaving nothing to credit.
-        `deposit` is the event's deposit object, whose claw-backs apply to the credit at once."""
-        with self.ledger.transaction() as db:
-            return self._fulfill(db, credit, deposit)
-
-    def _fulfill(
-        self, db: sqlite3.Connection, credit: CreditedDeposit, deposit: Mapping[str, Any] | None
-    ) -> str:
-        key = credit.fulfillment_key
-        view = deposit_view(deposit or {}) or (key, DepositView("credited", 0, 0))
-        return self._settle(db, key, view[1], credit=credit, reason=CREDITED_EVENT) or "reversed"
 
     def _settle(
         self,

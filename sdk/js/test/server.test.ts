@@ -149,12 +149,13 @@ describe("address verification from your own pins", () => {
 
 // The Rust core's and the Python SDK's signing vector (sdk/python/tests/test_webhooks.py): the
 // seed [7; 32] signs `{id}.{timestamp}.{body}`.
-const PUBLIC_KEY = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
-const RUST_ID = "018d5f8e-8a7b-7d65-bc44-2c4f5f0a6d31";
+const PUBLIC_KEY = "whpk_6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=";
+const PUBLIC_KEY_HEX = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+const RUST_ID = "evt_018d5f8e8a7b7d65bc442c4f5f0a6d31";
 const RUST_TIMESTAMP = 1_674_087_231;
 const RUST_BODY = '{"type":"deposit.confirmed","data":{"deposit_id":"dep_123"}}';
 const RUST_SIGNATURE =
-  "v1a,0thypM6abf9ly803QGttAKGQfPFKHiwgpxF+b4zWDUCycKswAoJ848WmI7VKQBw8NIWO74zYeRvd7vw/cGOZBw==";
+  "v1a,YuPb4kzXzDJqX8EcTFjrfDziMBFmzlPS3V/ISzdG/7R3KS7G1TVLRBF7DOJGnAtOjjvfeFm1G32KO67JiiY0BQ==";
 
 async function signed(body: string, id: string) {
   const pair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
@@ -166,7 +167,7 @@ async function signed(body: string, id: string) {
   );
   const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
   return {
-    publicKey: Buffer.from(raw).toString("base64"),
+    publicKey: `whpk_${Buffer.from(raw).toString("base64")}`,
     headers: {
       "webhook-id": id,
       "webhook-timestamp": String(timestamp),
@@ -185,6 +186,8 @@ function event(overrides: Record<string, unknown> = {}) {
     livemode: false,
     type: "deposit.credited",
     created: 1_790_000_000,
+    actor: "system",
+    request: null,
     data: { object: { id: `dep_${"01".repeat(16)}`, object: "deposit" } },
     ...overrides,
   });
@@ -218,29 +221,44 @@ describe("constructEvent", () => {
     expect(verified.data.object["object"]).toBe("deposit");
   });
 
-  it("accepts a Standard Webhooks whpk_ key and returns the causing request", async () => {
+  it("returns the causing request", async () => {
     const request = { id: `req_${"3c".repeat(12)}`, idempotency_key: "order-17" };
     const body = event({ request });
     const { publicKey, headers } = await signed(body, EVENT_ID);
-    const verified = await constructEvent(body, headers, `whpk_${publicKey}`, {
+    const verified = await constructEvent(body, headers, publicKey, {
       expectedAccount: ACCOUNT,
       expectedLivemode: false,
     });
     expect(verified.request).toEqual(request);
-    const malformed = event({ request: { id: 7 } });
-    const other = await signed(malformed, EVENT_ID);
-    await expect(
-      constructEvent(malformed, other.headers, `whpk_${other.publicKey}`, {
-        expectedAccount: ACCOUNT,
-        expectedLivemode: false,
-      }),
-    ).rejects.toThrow("not an event");
-    await expect(
-      constructEvent(body, headers, `whpk_${PUBLIC_KEY}`, {
-        expectedAccount: ACCOUNT,
-        expectedLivemode: false,
-      }),
-    ).rejects.toThrow("32 bytes");
+    expect(verified.actor).toBe("system");
+    // A malformed request, or an envelope without its actor or request, is not an event.
+    for (const malformed of [
+      event({ request: { id: 7 } }),
+      event({ actor: undefined }),
+      event({ request: undefined }),
+    ]) {
+      const other = await signed(malformed, EVENT_ID);
+      await expect(
+        constructEvent(malformed, other.headers, other.publicKey, {
+          expectedAccount: ACCOUNT,
+          expectedLivemode: false,
+        }),
+      ).rejects.toThrow("not an event");
+    }
+  });
+
+  it("accepts a public key only in the whpk_ form", async () => {
+    const body = event();
+    const { publicKey, headers } = await signed(body, EVENT_ID);
+    const options = { expectedAccount: ACCOUNT, expectedLivemode: false };
+    for (const refused of [
+      PUBLIC_KEY_HEX,
+      publicKey.slice("whpk_".length),
+      `whpk_${PUBLIC_KEY_HEX}`,
+      `whpk_${Buffer.from(new Uint8Array(16)).toString("base64")}`,
+    ]) {
+      await expect(constructEvent(body, headers, refused, options)).rejects.toThrow("whpk_");
+    }
   });
 
   it.each([

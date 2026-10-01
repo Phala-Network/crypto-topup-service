@@ -821,7 +821,10 @@ pub async fn nudge_deposit(
         Some(account_id),
         actor,
         "deposit_nudged",
-        &format!("deposit:{deposit_id}"),
+        &format!(
+            "deposit:{}",
+            crate::ids::format(crate::ids::DEPOSIT, deposit_id)
+        ),
     )
     .await?;
     transaction.commit().await?;
@@ -1319,7 +1322,7 @@ pub async fn daily_report(
 
     Ok(DailyReportResponse {
         generated_at,
-        exposure_minor: Some(exposure_minor),
+        exposure_minor,
         routes: reports.into_values().collect(),
         reconciliation: None,
         reconciliation_blocks,

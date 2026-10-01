@@ -46,7 +46,7 @@ trait ConfirmationReader: Send + Sync {
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
-        known: Option<KnownTransfer>,
+        known: KnownTransfer,
     ) -> Result<ReceiptLookup, ChainError>;
 }
 
@@ -66,14 +66,9 @@ where
         &self,
         tx_hash: B256,
         receipt_log_index: u64,
-        known: Option<KnownTransfer>,
+        known: KnownTransfer,
     ) -> Result<ReceiptLookup, ChainError> {
-        match known {
-            Some(known) => {
-                ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
-            }
-            None => ChainReader::receipt_transfer(self, tx_hash, receipt_log_index).await,
-        }
+        ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
     }
 }
 
@@ -201,7 +196,7 @@ impl ConfirmStep {
         {
             Ok(context) => context,
             Err(error) => {
-                tracing::error!(deposit_id = %deposit.id, %error, "confirm context load failed");
+                tracing::error!(deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id), %error, "confirm context load failed");
                 return retry(
                     RetryError::Transient,
                     json!({"stage": "context", "error": "database"}),
@@ -604,11 +599,19 @@ async fn confirmed_evidence(
     deposit: &Deposit,
     address: Address,
 ) -> FinalityResult {
-    let known = deposit.tx_nonce.map(|tx_nonce| KnownTransfer {
+    // Every deposit the scanner records has its transaction's nonce; only a reversed deposit
+    // restored from a delivered event lacks it, and it is never confirmed.
+    let Some(tx_nonce) = deposit.tx_nonce else {
+        return FinalityResult::Retry(
+            RetryError::InvariantViolation,
+            json!({"stage": "finality", "error": "tx_nonce_missing"}),
+        );
+    };
+    let known = KnownTransfer {
         block_hash: deposit.block_hash,
         block_time: deposit.block_time,
         tx_nonce,
-    });
+    };
     let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = tokio::join!(
         chains.primary.confirmation_heads(confirmations),
         chains.secondary.confirmation_heads(confirmations),

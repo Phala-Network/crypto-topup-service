@@ -68,7 +68,7 @@ Events arrive in any order; the snapshot's cumulative `amount_refunded` and `amo
 make the result independent of it (docs/integration.md §2.3; `apply_deposit` in
 `sdk/examples/fastapi_app.py`).
 
-`WEBHOOK_PUBLIC_KEY` is your account's webhook key in the mode, pinned from `GET
+`WEBHOOK_PUBLIC_KEY` is your account's webhook key in the mode, `whpk_…`, pinned from `GET
 /v1/attestation` (docs/integration.md §5.3); pass a list of keys while a rotation overlaps.
 `construct_event` fails closed: it checks the Standard Webhooks signature, the timestamp (five
 minutes' tolerance), that the body's id is the `webhook-id`, and that the event's `account` and

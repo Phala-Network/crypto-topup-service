@@ -26,7 +26,7 @@ from topup_sdk import RequestSigner
 
 from .config import DRIVER_KEYID, EVM_ADDRESS, ProductConfig
 from .driver import ProductApi, run_deposit
-from .ledger import LedgerVersionError, ProductLedger
+from .ledger import ProductLedger
 from .restore_records import export_restore_records
 from .server import product_service, serve
 
@@ -138,10 +138,7 @@ def main() -> int:
     if args.mode == "export-restore-records":
         if not os.path.isfile(config.ledger_path):
             parser.error(f"the config's ledger_path {config.ledger_path!r} is not a ledger file")
-        try:
-            ledger = ProductLedger(config.ledger_path, read_only=True)
-        except LedgerVersionError as error:
-            parser.error(str(error))
+        ledger = ProductLedger(config.ledger_path, read_only=True)
         records = export_restore_records(config.account, ledger, since=args.since)
         write_records(json.dumps(records, indent=2) + "\n", args.output)
         return 0

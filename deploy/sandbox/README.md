@@ -204,7 +204,7 @@ Write a configuration file; the fields are those of `ProductConfig` in
 - Without a mode the reference product runs the product (`serve`) and one deposit (`deposit`) in
   one process; the two modes also run separately, as for staging (deploy/phala.md, "Staging
   reference product").
-- Set `webhook_public_keys` (hex, current first) after verifying the attestation quote; otherwise
+- Set `webhook_public_keys` (`whpk_…`, current first) after verifying the attestation quote; otherwise
   the product fetches `GET /v1/attestation` with its API key, checks only its binding to the
   nonce, account, mode, and keys, and warns.
 

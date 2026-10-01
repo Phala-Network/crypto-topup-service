@@ -1087,8 +1087,7 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
                 .map(|key| {
                     json!({
                         "version": key.version,
-                        "public_key": hex::encode(key.public_key.0),
-                        "standard_webhooks_public_key": format!(
+                        "public_key": format!(
                             "whpk_{}",
                             base64::engine::general_purpose::STANDARD.encode(key.public_key.0)
                         ),
@@ -1103,7 +1102,6 @@ async fn attestation_binds_the_callers_account_keys_and_needs_a_key() -> Result<
                     json!({
                         "version": key["version"],
                         "public_key": key["public_key"],
-                        "standard_webhooks_public_key": key["standard_webhooks_public_key"],
                     })
                 })
                 .collect();

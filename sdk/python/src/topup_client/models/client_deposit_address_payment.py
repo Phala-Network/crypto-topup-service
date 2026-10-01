@@ -22,6 +22,7 @@ class ClientDepositAddressPayment:
     Attributes:
         amount_atomic (str): Token amount in base units, as a decimal string.
         chain_id (int): EVM chain identifier.
+        confirmations (int | None): While `seen`: blocks on top of and including the payment's block; otherwise `null`.
         created (int): When the payment was first seen or recorded, Unix seconds.
         status (str): `seen` (in a block, below the route's confirmation, and may still disappear);
             `confirming` (at the confirmation, being valued and screened); `credited`; `rejected`
@@ -29,18 +30,16 @@ class ClientDepositAddressPayment:
             transaction left the chain before finality: the payment did not happen).
         tx_hash (str): Transaction hash.
         asset (None | str | Unset): Asset code; `null` for a token without a route.
-        confirmations (int | None | Unset): While `seen`: blocks on top of and including the payment's block; otherwise
-            `null`.
         decimals (int | None | Unset): The token's decimals, to display `amount_atomic`; `null` with `asset`.
     """
 
     amount_atomic: str
     chain_id: int
+    confirmations: int | None
     created: int
     status: str
     tx_hash: str
     asset: None | str | Unset = UNSET
-    confirmations: int | None | Unset = UNSET
     decimals: int | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -48,6 +47,9 @@ class ClientDepositAddressPayment:
         amount_atomic = self.amount_atomic
 
         chain_id = self.chain_id
+
+        confirmations: int | None
+        confirmations = self.confirmations
 
         created = self.created
 
@@ -61,12 +63,6 @@ class ClientDepositAddressPayment:
         else:
             asset = self.asset
 
-        confirmations: int | None | Unset
-        if isinstance(self.confirmations, Unset):
-            confirmations = UNSET
-        else:
-            confirmations = self.confirmations
-
         decimals: int | None | Unset
         if isinstance(self.decimals, Unset):
             decimals = UNSET
@@ -79,6 +75,7 @@ class ClientDepositAddressPayment:
             {
                 "amount_atomic": amount_atomic,
                 "chain_id": chain_id,
+                "confirmations": confirmations,
                 "created": created,
                 "status": status,
                 "tx_hash": tx_hash,
@@ -86,8 +83,6 @@ class ClientDepositAddressPayment:
         )
         if asset is not UNSET:
             field_dict["asset"] = asset
-        if confirmations is not UNSET:
-            field_dict["confirmations"] = confirmations
         if decimals is not UNSET:
             field_dict["decimals"] = decimals
 
@@ -99,6 +94,13 @@ class ClientDepositAddressPayment:
         amount_atomic = d.pop("amount_atomic")
 
         chain_id = d.pop("chain_id")
+
+        def _parse_confirmations(data: object) -> int | None:
+            if data is None:
+                return data
+            return cast(int | None, data)
+
+        confirmations = _parse_confirmations(d.pop("confirmations"))
 
         created = d.pop("created")
 
@@ -115,15 +117,6 @@ class ClientDepositAddressPayment:
 
         asset = _parse_asset(d.pop("asset", UNSET))
 
-        def _parse_confirmations(data: object) -> int | None | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(int | None | Unset, data)
-
-        confirmations = _parse_confirmations(d.pop("confirmations", UNSET))
-
         def _parse_decimals(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -136,11 +129,11 @@ class ClientDepositAddressPayment:
         client_deposit_address_payment = cls(
             amount_atomic=amount_atomic,
             chain_id=chain_id,
+            confirmations=confirmations,
             created=created,
             status=status,
             tx_hash=tx_hash,
             asset=asset,
-            confirmations=confirmations,
             decimals=decimals,
         )
 

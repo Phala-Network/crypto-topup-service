@@ -1376,8 +1376,7 @@ key's mode, paying its own treasury of the chain (§9).
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints
 the resolved route, every value explicit (JSON, itself a valid route file); preflight reads the
-defaulted addresses from it. A resolved route saved before `unit_decimals` was removed still
-carries `"unit_decimals": 2` and is now refused: delete that key. The defaults and why:
+defaulted addresses from it. The defaults and why:
 
 | Value | Default |
 |---|---|
@@ -1500,9 +1499,8 @@ rebuilds the reversed deposit from its snapshot, whose id must be the one its `r
 and `revision` derive (`restore_deposit_tombstones`): at its revision, reversed, valued at its
 delivered credit if it had one. The rescan then records the final transfer at the next revision,
 under the successor's id, and links it to the reversed deposit the delivery named (`replaces`), so
-it is valued at the successor's delivered credit and its events are recorded already. A delivery
-rendered before the deposit object carried its position cannot rebuild it, and neither can an
-import after the rescan reached the position (the import never rebuilds it over a deposit the
+it is valued at the successor's delivered credit and its events are recorded already. An import
+after the rescan reached the position cannot rebuild it (the import never rebuilds it over a deposit the
 rescan recorded there, and reports it `rescanned`, as does the restore's status): the rescan then
 records the final transfer under the reversed deposit's id, whose imported credit contradicts it,
 so it is held until the operator discards the credit and settles both with the merchant. The reversal and its
@@ -1522,7 +1520,8 @@ malicious upgrade could cause downtime, read service data, or sign credits no de
 to whatever caps the merchant keeps (§3, §11), but not move funds; the attested compose hash makes
 it detectable.
 `GET /v1/attestation?nonce=`, authenticated with an API key, returns the key's account's webhook
-keys in the key's mode (current first, then any rolled key still signing) and the dstack
+keys in the key's mode (current first, then any rolled key still signing; each `public_key` in
+Standard Webhooks' `whpk_` form, the base64 of the 32 raw bytes `report_data` binds) and the dstack
 attestation (TDX quote and event log) of `/Attest` with `report_data = sha256(len(nonce) ‖ nonce
 ‖ len(account) ‖ account ‖ livemode ‖ (version ‖ public_key)*)` (one-byte lengths, the UTF-8
 `acct_` id, one byte `1` live or `0` test, each version as 4 big-endian bytes; the vector is

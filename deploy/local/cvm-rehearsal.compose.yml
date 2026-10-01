@@ -1,9 +1,8 @@
-# CVM rehearsal overlay, applied by deploy/local/cvm-rehearsal.sh and upgrade-rehearsal.sh after
-# the compose deploy/render.sh rendered from a staging-shaped environment (the rehearsal's own
-# addresses and providers). It replaces only what a
-# CVM provides and a workstation does not: the dstack socket (the simulator), object storage
-# (s3.compose.yml), and the asset chains (an Anvil with Sepolia's chain id and one with Base
-# Sepolia's, for the committed routes of each). Images, commands,
+# CVM rehearsal overlay, applied by deploy/local/cvm-rehearsal.sh after the compose
+# deploy/render.sh rendered from a staging-shaped environment (the rehearsal's own addresses and
+# providers). It replaces only what a CVM provides and a workstation does not: the dstack socket
+# (the simulator), object storage (s3.compose.yml), and the asset chains (an Anvil with Sepolia's
+# chain id and one with Base Sepolia's, for the committed routes of each). Images, commands,
 # settings, inline configs, and healthchecks all come from the rendered file, and the secrets from a
 # `.env` of the rendered compose's sealed names.
 #

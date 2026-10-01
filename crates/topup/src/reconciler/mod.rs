@@ -520,7 +520,7 @@ impl Reconciler {
                 Ok(Some(finding)) => findings.push(finding),
                 Ok(None) => {}
                 Err(error) => {
-                    tracing::warn!(deposit_id = %id, %error, "credit recomputation failed");
+                    tracing::warn!(deposit_id = %crate::ids::format(crate::ids::DEPOSIT, id), %error, "credit recomputation failed");
                     findings.push(Finding::new(
                         CheckName::CreditRecomputation,
                         subjects([("deposit_id", id.to_string())]),

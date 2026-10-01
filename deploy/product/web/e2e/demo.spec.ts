@@ -675,8 +675,8 @@ test("refuses another browser's payments and refunds, and rate-limits quote crea
     return { statuses, quote };
   }, env("API_URL"));
   expect(created.statuses).toEqual([200, 200, 200, 429]);
-  // The API's origin serves only the API: no page, and the old `/demo/` paths are unknown.
-  for (const path of ["", "index.html", "demo", "demo/", "demo/api/account"]) {
+  // The API's origin serves only the API: no page.
+  for (const path of ["", "index.html"]) {
     expect((await fetch(`${env("API_URL")}/${path}`)).status).toBe(404);
   }
   // Another origin's page cannot read the API, even with the visitor's cookie.

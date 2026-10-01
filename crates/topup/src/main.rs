@@ -528,7 +528,12 @@ fn print_attestation(
 ) -> Result<(), &'static str> {
     let webhook_keys: Vec<_> = keys
         .iter()
-        .map(|key| json!({"version": key.version, "public_key": hex::encode(key.public_key.0)}))
+        .map(|key| {
+            json!({
+                "version": key.version,
+                "public_key": topup::webhook_keys::standard_webhooks_public_key(&key.public_key),
+            })
+        })
         .collect();
     let output = json!({
         "object": "attestation",

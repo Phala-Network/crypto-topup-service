@@ -297,9 +297,7 @@ webhook keys cannot be derived; retry.
 A `deposit.reversed` also brings its deposit back, reversed, as the merchant received it, when the
 restore lost it. Its `reversed_deposit` is `restored`; `recorded` (the ledger holds the deposit
 already); `address_unknown` (its address is not issued in the event's account and mode: re-issue
-it, step 4, and import the event again); `rescanned` (see below); or `identity_missing` (a delivery
-rendered before the deposit object carried `receipt_log_index`, `revision`, `block_hash`, and
-`block_time`: see step 8). A deposit the
+it, step 4, and import the event again); or `rescanned` (see below). A deposit the
 finality watch reversed because a re-included transaction put another transfer at its receipt
 position ([architecture §7](../../docs/architecture.md#7-states-and-pump)) so keeps its revision
 there, and the rescan records the transfer now at the position under its successor's id, with its
@@ -376,9 +374,8 @@ delivered credit and is never sent another; record each mismatch, both amounts, 
 the incident and settle it with the merchant. A `pending` finding that stays after the rescan is a
 deposit the chain does not show: escalate. A deposit the finality watch reversed because another
 transfer took its receipt position is brought back from its imported `deposit.reversed` (step 5),
-so its successor is recorded under its own id. Only when that could not be done (the delivery was
-`identity_missing`, or the rescan reached the position before the import: a `rescanned` finding)
-does the rescan record the final transfer under the reversed deposit's id: that deposit's imported
+so its successor is recorded under its own id. Only when that could not be done (the rescan
+reached the position before the import: a `rescanned` finding) does the rescan record the final transfer under the reversed deposit's id: that deposit's imported
 credit then contradicts the transfer it holds, so it is held, and the successor's events stay
 `pending`. Record the two as one incident, settle what the merchant applied with it, then discard
 the held deposit's delivered credit (step 6).

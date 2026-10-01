@@ -43,7 +43,7 @@ treasuries, sweeps) · [2. Webhooks and fulfillment](#2-webhooks-and-fulfillment
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install.** `@phala/pay` from npm and `phala-pay` from PyPI, 0.2.0 or later (the multi-tenant
+**Install.** `@phala/pay` from npm and `phala-pay` from PyPI, 0.3.0 or later (the multi-tenant
 API):
 
 ```sh
@@ -1079,7 +1079,7 @@ For example, Phala's own instance, which serves only Phala Cloud's account: prod
 ```sh
 cd sdk/python
 uv run --locked topup-sdk keygen --keyid test-webhooks/v1 --seed-out /tmp/test-service.seed
-# Configure your test instance to pin the printed public key in place of your webhook key, then:
+# Configure your test instance to pin the printed webhook_public_key in place of your webhook key, then:
 uv run --locked topup-sdk send-test-event --url https://test.example/topup/webhooks \
   --seed-file /tmp/test-service.seed --account acct_… --client-reference-id test-workspace \
   --amount 250
@@ -1212,17 +1212,14 @@ keys = verify_attestation_binding(  # raises AttestationError
     expected_account="acct_…",
     expected_livemode=False,
 )
-print([key.public_key for key in response.webhook_keys])  # hex, current first; pin them
+print([key.public_key for key in response.webhook_keys])  # whpk_, current first; pin them
 ```
 
 `TopupClient.attestation(nonce)` fetches and runs the same binding check. The binding alone is
 worthless without the verifier step: it proves only that the response is self-consistent.
 
-Each key also comes as `standard_webhooks_public_key`, Standard Webhooks' `whpk_` and the base64
-of the same raw bytes, for a Standard Webhooks library. It is derived from `public_key`, which is
-the value `report_data` binds: pin it only if it encodes the attested `public_key`
-(`verify_attestation_binding` refuses a response where it does not). Both SDK verifiers accept
-either form.
+Each `public_key` is in Standard Webhooks' form, `whpk_` and the standard base64 of the key's 32
+raw bytes, which `report_data` binds; both SDK verifiers take the key in this form only.
 
 `report_data` is `sha256(len(nonce) ‖ nonce ‖ len(account) ‖ account ‖ livemode ‖ (version ‖
 public_key)*)`: one-byte lengths, the UTF-8 `acct_` id, one byte `1` live or `0` test, and each
@@ -1449,49 +1446,36 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 
 ### 5.9 Versioning and deprecation
 
+The service and both SDKs are pre-1.0 (0.x), versioned by SemVer's rules for 0.x: a minor release
+may break what came before it, and a patch release only fixes or adds.
+
 #### API
 
-- The path prefix carries the major version (`/v1`). Within it every change is backward
-  compatible: new endpoints, optional request fields, response fields, error codes, and event
-  types. Ignore unknown response fields and event types.
-- A breaking change needs a new prefix (`/v2`); the old one keeps working for the deprecation
-  window.
-- `info.version` in `openapi.json` is the service release (the Cargo workspace version), SemVer
-  on the published contract: MAJOR with a new prefix, MINOR when the document gains anything,
-  PATCH otherwise.
-- Integrator-visible API changes are recorded in [CHANGELOG.md](../CHANGELOG.md).
+- The path prefix is `/v1`. A minor release may change the API incompatibly (endpoints, fields,
+  error codes, event types and payloads) with no deprecation window and no second prefix.
+- Any release may add endpoints, optional request fields, response fields, error codes, and event
+  types: ignore unknown response fields and event types.
+- `info.version` in `openapi.json` is the service release (the Cargo workspace version).
+- Every integrator-visible change is recorded in [CHANGELOG.md](../CHANGELOG.md), a breaking one
+  marked **Breaking**. Read it before you move to a new minor release; your operator tells every
+  account's recorded contact when it deploys one.
 
 #### SDK
 
-- `phala-pay` and `@phala/pay` follow SemVer independently: MAJOR for a breaking
-  change to the public API (`phala_pay` and `topup_sdk` exports, generated `topup_client`
-  names, the JavaScript exports and component props) or a new API major version;
-  MINOR for regeneration against an additive OpenAPI change or new helpers; PATCH for fixes.
+- `phala-pay` and `@phala/pay` are versioned independently: a minor release may break the public
+  API (`phala_pay` and `topup_sdk` exports, generated `topup_client` names, the JavaScript
+  exports and component props); pin the minor release you tested.
 - Each release records the `info.version` it was generated from.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
   no-op, so a PR that changes `openapi.json` regenerates the client in the same PR.
 
-#### Deprecation
-
-- Anything integrators use is removed only after at least 90 days from the announcement:
-  endpoints, fields, error codes, event types and fields, SDK public functions and parameters,
-  and API major versions. The exceptions so far were made before any integration was live: the
-  move from settlement requests to webhook fulfillment, and the multi-tenant API (design), which
-  changed the API without aliases.
-- Announcing means, in one release: `deprecated: true` in OpenAPI (and a `DeprecationWarning` from
-  the SDK) and a `Deprecated` changelog entry with the earliest removal date; your operator
-  notifies every account's recorded contact when it deploys that release.
-- An operator deploys a removal no earlier than the announced date, to its staging first if it
-  runs one. Only a security fix may shorten the window, and its changelog entry says why.
-
 #### SDK changelog rules
 
 [sdk/python/CHANGELOG.md](../sdk/python/CHANGELOG.md) follows Keep a Changelog: every PR that
-changes `openapi.json`, `topup_sdk`, the generated client, or the signing profile adds an entry
-under `Unreleased` (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`); a release
-heading carries the SDK version, date, and OpenAPI `info.version`; `Deprecated` names the
-replacement and earliest removal date; `Removed` links the deprecating release; breaking changes
-come first.
+changes `openapi.json`, `topup_sdk`, the generated client, or the signing profile adds an entry to
+the next release's section (`Added`, `Changed`, `Removed`, `Fixed`, `Security`); a release
+heading carries the SDK version and date, and records the OpenAPI `info.version`; breaking
+changes come first, marked **Breaking**.
 
 ### 5.10 SDK development
 

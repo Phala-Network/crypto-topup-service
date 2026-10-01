@@ -214,14 +214,9 @@ class VerifiedRequest:
 
 
 def load_public_key(encoded: str) -> Ed25519PublicKey:
-    """Parses a raw ed25519 public key given as 64 hexadecimal characters, standard base64, or
-    Standard Webhooks' `whpk_` and standard base64."""
-    value = encoded.strip()
-    if value.startswith("whpk_"):
-        raw = base64.b64decode(value.removeprefix("whpk_"), validate=True)
-    else:
-        value = value.removeprefix("0x")
-        raw = bytes.fromhex(value) if len(value) == 64 else base64.b64decode(value, validate=True)
+    """Parses a request-signing ed25519 public key, the standard base64 of its 32 raw bytes
+    (`RequestSigner.public_key_base64`)."""
+    raw = base64.b64decode(encoded, validate=True)
     if len(raw) != 32:
         raise ValueError("ed25519 public key must contain exactly 32 bytes")
     return Ed25519PublicKey.from_public_bytes(raw)
@@ -238,7 +233,8 @@ def verify_request(
     require_idempotency_key: bool,
     now: int | None = None,
 ) -> VerifiedRequest:
-    """Verifies an inbound request signed in this profile, such as a settlement request.
+    """Verifies an inbound request signed in this profile, such as the reference product's
+    driver requests.
 
     `target_uri` must be the URI the sender addressed, derived from the receiver's own configured
     public URL rather than from untrusted `Host` or forwarding headers. `keyid` and `public_key`

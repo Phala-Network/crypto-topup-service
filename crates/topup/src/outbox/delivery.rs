@@ -440,7 +440,7 @@ where
         let span = crate::observability::outbox_delivery_span(
             event.id,
             &event.event_type,
-            event.object.map(EventObject::id),
+            event.object.map(EventObject::public_id),
             event.attempts,
         );
         let result = async {
@@ -460,7 +460,7 @@ where
         let age = Utc::now().signed_duration_since(event.created_at);
         if age > threshold {
             tracing::warn!(
-                event_id = %event.id,
+                event_id = %crate::ids::format(crate::ids::EVENT, event.id),
                 event_type = event.event_type,
                 age_seconds = age.num_seconds(),
                 threshold_seconds = threshold.num_seconds(),
@@ -540,9 +540,6 @@ where
     /// Returns the `webhook-id` and body. The event's `data` was rendered when the event was
     /// recorded, so every endpoint, retry, and resend sends it unchanged.
     fn event_body(event: &ClaimedEvent) -> Result<(String, Vec<u8>), &'static str> {
-        if event.data.get("object").is_none() {
-            return Err("missing_object");
-        }
         let data = event.data.clone();
         let id = webhook_id(event.id);
         let envelope = Event {

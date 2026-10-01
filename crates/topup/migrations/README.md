@@ -63,8 +63,7 @@ beside the routes that require them; `20261021120000_atomic_idempotency` dropped
   recorded; `final_at` when both providers showed it at `finalized`.
 - `events.data` is rendered in the transaction that changes its object, a snapshot of the object
   when the event happened, with `previous_attributes` on `*.updated` events; it is never
-  re-rendered, so every endpoint, retry, resend, and read gets the same body. Rows written before
-  `20261015000000_api_conformance` may hold `{}`.
+  re-rendered, so every endpoint, retry, resend, and read gets the same body.
 - `pending_transfers` is display-only, written by the head scan and cleared by the finalized
   scanner's cursor advance. Nothing that affects money reads it.
 - `quotes.metadata`, `deposits.metadata`, and `refunds.metadata` (`20261006080000_metadata`) are
@@ -250,3 +249,9 @@ which the confirm step values the re-derived deposit at (a deposit whose transfe
 held until the operator discards it, `discarded_at`); `quotes.restore_id` marks a quote re-issued
 from the merchant's record, whose locked price is never applied. Its down migration drops both;
 run it only while no re-issued quote is open.
+
+`20261023000000_current_invariants` makes the invariants the service assumes of its rows
+constraints, so a row that breaks one fails the migration instead of a worker: a deposit carries
+its transaction's `tx_from` and `tx_nonce` unless it is a reversed deposit restored from a delivered
+event, every event's `data` holds its `object`, and a deposit's snapshot carries its
+`receipt_log_index`, `revision`, `block_hash`, and `block_time`. Its down migration drops them.

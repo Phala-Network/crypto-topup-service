@@ -1994,10 +1994,10 @@ async fn insert_deposit_in(
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, asset_contract, from_address,
-            amount_atomic, state, reason, next_attempt_at, receipt_log_index
+            amount_atomic, state, reason, next_attempt_at, receipt_log_index, tx_from, tx_nonce
         )
         SELECT $1, 1, $2, 0, 10, $3, now(), address.id, address.account_id, address.livemode,
-               quote.customer_id, $5, $6, 100, 'rejected', 'unsupported_asset', now(), 0
+               quote.customer_id, $5, $6, 100, 'rejected', 'unsupported_asset', now(), 0, $6, 0
         FROM addresses AS address
         JOIN quotes AS quote ON quote.id = address.quote_id
         WHERE address.id = $4

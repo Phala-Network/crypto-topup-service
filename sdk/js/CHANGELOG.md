@@ -4,12 +4,18 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - Unreleased
 
-### Added
+### Changed (breaking)
 
-- `constructEvent` accepts a public key in Standard Webhooks' `whpk_` form (`whpk_` and base64),
-  beside hex and base64.
+- `constructEvent` takes webhook public keys only in Standard Webhooks' `whpk_` form (`whpk_` and
+  the standard base64 of the key), as `GET /v1/attestation` lists them; a hex or bare base64 key
+  is refused.
+- `parseClientQuote` requires `confirmations`, an integer or `null`, as the service always sends
+  it.
+- `constructEvent` requires the event's `actor` and `request` (`null` or the causing request), as
+  the service always sends them, and refuses an envelope without them; `WebhookEvent.actor` and
+  `request` are no longer optional.
 
 ### Fixed
 
@@ -144,7 +150,7 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   without trailing zeros (`1,273.9185`); `tokenAmount(quote)` is the plain decimal a wallet
   accepts, which `<Checkout>`'s "Exact amount" copies.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...HEAD
+[0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...HEAD
 [0.2.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.2...sdk-js-v0.2.0
 [0.1.2]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.1...sdk-js-v0.1.2
 [0.1.1]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.0...sdk-js-v0.1.1

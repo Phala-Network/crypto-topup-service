@@ -26,14 +26,18 @@ REPORT_DATA_LIVE_ROTATING = "86da5cb5cfe64def5578b7e416e6354930cd47cf85231f8227c
 REPORT_DATA_TEST = "919730430f98ac5d7dc845ded45abd8946e7ee4e38035cefb16567324fcbe622"
 
 
+def _whpk(raw: bytes) -> str:
+    return "whpk_" + base64.b64encode(raw).decode()
+
+
 def _response(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "object": "attestation",
         "account": ACCOUNT,
         "livemode": True,
         "webhook_keys": [
-            {"version": 2, "public_key": CURRENT.hex(), "expires_at": None},
-            {"version": 1, "public_key": PREVIOUS.hex(), "expires_at": 1_790_000_000},
+            {"version": 2, "public_key": _whpk(CURRENT), "expires_at": None},
+            {"version": 1, "public_key": _whpk(PREVIOUS), "expires_at": 1_790_000_000},
         ],
         "report_data": REPORT_DATA_LIVE_ROTATING,
         "tdx_quote": "",
@@ -57,13 +61,6 @@ def test_binding_returns_the_keys_current_first() -> None:
     )
     raw = [key.public_bytes(Encoding.Raw, PublicFormat.Raw) for key in keys]
     assert raw == [CURRENT, PREVIOUS]
-    # With the Standard Webhooks form of each key, the binding holds as well.
-    webhook_keys = [
-        {**key, "standard_webhooks_public_key": "whpk_" + base64.b64encode(bytes_).decode()}
-        for key, bytes_ in zip(_response()["webhook_keys"], (CURRENT, PREVIOUS), strict=True)
-    ]
-    response = AttestationResponse.from_dict(_response(webhook_keys=webhook_keys))
-    assert len(verify_attestation_binding(response, NONCE)) == 2
 
 
 @pytest.mark.parametrize(
@@ -71,22 +68,18 @@ def test_binding_returns_the_keys_current_first() -> None:
     [
         {"account": "acct_" + "f" * 32},
         {"livemode": False},
-        {"webhook_keys": [{"version": 2, "public_key": "43" * 32}]},
-        {"webhook_keys": [{"version": 2, "public_key": CURRENT.hex()}]},
-        {"webhook_keys": [{"version": 2, "public_key": "42" * 31}]},
-        {"webhook_keys": []},
-        {"report_data": "00" * 32},
-        # The unbound Standard Webhooks form names another key than the bound one.
+        {"webhook_keys": [{"version": 2, "public_key": _whpk(bytes([0x43] * 32))}]},
+        {"webhook_keys": [{"version": 2, "public_key": _whpk(CURRENT)}]},
+        {"webhook_keys": [{"version": 2, "public_key": _whpk(CURRENT[:31])}]},
+        # A key in any other form than `whpk_` is malformed.
         {
             "webhook_keys": [
-                {
-                    "version": 2,
-                    "public_key": CURRENT.hex(),
-                    "standard_webhooks_public_key": "whpk_" + base64.b64encode(PREVIOUS).decode(),
-                },
-                {"version": 1, "public_key": PREVIOUS.hex()},
+                {"version": 2, "public_key": CURRENT.hex()},
+                {"version": 1, "public_key": _whpk(PREVIOUS)},
             ]
         },
+        {"webhook_keys": []},
+        {"report_data": "00" * 32},
         {"report_data": "not hex"},
     ],
 )
@@ -112,7 +105,7 @@ def test_an_attestation_of_another_account_or_mode_is_refused(
 
 
 def test_client_attestation_is_authenticated_and_verifies_the_binding() -> None:
-    forged = _response(webhook_keys=[{"version": 2, "public_key": "43" * 32}])
+    forged = _response(webhook_keys=[{"version": 2, "public_key": _whpk(bytes([0x43] * 32))}])
     bodies = [_response(), forged]
     api_key = "ppay_sk_live_" + "C" * 43 + "000000"
 
@@ -126,7 +119,7 @@ def test_client_attestation_is_authenticated_and_verifies_the_binding() -> None:
     ) as client:
         evidence = client.attestation(NONCE)
         assert evidence.account == ACCOUNT
-        assert evidence.webhook_keys[0].public_key == CURRENT.hex()
+        assert evidence.webhook_keys[0].public_key == _whpk(CURRENT)
         with pytest.raises(AttestationError):
             client.attestation(NONCE)
 
