@@ -74,15 +74,17 @@ of them. Run them from a checkout of `main` with `PHALA_CLOUD_API_KEY` of the `s
 exported and the release's verified kit in `kit/`:
 
 ```sh
-bash deploy/verify-release.sh v0.3.0 release
-mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.0.tar.gz -C kit --strip-components=1
+bash deploy/verify-release.sh v0.3.1 release
+mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-components=1
 npm ci --prefix kit/deploy/tools --ignore-scripts
 ```
 
-Already in place: v0.3.0 is released, [deploy-phala.yml](../.github/workflows/deploy-phala.yml)
-calls it, and staging's [compose.yaml](environments/phala-network/staging/topup/compose.yaml) names
-the new, empty prefix `s3://crypto-topup-test/staging-v030` (committed ahead of the cutover: until
-the reset, never upgrade the old staging CVM from `main`). The factory
+The reset runs v0.3.1, called by [deploy-phala.yml](../.github/workflows/deploy-phala.yml) at its
+commit: v0.3.0's Deploy cannot provision (it waits for the unsealed CVM to run, and reuses the CVM
+name). Already in place: staging's
+[compose.yaml](environments/phala-network/staging/topup/compose.yaml) names the new, empty prefix
+`s3://crypto-topup-test/staging-v030` (committed ahead of the cutover: until the reset, never
+upgrade the old staging CVM from `main`). The factory
 `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified on Sepolia and Base Sepolia
 ([Contracts](README.md#contracts)), and the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`
@@ -90,7 +92,8 @@ the reset, never upgrade the old staging CVM from `main`). The factory
 use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is destroyed.
 
 1. **Record the old CVMs, stop them, and clear their variables.** Deploy refuses to provision
-   while a CVM id variable is set:
+   while a CVM id variable is set. It names each new CVM after its run (`phala-pay-staging-<run
+   id>`), so the stopped CVMs stay beside the new ones as the rollback until step 9:
 
    ```sh
    repo=(-R Phala-Network/phala-pay)
@@ -112,7 +115,10 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
      --endpoint-url https://1d694c298092ffa09c793cbca4587812.r2.cloudflarestorage.com
    ```
 
-3. **Provision the service**, then record its CVM id from the run summary:
+3. **Provision the service**, then record its CVM id from the run summary. The new CVM is unsealed
+   and shows `error` in Phala Cloud until step 4: PostgreSQL refuses to start without the storage
+   credentials, so app-compose fails, by design. If a run fails after its summary lists a CVM id,
+   continue with that CVM as [Deploy](README.md#deploy) step 2 says; never provision twice:
 
    ```sh
    gh workflow run deploy-phala.yml "${repo[@]}" --ref main -f environment=staging -f target=topup -f mode=provision

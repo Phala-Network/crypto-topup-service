@@ -9,9 +9,10 @@
 #                                                    custom domain's CNAME target
 #   deploy/phala-cvm.sh deploy OUTPUT CLI_ARGS...    `deploy --json`; its output goes to the log, its
 #                                                    JSON object to OUTPUT, and it must succeed
-#   deploy/phala-cvm.sh wait CVM_ID [PREVIOUS_HASH] >cvm.json
+#   deploy/phala-cvm.sh wait [--unsealed] CVM_ID [PREVIOUS_HASH] >cvm.json
 #                                                    until the CVM runs, settled, with a compose hash
-#                                                    other than PREVIOUS_HASH (15 minutes)
+#                                                    other than PREVIOUS_HASH (15 minutes); with
+#                                                    --unsealed, settled in any status
 #   deploy/phala-cvm.sh attestation CVM_ID HASH >attestation.json
 #                                                    until the attestation reports compose hash HASH
 #                                                    (10 minutes; an upgrade attests late)
@@ -46,17 +47,30 @@ case "$command" in
         jq -e '.success == true' "$output" >/dev/null
         ;;
     wait)
-        settled='.status == "running" and (.in_progress | not)
-            and ((.compose_hash | '"$normal_hash"') != $previous)'
+        # A provisioned CVM is unsealed until its owner seals the secrets, and its app-compose
+        # fails by design (topup's PostgreSQL refuses to start without the storage credentials):
+        # dstack reports boot.error with the VM and its guest agent up, and Phala Cloud shows the
+        # CVM as error. It is settled once no operation is in progress, whatever its status.
+        settled='(.in_progress | not) and ((.compose_hash | '"$normal_hash"') != $previous)'
+        outcome="run a new compose"
+        if [[ "${1:-}" == --unsealed ]]; then
+            shift
+            outcome="settle with a new compose"
+        else
+            settled='.status == "running" and '$settled
+        fi
         for _ in $(seq 60); do
-            if cvm=$(phala cvms get "$1" --json) &&
-                jq -e --arg previous "${2:-}" "$settled" <<<"$cvm" >/dev/null; then
-                printf '%s\n' "$cvm"
-                exit 0
+            if cvm=$(phala cvms get "$1" --json); then
+                jq -r '"status=\(.status) in_progress=\(.in_progress) compose_hash=\(.compose_hash)"' \
+                    <<<"$cvm" >&2 || true
+                if jq -e --arg previous "${2:-}" "$settled" <<<"$cvm" >/dev/null; then
+                    printf '%s\n' "$cvm"
+                    exit 0
+                fi
             fi
             sleep 15
         done
-        echo "::error::CVM $1 did not run a new compose within 15 minutes" >&2
+        echo "::error::CVM $1 did not $outcome within 15 minutes" >&2
         exit 1
         ;;
     attestation)

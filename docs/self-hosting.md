@@ -219,12 +219,13 @@ Deploy `upgrade`, never a runtime setting.
    summary. Set `TOPUP_CVM_ID` to the CVM id; if a later step of the run fails, set it anyway and
    continue with `upgrade`, never provision twice
    ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)).
-3. **Seal the secrets** (**HUMAN-ONLY**). The CVM waits for them: PostgreSQL initializes only
-   after it can list the empty backup prefix. Write `.env.production` (mode 0600) with exactly the
-   rendered compose's sealed names, which the provision summary lists: `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be empty), and each `TOPUP_RPC_<ID>_KEY` your
-   directory declares. With the release's kit, your repository at the deployed commit, the
-   rendered compose from the run's artifact, and `PHALA_CLOUD_API_KEY` exported:
+3. **Seal the secrets** (**HUMAN-ONLY**). The CVM waits for them: PostgreSQL initializes only after
+   it can list the empty backup prefix, so Phala Cloud shows the CVM as `error` until then. Write
+   `.env.production` (mode 0600) with exactly the rendered compose's sealed names, which the
+   provision summary lists: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `SENTRY_DSN` (may be
+   empty), and each `TOPUP_RPC_<ID>_KEY` your directory declares. With the release's kit, your
+   repository at the deployed commit, the rendered compose from the run's artifact, and
+   `PHALA_CLOUD_API_KEY` exported:
 
    ```sh
    docker pull <the compose's phala-pay image>   # preflight --offline checks the configuration in it

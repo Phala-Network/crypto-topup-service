@@ -26,6 +26,16 @@ own changelogs in `sdk/js` and `sdk/python`.
   called at `v0.3.0`, refused its own release ("Deploy runs at e42120e…, not v0.3.0's commit
   659bd26…"). `deploy/verify-release.sh VERSION DIR CALLED_AT` peels the tag to its commit and
   accepts either SHA. Pinning the commit SHA remains the recommendation.
+- Deploy's provision completes on the unsealed CVM it creates. Without the storage credentials
+  PostgreSQL refuses to start, so app-compose fails by design and Phala Cloud shows the CVM as
+  `error`; provision waited for `running` and timed out after 15 minutes, before the DNS records and
+  the sealing step. A provision now waits only for the CVM to settle (`in_progress` false) with the
+  new compose, whatever its status, and redeploys the gateway's compose without the CLI's `--wait`;
+  an upgrade still waits for `running`. `deploy/phala-cvm.sh wait --unsealed`.
+- Deploy names a new CVM after its run (`phala-pay-<environment>-<run id>`,
+  `phala-pay-staging-product-<run id>`): Phala Cloud refuses a duplicate name (`ERR-01-004`), so a
+  provision beside a stopped CVM kept for rollback, as in a reset, failed. A CVM is identified by
+  its id variable, never by its name.
 
 ## [0.3.0] - 2026-10-01
 
