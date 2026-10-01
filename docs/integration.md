@@ -43,13 +43,12 @@ treasuries, sweeps) · [2. Webhooks and fulfillment](#2-webhooks-and-fulfillment
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install** the latest `@phala/pay` from npm and `phala-pay` from PyPI; each SDK's changelog
-([JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)) names the service release a
-breaking change needs:
+**Install** `@phala/pay` from npm and `phala-pay` from PyPI, at the minor release compatible with
+your operator's service release, and pin it ([§5.9, "Compatibility"](#compatibility); `X.Y` below):
 
 ```sh
-npm install @phala/pay viem
-uv add phala-pay   # or: pip install phala-pay
+npm install "@phala/pay@~X.Y" viem
+uv add "phala-pay~=X.Y.0"   # or: pip install "phala-pay~=X.Y.0"
 ```
 
 **Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
@@ -1472,6 +1471,19 @@ may break what came before it, and a patch release only fixes or adds.
 - Each release records the `info.version` it was generated from.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
   no-op, so a PR that changes `openapi.json` regenerates the client in the same PR.
+
+#### Compatibility
+
+Use the SDK minor release that matches the service release your operator runs (`info.version` of
+its `GET /openapi.json`). An SDK minor release may require fields that only a later service release
+sends, so upgrade the service before the SDK. The current pairing:
+
+| Service | `@phala/pay` | `phala-pay` |
+|---|---|---|
+| v0.3.4 or later | 0.4 | 0.4 |
+
+Each SDK's changelog ([JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)) names the
+service release that each breaking change needs.
 
 ### 5.10 SDK development
 

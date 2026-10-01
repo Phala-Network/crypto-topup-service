@@ -39,9 +39,9 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
   credited: {
     title: "Credited",
     hint:
-      "Usually about 30 s after sending on Ethereum, at 2 confirmations, and about 5 minutes on " +
-      "Base, at its safe block: once both RPC providers report the same block, the deposit is " +
-      "valued and screened.",
+      "At the chain's confirmation: 2 blocks on Sepolia, about 30 s after sending, and the safe block " +
+      "on Base Sepolia, about 5 minutes. Once both RPC providers report the same block, the deposit " +
+      "is valued and screened.",
     failed: "The deposit was rejected and will not be credited.",
   },
   webhook_received: {
