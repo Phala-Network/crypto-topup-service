@@ -26,15 +26,16 @@ the merchant's steps with the account's keys, never with the admin key.
 
 ## One-command deploy
 
-There are three ways to deploy a release, all to your own Phala Cloud workspace:
+There are two ways to deploy a release, both to your own Phala Cloud workspace, and a third is
+coming:
 
 - **One command**, from your machine, below: a testnet quick start, or an instance on your own
   domain.
-- **[The Phala Cloud template](#the-phala-cloud-template)**, from Phala Cloud's console: the same
-  testnet quick start in one click.
 - **Your environment repository** (sections 2 to 4): Deploy provisions and upgrades the instance
   from your committed settings. Every instance with merchants ends up here, since upgrades run
   through it.
+- **[The Phala Cloud template](#the-phala-cloud-template)** (coming): the same testnet quick start
+  in one click from Phala Cloud's console.
 
 ```sh
 curl -fsSL https://pay.phala.com/deploy.sh | bash              # the latest release
@@ -139,12 +140,12 @@ CVM id to run that upgrade; then onboard your first account (section 6).
 **HUMAN-ONLY, owner of the repository.** It holds your settings and nothing else; the software
 comes from a release.
 
-1. **Verify a release** ([Verify a release](#verify-a-release)), the latest `v<version>` of the
-   [releases](https://github.com/Phala-Network/phala-pay/releases), and extract its deploy kit next
-   to your repository, with its locked Phala Cloud CLI:
+1. **Verify a release** ([Verify a release](#verify-a-release)), the latest of the
+   [releases](https://github.com/Phala-Network/phala-pay/releases) as `$version`, and extract its
+   deploy kit next to your repository, with its locked Phala Cloud CLI:
 
    ```sh
-   mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-components=1
+   mkdir kit && tar -xzf "release/phala-pay-deploy-$version.tar.gz" -C kit --strip-components=1
    npm ci --prefix kit/deploy/tools --ignore-scripts
    ```
 
@@ -184,7 +185,7 @@ comes from a release.
    release's [Deploy](../.github/workflows/deploy.yml) at the release, which verifies the release
    and runs the kit's scripts on your environment directory ([deploy/README.md,
    "Deploy"](../deploy/README.md#deploy)). Pin it by the release's commit SHA, as GitHub
-   recommends for third-party workflows (`gh api repos/Phala-Network/phala-pay/commits/v0.3.1
+   recommends for third-party workflows (`gh api "repos/Phala-Network/phala-pay/commits/$version"
    --jq .sha`); Deploy refuses to run at any commit but `version`'s (called at the `version` tag,
    it peels the tag to that commit). The only secret it reads is `PHALA_CLOUD_API_KEY`, declared
    since v0.3.1:
@@ -221,9 +222,9 @@ comes from a release.
      attestations: read
    jobs:
      deploy:
-       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<the v0.3.1 commit SHA> # v0.3.1
+       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<the release's commit SHA> # v0.3.4
        with:
-         version: v0.3.1
+         version: v0.3.4
          environment: ${{ inputs.environment }}
          mode: ${{ inputs.mode }}
          environment_dir: ${{ inputs.environment }}/topup
@@ -250,16 +251,11 @@ A route is one chain and token that accounts quote on and are paid through, in o
 are committed and attested: a new route is a pull request to your environment repository and a
 Deploy `upgrade`, never a runtime setting.
 
-- **The routes of Phala's staging** are in test mode on Sepolia and Base Sepolia, and any instance
-  can copy them from its
+- **The routes of Phala's staging** are test routes on Sepolia and Base Sepolia
+  ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes) lists them, with their
+  tokens and faucets). Any instance can copy them from its
   [topup.yaml](../deploy/environments/phala-network/staging/topup/topup.yaml) for a first
-  instance in test mode. They are:
-  - `phala-cloud-sepolia-pha-usd`, a test PHA token (`MockERC20`, public `mint`);
-  - `phala-cloud-sepolia-usdc-usd`, Circle's testnet USDC ([faucet](https://faucet.circle.com)),
-    priced as a stablecoin;
-  - `phala-cloud-base-sepolia-pha-usd` and `phala-cloud-base-sepolia-usdc-usd`, the same two
-    tokens on Base Sepolia, credited at the OP-stack `safe` head, with providers of their own
-    ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
+  instance in test mode.
 - **Your own routes** are items of `topup.yaml`'s `routes`, written as route files are. The fields
   and their defaults are in [architecture §14](architecture.md#14-configuration-and-deployment),
   and [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example.
@@ -436,7 +432,7 @@ directory's scenarios play late, partial, rejected, and refunded payments.
    providers to `topup.yaml`, with the factory verified on its chain; then Deploy `upgrade`
    ([Deploy](../deploy/README.md#deploy)).
 2. Your own sign-off of the limits: route bounds, each account's caps, and
-   `max_unfinalized_credit` ([architecture §17](architecture.md#17-delivery) lists Phala's), and a
+   `max_unfinalized_credit` ([architecture §14](architecture.md#14-configuration-and-deployment)), and a
    passed restore drill (section 10).
 3. `charges_enabled: true` for each account you enable; the merchant then proves a live
    treasury and follows the [go-live checklist](integration.md#44-go-live-checklist).
@@ -462,7 +458,7 @@ read the old app's backups, so never delete the app, and give a new app a new pr
 
 - **Upgrades.** A new release is a pull request to your repository that changes the release in your
   workflow, in both places (the `uses:` commit and `version`). Review its notes and what it changes
-  in the attested compose (`git diff v0.3.0 v0.4.0 -- deploy/` in a clone of Phala Pay, or render
+  in the attested compose (`git diff OLD_TAG NEW_TAG -- deploy/` in a clone of Phala Pay, or render
   your directory with both kits and diff), [verify it](#verify-a-release), merge, and run Deploy
   `upgrade`. An upgrade sends only the compose, so the sealed secrets stay; rollback is an upgrade
   to an earlier release, and a schema is never rolled back ([Deploy](../deploy/README.md#deploy)).
@@ -494,12 +490,13 @@ into a directory and stops at the first failure:
    commit (`gh attestation verify --source-digest`).
 
 ```sh
+version=v0.3.4   # the release you adopt
 gh api -H 'Accept: application/vnd.github.raw' \
-  'repos/Phala-Network/phala-pay/contents/deploy/verify-release.sh?ref=v0.3.1' >verify-release.sh
-bash verify-release.sh v0.3.1 release     # prints the release's commit
+  "repos/Phala-Network/phala-pay/contents/deploy/verify-release.sh?ref=$version" >verify-release.sh
+bash verify-release.sh "$version" release     # prints the release's commit
 ```
 
-**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch v0.3.1
+**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch "$version"
 --recurse-submodules https://github.com/Phala-Network/phala-pay.git`), with Buildx v0.37.1:
 
 - `phala-pay` and `phala-pay-reference-product` are reproducible: `make verify-image` builds
@@ -509,13 +506,13 @@ bash verify-release.sh v0.3.1 release     # prints the release's commit
 - `postgres-walg` is not reproducible (apt and dpkg timestamps): it has provenance only. Review
   its [Dockerfile](../deploy/Dockerfile.postgres-walg) at the tag.
 - The kit's tar is `git archive` of the tag's `LICENSE`, `deploy/`, and `docs/`:
-  `gzip -dc phala-pay-deploy-v0.3.1.tar.gz` equals
-  `git archive --prefix=phala-pay-deploy-v0.3.1/ v0.3.1 -- LICENSE deploy docs`.
+  `gzip -dc "phala-pay-deploy-$version.tar.gz"` equals
+  `git archive --prefix="phala-pay-deploy-$version/" "$version" -- LICENSE deploy docs`.
 
 ## The Phala Cloud template
 
-Phala Cloud's [Phala Pay template](https://cloud.phala.com/templates/phala-pay) is a one-click
-**testnet quick start**: the release's `phala-cloud-template.yml`, rendered by
+Phala Cloud's Phala Pay template, coming to its template gallery, is a one-click **testnet quick
+start**: the release's `phala-cloud-template.yml`, rendered by
 `deploy/render.sh --template` from
 [deploy/environments/phala-cloud-template](../deploy/environments/phala-cloud-template/topup)
 ([deploy/README.md, "The Phala Cloud template variant"](../deploy/README.md#the-phala-cloud-template-variant)).

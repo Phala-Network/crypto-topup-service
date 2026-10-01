@@ -43,12 +43,12 @@ treasuries, sweeps) · [2. Webhooks and fulfillment](#2-webhooks-and-fulfillment
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install.** `@phala/pay` from npm and `phala-pay` from PyPI, 0.3.0 or later (the multi-tenant
-API):
+**Install** `@phala/pay` from npm and `phala-pay` from PyPI, at the minor release compatible with
+your operator's service release, and pin it ([§5.9, "Compatibility"](#compatibility); `X.Y` below):
 
 ```sh
-npm install @phala/pay viem
-uv add phala-pay   # or: pip install phala-pay
+npm install "@phala/pay@~X.Y" viem
+uv add "phala-pay~=X.Y.0"   # or: pip install "phala-pay~=X.Y.0"
 ```
 
 **Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
@@ -1064,15 +1064,11 @@ You integrate with your operator's instance, at its service URL; which chains, t
 it offers are its routes, listed by `GET /v1/config`. One deployment serves both modes, and your
 key selects the mode (§5.2): `ppay_*_test_` keys act on test routes (test networks such as
 Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live mode, on live
-routes. Integrate in test mode. The repository's test routes, with their forwarder factory and
-implementation, are the `routes` of
-[Phala's staging configuration](../deploy/environments/phala-network/staging/topup/topup.yaml):
-`phala-cloud-sepolia-pha-usd` (a test PHA token, a `MockERC20` whose `mint(address,uint256)` is
-public) and `phala-cloud-sepolia-usdc-usd` (Circle's testnet USDC, from
-[Circle's faucet](https://faucet.circle.com), credited at one dollar), and the same two tokens on
-Base Sepolia, `phala-cloud-base-sepolia-pha-usd` and `phala-cloud-base-sepolia-usdc-usd`,
-credited once the block is `safe`, typically about 5 minutes; route files carry no treasury, so
-set your own on each chain first (§1.6).
+routes. Integrate in test mode. The repository's test routes are Phala's staging routes on
+Sepolia and Base Sepolia, listed with their tokens and faucets in
+[deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes); Base Sepolia's credit once
+the block is `safe`, typically about 5 minutes. Route files carry no treasury, so set your own on
+each chain first (§1.6).
 
 For example, Phala's own instance, which serves only Phala Cloud's account: production
 `https://pay-api.phala.com` (live: Ethereum Mainnet; test: Sepolia; not deployed yet) and staging
@@ -1476,38 +1472,23 @@ may break what came before it, and a patch release only fixes or adds.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
   no-op, so a PR that changes `openapi.json` regenerates the client in the same PR.
 
-#### SDK changelog rules
+#### Compatibility
 
-[sdk/python/CHANGELOG.md](../sdk/python/CHANGELOG.md) follows Keep a Changelog: every PR that
-changes `openapi.json`, `topup_sdk`, the generated client, or the signing profile adds an entry to
-the next release's section (`Added`, `Changed`, `Removed`, `Fixed`, `Security`); a release
-heading carries the SDK version and date, and records the OpenAPI `info.version`; breaking
-changes come first, marked **Breaking**.
+Use the SDK minor release that matches the service release your operator runs (`info.version` of
+its `GET /openapi.json`). An SDK minor release may require fields that only a later service release
+sends, so upgrade the service before the SDK. The current pairing:
+
+| Service | `@phala/pay` | `phala-pay` |
+|---|---|---|
+| v0.3.4 or later | 0.4 | 0.4 |
+
+Each SDK's changelog ([JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)) names the
+service release that each breaking change needs.
 
 ### 5.10 SDK development
 
-```sh
-make -C sdk/python sync      # uv sync --locked --all-groups
-make -C sdk/python check     # ruff, mypy --strict, pytest, and the regeneration no-op check
-make -C sdk/python generate  # after an openapi.json change
-(cd sdk/js && pnpm install && pnpm run check && pnpm run e2e)  # typecheck, lint, tests, build
-```
-
-Releases are tags: `sdk-py-v<version>` publishes `phala-pay` to PyPI and
-`sdk-js-v<version>` publishes `@phala/pay` to npm, from `.github/workflows/release-sdks.yml`
-after the SDK's tests pass on the tagged commit, with trusted publishing (no stored tokens) from the
-`npm` and `pypi` environments.
-
-The SDK's RFC 9421 signer serves only the operator's admin API (merchant requests use a Bearer
-key). Regenerate its vectors only after an intentional profile change, then rerun the Rust test:
-
-```sh
-(cd sdk/python && uv run --locked python -m tests.vectors)
-cargo test -p topup --lib api::auth
-```
-
-Also in this repository: the local sandbox, `make sandbox-local`, whose smoke check
-[deploy/sandbox/smoke.py](../deploy/sandbox/smoke.py) pins, quotes, recomputes, and verifies
+Building, testing, and releasing the SDKs is in [CONTRIBUTING.md](../CONTRIBUTING.md#sdks); the
+local sandbox, `make sandbox-local`, runs every payment scenario against a local stack
 ([deploy/sandbox/README.md](../deploy/sandbox/README.md)).
 
 ### 5.11 Webhook endpoints and events

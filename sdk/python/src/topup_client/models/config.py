@@ -27,7 +27,7 @@ class Config:
         {'assets': [{'asset': 'PHA', 'chain_id': 1, 'confirmations': '2', 'contract':
             '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'max_deposit_atomic': '1000000000000000000000000',
             'min_amount': 100, 'min_refund_atomic': '1000000000000000000', 'pricing': 'spot', 'quote_spread_bps': 50,
-            'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900, 'typical_credit_seconds': 24, 'typical_finality_seconds':
+            'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900, 'typical_credit_seconds': 30, 'typical_finality_seconds':
             900}], 'currency': 'usd', 'livemode': False, 'max_open_amount_per_account': 1000000,
             'max_open_amount_per_customer': 500000, 'max_open_quotes': 100, 'object': 'config'}
 

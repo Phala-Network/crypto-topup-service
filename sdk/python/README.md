@@ -10,7 +10,8 @@ the signed `deposit.credited` webhook.
 uv add phala-pay        # or: pip install phala-pay
 ```
 
-`phala-pay[eoa]` adds the signer an EOA treasury's proof needs (`pay.treasuries.set_eoa`).
+Pin the minor release that matches your operator's service release
+([compatibility](../../docs/integration.md#compatibility)). `phala-pay[eoa]` adds the signer an EOA treasury's proof needs (`pay.treasuries.set_eoa`).
 
 ## Quickstart
 

@@ -31,6 +31,8 @@ webhooks, and refunds, running in an attested confidential VM.
   their own ([self-hosting](docs/self-hosting.md)).
 - **Not a wallet, exchange, or dashboard.** There is no custody, trading, fiat conversion,
   signup, or merchant UI; merchants use the API and the SDKs.
+- **Not a compliance service.** Beyond direct sanctions screening, compliance (KYC, KYT, the
+  Travel Rule) is each operator's and merchant's responsibility.
 - **Not production-ready yet.** The software is pre-1.0 and has not had its independent security
   review ([status](#status)).
 
@@ -48,9 +50,9 @@ Pick the path that matches your role:
   curl -fsSL https://pay.phala.com/deploy.sh | bash
   ```
 
-  The [self-hosting guide](docs/self-hosting.md) has the other two paths: Phala Cloud's one-click
-  template, and the environment repository of your settings that Deploy provisions and upgrades
-  from.
+  Every instance with merchants then runs from an environment repository of your settings, which
+  the reusable Deploy workflow provisions and upgrades from
+  ([self-hosting guide](docs/self-hosting.md)); a one-click Phala Cloud template is coming.
 - **Evaluators and contributors**: run the whole stack locally. The sandbox builds the images,
   starts PostgreSQL, the dstack simulator, and an Anvil chain, and pays and credits a quote end to
   end through the reference merchant backend.
@@ -66,10 +68,10 @@ Pick the path that matches your role:
   starts on exit. See [deploy/sandbox/README.md](deploy/sandbox/README.md) for every scenario.
 
 To see it running, [pay.phala.com](https://pay.phala.com/) has a live demo: a cloud console's
-billing page that takes test PHA and test USDC on Sepolia and Base Sepolia. The site is static, on
-Cloudflare Workers; its demo calls an API-only reference merchant backend at
-`pay-demo-api.phala.com`, an ordinary merchant account of Phala's staging instance
-([staging reference product](deploy/phala.md#staging-reference-product)).
+billing page that takes the test tokens of Phala's [staging routes](deploy/phala.md#staging-routes)
+on Sepolia and Base Sepolia. The site is static, on Cloudflare Workers; its demo calls an API-only
+reference merchant backend at `pay-demo-api.phala.com`, an ordinary merchant account of Phala's
+staging instance ([staging reference product](deploy/phala.md#staging-reference-product)).
 
 ## Features
 
@@ -78,8 +80,9 @@ Cloudflare Workers; its demo calls an API-only reference merchant backend at
 - **Deposit addresses**: one persistent, rotatable address per customer for every supported token
   on every chain, credited at spot for any amount.
 - **Fast credit, watched to finality**: a deposit is credited at the route's confirmation (about
-  30 seconds after paying on Ethereum), confirmed by a second RPC provider, and reversed with
-  `deposit.reversed` if its transaction leaves the chain before finality.
+  30 seconds after paying on Ethereum, about 5 minutes on Base), confirmed by a second RPC
+  provider, and reversed with `deposit.reversed` if its transaction leaves the chain before
+  finality.
 - **Signed webhooks**: Standard Webhooks with ed25519 keys per account and mode, derived in the
   CVM and pinned by merchants from TDX attestation.
 - **Merchant sweeps and refunds**: merchants sweep forwarders and pay refunds from their own
@@ -91,35 +94,13 @@ Cloudflare Workers; its demo calls an API-only reference merchant backend at
 - **Operable in a CVM**: reproducible images, an attested compose, encrypted WAL-G backups,
   restore mode, Sentry alerts linked to [runbooks](deploy/runbooks/README.md).
 
-## Architecture at a glance
+## How it works
 
-```mermaid
-flowchart LR
-    payer(["Payer"])
-    subgraph merchant["Merchant (e.g. Phala Cloud)"]
-        ui["Web app<br/>&lt;Checkout&gt; from @phala/pay"]
-        backend["Backend<br/>phala-pay SDK, pinned addresses"]
-        wallet["Merchant wallet or Safe"]
-    end
-    subgraph cvm["Phala Pay (dstack CVM, attested)"]
-        api["HTTP API<br/>/v1/quotes, deposit_addresses, deposits, refunds"]
-        worker["Scanner, pump, finality watch,<br/>outbox, reconciler"]
-    end
-    subgraph chain["EVM chain"]
-        fwd["CREATE2 forwarders<br/>(clone arg: treasury)"]
-        treasury[("Merchant treasury")]
-    end
-    payer -->|"wallet, QR, or manual transfer"| fwd
-    ui -->|"client_secret: status"| api
-    ui <--> backend
-    backend -->|"Bearer API key: quotes, refunds, keys, treasuries"| api
-    worker -->|"deposit.credited, signed with the account's key"| backend
-    worker -->|"reads logs (2 RPC providers)"| fwd
-    wallet -->|"factory flush, pays gas (anyone may flush)"| fwd
-    fwd -->|"can only pay"| treasury
-```
-
-[How Phala Pay works](docs/overview.md) walks through the payment lifecycle and who owns what.
+A merchant's backend creates a quote or a customer's deposit address with its API key; the payer
+pays a CREATE2 forwarder that can only pay the merchant's treasury; the service, in an attested
+CVM, watches the chain with two RPC providers and sends a signed `deposit.credited` webhook; the
+merchant sweeps forwarders to its treasury with its own wallet or Safe.
+[How Phala Pay works](docs/overview.md) has the diagram, the payment lifecycle, and who owns what.
 
 ## Documentation
 
@@ -140,8 +121,9 @@ The [documentation index](docs/README.md) lists every document.
 | [`@phala/pay`](sdk/js) | `npm install @phala/pay viem` | The browser checkout (`<Checkout>`, `<DepositAddress>`) and server helpers for Node |
 | [`phala-pay`](sdk/python) | `pip install phala-pay` | The Python backend client, webhook verification, and address pinning |
 
-The Python SDK's low-level client is generated from [crates/topup/openapi.json](crates/topup/openapi.json),
-the API's OpenAPI document.
+Pin the minor release that matches your operator's service release
+([compatibility](docs/integration.md#compatibility)). The Python SDK's low-level client is generated
+from [crates/topup/openapi.json](crates/topup/openapi.json), the API's OpenAPI document.
 
 ## Status
 

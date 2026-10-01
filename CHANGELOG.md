@@ -9,6 +9,15 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+### Changed
+
+- Compliance is each operator's responsibility: Phala Pay is software, and beyond the service's
+  direct sanctions screening, KYC, KYT, and the Travel Rule are for each operator and its
+  merchants to handle. The
+  legal review that was to gate live mode for third-party merchants on Phala's instance is removed
+  from the design (D12, former §17), the architecture, and the plan: Phala's instance serves only
+  Phala Cloud.
+
 ## [0.3.4] - 2026-10-01
 
 ### Added

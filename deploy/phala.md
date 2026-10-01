@@ -9,10 +9,12 @@ rehearsals. The generic procedures are in the [deployment reference](README.md).
 
 ## Onboarding policy
 
-Phala onboards accounts as in [Operator onboarding](README.md#operator-onboarding), with due
-diligence under Phala's policy (design §17). Until Phala's legal review signs off, live mode
-(`charges_enabled`) is for Phala's own accounts only; third-party merchants go live only after
-it.
+Phala's instance onboards only Phala's own accounts, as in
+[Operator onboarding](README.md#operator-onboarding): Phala Cloud's, which collects Phala Cloud's
+own revenue, and the staging reference product's. It takes no third-party merchants, so live mode
+(`charges_enabled`) is a decision about Phala Cloud alone. Phala, as the operator of this
+instance, is responsible for its compliance, as every operator is for its own (architecture §15,
+"Compliance").
 
 ## Staging routes
 
@@ -63,32 +65,29 @@ Mainnet needs paid providers from two different companies.
 
 ## Staging reset (HUMAN-ONLY)
 
-Staging is reset at the v0.3.0 cutover: a fresh provision on an empty backup prefix, with every
-account created again, instead of an upgrade. v0.3.0 reads no row of an earlier release: its
+A reset replaces staging with a fresh provision on an empty backup prefix, with every account
+created again, instead of an upgrade, for a release that cannot read the old rows. Staging was last
+reset at the v0.3.0 cutover ([#256](https://github.com/Phala-Network/phala-pay/pull/256)): its
 schema requires every deposit's transaction origin and every deposit event's receipt position,
-revision, and block (`20261023000000_current_invariants`), which rows staging recorded before them
-lack, and its reference product creates its ledger fresh. Nothing on staging is live, so no funds
-or merchants are affected; the new app id derives new webhook keys (`whpk_…`) for every account. Every step is HUMAN-ONLY,
-by the staging owner, except the workflow runs, which the owner dispatches; agents and CI run none
-of them. Run them from a checkout of `main` with `PHALA_CLOUD_API_KEY` of the `staging` Environment
+revision, and block (`20261023000000_current_invariants`), and its reference product creates its
+ledger fresh. Nothing on staging is live, so no funds or merchants are affected; the new app id
+derives new webhook keys (`whpk_…`) for every account. Every step is HUMAN-ONLY, by the staging
+owner, except the workflow runs, which the owner dispatches; agents and CI run none of them. Run them from a checkout of `main` with `PHALA_CLOUD_API_KEY` of the `staging` Environment
 exported and the release's verified kit in `kit/`:
 
 ```sh
-bash deploy/verify-release.sh v0.3.1 release
-mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-components=1
+version=v0.3.4   # the release deploy-phala.yml pins
+bash deploy/verify-release.sh "$version" release
+mkdir kit && tar -xzf "release/phala-pay-deploy-$version.tar.gz" -C kit --strip-components=1
 npm ci --prefix kit/deploy/tools --ignore-scripts
 ```
 
-Run a reset with v0.3.3 or later. v0.3.0's Deploy cannot provision: it waits for the unsealed CVM to
-run, and reuses the CVM name (the v0.3.0 cutover recovered by hand: seal, then upgrade, as
-[Deploy](README.md#deploy) step 2 says); v0.3.1's and v0.3.2's wait for an instance id that Phala
-Cloud's `cvms get` never reports. **Until `v0.3.1` is tagged,
-[deploy-phala.yml](../.github/workflows/deploy-phala.yml) pins v0.3.0's commit;** right after the
-tag, its own adoption pull request moves `uses:` and `version` to the v0.3.1 commit SHA, before any
-reset. Already in place: staging's
-[compose.yaml](environments/phala-network/staging/topup/compose.yaml) names the new, empty prefix
-`s3://crypto-topup-test/staging-v030` (committed ahead of the cutover: until the reset, never
-upgrade the old staging CVM from `main`). The factory
+Run a reset with v0.3.3 or later: v0.3.0's Deploy cannot provision (it waits for the unsealed CVM
+to run, and reuses the CVM name), and v0.3.1's and v0.3.2's wait for an instance id that Phala
+Cloud's `cvms get` never reports. Before the reset, a pull request points staging's
+[compose.yaml](environments/phala-network/staging/topup/compose.yaml) at a new, empty prefix
+(v0.3.0's: `s3://crypto-topup-test/staging-v030`); from then until the reset, never upgrade the old
+staging CVM from `main`. The factory
 `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and its implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9` are deployed and verified on Sepolia and Base Sepolia
 ([Contracts](README.md#contracts)), and the staging Safe `0x26430107887d4a691B340BdB887096B83E7a5844`
@@ -115,7 +114,7 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
    nothing:
 
    ```sh
-   aws s3 ls s3://crypto-topup-test/staging-v030/ --recursive \
+   aws s3 ls "s3://crypto-topup-test/<new prefix>/" --recursive \
      --endpoint-url https://1d694c298092ffa09c793cbca4587812.r2.cloudflarestorage.com
    ```
 
@@ -149,7 +148,7 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
    which proves the staging Safe again as the account's treasury on each chain: the owners sign
    the new instance's challenge as a Safe message, verified by EIP-1271
    ([Treasury setup](README.md#treasury-setup)), since the new database holds no treasury.
-   The cutover pull request, not this one, sets that new `acct_…` as `account` in
+   A pull request sets that new `acct_…` as `account` in
    [product/config.json](environments/phala-network/staging/product/config.json); merge it.
 8. **Provision, reseal, and switch the reference product** (setup step 4): dispatch with
    `-f target=product -f mode=provision` (the new CVM's volume starts the product's ledger empty),
@@ -159,8 +158,8 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
    endpoint. Run one deposit of each collection method (setup step 5) and one
    [sweep](README.md#sweeping) from the Safe; confirm `swept` and the daily report.
 9. **Delete the old CVMs by their recorded ids** (never by name or app id), once the new service
-   has run clean for a day. Their app is gone with them, so the old prefix
-   `staging-mt-20260928` can no longer be restored and may be deleted too:
+   has run clean for a day. Their app is gone with them, so the old prefix can no longer be
+   restored and may be deleted too:
 
    ```sh
    kit/deploy/phala cvms delete "$OLD_TOPUP_CVM_ID" --force
@@ -241,7 +240,7 @@ driver key (`driver/v1`, the product's own authentication, not Phala Pay's).
   from the ledger, opened read-only. The controlled
   [restore drill](RESTORE.md#local-and-ci-drills) runs this receiver and imports what it fetches.
 - **Its networks.** The page offers a configured chain only once the service serves assets there
-  (`GET /v1/config`): Base Sepolia appears when its route is deployed, with no product change.
+  (`GET /v1/config`), so a new route appears with no product change.
 - **Its custom domain.** The same pinned dstack-ingress as topup's
   ([Custom domain](README.md#custom-domain)) terminates TLS for the overlay's `DOMAIN` (Phala's:
   `pay-demo-api.phala.com`) in the product's compose and forwards to `product:8089`, so the demo's
@@ -323,7 +322,7 @@ Setup, in order, during the [staging reset](#staging-reset-human-only)'s steps 7
    `account`, `factory`, `implementation`, `chains` (as in the product config: each with its
    `chain_id`, `name`, `rpc_url`, `treasury`, and `test_tokens`), and `public_url` (the product
    URL). The driver pays on the first chain, with its first test token; `--chain-id 84532` pays on
-   Base Sepolia instead, once its route is served.
+   Base Sepolia instead.
 
    ```sh
    export ETH_KEYSTORE=~/.foundry/keystores/staging-payer ETH_PASSWORD=~/staging/payer.password

@@ -67,6 +67,11 @@ export function clock(seconds: number): string {
   });
 }
 
+/** A typical wait, rounded: `~30 s`, or `~5 min` from 90 seconds. */
+export function approx(seconds: number): string {
+  return seconds < 90 ? `~${Math.round(seconds)}\u00a0s` : `~${Math.round(seconds / 60)}\u00a0min`;
+}
+
 /** `12 s`, `3 min 5 s`, or `1 h 2 min`, as the page's copy writes times. */
 export function duration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));

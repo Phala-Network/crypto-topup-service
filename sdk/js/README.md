@@ -11,6 +11,9 @@ Python SDK (`phala-pay`) and fulfils from the signed `deposit.credited` webhook.
 npm install @phala/pay viem
 ```
 
+Pin the minor release that matches your operator's service release
+([compatibility](../../docs/integration.md#compatibility)).
+
 Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Browser wallets are
 found with EIP-6963 through [mipd](https://github.com/wevm/mipd), wagmi's discovery store (with a
 `window.ethereum` fallback for wallets that do not announce themselves). If your page already

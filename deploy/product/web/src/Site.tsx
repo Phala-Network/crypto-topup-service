@@ -133,7 +133,7 @@ function Lockup() {
 const HERO_BUTTON = "h-10 px-4";
 
 // The headline, with the fact behind each of its words (docs/architecture.md §8, the typical credit
-// at depth 2; README.md), and the way to run it: self-hosting on Phala Cloud.
+// at depth 2, `typical_credit_seconds`; README.md), and the way to run it: self-hosting on Phala Cloud.
 export function Hero() {
   return (
     <section aria-labelledby="hero-title">
@@ -147,7 +147,7 @@ export function Hero() {
           {/* Each sentence starts a line, and is one where the paragraph is wide; its clauses kept
               whole so it wraps only between them (checked at 360 and 390 px). */}
           <span className="block">
-            Credited at two confirmations, <span className="whitespace-nowrap">about 15&nbsp;s on Ethereum</span>,{" "}
+            Credited at two confirmations, <span className="whitespace-nowrap">about 30&nbsp;s on Ethereum</span>,{" "}
             <span className="whitespace-nowrap">in a TEE you can verify</span>.
           </span>
           <span className="block">

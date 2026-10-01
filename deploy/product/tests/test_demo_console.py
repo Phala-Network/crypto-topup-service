@@ -192,7 +192,7 @@ def _config_asset(
         "quote_spread_bps": 50,
         "quote_tolerance_bps": 100,
         "quote_ttl_seconds": 900,
-        "typical_credit_seconds": 24,
+        "typical_credit_seconds": 30,
         "typical_finality_seconds": 900,
     }
 
@@ -410,6 +410,7 @@ def test_offers_the_services_tokens_by_network_on_the_products_chains(
         "pricing": "spot",
         "min_amount": 100,
         "quote_ttl_seconds": 900,
+        "typical_credit_seconds": 30,
         "mintable": True,
         "faucet": None,
         "bonus_bps": 1000,

@@ -499,8 +499,8 @@ reproduces crediting only final deposits.
 
 | Chain family | Values | Default |
 |---|---|---|
-| Ethereum L1 (mainnet 1, Sepolia, Holesky, Hoodi, Anvil 31337) | a depth ≥ 1, or `finalized` | 2 (about 24 s): depth-1 reorgs are routine, deeper ones were not observed |
-| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` |
+| Ethereum L1 (mainnet 1, Sepolia, Holesky, Hoodi, Anvil 31337) | a depth ≥ 1, or `finalized` | 2 (credited about 30 s after paying): depth-1 reorgs are routine, deeper ones were not observed |
+| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` (about 5 minutes) |
 | Any other chain | `finalized` | `finalized` |
 
 **Head loop** per chain, on provider A: the only reader of provider A's heads. It polls
@@ -545,13 +545,13 @@ horizon (the highest block that has reached the confirmation) become `detected` 
 same transaction, so the blocks above it are read again on the next head and a block below it is
 not read by this loop again. The pump confirms them on both providers at once, so a payment to any
 issued address (an open quote's, a closed or expired one's, a repeated or wrong amount, or a
-persistent address) is typically credited about 15 seconds after inclusion at depth 2 (one more
-slot, up to a quarter slot of polling, confirmation). A transfer the per-block scan does not record
-(in a range it skipped after downtime longer than a window, or introduced below its cursor by a
-reorg deeper than the confirmation) is recorded by the finalized backstop and credited at
-finality. In token mode, transfers of other tokens are not requested: the reconciler's
-missing-deposit pass (§13), which reads every issued address's finalized transfers of any
-contract, records them as `rejected(unsupported_asset)` after finality.
+persistent address) is typically credited about 30 seconds after paying at depth 2 (half a slot to
+inclusion, one more slot, up to a quarter slot of polling, confirmation; `typical_credit_seconds`).
+A transfer the per-block scan does not record (in a range it skipped after downtime longer than a
+window, or introduced below its cursor by a reorg deeper than the confirmation) is recorded by the
+finalized backstop and credited at finality. In token mode, transfers of other tokens are not
+requested: the reconciler's missing-deposit pass (§13), which reads every issued address's
+finalized transfers of any contract, records them as `rejected(unsupported_asset)` after finality.
 
 **Pending view (display only)**, from the same logs: the non-zero transfers of routed tokens in the
 scanned range are upserted into `pending_transfers`, and rows in that range not seen this time
@@ -626,8 +626,8 @@ max_deviation_bps / 10 000`; FX within `max_fx_deviation_bps`; the primary is us
 retries the whole step. Stablecoin routes use fixed `1.0` with the primary reference rate as a
 depeg guard; check and FX observations are not required for that mode.
 
-**Screening** is direct sanctions-list screening plus per-deposit bounds. KYT is a separate
-adapter that compliance may require before GA.
+**Screening** is direct sanctions-list screening plus per-deposit bounds. KYC, KYT, and the Travel
+Rule are not part of the software: they are the operator's and the merchant's responsibility (§15).
 
 ## 9. Quotes
 
@@ -1543,7 +1543,7 @@ which are stable across releases; a production CVM exposes no logs or shell. `to
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
 | Refunds | Only a final deposit is refunded (`400 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the merchant closed the customer. A credited deposit is refunded only by the merchant's decision, for a credit it did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The merchant's staff request a refund by deposit id with a destination address the payer controls (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
 | Customer closure | Unused credit and in-flight deposits follow the merchant's closure policy; the customer's addresses stay monitored, and later funds are held for refund: the merchant holds a `deposit.credited` for a closed customer instead of crediting it and refunds it (§11); the service has no closure check of its own. Account closure is an operator action at the merchant's request (design §13, PR 13). |
-| Compliance | Direct sanctions screening of payers, refund destinations, and treasuries (§8, §9); the operator screens each merchant, its owners, and its jurisdiction in offline due diligence (design D8). Phala's legal review (design §17) precedes live mode for third-party merchants; until then the operator enables live mode only for Phala's own accounts. The merchant's own compliance (KYT, Travel Rule, customer information requests) applies to its customers. |
+| Compliance | Direct sanctions screening of payers, refund destinations, and treasuries (§8, §9); the operator screens each merchant, its owners, and its jurisdiction in offline due diligence (design D8). Phala Pay is software: each operator is responsible for its own compliance, and each merchant for its customers' (KYC, KYT, the Travel Rule, customer information requests). |
 | Fees and exposure | No fee. The merchant pays its own sweep and refund gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sale of the tokens, open quote exposure up to the caps (§9), and credit before finality up to `max_unfinalized_credit` (§7). |
 | Rotation | Webhook key: the merchant rolls it (`POST /v1/account/webhook_keys/roll`); both keys sign every delivery for 48 hours (live minimum) to 7 days while the merchant pins the new one from attestation, and the roll's notice is always signed by the retiring key. API key: the merchant rolls it (`POST /v1/api_keys/{id}/roll`), the old key working for up to 7 days; the operator issues a recovery key to an account that lost its keys (§12, design D7). Backup key: a new domain and a new prefix; the old prefix is kept until the new one holds a full retention window. |
 | Retention | Deposits, refunds, events, transitions, and audit: 7 years *(policy)*; transitions, audit, and events are append-only. |
@@ -1618,8 +1618,7 @@ The plan and its status are [docs/plan.md](plan.md); the design's PR plan is
    payment at spot; a deposit recovered after restart and provider interruption; duplicates and
    concurrency yield one ledger mutation; every forwarder's balance matches its deposits minus its
    finalized `Flushed` events; one merchant sweep and one refund end to end; restore drill passed.
-4. **Third-party merchants** go live only after Phala's legal review (design §17).
-5. **Later**: Base mainnet PHA and USDC routes through route files, the same addresses wherever
+4. **Later**: Base mainnet routes through route files, the same addresses wherever
    the treasury is the same (staging already serves test routes on Base Sepolia); account closure
    (design PR 13).
 
@@ -1645,5 +1644,5 @@ Ownership: **S** service, **M** merchant (its UI, billing, and support), **O** o
 | Sanctions screening of payers, refund destinations, and treasuries | S | ✓ | |
 | SDKs with webhook verification, address pinning, idempotent client, examples; versioning policy; local sandbox | S | ✓ | |
 | Account closure (design PR 13) | S+O | | ✓ |
-| Base mainnet PHA and USDC routes (test routes on Base Sepolia run on staging) | S | | ✓ |
+| Base mainnet routes (test routes on Base Sepolia run on staging) | S | | ✓ |
 | Merchant dashboard, users, logins, self-serve onboarding, fees, custody | — | | never (design, owner ruling of 2026-09-28) |

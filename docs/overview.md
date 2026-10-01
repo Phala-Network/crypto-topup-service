@@ -43,8 +43,8 @@ A route is one chain and one token, in test or live mode. Routes are settings th
 commits to its environment repository, so they are part of the attested deployment; further
 merchants are accounts, not configuration.
 
-The repository's committed routes are test routes on Sepolia and Base Sepolia, for a test PHA
-token and Circle's testnet USDC ([deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes)).
+The repository's committed routes are Phala's staging routes, test routes on Sepolia and Base
+Sepolia, listed in [deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes).
 Phala's first live route will be Ethereum Mainnet PHA for Phala Cloud's account
 ([examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml)); it is not deployed yet.
 
@@ -83,8 +83,8 @@ merchant backend creates a quote (or the customer's deposit address) with its AP
   → service locks the price and computes a CREATE2 forwarder address over the merchant's treasury
   → the merchant recomputes the address from its own pins before showing it
   → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
-  → recorded once its block reaches the confirmation (2 on Ethereum, `safe` on an OP-stack chain,
-    or the account's stricter policy)
+  → recorded once its block reaches the confirmation (2 blocks on Ethereum, about 30 s after
+    paying; `safe` on an OP-stack chain, about 5 minutes; or the account's stricter policy)
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
   → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
@@ -103,5 +103,5 @@ and never credited.
 | Party | Owns |
 |---|---|
 | Service | Addresses, chain evidence, finality, screening, pricing, deposit state, credits and their webhooks, the swept status it reads from the chain, and reconciliation. |
-| Operator | Creating accounts, deciding live access, issuing first and recovery keys, and handling incidents. |
-| Merchant | Its keys, treasuries, webhook endpoints, sweeps, and refunds (and their gas), and its customers' identity, balances, entitlements, and billing policy. |
+| Operator | Creating accounts, deciding live access, issuing first and recovery keys, handling incidents, and its own compliance. |
+| Merchant | Its keys, treasuries, webhook endpoints, sweeps, and refunds (and their gas), and its customers' identity (KYC), balances, entitlements, and billing policy. |
