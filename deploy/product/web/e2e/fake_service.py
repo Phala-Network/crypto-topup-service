@@ -23,6 +23,8 @@ second):
 `POST /_test/quotes/{id}/expire` and `/cancel` end an unpaid quote, as its window's end or the
 merchant's cancel does. `POST /_test/deposits/{id}/reverse` makes a deposit `reversed`, as the
 service's finality watch does for a proven-dropped transaction, and sends `deposit.reversed`.
+`POST /_test/mining/pause` and `/resume` stop and restart the block a second it mines on each
+chain, so a test can hold a transaction pending (with Anvil's automine off too).
 Addresses, deposit ids, the webhook signature, and the attestation binding use the SDK's own
 helpers, so the product checks them exactly as it checks the real service.
 
@@ -115,6 +117,10 @@ class FakeTopup:
         self.key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(args.webhook_seed))
         self.rpc = httpx.Client(timeout=10)
         self.stop = threading.Event()
+        # Whether the watch mines its block a second; changed under `mining_lock`, which the watch
+        # holds while it mines, so a pause returns only once no block is being mined.
+        self.mining = True
+        self.mining_lock = threading.Lock()
         self.lock = threading.RLock()
         self.quotes: dict[str, dict[str, Any]] = {}
         self.addresses: dict[str, dict[str, Any]] = {}  # deposit addresses by id
@@ -151,8 +157,10 @@ class FakeTopup:
     def watch(self) -> None:
         while not self.stop.wait(1.0):
             try:
-                for chain_id in self.chains:
-                    self.call(chain_id, "evm_mine")
+                with self.mining_lock:
+                    if self.mining:
+                        for chain_id in self.chains:
+                            self.call(chain_id, "evm_mine")
                 self.step()
             except (httpx.HTTPError, RuntimeError):
                 LOG.exception("watch step failed")
@@ -1021,6 +1029,11 @@ def serve(fake: FakeTopup) -> ThreadingHTTPServer:
             body = json.loads(self.rfile.read(length) or b"{}")
             if parts[:2] == ["_test", "deposits"] and parts[3:] == ["reverse"]:
                 self.send(HTTPStatus.OK, _public(fake.reverse(parts[2])))
+                return
+            if parts[:2] == ["_test", "mining"] and parts[2:] in (["pause"], ["resume"]):
+                with fake.mining_lock:
+                    fake.mining = parts[2] == "resume"
+                self.send(HTTPStatus.OK, {"mining": fake.mining})
                 return
             if parts[:2] == ["_test", "quotes"] and parts[3:] in (["expire"], ["cancel"]):
                 status = "expired" if parts[3] == "expire" else "canceled"

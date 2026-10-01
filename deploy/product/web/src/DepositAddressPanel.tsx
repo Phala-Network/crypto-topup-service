@@ -232,6 +232,8 @@ function PayFromWallet({
           className="h-10 tabular-nums"
           inputMode="decimal"
           value={amount}
+          // Fixed while the wallet confirms the transfer: the transfer is for this amount.
+          disabled={send.isPending}
           onChange={(event) => {
             onAmountChange(event.target.value);
             // A refusal, and its mint, were for the amount before.

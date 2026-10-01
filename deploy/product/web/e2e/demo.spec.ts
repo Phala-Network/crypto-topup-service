@@ -111,20 +111,25 @@ async function sentCount(account: Address): Promise<number> {
 /**
  * EIP-6963 wallets on the Anvils, announced in order, each holding its account: by default one,
  * "Test Wallet", holding the payer's. Each starts on mainnet. Resolves with the RPC methods they
- * forwarded to the Anvils, in order.
+ * forwarded to the Anvils, in order, and `holdSends`, which holds every transaction the wallets
+ * send, as a wallet does while the payer confirms, until the function it returns is called.
  */
 async function installWallet(
   page: Page,
   wallets: { name: string; account: string }[] = [{ name: "Test Wallet", account: env("PAYER_ADDRESS") }],
-): Promise<string[]> {
+): Promise<{ forwarded: string[]; holdSends: () => () => void }> {
   const rpcs: Record<number, string> = { [sepolia.id]: env("ANVIL_URL"), [baseSepolia.id]: env("BASE_ANVIL_URL") };
   const forwarded: string[] = [];
+  let held: Promise<void> | undefined;
   await page.exposeFunction("anvilRequest", async (chainId: number, method: string, params: unknown) => {
     const rpc = rpcs[chainId];
     if (rpc === undefined) {
       return { error: { code: 4901, message: "wallet is on another chain" } };
     }
     forwarded.push(method);
+    if (method === "eth_sendTransaction") {
+      await held;
+    }
     const response = await fetch(rpc, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -193,7 +198,17 @@ async function installWallet(
     },
     { wallets, chainIds: [sepolia.id, baseSepolia.id] as number[] },
   );
-  return forwarded;
+  const holdSends = () => {
+    let release = () => undefined;
+    held = new Promise<void>((resolve) => {
+      release = () => {
+        held = undefined;
+        resolve();
+      };
+    });
+    return release;
+  };
+  return { forwarded, holdSends };
 }
 
 /**
@@ -765,17 +780,22 @@ test("the deposit address: a canceled mint mints nothing; the amount typed sizes
   test.setTimeout(180_000);
   const problems = await watchConsole(page);
   const account = await emptyAccount(2);
-  const forwarded = await installWallet(page, [{ name: "Test Wallet", account }]);
+  const { forwarded, holdSends } = await installWallet(page, [{ name: "Test Wallet", account }]);
   await page.goto(env("SITE_URL"));
   const product = page.getByRole("region", { name: "Acme Cloud · Billing" });
   const helper = page.getByRole("note", { name: "Test tokens" });
   await expect(product.getByTestId("balance")).toHaveText("$0.00");
 
   // The wallet cancels the mint (a 0 ETH transfer to itself with its nonce) before it is mined: the
-  // page says nothing was minted. Anvil holds the mint until the cancel replaces it.
+  // page says nothing was minted. No block is mined (neither Anvil's automine nor the stand-in
+  // service's block a second) until the cancel replaces the mint.
   const chain = createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) })
     .extend(walletActions)
     .extend(publicActions);
+  const mining = async (state: "pause" | "resume") => {
+    expect((await fetch(`${env("SERVICE_URL")}/_test/mining/${state}`, { method: "POST" })).status).toBe(200);
+  };
+  await mining("pause");
   await chain.setAutomine(false);
   try {
     const nonce = await sentCount(account);
@@ -798,6 +818,7 @@ test("the deposit address: a canceled mint mints nothing; the amount typed sizes
     await chain.mine({ blocks: 1 });
   } finally {
     await chain.setAutomine(true);
+    await mining("resume");
   }
   await expect(helper).toContainText("The mint was canceled in the wallet; nothing was minted.", { timeout: 30_000 });
   await expect(helper).not.toContainText("Minted:");
@@ -824,8 +845,15 @@ test("the deposit address: a canceled mint mints nothing; the amount typed sizes
   await fund.getByRole("button", { name: "Mint 1,300 test PHA" }).click();
   await expect(fund).toContainText("Minted:");
   expect(await tokenBalance(account)).toBe(parseEther("1300"));
+  // While the wallet confirms, the amount and Send stay fixed: another amount cannot be sent
+  // beside the pending one.
+  const release = holdSends();
   await send.click();
+  await expect(form.getByRole("button", { name: "Confirm in your wallet…" })).toBeDisabled();
+  await expect(amount).toBeDisabled();
+  release();
   await expect(form).toContainText("Sent: 0x");
+  await expect(amount).toBeEnabled();
   expect(await tokenBalance(account)).toBe(parseEther("65.5"));
   expect(problems).toEqual([]);
 });
