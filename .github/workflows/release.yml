@@ -16,7 +16,8 @@ name: Release
 # `release` then publishes the GitHub release, each asset attested: images.json (the
 # repository@sha256 references by image name, deploy/render.sh's --images); the deploy kit
 # phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
-# Cloud template's compose, rendered from the kit with these images); and SHA256SUMS.
+# Cloud template's compose, rendered from the kit with these images); deploy.sh (deploy/deploy.sh,
+# the one-command deploy, set to deploy this release); and SHA256SUMS.
 # deploy/verify-release.sh verifies all of it (docs/self-hosting.md, "Verify a release").
 
 on:
@@ -153,7 +154,7 @@ jobs:
           path: ${{ runner.temp }}/refs
       # The kit renders the example environment and Phala's with these images before anything is
       # published; the template's compose is rendered from the kit itself.
-      - name: Write images.json, build the deploy kit, and render the template
+      - name: Write images.json, build the deploy kit, render the template, and set deploy.sh's release
         run: |
           dist="$RUNNER_TEMP/dist" kit="$RUNNER_TEMP/kit"
           mkdir -p "$dist" "$kit"
@@ -167,8 +168,10 @@ jobs:
           done
           "$kit/deploy/render.sh" --template --images "$dist/images.json" \
             "$kit/deploy/environments/phala-cloud-template/topup" >"$dist/phala-cloud-template.yml"
+          sed "s/^release=latest\$/release=$GITHUB_REF_NAME/" deploy/deploy.sh >"$dist/deploy.sh"
+          grep -qx "release=$GITHUB_REF_NAME" "$dist/deploy.sh"
           (cd "$dist" && sha256sum images.json "phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
-            phala-cloud-template.yml >SHA256SUMS)
+            phala-cloud-template.yml deploy.sh >SHA256SUMS)
       - name: Attest the release assets
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -176,6 +179,7 @@ jobs:
             ${{ runner.temp }}/dist/images.json
             ${{ runner.temp }}/dist/phala-pay-deploy-${{ github.ref_name }}.tar.gz
             ${{ runner.temp }}/dist/phala-cloud-template.yml
+            ${{ runner.temp }}/dist/deploy.sh
             ${{ runner.temp }}/dist/SHA256SUMS
       # `gh release create` uploads to a draft and publishes last, as immutable releases require.
       - name: Publish the GitHub release
@@ -200,4 +204,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "Phala Pay $VERSION" \
             --notes-file "$notes" "${prerelease[@]}" \
             "$dist/images.json" "$dist/phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
-            "$dist/phala-cloud-template.yml" "$dist/SHA256SUMS"
+            "$dist/phala-cloud-template.yml" "$dist/deploy.sh" "$dist/SHA256SUMS"

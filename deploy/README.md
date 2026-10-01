@@ -119,6 +119,9 @@ dpkg timestamps): it has provenance only. The GitHub release's assets, each atte
 - the deploy kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): `LICENSE`,
   `deploy/`, and `docs/` of the tag, a tar identical to their `git archive`);
 - `phala-cloud-template.yml` ([The Phala Cloud template variant](#the-phala-cloud-template-variant));
+- `deploy.sh`, [deploy.sh](deploy.sh) set to deploy this release, the one-command deploy that
+  `https://pay.phala.com/deploy.sh` (the latest release) and `/deploy/v<version>.sh` redirect to
+  ([self-hosting, "One-command deploy"](../docs/self-hosting.md#one-command-deploy));
 - `SHA256SUMS`.
 
 [verify-release.sh](verify-release.sh) is the one verification of a release, run by Deploy and by
@@ -180,12 +183,19 @@ drill ([RESTORE.md](RESTORE.md)); then [onboard](#operator-onboarding) accounts 
 
 ### Sealing the secrets
 
-The CVM's encrypted env holds exactly the rendered compose's sealed names, its `${NAME:-}`
-references, which are also its `allowed_envs`:
+The CVM's encrypted env holds the rendered compose's sealed names, its `${NAME:-}` references.
+The Phala Cloud CLI makes the names of the env file it sends the CVM's `allowed_envs`, and
+[verify-attestation.sh](verify-attestation.sh) requires them to be among the sealed names
+([compose-policy.jq](compose-policy.jq), `allowed_envs_violations`): another name is refused, since
+it would put in the env a value the compose does not reference. A sealed name left out is unset,
+like an empty one; a required secret is enforced where it is used, at startup (PostgreSQL refuses to
+start without the storage credentials), so the acceptance upgrade's `/healthz` catches it. The
+names are part of the app-compose, so sealing with the names a CVM already allows keeps its compose
+hash. The sealed names are:
 
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the object store's token (declared in
   [compose.yaml](compose.yaml));
-- `SENTRY_DSN`, which may be empty to turn Sentry off;
+- `SENTRY_DSN`, which may be empty or left out to turn Sentry off;
 - a `TOPUP_RPC_<ID>_KEY` per keyed [RPC provider](#rpc-providers), declared in the environment's
   `compose.yaml` overlay. It is the API key topup puts in place of `{key}` in the provider's
   attested URL. Phala's staging has keyless providers and declares none.
@@ -217,11 +227,11 @@ The CVM restarts, `/healthz` answers, and backups have started once a WAL segmen
 minutes is listed (`aws s3 ls "${WALG_S3_PREFIX%/}/wal_005/" --endpoint-url "$AWS_ENDPOINT" | tail -1`).
 Re-seal the same way whenever a secret changes; never change a setting with `envs update`.
 
-**A new sealed name** (a new keyed provider's `TOPUP_RPC_<ID>_KEY`) changes the CVM's allowed
-names, and Deploy `upgrade` keeps a CVM's allowed names, so its attestation check would refuse the
-upgrade. Once, before that upgrade, run only the `envs update` above with `.env.ENV` holding every
-sealed name of the new compose (the keys empty for keyless URLs): the running compose ignores the
-new names, and preflight against it would refuse them. A new keyless provider adds no name.
+**A new sealed name** (a new keyed provider's `TOPUP_RPC_<ID>_KEY`) is not among the CVM's allowed
+names, which Deploy `upgrade` keeps, so after the upgrade it would be unset and topup would refuse
+to start (a `{key}` without a key). Once, before that upgrade, run only the `envs update` above with
+`.env.ENV` holding the new compose's sealed names: the running compose ignores the new name, and
+preflight against it would refuse it. A new keyless provider adds no name.
 
 ### Attested settings
 
@@ -300,7 +310,11 @@ so a service compose can never take either from its env. These values are not at
 controls the workspace can change them without changing the compose hash. Everything else is:
 the services, the routes and providers, smokescreen, the credential volumes, and the sealed names.
 [verify-attestation.sh](verify-attestation.sh) checks a template CVM with the variant `template`.
-An instance with merchants uses the service variant.
+The Phala Cloud CLI, and the deploy form likewise, puts in `allowed_envs` only the values it is
+given, so a template CVM deployed without the optional `SENTRY_DSN` has the other sealed names
+only; the verifier accepts that ([Sealing the secrets](#sealing-the-secrets)) and refuses any other
+name, `DSTACK_APP_DOMAIN` included. A missing form value is refused at startup by the service that
+reads it (the table above). An instance with merchants uses the service variant.
 
 **No restore-check path.** A template instance cannot be restored through
 [RESTORE.md](RESTORE.md)'s restore-check variant. That variant renders from an environment whose
@@ -542,7 +556,7 @@ app id, and a compose hash whose app-compose holds exactly the rendered compose.
 is the hash of the full app-compose JSON the Phala CLI builds (with `allowed_envs` and the CVM
 options), not of the YAML file, so every upgrade's hash is new and goes to merchants
 ([docs/integration.md §5.3](../docs/integration.md#53-pin-your-accounts-webhook-keys)). It then
-requires `allowed_envs` equal to the compose's sealed names, and the variant's
+requires `allowed_envs` to name only the compose's sealed names, and the variant's
 [compose-policy.jq](compose-policy.jq): for the service, the only published port is
 `dstack-ingress` on 443 (`tls-alpn-01`, forwarding to `topup:8080`, for the host of
 `public_origin`); for the restore-check variant it is `topup` on 8081, with no ingress.

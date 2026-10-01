@@ -2,14 +2,16 @@
 # Preflight for a topup deploy (deploy/README.md, "Deploy" and "Sealing the secrets"). It is
 # read-only against remote systems: it never pushes, deploys, updates, or sends a transaction.
 #
-# Usage: deploy/preflight.sh --env FILE --compose FILE --environment-dir DIR [--restore-check]
-#          (--workspace NAME --os-image NAME | --offline) [--unsealed]
+# Usage: deploy/preflight.sh --env FILE --compose FILE --environment-dir DIR
+#          [--restore-check | --template] (--workspace NAME --os-image NAME | --offline) [--unsealed]
 #
 # --compose is the rendered compose (deploy/render.sh), --environment-dir the environment it was
-# rendered from, and --restore-check expects the restore-check variant (deploy/RESTORE.md).
+# rendered from, --restore-check expects the restore-check variant (deploy/RESTORE.md), and
+# --template the Phala Cloud template variant, whose env file also holds the deploy form's values
+# (deploy/README.md, "The Phala Cloud template variant").
 #
 # --offline makes no network access and pulls nothing. It checks:
-# - the env file: exactly the compose's sealed names, and no placeholder;
+# - the env file: only the compose's sealed names (one left out is unset), and no placeholder;
 # - the compose: deploy/compose-policy.jq, no example value, and a byte-for-byte fresh render;
 # - the configuration, with `topup config check` run in the compose's pinned image, which must
 #   already be present (`docker pull` it first). With the env file's keys it also checks that
@@ -35,7 +37,7 @@ networks="$DEPLOY_CONTRACTS_DIR/networks.json"
 approved_os_image=dstack-0.5.9
 
 usage() {
-    echo "usage: $0 --env FILE --compose FILE --environment-dir DIR [--restore-check]" \
+    echo "usage: $0 --env FILE --compose FILE --environment-dir DIR [--restore-check | --template]" \
         "(--workspace NAME --os-image NAME | --offline) [--unsealed]" >&2
     exit 64
 }
@@ -48,6 +50,7 @@ while (($#)); do
         --workspace) workspace="${2:-}"; shift 2 ;;
         --os-image) os_image="${2:-}"; shift 2 ;;
         --restore-check) variant=restore-check; shift ;;
+        --template) variant=template; shift ;;
         --offline) offline=1; shift ;;
         --unsealed) unsealed=1; shift ;;
         *) usage ;;
@@ -78,8 +81,8 @@ while IFS= read -r name; do
     if [[ "$value" == *replace-me* ]]; then
         fail "$name still contains replace-me"
     elif [[ -z "$value" ]] && ((unsealed == 0)) && [[ "$name" != SENTRY_DSN && "$name" != TOPUP_RPC_*_KEY ]]; then
-        # An empty DSN turns Sentry off; an empty key means a keyless URL (config check --secrets).
-        fail "$name is empty"
+        # An empty or unset DSN turns Sentry off; no key means a keyless URL (config check --secrets).
+        fail "$name is empty or not set"
     fi
 done <"$tmp/sealed"
 sentry_dsn=${env[SENTRY_DSN]-}

@@ -1,0 +1,5 @@
+# Cloudflare's static-assets redirects (developers.cloudflare.com/workers/static-assets/redirects/).
+# The one-command deploy (docs/self-hosting.md, "One-command deploy") is a release asset: the site
+# only redirects to GitHub Releases, its one source, and serves nothing that must be trusted.
+/deploy.sh https://github.com/Phala-Network/phala-pay/releases/latest/download/deploy.sh 302
+/deploy/:version.sh https://github.com/Phala-Network/phala-pay/releases/download/:version/deploy.sh 302

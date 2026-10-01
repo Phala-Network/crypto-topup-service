@@ -70,10 +70,16 @@ render service "$staging"
 env_file complete "$tmp/service.yml"
 passes --env "$tmp/complete.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 
-# The env file names exactly the compose's sealed names, with no placeholder.
+# The env file names only the compose's sealed names, with no placeholder; an optional one left
+# out is unset, a required one is refused.
 { cat "$tmp/complete.env"; echo "EXTRA_SECRET=x"; } >"$tmp/extra.env"
-expect_failure extra-name "must set exactly the compose's sealed names: > EXTRA_SECRET" \
+expect_failure extra-name "the env may set only the compose's sealed names, not EXTRA_SECRET" \
     --env "$tmp/extra.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+grep -v '^SENTRY_DSN=' "$tmp/complete.env" >"$tmp/subset.env"
+passes --env "$tmp/subset.env" --compose "$tmp/service.yml" --environment-dir "$staging"
+grep -v '^AWS_ACCESS_KEY_ID=' "$tmp/complete.env" >"$tmp/no-storage.env"
+expect_failure no-storage "AWS_ACCESS_KEY_ID is empty or not set" \
+    --env "$tmp/no-storage.env" --compose "$tmp/service.yml" --environment-dir "$staging"
 sed 's/^AWS_ACCESS_KEY_ID=.*/AWS_ACCESS_KEY_ID=replace-me/' "$tmp/complete.env" >"$tmp/example.env"
 expect_failure replace-me "AWS_ACCESS_KEY_ID still contains replace-me" \
     --env "$tmp/example.env" --compose "$tmp/service.yml" --environment-dir "$staging"

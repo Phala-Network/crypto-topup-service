@@ -40,8 +40,17 @@ Pick the path that matches your role:
 
 - **Merchants** integrating with an operator's instance: the
   [integration quickstart](docs/integration.md#quickstart).
-- **Operators** running their own instance: deploy a verified release of Phala Pay from a
-  repository that holds only your settings ([self-hosting guide](docs/self-hosting.md)).
+- **Operators** running their own instance: deploy a verified release of Phala Pay to your own
+  Phala Cloud workspace with one command, a testnet quick start or your own domain
+  ([one-command deploy](docs/self-hosting.md#one-command-deploy)):
+
+  ```sh
+  curl -fsSL https://pay.phala.com/deploy.sh | bash
+  ```
+
+  The [self-hosting guide](docs/self-hosting.md) has the other two paths: Phala Cloud's one-click
+  template, and the environment repository of your settings that Deploy provisions and upgrades
+  from.
 - **Evaluators and contributors**: run the whole stack locally. The sandbox builds the images,
   starts PostgreSQL, the dstack simulator, and an Anvil chain, and pays and credits a quote end to
   end through the reference merchant backend.

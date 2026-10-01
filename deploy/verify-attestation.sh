@@ -7,11 +7,11 @@ set -eu
 # app-compose JSON the Phala CLI built, not the compose file), whose docker_compose_file must be
 # EXPECTED_COMPOSE byte for byte. Then the compose's own policy for VARIANT (`service`,
 # `restore-check`, or `template` for topup, `product` for the reference product):
-# deploy/compose-policy.jq, and allowed_envs exactly the compose's `${NAME:-}` names. The app-compose's
+# deploy/compose-policy.jq, and allowed_envs only the compose's `${NAME:-}` names. The app-compose's
 # pre_launch_script, which the guest sources before `docker compose up`, must be byte for byte the
-# reviewed deploy/phala-cloud-pre-launch.sh that Deploy sends (`--pre-launch-script`). The
-# template's DSTACK_APP_DOMAIN is not an allowed env: that script exports it from the app id and the
-# gateway domain.
+# reviewed deploy/phala-cloud-pre-launch.sh that Deploy sends (`--pre-launch-script`). A sealed name
+# missing from allowed_envs is unset; the template's DSTACK_APP_DOMAIN is not an allowed env: that
+# script exports it from the app id and the gateway domain.
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
 # and the app-compose). INFO_JSON is the guest agent's public `GET /prpc/Info` on port 8090 (the
@@ -82,18 +82,10 @@ cmp -s "$expected_compose" "$tmp/docker-compose.yml" || {
 
 compose=$("$root/deploy/pinned-compose.sh")
 "$compose" -f "$tmp/docker-compose.yml" config --no-interpolate --format json >"$tmp/docker-compose.json"
-# Every setting is attested: the env holds only the compose's sealed names, and exactly those.
-"$compose" -f "$tmp/docker-compose.yml" config --variables |
-    awk -v variant="$variant" 'NR > 1 && NF > 0 && !(variant == "template" && $1 == "DSTACK_APP_DOMAIN") { print $1 }' |
-    sort -u >"$tmp/expected-envs"
-jq -r '.allowed_envs[]' "$tmp/app-compose.json" | sort -u >"$tmp/actual-envs"
-cmp -s "$tmp/actual-envs" "$tmp/expected-envs" || {
-    echo "attested allowed_envs differs from the compose's sealed names" >&2
-    diff -u "$tmp/expected-envs" "$tmp/actual-envs" >&2 || true
-    exit 1
-}
-violations=$(jq -r -L "$root/deploy" --arg variant "$variant" \
-    'include "compose-policy"; violations($variant; "dstack")[]' "$tmp/docker-compose.json")
+# Every setting is attested: the env may set only the compose's sealed names.
+violations=$(jq -r -L "$root/deploy" --arg variant "$variant" --slurpfile app "$tmp/app-compose.json" \
+    'include "compose-policy"; (violations($variant; "dstack") + allowed_envs_violations($variant; $app[0].allowed_envs))[]' \
+    "$tmp/docker-compose.json")
 if [ -n "$violations" ]; then
     echo "the attested $variant compose breaks deploy/compose-policy.jq:" >&2
     printf '%s\n' "$violations" | sed 's/^/  /' >&2

@@ -85,7 +85,7 @@ if grep -q 0123456789abcdef "$tmp/keyed-rpc.out" "$tmp/keyed-rpc.err"; then
     exit 1
 fi
 printf 'PRODUCT_API_KEY=\nEXTRA=\n' >"$tmp/extra.env"
-expect_failure extra "must set exactly the compose's sealed names" --unsealed \
+expect_failure extra "the env may set only the compose's sealed names, not EXTRA" --unsealed \
     --env "$tmp/extra.env" --compose "$tmp/compose.yml" "${staging[@]}"
 "$preflight" --env "$tmp/unsealed.env" --compose "$tmp/compose.yml" "${staging[@]}" --offline --unsealed >/dev/null
 "$preflight" --env "$tmp/restricted.env" --compose "$tmp/compose.yml" "${staging[@]}" --offline >/dev/null

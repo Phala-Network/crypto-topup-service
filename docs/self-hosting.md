@@ -24,6 +24,53 @@ DNS, or a secret, and are run by a person from their own machine, never by CI or
 An operator may also be a merchant of its own instance, as Phala is for Phala Cloud; it then does
 the merchant's steps with the account's keys, never with the admin key.
 
+## One-command deploy
+
+There are three ways to deploy a release, all to your own Phala Cloud workspace:
+
+- **One command**, from your machine, below: a testnet quick start, or an instance on your own
+  domain.
+- **[The Phala Cloud template](#the-phala-cloud-template)**, from Phala Cloud's console: the same
+  testnet quick start in one click.
+- **Your environment repository** (sections 2 to 4): Deploy provisions and upgrades the instance
+  from your committed settings. Every instance with merchants ends up here, since upgrades run
+  through it.
+
+```sh
+curl -fsSL https://pay.phala.com/deploy.sh | bash              # the latest release
+curl -fsSL https://pay.phala.com/deploy/v0.3.2.sh | bash       # a given release
+```
+
+pay.phala.com only redirects to the release's `deploy.sh` asset on GitHub, which deploys that
+release; read it first if you like (`curl -fsSL https://pay.phala.com/deploy.sh | less`). It needs
+`curl`, `tar`, `jq`, bash 4.4, Node.js 22 and npm, Docker (preflight checks the configuration in the
+release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key, and
+your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it never stores. It:
+
+1. downloads the release into a private temporary directory, removed on exit, and verifies it:
+   with the GitHub CLI 2.101 or later, logged in, as [Verify a release](#verify-a-release) does;
+   without it, against `SHA256SUMS` only, which checks the download but not its provenance;
+2. asks for an instance name, the admin public key (or generates the keypair, the seed written
+   mode 0600 only to the file you name and never printed), the backup location and its token, an
+   optional Sentry DSN, and either nothing, for the **quick start** (the template variant at Phala
+   Cloud's gateway domain, testnet routes, its admin key and backup location in the CVM's env), or
+   a **custom domain** (the service variant, every setting attested, from an environment directory
+   it writes from the template's routes, or one of yours with its keyed RPC providers' keys);
+3. renders the compose with the kit's `render.sh`, runs `preflight.sh --offline` and
+   `check-route-modes.sh`, and provisions the CVM with the kit's locked Phala Cloud CLI, pre-launch
+   script, `--image dstack-0.5.9 --no-dev-os`, and Phala Cloud's KMS, sealing the secrets you gave
+   from a mode 0600 file in the temporary directory; for a custom domain it then sets the node's
+   gateway, as Deploy does;
+4. prints the CVM id, the URL, the DNS records of a custom domain, and how to verify the
+   attestation (section 5).
+
+`--non-interactive` takes the inputs from the environment instead (the script's header lists
+them). A provision proves nothing about the instance's health: it is accepted once `/healthz`
+answers and you have verified the attestation, and for a custom domain once the DNS records
+resolve and Deploy's upgrade with the same release has passed (section 4, step 5). Commit the
+custom domain's environment directory to your environment repository and set `TOPUP_CVM_ID` to the
+CVM id to run that upgrade; then onboard your first account (section 6).
+
 ## 1. Prerequisites
 
 - **A Phala Cloud workspace** with an API key for each GitHub Environment you deploy
@@ -404,7 +451,7 @@ into a directory and stops at the first failure:
 
 1. the tag's commit must be in Phala Pay's `main` history;
 2. the assets must match `SHA256SUMS`;
-3. every asset (`images.json`, the kit, `phala-cloud-template.yml`) and every image `images.json`
+3. every asset (`images.json`, the kit, `phala-cloud-template.yml`, `deploy.sh`) and every image `images.json`
    names must have a GitHub build provenance attestation signed by
    [release.yml](../.github/workflows/release.yml) at the tag, on a GitHub-hosted runner, for that
    commit (`gh attestation verify --source-digest`).

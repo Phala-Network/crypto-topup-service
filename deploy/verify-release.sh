@@ -47,7 +47,7 @@ gh release download "$version" -R "$repository" -D "$dir" --clobber
 
 provenance=(-R "$repository" --source-digest "$commit" --deny-self-hosted-runners
     --cert-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$version")
-for asset in images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml SHA256SUMS; do
+for asset in images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml deploy.sh SHA256SUMS; do
     gh attestation verify "$dir/$asset" "${provenance[@]}" >/dev/null
     echo "verified $asset" >&2
 done

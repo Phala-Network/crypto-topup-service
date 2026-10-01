@@ -294,8 +294,18 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const hero = page.getByRole("region", { name: headline });
   await expect(hero.getByRole("link", { name: "Deploy on Phala Cloud" })).toHaveAttribute(
     "href",
-    "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md#1-prerequisites",
+    "https://github.com/Phala-Network/phala-pay/blob/main/docs/self-hosting.md#one-command-deploy",
   );
+  // The one-command deploy is a release asset: the site only redirects to it (public/_redirects).
+  const releases = "https://github.com/Phala-Network/phala-pay/releases";
+  for (const [path, location] of [
+    ["deploy.sh", `${releases}/latest/download/deploy.sh`],
+    ["deploy/v0.3.2.sh", `${releases}/download/v0.3.2/deploy.sh`],
+  ] as const) {
+    const redirect = await page.request.get(new URL(path, env("SITE_URL")).href, { maxRedirects: 0 });
+    expect(redirect.status(), path).toBe(302);
+    expect(redirect.headers()["location"], path).toBe(location);
+  }
   await expect(hero.getByRole("link", { name: "Docs" })).toHaveAttribute(
     "href",
     "https://github.com/Phala-Network/phala-pay/blob/main/docs/integration.md",
