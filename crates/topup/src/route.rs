@@ -28,12 +28,15 @@ mod tests {
 
     const VALID: &str = include_str!("../tests/fixtures/phala-cloud-pha.yaml");
     const TEMPLATE: &str = include_str!("../../../examples/phala-cloud-pha.yaml");
+    const USDT_TEMPLATE: &str = include_str!("../../../examples/phala-cloud-usdt.yaml");
     const STAGING: &str =
         include_str!("../../../deploy/environments/phala-network/staging/topup/topup.yaml");
     const DEPLOY_ROUTE: &str = "phala-cloud-sepolia-pha-usd";
     const DEPLOY_USDC_ROUTE: &str = "phala-cloud-sepolia-usdc-usd";
     const DEPLOY_BASE_PHA_ROUTE: &str = "phala-cloud-base-sepolia-pha-usd";
     const DEPLOY_BASE_USDC_ROUTE: &str = "phala-cloud-base-sepolia-usdc-usd";
+    const DEPLOY_USDT_ROUTE: &str = "phala-cloud-sepolia-usdt-usd";
+    const DEPLOY_BASE_USDT_ROUTE: &str = "phala-cloud-base-sepolia-usdt-usd";
 
     /// A route of Phala's staging configuration, by name.
     fn staging(name: &str) -> Result<RouteFile, String> {
@@ -51,12 +54,45 @@ mod tests {
 
     #[test]
     fn deployment_template_only_passes_in_template_mode() {
-        assert!(
-            parse_and_validate(TEMPLATE, false)
-                .expect_err("zero placeholders must fail normal validation")
-                .contains("forwarder_factory")
+        for template in [TEMPLATE, USDT_TEMPLATE] {
+            assert!(
+                parse_and_validate(template, false)
+                    .expect_err("zero placeholders must fail normal validation")
+                    .contains("forwarder_factory")
+            );
+            parse_and_validate(template, true).expect("template placeholders must be allowed");
+        }
+    }
+
+    #[test]
+    fn mainnet_usdt_template_is_a_stablecoin_route_in_address_mode() {
+        let usdt = parse_and_validate(USDT_TEMPLATE, true).expect("USDT template");
+        assert!(usdt.livemode, "Ethereum is a mainnet");
+        assert_eq!(
+            (
+                format!("{:#x}", usdt.asset.contract),
+                usdt.asset.symbol.as_str(),
+                usdt.asset.decimals
+            ),
+            (
+                "0xdac17f958d2ee523a2206206994597c13d831ec7".to_owned(),
+                "usdt",
+                6
+            )
         );
-        parse_and_validate(TEMPLATE, true).expect("template placeholders must be allowed");
+        assert_eq!(usdt.asset.backstop, topup_core::route::Backstop::Addresses);
+        assert_eq!(
+            usdt.pricing.mode,
+            topup_core::route::PricingMode::Stablecoin
+        );
+        assert_eq!(
+            (
+                usdt.pricing.primary.source.as_str(),
+                usdt.pricing.primary.asset.as_str()
+            ),
+            ("coinmetrics", "usdt")
+        );
+        assert_eq!(usdt.rate_lock.spread_bps.value(), 0);
     }
 
     #[test]
@@ -129,6 +165,50 @@ mod tests {
     }
 
     #[test]
+    fn staging_usdt_routes_are_stablecoin_routes_beside_usdc() {
+        for (usdt_route, usdc_route) in [
+            (DEPLOY_USDT_ROUTE, DEPLOY_USDC_ROUTE),
+            (DEPLOY_BASE_USDT_ROUTE, DEPLOY_BASE_USDC_ROUTE),
+        ] {
+            let usdt = staging(usdt_route).expect("USDT route must pass");
+            let usdc = staging(usdc_route).expect("USDC route must pass");
+            assert!(!usdt.livemode, "{usdt_route} is a test route");
+            assert_eq!(
+                usdt.chain, usdc.chain,
+                "one chain has one set of chain settings"
+            );
+            assert_eq!(
+                (usdt.asset.symbol.as_str(), usdt.asset.decimals),
+                ("usdt", 6)
+            );
+            assert_eq!(
+                usdt.pricing.mode,
+                topup_core::route::PricingMode::Stablecoin
+            );
+            assert_eq!(
+                (
+                    usdt.pricing.primary.source.as_str(),
+                    usdt.pricing.primary.asset.as_str()
+                ),
+                ("coinmetrics", "usdt")
+            );
+            assert_eq!(usdt.pricing.check, None);
+            assert_eq!(usdt.rate_lock.spread_bps.value(), 0);
+            assert_eq!(
+                (
+                    usdt.screening.max_deposit_atomic,
+                    usdt.asset.min_refund_atomic
+                ),
+                (
+                    usdc.screening.max_deposit_atomic,
+                    usdc.asset.min_refund_atomic
+                ),
+                "a dollar stablecoin has the USDC route's limits"
+            );
+        }
+    }
+
+    #[test]
     fn base_sepolia_routes_credit_at_safe_on_their_own_providers() {
         let pha = staging(DEPLOY_BASE_PHA_ROUTE).expect("Base PHA route");
         let usdc = staging(DEPLOY_BASE_USDC_ROUTE).expect("Base USDC route");
@@ -161,11 +241,20 @@ mod tests {
         );
         assert_eq!(usdc.rate_lock.spread_bps.value(), 0);
 
-        // All four staging routes load together: two chains, each in address mode.
+        // All six staging routes load together: two chains, each in address mode.
         let usdc_sepolia = staging(DEPLOY_USDC_ROUTE).expect("USDC route");
-        let routes = topup::routes::RouteSet::new(vec![sepolia, usdc_sepolia, pha, usdc])
-            .expect("the staging routes load");
-        assert_eq!(routes.current_in(false).count(), 4);
+        let usdt_sepolia = staging(DEPLOY_USDT_ROUTE).expect("USDT route");
+        let usdt = staging(DEPLOY_BASE_USDT_ROUTE).expect("Base USDT route");
+        let routes = topup::routes::RouteSet::new(vec![
+            sepolia,
+            usdc_sepolia,
+            usdt_sepolia,
+            pha,
+            usdc,
+            usdt,
+        ])
+        .expect("the staging routes load");
+        assert_eq!(routes.current_in(false).count(), 6);
         let chains = topup::scanner::chain_routes(&routes);
         assert_eq!(
             chains

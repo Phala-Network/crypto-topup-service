@@ -50,8 +50,13 @@ export interface Asset {
   quote_ttl_seconds: number;
   /** Typical seconds from paying to the credit at the account's confirmation on the chain. */
   typical_credit_seconds: number;
-  /** A test token whose `mint` is public: the visitor's own wallet mints it. */
+  /** A test token anyone can mint: the visitor's own wallet mints it. */
   mintable: boolean;
+  /**
+   * The faucet contract whose public `mint(token, to, amount)` mints it (Aave's, for its test
+   * USDT), or null when the token's own `mint(address,uint256)` does.
+   */
+  minter: string | null;
   /** The token issuer's testnet faucet, for a test token that does not mint. */
   faucet: string | null;
   /** The demo merchant's own promotion on credits paid in this token, in basis points. */

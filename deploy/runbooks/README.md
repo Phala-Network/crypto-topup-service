@@ -35,8 +35,8 @@ fail with `401`; `ADMIN_KEY_ID` is its `admin_key.id`, `admin/<Environment>-v1` 
 
 ```sh
 export BASE_URL="https://pay-api-staging.phala.com"   # the Environment's public_origin
-# The affected route; staging also serves phala-cloud-sepolia-usdc-usd, and on Base Sepolia
-# (CHAIN_ID=84532, providers base-sepolia-a/-b) phala-cloud-base-sepolia-{pha,usdc}-usd.
+# The affected route; staging also serves phala-cloud-sepolia-{usdc,usdt}-usd, and on Base Sepolia
+# (CHAIN_ID=84532, providers base-sepolia-a/-b) phala-cloud-base-sepolia-{pha,usdc,usdt}-usd.
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x...
@@ -82,6 +82,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 | A merchant's treasury change, or a pending `treasury.created` it did not request | [Treasury change](treasury-change.md) |
 | A treasury reported compromised: hold its payments uncredited | [Treasury crediting pause](treasury-credit-pause.md) |
 | Removing a route version or a chain's last route | [Route or chain retirement](route-retirement.md) |
+| On a USDT route: a nonzero fee (`basisPointsRate`, `maximumFee`) or a `Params` event, a `FlushFailed` with an empty `reason`, a forwarder or treasury on Tether's blacklist | [USDT fee switch and blacklist](usdt-issuer-controls.md) |
 | Payment sent on another EVM chain | [Wrong-network deposit](wrong-network-deposit.md) |
 | Any customer-impacting incident | [Incident communication](incident-communication.md) |
 

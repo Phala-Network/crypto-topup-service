@@ -1,4 +1,4 @@
-# The Phala Cloud template's topup configuration (docs/configuration.md): the four test routes and
+# The Phala Cloud template's topup configuration (docs/configuration.md): the six test routes and
 # the keyless providers of Phala's staging instance. It leaves out the public origin (the app's
 # gateway domain) and the admin public key, known only at deploy time: `topup run` reads them from
 # DSTACK_APP_DOMAIN and TOPUP_ADMIN_PUBLIC_KEY (deploy/compose.template.yaml), parses them strictly
@@ -90,6 +90,47 @@ routes:
       min_credit_minor: 100 # USD 1.00, as on the PHA route
       max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
       min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA
+  # Staging route on Base Sepolia for Aave's testnet USDT, beside the PHA and USDC routes: a
+  # test-mode route (`livemode: false`) any account can quote on and pay its own treasury through.
+  # Tether publishes no testnet USDT; the token is the one Aave's address book lists for its Base
+  # Sepolia market (bgd-labs/aave-address-book, `AaveV3BaseSepolia.USDT_UNDERLYING`), a plain
+  # 6-decimal ERC-20 with no transfer fee or rebasing that its faucet,
+  # `0xD9145b5F45Ad4519c7ACcD6E0A4A82e83bB8A6Dc`, mints to anyone (`mint(token, to, amount)`).
+  # The chain section is the PHA route's: one chain has one set of chain settings. Route files carry
+  # no treasury (design D10).
+  - route: phala-cloud-base-sepolia-usdt-usd
+    version: 1
+    livemode: false
+
+    chain:
+      chain_id: 84532
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
+      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
+      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
+      confirmations: safe
+      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
+
+    asset:
+      symbol: usdt
+      contract: "0x0a215D8ba66387DCA84B284D18c3B4ec3de6E54a"
+      decimals: 6
+      # 2 transfers in 2 000 blocks (Oct 2026): one token-wide log request per range. The USDC route
+      # still puts the whole chain in address mode (architecture §8).
+      backstop: token
+
+    pricing:
+      mode: stablecoin # credited at 1.00 while Coin Metrics' USDT reference rate is within 1% of it
+      primary: { source: coinmetrics, asset: usdt }
+
+    quote:
+      spread_bps: 0 # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
+
+    limits:
+      min_credit_minor: 100 # USD 1.00, as on the PHA route
+      max_deposit_atomic: "10000000000" # 10,000 USDT, as on the USDC route
+      min_refund_atomic: "1000000" # 1 USDT, as on the USDC route
   # Staging route on Sepolia: a test-mode route (`livemode: false`) any account can quote on and pay
   # its own treasury through; the staging reference-product CVM uses it (deploy/phala.md, "Staging
   # reference product"). Route files carry no treasury: each account proves its own per chain
@@ -156,3 +197,39 @@ routes:
       min_credit_minor: 100 # USD 1.00, as on the PHA route
       max_deposit_atomic: "10000000000" # 10,000 USDC, about the PHA route's 200,000 PHA
       min_refund_atomic: "1000000" # 1 USDC, about the PHA route's 20 PHA
+  # Staging route on Sepolia for Aave's testnet USDT, beside the PHA and USDC routes: a test-mode
+  # route (`livemode: false`) any account can quote on and pay its own treasury through. Tether
+  # publishes no testnet USDT; the token is the one Aave's address book lists for its Sepolia market
+  # (bgd-labs/aave-address-book, `AaveV3Sepolia.USDT_UNDERLYING`), a plain 6-decimal ERC-20 with no
+  # transfer fee or rebasing that its faucet, `0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D`, mints to
+  # anyone (`mint(token, to, amount)`). The chain section is the PHA route's: one chain has one set
+  # of chain settings. Route files carry no treasury (design D10).
+  - route: phala-cloud-sepolia-usdt-usd
+    version: 1
+    livemode: false
+
+    chain:
+      chain_id: 11155111
+      forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
+      confirmations: 2 # the floor and default (design D1); an account may require more, never less
+      sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
+
+    asset:
+      symbol: usdt
+      contract: "0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0"
+      decimals: 6
+      # 175 transfers in 2 000 blocks, up to 3 in one (Oct 2026): one token-wide log request per
+      # range. The USDC route still puts the whole chain in address mode (architecture §8).
+      backstop: token
+
+    pricing:
+      mode: stablecoin # credited at 1.00 while Coin Metrics' USDT reference rate is within 1% of it
+      primary: { source: coinmetrics, asset: usdt }
+
+    quote:
+      spread_bps: 0 # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
+
+    limits:
+      min_credit_minor: 100 # USD 1.00, as on the PHA route
+      max_deposit_atomic: "10000000000" # 10,000 USDT, as on the USDC route
+      min_refund_atomic: "1000000" # 1 USDT, as on the USDC route

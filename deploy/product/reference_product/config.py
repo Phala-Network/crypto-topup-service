@@ -67,16 +67,21 @@ def keyless_rpc_url(value: object, name: str) -> str:
 
 @dataclass(frozen=True)
 class MintableToken:
-    """A test token with a public `mint(address,uint256)` (a `MockERC20`): the page's faucet helper
-    mints it from the visitor's wallet, and the deposit driver mints what it pays."""
+    """A test token anyone can mint: the page's faucet helper mints it from the visitor's wallet,
+    and the deposit driver mints what it pays. Its own `mint(address,uint256)` is public (a
+    `MockERC20`), or, with `minter`, a faucet contract's public `mint(token, to, amount)` mints it
+    (Aave's testnet faucets)."""
 
     symbol: str
     address: str
+    minter: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, str) or not SYMBOL.fullmatch(self.symbol):
             raise ValueError("a test token's symbol must be 1-11 uppercase letters or digits")
         object.__setattr__(self, "address", checksum_address(self.address, "test token address"))
+        if self.minter is not None:
+            object.__setattr__(self, "minter", checksum_address(self.minter, "test token minter"))
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,11 @@ class ChainConfig:
         )
         if len({token.symbol for token in tokens}) != len(tokens):
             raise ValueError(f"chain {self.chain_id}: test token symbols must be distinct")
+        if tokens and tokens[0].minter is not None:
+            raise ValueError(
+                f"chain {self.chain_id}: the first test token, which the deposit driver mints"
+                " and pays with, must mint itself (no minter)"
+            )
         object.__setattr__(self, "test_tokens", tokens)
 
     @property

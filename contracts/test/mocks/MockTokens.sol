@@ -102,7 +102,8 @@ contract FalseReturningToken is ERC20 {
     }
 }
 
-/// Token with an issuer blacklist that blocks both senders and recipients, as USDC and USDT do.
+/// Token with an issuer blacklist that blocks both senders and recipients, as USDC does (USDT
+/// checks only the sender: `UsdtLikeToken`).
 contract BlacklistToken is ERC20 {
     error Blacklisted(address account);
 
@@ -304,6 +305,10 @@ contract UsdtLikeToken {
         balanceOf[account] += amount;
         totalSupply += amount;
         emit Transfer(address(0), account, amount);
+    }
+
+    function addBlackList(address account) external {
+        isBlackListed[account] = true;
     }
 
     function transfer(address to, uint256 value) external {

@@ -16,12 +16,14 @@ import {
 import { readContract, waitForTransactionReceipt } from "viem/actions";
 import { tokens } from "./format.js";
 
-// Staging's test PHA, on each network, is a MockERC20 whose `mint(address,uint256)` is public: the
-// visitor's own wallet mints, so the demo holds no faucet key. Gas is the testnet's ETH from any
-// public faucet. The
-// same wallet pays to the deposit address, sends a sweep (a flush is permissionless), and may pay
-// a refund, which fails verification unless it comes from the treasury.
+// Staging's test PHA, on each network, is a MockERC20 whose `mint(address,uint256)` is public, and
+// its test USDT is Aave's, which Aave's faucet contract mints to anyone with
+// `mint(token, to, amount)`: the visitor's own wallet mints either, so the demo holds no faucet key.
+// Gas is the testnet's ETH from any public faucet. The same wallet pays to the deposit address,
+// sends a sweep (a flush is permissionless), and may pay a refund, which fails verification unless
+// it comes from the treasury.
 const MINT_ABI = parseAbi(["function mint(address account, uint256 amount)"]);
+const FAUCET_MINT_ABI = parseAbi(["function mint(address token, address to, uint256 amount) returns (uint256)"]);
 
 /** The first wallet the browser announces within 300 ms (EIP-6963, or `window.ethereum`). */
 export function firstWallet(): Promise<Wallet | undefined> {
@@ -85,24 +87,36 @@ async function connect(chainId: number, using?: PaidWith): Promise<Connected> {
 
 /**
  * Mints `amountAtomic` of a test token to the visitor's wallet (`using`, else the first browser
- * wallet); resolves with the mint's transaction once it is in a block, the repriced one if the
- * wallet sped it up. A mint the wallet canceled or replaced with another call minted nothing.
+ * wallet), through its `minter` faucet contract when it has one; resolves with the mint's
+ * transaction once it is in a block, the repriced one if the wallet sped it up. A mint the wallet
+ * canceled or replaced with another call minted nothing.
  */
 export async function mintTestTokens(
   chainId: number,
-  token: string,
+  token: { contract: string; minter: string | null },
   amountAtomic: bigint,
   using?: PaidWith,
 ): Promise<Hash> {
   const { client, account, chain } = await connect(chainId, using);
-  const hash = await client.writeContract({
-    account,
-    chain,
-    address: getAddress(token),
-    abi: MINT_ABI,
-    functionName: "mint",
-    args: [addressOf(account), amountAtomic],
-  });
+  const to = addressOf(account);
+  const hash =
+    token.minter === null
+      ? await client.writeContract({
+          account,
+          chain,
+          address: getAddress(token.contract),
+          abi: MINT_ABI,
+          functionName: "mint",
+          args: [to, amountAtomic],
+        })
+      : await client.writeContract({
+          account,
+          chain,
+          address: getAddress(token.minter),
+          abi: FAUCET_MINT_ABI,
+          functionName: "mint",
+          args: [getAddress(token.contract), to, amountAtomic],
+        });
   // So that a payment right after it sees the minted balance.
   let replaced: ReplacementReason | undefined;
   const receipt = await waitForTransactionReceipt(client, {

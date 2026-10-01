@@ -273,16 +273,23 @@ PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
 base_token=$(jq -er .test_token "$tmp/base-test-contracts.json")
 base_second_token=$(jq -er .unsupported_token "$tmp/base-test-contracts.json")
 base_oracle=$(jq -er .sanctions_oracle "$tmp/base-test-contracts.json")
-printf 'base-sepolia: token=%s second_token=%s sanctions_oracle=%s\n' \
-    "$base_token" "$base_second_token" "$base_oracle"
+# usdt_token RPC_URL: deploys a USDT-like token, whose `transfer` returns nothing.
+usdt_token() {
+    (cd "$CONTRACTS_DIR" && forge create test/mocks/MockTokens.sol:UsdtLikeToken --rpc-url "$1" \
+        --unlocked --from "$owner" --broadcast --json) | jq -er .deployedTo
+}
+base_third_token=$(usdt_token "$base_rpc_url")
+printf 'base-sepolia: token=%s second_token=%s third_token=%s sanctions_oracle=%s\n' \
+    "$base_token" "$base_second_token" "$base_third_token" "$base_oracle"
 
 echo "== writing the configuration and rendering the staging compose"
 # Phala's staging configuration with this network's addresses: on each chain the test token stands
-# in for PHA, the reference product's asset, and the second mock token for USDC. Provider A is
-# keyless, as staging's; provider B is attested with a `{key}`, as a paid provider is, and Anvil
-# ignores the query that carries the key. Base Sepolia's two providers are keyless, at two URLs of
-# its Anvil.
+# in for PHA, the reference product's asset, the second mock token for USDC, and a USDT-like one
+# for USDT. Provider A is keyless, as staging's; provider B is attested with a `{key}`, as a paid
+# provider is, and Anvil ignores the query that carries the key. Base Sepolia's two providers are
+# keyless, at two URLs of its Anvil.
 second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
+third_token=$(usdt_token "$rpc_url")
 # The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
 admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
@@ -293,12 +300,15 @@ write_config() {
         jq --arg id "$1" --arg key "$admin_public_key" --arg factory "$factory" \
             --arg implementation "$implementation" \
             --argjson assets "$(jq -n --arg pha "$token" --arg usdc "$second_token" \
-                --arg base_pha "$base_token" --arg base_usdc "$base_second_token" \
+                --arg usdt "$third_token" --arg base_pha "$base_token" \
+                --arg base_usdc "$base_second_token" --arg base_usdt "$base_third_token" \
                 --arg oracle "$oracle" --arg base_oracle "$base_oracle" '{
                     "phala-cloud-sepolia-pha-usd": [$pha, $oracle],
                     "phala-cloud-sepolia-usdc-usd": [$usdc, $oracle],
+                    "phala-cloud-sepolia-usdt-usd": [$usdt, $oracle],
                     "phala-cloud-base-sepolia-pha-usd": [$base_pha, $base_oracle],
-                    "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle]}')" '
+                    "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle],
+                    "phala-cloud-base-sepolia-usdt-usd": [$base_usdt, $base_oracle]}')" '
             .admin_key = {id: $id, public_key: $key}
             | .rpc_providers = {
                 "provider-a": "http://anvil:8545",

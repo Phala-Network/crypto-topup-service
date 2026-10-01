@@ -41,21 +41,19 @@ function chainName(network: Network): string {
 }
 
 /**
- * The test token's public mint, of enough for `needed`, from the visitor's wallet: `using`, else
- * the first browser wallet.
+ * The public mint of the network's test tokens, one at a time, from the visitor's wallet: `using`,
+ * else the first browser wallet. A token mints enough for `need` when the payment is in it.
  */
-function useMint(network: Network, token: Asset | undefined, needed: bigint | undefined, using?: PaidWith) {
-  const amount = token === undefined ? 0n : mintAmount(needed, token.decimals);
+function useMint(network: Network, need: Need | null, using?: PaidWith) {
+  const amountOf = (token: Asset) =>
+    mintAmount(need?.asset === token.asset ? need.atomic : undefined, token.decimals);
   const mint = useMutation({
-    mutationFn: async () => {
-      if (token === undefined) {
-        throw new Error("This network has no test token to mint.");
-      }
+    mutationFn: async (token: Asset) => {
       const { mintTestTokens } = await wallet();
-      return mintTestTokens(network.chain_id, token.contract, amount, using);
+      return mintTestTokens(network.chain_id, token, amountOf(token), using);
     },
   });
-  const label = token === undefined ? "" : `Mint ${tokens(amount.toString(), `test ${token.symbol}`, token.decimals)}`;
+  const label = (token: Asset) => `Mint ${tokens(amountOf(token).toString(), `test ${token.symbol}`, token.decimals)}`;
   return { mint, label };
 }
 
@@ -77,10 +75,10 @@ function FaucetLink({ href, icon, title, children }: { href: string; icon: React
 /** The mint button: the token's mark and the amount, marked with the wallet that mints it. */
 function MintButton({ token, label, mint }: { token: Asset } & ReturnType<typeof useMint>) {
   return (
-    <Button type="button" variant="outline" className={TOKEN_ROW} onClick={() => mint.mutate()} disabled={mint.isPending}>
+    <Button type="button" variant="outline" className={TOKEN_ROW} onClick={() => mint.mutate(token)} disabled={mint.isPending}>
       <span className="flex items-center gap-2">
         <TokenIcon asset={token.asset} className="size-4" />
-        {mint.isPending ? "Confirm in your wallet…" : label}
+        {mint.isPending && mint.variables.asset === token.asset ? "Confirm in your wallet…" : label(token)}
       </span>
       <Wallet aria-hidden="true" />
     </Button>
@@ -88,15 +86,15 @@ function MintButton({ token, label, mint }: { token: Asset } & ReturnType<typeof
 }
 
 /**
- * Where to get test tokens on the selected network, whatever token is selected: the mintable test
+ * Where to get test tokens on the selected network, whatever token is selected: each mintable test
  * token's public mint, from the visitor's wallet (a button, marked with the wallet), of enough for
  * the payment at hand (`need`); then, as links out, another test token's issuer faucet and the
  * network's gas faucets.
  */
 export function TestTokens({ network, need, className }: { network: Network; need: Need | null; className?: string }) {
-  const mintable = network.assets.find((each) => each.mintable);
+  const mintable = network.assets.filter((each) => each.mintable);
   const fromFaucet = network.assets.find((each) => !each.mintable && each.faucet !== null);
-  const { mint, label } = useMint(network, mintable, need?.asset === mintable?.asset ? need?.atomic : undefined);
+  const { mint, label } = useMint(network, need);
   const chain = chainName(network);
   return (
     <div
@@ -107,13 +105,19 @@ export function TestTokens({ network, need, className }: { network: Network; nee
       <div className="flex items-center justify-between gap-2 px-5 pt-4 sm:px-6">
         <span className="font-medium">Need test tokens?</span>
         <InfoTip label="About test tokens">
-          {mintable !== undefined && `Test ${mintable.symbol} is free: its contract lets anyone mint it, so your own wallet mints it. `}
+          {mintable.map((each) =>
+            each.minter === null
+              ? `Test ${each.symbol} is free: its contract lets anyone mint it, so your own wallet mints it. `
+              : `Test ${each.symbol} is free: a public faucet contract mints it to anyone, within the faucet's limits, so your own wallet mints it. `,
+          )}
           {fromFaucet !== undefined && `Test ${fromFaucet.symbol} is free from Circle's faucet: pick ${chain} as the network there. `}
           Gas is {chain} ETH, also free, from a public faucet.
         </InfoTip>
       </div>
       <div className="flex flex-col gap-2 px-5 pt-3 pb-4 sm:px-6">
-        {mintable !== undefined && <MintButton token={mintable} mint={mint} label={label} />}
+        {mintable.map((each) => (
+          <MintButton key={each.asset} token={each} mint={mint} label={label} />
+        ))}
         {fromFaucet !== undefined && fromFaucet.faucet !== null && (
           <FaucetLink href={fromFaucet.faucet} icon={<TokenIcon asset={fromFaucet.asset} className="size-4" />} title={`On the faucet, pick ${chain} as the network.`}>
             Circle {fromFaucet.symbol} faucet
@@ -154,7 +158,7 @@ export function FundWallet({
   needed: bigint;
   wallet?: PaidWith | undefined;
 }) {
-  const { mint, label } = useMint(network, token.mintable ? token : undefined, needed, using);
+  const { mint, label } = useMint(network, { asset: token.asset, atomic: needed }, using);
   const name = tokenName(token.symbol, network.testnet);
   if (!network.testnet || (!token.mintable && token.faucet === null)) {
     return null;

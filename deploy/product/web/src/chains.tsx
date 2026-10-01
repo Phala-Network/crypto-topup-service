@@ -4,6 +4,7 @@ import baseIcon from "./icons/base.svg";
 import ethereumIcon from "./icons/ethereum.svg";
 import phaIcon from "./icons/pha-token.svg";
 import usdcIcon from "./icons/usdc.svg";
+import usdtIcon from "./icons/usdt.svg";
 
 // Chain and token marks (./icons, from web3icons), bundled with the page: its CSP allows images
 // from its own origin only.
@@ -16,6 +17,7 @@ const CHAIN_ICONS: Record<number, string> = {
 const TOKENS: Record<string, { name: string; icon: string }> = {
   pha: { name: "Phala Network", icon: phaIcon },
   usdc: { name: "USD Coin", icon: usdcIcon },
+  usdt: { name: "Tether USD", icon: usdtIcon },
 };
 
 /** The token's full name, `USD Coin`, or its symbol. */

@@ -572,7 +572,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
   // Its networks and tokens, named as the product's selectors name them.
   // One address on both networks (the treasury is the same), each with its tokens.
   const tokensOnNetwork = scenes.getByTestId("deposit-address-network");
-  await expect(tokensOnNetwork).toHaveText(["Test PHA, Test USDC", "Test PHA"]);
+  await expect(tokensOnNetwork).toHaveText(["Test PHA, Test USDC", "Test PHA, Test USDT"]);
   await expect(tokensOnNetwork.first().locator("xpath=..")).toContainText("Sepolia testnet");
   await expect(tokensOnNetwork.last().locator("xpath=..")).toContainText("Base Sepolia testnet");
   const address = (await scenes.getByTestId("deposit-address").textContent()) ?? "";
@@ -636,7 +636,7 @@ test("a deposit address: one verified address, any amount credited at spot, then
   expect(problems).toEqual([]);
 });
 
-test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepolia with one; the faucets follow", async ({
+test("networks and tokens: USDC and USDT at $1.00 without a bonus, and PHA on Base Sepolia with one; the faucets follow", async ({
   page,
 }, testInfo) => {
   test.setTimeout(180_000);
@@ -687,9 +687,11 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await product.getByRole("button", { name: "Add more credits" }).click();
   await chooseNetwork(page, product, "Base Sepolia");
   const tokens = product.getByRole("radiogroup", { name: "Token" });
-  await expect(tokens.getByRole("radio")).toHaveCount(1);
+  await expect(tokens.getByRole("radio")).toHaveCount(2);
   await expect(tokens.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
   await expect(circle).toHaveCount(0);
+  // Test USDT mints from the wallet too, through its faucet contract, as Aave's does.
+  await expect(helper.getByRole("button", { name: "Mint 1,000 test USDT" })).toBeVisible();
   await expect(helper.getByRole("link", { name: /^Base Sepolia ETH faucets/ })).toHaveAttribute(
     "href",
     "https://docs.base.org/get-started/get-funds#testnet-base-sepolia",
@@ -714,6 +716,24 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
   await page.screenshot({ path: testInfo.outputPath("base-bonus-dark.png") });
   await page.getByRole("button", { name: "Switch to light theme" }).click();
+
+  // $5 in test USDT on Base Sepolia, minted through the faucet, at $1.00 with no bonus. Its
+  // `transfer` returns nothing, as Tether's does on Ethereum, and the checkout pays it all the same.
+  const usdt = { rpc: env("BASE_ANVIL_URL"), token: env("BASE_USDT_ADDRESS") };
+  await helper.getByRole("button", { name: "Mint 1,000 test USDT" }).click();
+  await expect.poll(() => tokenBalance(env("PAYER_ADDRESS"), usdt)).toBe(parseUnits("1000", 6));
+  await product.getByRole("button", { name: "Add more credits" }).click();
+  await product.getByRole("radio", { name: "Test USDT", exact: true }).check({ force: true });
+  await product.getByText("$5", { exact: true }).click();
+  const usdtRequest = page.waitForRequest((r) => r.method() === "POST" && r.url() === `${env("API_URL")}/api/quotes`);
+  await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  expect((await usdtRequest).postDataJSON()).toEqual({ amount: 500, chain_id: baseSepolia.id, asset: "usdt" });
+  await expect(product.getByTestId("locked-rate")).toContainText("1 USDT = $1.00");
+  await product.getByRole("button", { name: "Pay with crypto (Test Wallet)" }).click();
+  await expect(product.getByTestId("payment-credited")).toContainText("$5.00", { timeout: 60_000 });
+  await expect(product.getByTestId("bonus-credited")).toHaveCount(0);
+  await expect(product.getByTestId("balance")).toHaveText("$32.00", { timeout: 10_000 });
+  expect(await tokenBalance(env("PAYER_ADDRESS"), usdt)).toBe(parseUnits("995", 6));
   expect(problems).toEqual([]);
 });
 

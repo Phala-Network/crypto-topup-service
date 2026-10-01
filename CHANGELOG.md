@@ -9,6 +9,22 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+### Added
+
+- Staging adds USDT on both chains: `phala-cloud-sepolia-usdt-usd` and
+  `phala-cloud-base-sepolia-usdt-usd`, for Aave's testnet USDT (Sepolia
+  `0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0`, Base Sepolia
+  `0x0a215D8ba66387DCA84B284D18c3B4ec3de6E54a`, 6 decimals; Tether publishes no testnet USDT, and
+  Aave's faucet contracts mint it to anyone, which the demo's mint button does from the visitor's
+  wallet), valued at one dollar (pricing mode `stablecoin`, guarded by Coin Metrics' `usdt`
+  reference rate) with no quote spread, as USDC is. `GET /v1/config` lists it beside PHA and USDC,
+  and a deposit address takes all three tokens.
+- `examples/phala-cloud-usdt.yaml`, a mainnet route template for Tether's USDT on Ethereum
+  (`0xdAC17F958D2ee523a2206206994597C13D831ec7`), and the runbook
+  `deploy/runbooks/usdt-issuer-controls.md` for Tether's fee switch and blacklist: a blacklisted
+  forwarder still receives and is credited but cannot be flushed, a blacklisted treasury still
+  receives flushes, and a nonzero fee makes every sweep deliver less than it credited.
+
 ### Changed
 
 - Compliance is each operator's responsibility: Phala Pay is software, and beyond the service's
