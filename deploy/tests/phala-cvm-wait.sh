@@ -24,38 +24,62 @@ printf '#!/bin/sh\n' >"$tmp/bin/sleep"
 chmod +x "$tmp/deploy/phala" "$tmp/bin/sleep"
 export PATH="$tmp/bin:$PATH" STUB_COUNT="$tmp/count" STUB_STATES="$tmp/states"
 
-# state STATUS IN_PROGRESS HASH [INSTANCE_ID]: one `cvms get` answer; the instance id may be null.
+# state STATUS IN_PROGRESS HASH [INSTANCE_ID]: one `cvms get` answer; an empty instance id is null.
 state() {
-    printf '{"status": "%s", "in_progress": %s, "compose_hash": "%s", "instance_id": %s}\n' \
-        "$1" "$2" "$3" "${4-\"i1\"}"
-}
-# wait_for ARGS... with the states on stdin: the CVM JSON it accepts, on stdout.
-wait_for() {
-    cat >"$STUB_STATES"
-    echo 0 >"$STUB_COUNT"
-    "$tmp/deploy/phala-cvm.sh" wait "$@" 2>"$tmp/err"
+    jq -nc --arg status "$1" --argjson in_progress "$2" --arg hash "$3" --arg instance "${4-i1}" \
+        '{status: $status, in_progress: $in_progress, compose_hash: $hash,
+            instance_id: (if $instance == "" then null else $instance end)}'
 }
 fail() {
     echo "phala-cvm wait: $*" >&2
     exit 1
 }
+# wait_for ARGS... with the states on stdin, each a JSON object: the CVM JSON it accepts, on stdout.
+# It runs in a pipeline's subshell, so a bad state leaves no poll and no error for the checks below.
+wait_for() {
+    echo 0 >"$STUB_COUNT"
+    : >"$tmp/err"
+    cat >"$STUB_STATES"
+    jq -es 'all(type == "object")' "$STUB_STATES" >/dev/null || fail "a stub state is not a JSON object"
+    "$tmp/deploy/phala-cvm.sh" wait "$@" 2>"$tmp/err"
+}
+# accepted CASE OUTPUT STATE POLLS: the wait accepted exactly STATE, at poll POLLS.
+accepted() {
+    [[ "$(jq -c . <<<"$2")" == "$3" && "$(cat "$STUB_COUNT")" == "$4" ]] ||
+        fail "$1: accepted '$2' at poll $(cat "$STUB_COUNT"), not '$3' at poll $4"
+}
+# timed_out CASE OUTCOME: the wait failed only by timing out, after 60 polls, waiting for OUTCOME.
+timed_out() {
+    grep -qx "::error::CVM cvm-1 did not $2 within 15 minutes" "$tmp/err" &&
+        [[ "$(cat "$STUB_COUNT")" == 60 ]] || fail "$1: did not time out waiting to $2 ($(tail -1 "$tmp/err"))"
+}
 new=0xAB12 old=0xcd34
 
-booted=$({ state starting true "$new" null; state error false "$new"; } | wait_for --unsealed cvm-1) ||
-    fail "a provision did not accept the settled CVM that booted the new compose"
-[[ $(jq -r .status <<<"$booted") == error ]] || fail "a provision accepted the CVM while in progress"
-redeployed=$({ state error false "$old"; state error true ab12; state stopped false ab12; } |
-    wait_for --unsealed cvm-1 cd34) || fail "a provision's redeploy did not accept its new compose"
-[[ $(jq -r .status <<<"$redeployed") == stopped ]] || fail "a provision's redeploy accepted the previous compose"
-! state error false "$new" null | wait_for --unsealed cvm-1 >/dev/null || fail "a provision accepted a CVM that never booted"
-grep -q 'did not boot a new compose within 15 minutes' "$tmp/err" || fail "a provision's timeout does not say why"
+# A provision accepts a settled CVM with the new compose that booted, in any status.
+booted=$(state error false "$new")
+output=$({ state starting true "$new" ""; echo "$booted"; } | wait_for --unsealed cvm-1) ||
+    fail "a provision refused the booted CVM: $(tail -1 "$tmp/err")"
+accepted "a provision" "$output" "$booted" 2
+redeployed=$(state stopped false ab12)
+output=$({ state error false "$old"; state error true ab12; echo "$redeployed"; } |
+    wait_for --unsealed cvm-1 cd34) || fail "a provision's redeploy refused its new compose: $(tail -1 "$tmp/err")"
+accepted "a provision's redeploy" "$output" "$redeployed" 3
+! state error false "$new" "" | wait_for --unsealed cvm-1 >/dev/null || fail "a provision accepted a CVM that never booted"
+timed_out "a CVM without an instance id" "boot a new compose"
 ! state starting true "$new" | wait_for --unsealed cvm-1 >/dev/null || fail "a provision accepted a CVM in progress"
-[[ $(cat "$STUB_COUNT") == 60 ]] || fail "a provision did not poll 60 times before timing out"
+timed_out "a CVM in progress" "boot a new compose"
+! state error false "$old" | wait_for --unsealed cvm-1 cd34 >/dev/null || fail "a provision accepted the previous compose"
+timed_out "a provision's redeploy with the previous compose" "boot a new compose"
 
-running=$({ state error false "$new"; state running true "$new"; state running false "$new"; } |
-    wait_for cvm-1) || fail "an upgrade did not accept the running CVM"
-[[ $(jq -r '.in_progress' <<<"$running") == false ]] || fail "an upgrade accepted the CVM while in progress"
+# An upgrade accepts only a settled CVM running the new compose.
+running=$(state running false "$new")
+output=$({ state error false "$new"; state running true "$new"; echo "$running"; } | wait_for cvm-1) ||
+    fail "an upgrade refused the running CVM: $(tail -1 "$tmp/err")"
+accepted "an upgrade" "$output" "$running" 3
 ! state error false "$new" | wait_for cvm-1 >/dev/null || fail "an upgrade accepted a CVM that does not run"
-grep -q 'did not run a new compose within 15 minutes' "$tmp/err" || fail "an upgrade's timeout does not say why"
+timed_out "an upgrade of a CVM that does not run" "run a new compose"
+! state running true "$new" | wait_for cvm-1 >/dev/null || fail "an upgrade accepted a CVM in progress"
+timed_out "an upgrade in progress" "run a new compose"
 ! state running false "$old" | wait_for cvm-1 cd34 >/dev/null || fail "an upgrade accepted the previous compose"
+timed_out "an upgrade with the previous compose" "run a new compose"
 echo "CVM wait test passed"
