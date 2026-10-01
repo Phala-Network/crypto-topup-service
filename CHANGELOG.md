@@ -34,7 +34,8 @@ own changelogs in `sdk/js` and `sdk/python`.
   writing anything (an admin seed included), with how to find, finish, or remove that CVM: its
   recorded `cvm-id` is a file in the directory it ran from or the chosen environment directory,
   which a run from elsewhere cannot see. It fails closed: a CVM list it cannot read as one complete
-  page of CVMs (its counts, each item's name and app id) is refused, never read as "no such name".
+  page of CVMs (page 1 of 1, or of 0 for no match; every match on it, its total the items' count;
+  each item's name and app id) is refused, never read as "no such name".
 - The one-command deploy writes the sealed env file on tmpfs (`$XDG_RUNTIME_DIR`) where the session
   has one, mode 0600, and shreds it (where `shred` exists) and removes it on every exit.
 - The one-command deploy generates an admin key with the Python SDK pinned to `phala-pay==0.3.0`,

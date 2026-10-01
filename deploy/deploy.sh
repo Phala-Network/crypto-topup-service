@@ -308,14 +308,17 @@ main() {
     # A CVM's name is unique in its workspace: one there already, perhaps from a run elsewhere whose
     # recorded id this run cannot see, is refused rather than duplicated, before anything is written
     # (an admin seed included). The locked CLI's answer (cli/src/commands/cvms/list, CLI 1.1.22) must
-    # be one complete page: anything else is refused, never read as "no such name".
+    # be one complete page: page 1 of 1 (or of 0, for no match), every match on it (total fits the page
+    # and is the items' count), each item a name and an app id. Anything else is refused, never read
+    # as "no such name"; that includes a match the CLI leaves out (an app without a current CVM).
     local existing_cvms
     existing_cvms=$(phala_cli "$kit/deploy/phala" cvms list --search "$CVM_NAME" --page-size 100 --json </dev/null) ||
         die "could not list the workspace's CVMs"
     jq -e 'def count: type == "number" and . >= 0 and . == floor;
         type == "object" and .success == true
-        and all(.page, .pageSize, .total, .totalPages; count) and .page == 1 and .totalPages <= 1
-        and (.items | type) == "array" and (.items | length) <= .total and (.items | length) <= .pageSize
+        and all(.page, .pageSize, .total, .totalPages; count) and .page == 1 and .pageSize >= 1
+        and .total <= .pageSize and (.totalPages == 1 or (.total == 0 and .totalPages == 0))
+        and (.items | type) == "array" and (.items | length) == .total
         and all(.items[]; type == "object" and (.cvmName | type) == "string" and (.appId | type) == "string")' \
         <<<"$existing_cvms" >/dev/null 2>&1 ||
         die "could not check the workspace's CVM names: the CLI's answer is not one complete page of CVMs" \

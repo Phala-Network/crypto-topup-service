@@ -384,8 +384,9 @@ refused taken "the Phala Cloud workspace already has a CVM named taken-name" CVM
 grep -qF "kit/deploy/phala cvms get taken-name" "$tmp/taken.err" || fail "taken did not say how to find the CVM"
 [[ ! -e "$tmp/taken.seed" ]] || fail "taken wrote an admin seed"
 ! grep -q '^uvx' "$tmp/log" || fail "taken generated an admin key"
-# Neither is a CVM list it cannot read as one complete page: an answer is refused, never taken for
-# "no such name".
+# Neither is a CVM list it cannot read as one complete page (page 1 of 1, or of 0 for no match;
+# total on the page and the items' count; each item a name and an app id): an answer is refused,
+# never taken for "no such name", such as total 1 with no items.
 page='"success": true, "page": 1, "pageSize": 100, "total": 1, "totalPages": 1'
 item='"appId": "0xbb", "status": "running", "uptime": null'
 for answer in 'not JSON' '[]' '{"success": true}' "{$page}" "{$page, \"items\": {}}" \
@@ -394,6 +395,14 @@ for answer in 'not JSON' '[]' '{"success": true}' "{$page}" "{$page, \"items\": 
     "{${page/\"totalPages\": 1/\"totalPages\": 2}, \"items\": []}" \
     "{${page/\"totalPages\": 1/\"totalPages\": \"1\"}, \"items\": []}" \
     "{${page/\"total\": 1/\"total\": 0}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{$page, \"items\": []}" \
+    "{${page/\"total\": 1/\"total\": 2}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{${page/\"totalPages\": 1/\"totalPages\": 0}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{${page/\"total\": 1, \"totalPages\": 1/\"total\": 0, \"totalPages\": 2}, \"items\": []}" \
+    "{${page/\"total\": 1/\"total\": 101}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{${page/\"pageSize\": 100/\"pageSize\": 0}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{${page/\"page\": 1/\"page\": 2}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
+    "{${page/\"total\": 1/\"total\": 1.5}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
     "{${page/\"success\": true/\"success\": false}, \"items\": []}"; do
     refused unreadable-list "could not check the workspace's CVM names" STUB_CVMS_JSON="$answer" \
         TOPUP_ADMIN_PUBLIC_KEY= ADMIN_SEED_FILE="$tmp/unreadable-list.seed"
