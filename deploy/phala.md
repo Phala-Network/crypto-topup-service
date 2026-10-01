@@ -79,9 +79,10 @@ mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-comp
 npm ci --prefix kit/deploy/tools --ignore-scripts
 ```
 
-Run a reset with v0.3.1 or later. v0.3.0's Deploy cannot provision: it waits for the unsealed CVM to
+Run a reset with v0.3.3 or later. v0.3.0's Deploy cannot provision: it waits for the unsealed CVM to
 run, and reuses the CVM name (the v0.3.0 cutover recovered by hand: seal, then upgrade, as
-[Deploy](README.md#deploy) step 2 says). **Until `v0.3.1` is tagged,
+[Deploy](README.md#deploy) step 2 says); v0.3.1's and v0.3.2's wait for an instance id that Phala
+Cloud's `cvms get` never reports. **Until `v0.3.1` is tagged,
 [deploy-phala.yml](../.github/workflows/deploy-phala.yml) pins v0.3.0's commit;** right after the
 tag, its own adoption pull request moves `uses:` and `version` to the v0.3.1 commit SHA, before any
 reset. Already in place: staging's

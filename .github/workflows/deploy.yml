@@ -336,8 +336,9 @@ jobs:
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-          # A provision only creates the CVM: unsealed, it boots but does not run (deploy/phala-cvm.sh,
-          # wait). The upgrade after the sealing is the acceptance step.
+          # A provision only creates the CVM: unsealed, it boots but does not run, so it is waited for
+          # settled in any status (deploy/phala-cvm.sh, wait); the attestation below shows it booted
+          # the compose. The upgrade after the sealing is the acceptance step.
           if [[ "$MODE" == provision ]]; then
             "$KIT/deploy/phala-cvm.sh" wait --unsealed "$cvm_id" >"$WORK/cvm.json"
           else
@@ -396,9 +397,7 @@ jobs:
       # resolve. An upgrade keeps the instance id; a new instance (a restore) needs a new TXT value.
       - name: Print the owner's DNS records
         run: |
-          instance_id=$(jq -er '[.tcb_info.event_log[] | select(.event == "instance-id")
-            | .event_payload | ascii_downcase | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' \
-            "$WORK/attestation.json")
+          instance_id=$("$KIT/deploy/phala-cvm.sh" instance-id "$WORK/attestation.json")
           {
             echo "### Owner: DNS records for \`$DOMAIN\`"
             echo

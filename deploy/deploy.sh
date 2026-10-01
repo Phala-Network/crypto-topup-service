@@ -23,15 +23,25 @@
 #   it writes from the template's routes, or an existing one. It prints the DNS records to create.
 #
 # Unlike Deploy, it seals the secrets at provision, from the owner's machine: the env file, the
-# sealed names given a value and no other, is written mode 0600 in the temporary directory, and
-# preflight refuses a value the CLI would read differently. No secret is printed or kept; a
-# generated admin seed goes only to the file the owner names. Phala Cloud authentication is the
-# owner's CLI login or PHALA_CLOUD_API_KEY, never stored. The CLI runs in an empty directory of its
-# own, with absolute paths, so no phala.toml in the caller's directory can turn the new CVM into an
-# update of another. Once the CVM exists, its id (no secret) goes to the environment directory's
-# cvm-id, or ./CVM_NAME.cvm-id for the quick start; a later run that finds it creates nothing and
-# says how to finish that CVM. A provision proves nothing about the CVM's health: /healthz and the
-# attestation, and for a custom domain the certificate evidence, are the acceptance step.
+# sealed names given a value and no other, is written mode 0600 in a private directory under
+# $XDG_RUNTIME_DIR (a tmpfs) where there is one, otherwise in the temporary directory, shredded
+# (where shred exists) and removed on every exit; preflight refuses a value the CLI would read
+# differently. No secret is printed or kept; a generated admin seed goes only to the file the owner
+# names. Phala Cloud authentication is the owner's CLI login or PHALA_CLOUD_API_KEY, never stored.
+# The CLI runs in an empty directory of its own, with absolute paths, so no phala.toml in the
+# caller's directory can turn the new CVM into an update of another.
+#
+# One CVM per instance. The run's state is a file, in the directory it is run from or the chosen
+# environment directory: once the CVM exists, its id (no secret) goes to the environment
+# directory's cvm-id, or to CVM_NAME.cvm-id in the current directory for the quick start, and a
+# later run that finds it creates nothing and says how to finish that CVM. A run from elsewhere
+# cannot see that file, so before creating a CVM it also refuses a name the Phala Cloud workspace
+# already has, as the CLI's names are unique in a workspace. Once the CVM exists, every exit prints
+# what is known of it (its id, app id, and URL) and, after a failure, how to finish or remove it.
+# The quick start waits for the CVM to settle with its compose; a custom domain also for the
+# attestation of the compose with the node's gateway, whose event log names the instance id the TXT
+# record needs. A provision proves nothing about the CVM's health: /healthz and the attestation,
+# and for a custom domain the certificate evidence, are the acceptance step.
 #
 # The inputs are prompted for on the terminal, or with --non-interactive read from the environment:
 #   CVM_NAME                  the CVM's name: 5 to 63 letters, digits, and -, from a letter to a
@@ -40,7 +50,8 @@
 #   ENVIRONMENT_DIR           custom domain: the environment directory, written unless it exists
 #                             (default ./CVM_NAME/topup)
 #   TOPUP_ADMIN_PUBLIC_KEY    the admin public key; empty or unset to generate a keypair with the
-#   ADMIN_SEED_FILE           Python SDK, its seed in this new file (default ./CVM_NAME-admin.seed)
+#   ADMIN_SEED_FILE           Python SDK phala-pay 0.3.0, its seed in this new file (default
+#                             ./CVM_NAME-admin.seed)
 #   WALG_S3_PREFIX AWS_ENDPOINT AWS_REGION (default auto)      the backup location
 #   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY                    its read-write token
 #   SENTRY_DSN                optional
@@ -52,7 +63,8 @@ set -euo pipefail
 repository=Phala-Network/phala-pay
 # The release this script deploys; the Release workflow sets its tag in the published asset.
 release=latest
-docs=https://github.com/$repository/blob/main/docs/self-hosting.md
+# The Python SDK whose topup-sdk keygen generates an admin key: the version this release documents.
+sdk=phala-pay==0.3.0
 
 say() {
     printf '%s\n' "$*" >&2
@@ -97,10 +109,87 @@ phala_cvm() {
     phala_cli "$kit/deploy/phala-cvm.sh" "$@"
 }
 
+# recover CVM [ID]: how to finish or remove the instance's CVM, named CVM (its id or its name), with
+# id ID when known.
+recover() {
+    if [[ "$variant" == service ]]; then
+        echo "Finish it with Deploy, which renders the node's gateway, keeps the sealed env, and prints the"
+        echo "DNS records: commit $ENVIRONMENT_DIR to your environment repository, set the Environment"
+        echo "variable TOPUP_CVM_ID=${2:-"<its id: kit/deploy/phala cvms get $1>"}, and run Deploy with mode upgrade"
+        echo "at $release ($docs#4-release-and-provision, step 5)."
+    else
+        echo "See it in Phala Cloud's dashboard, or with the release's locked CLI"
+        echo "($docs#2-your-environment-repository, step 1): kit/deploy/phala cvms get $1."
+        echo "The quick start has no upgrade path."
+    fi
+    echo "To start over instead, delete CVM $1 in Phala Cloud$([[ ! -f "$state" ]] || echo ", then $state")."
+}
+
+# summary STATUS: once the CVM exists, on every exit, what is known of it; after a failure, how to
+# finish or remove it.
+summary() {
+    if (($1 == 0)); then
+        printf '\nPhala Pay %s is provisioned.\n\n' "$release"
+    else
+        printf '\nPhala Pay %s: this run created CVM %s and then failed; the CVM is not finished.\n\n' \
+            "$release" "$cvm_id"
+    fi
+    printf '  %-9s %s\n' "CVM id" "$cvm_id" "App id" "$app_id"
+    [[ -z "$url" ]] || printf '  %-9s %s\n' URL "$url"
+    [[ -z "$record" ]] || printf '  %-9s %s%s\n' Compose "$record" "$([[ "$variant" == service ]] || echo " (the release's)")"
+    if (($1 != 0)); then
+        echo
+        recover "$cvm_id" "$cvm_id"
+        return
+    fi
+    if [[ "$variant" == service ]]; then
+        cat <<SUMMARY
+
+Create these DNS records, not proxied (Cloudflare: DNS only); dstack-ingress then obtains its
+certificate through port 443:
+
+  CNAME  $DOMAIN  $gateway
+  TXT    _dstack-app-address.$DOMAIN  $instance_id:443
+
+$env_dir holds this instance's settings and no secret. Commit it to your
+environment repository and set TOPUP_CVM_ID=$cvm_id to upgrade the instance with Deploy:
+$docs#2-your-environment-repository
+SUMMARY
+    fi
+    cat <<SUMMARY
+
+The provision proves nothing about the instance's health. It is accepted once
+  - $answers, and
+  - you have verified its attestation with the release's verified kit
+    ($docs#5-verify-the-attestation):
+      kit/deploy/verify-attestation.sh attestation.json info.json $app_id $record $variant
+
+Next, create a merchant account with the admin key (BASE_URL=$url):
+$docs#6-onboard-your-first-account
+SUMMARY
+}
+
+# finish: on every exit, the summary of a CVM this run created, on the script's own stdout (fd 3:
+# an exit inside a redirected function keeps that redirection); the sealed env file shredded where
+# shred exists, and every temporary file removed.
+finish() {
+    local status=$?
+    if [[ -n "$sealed" ]]; then
+        [[ ! -f "$sealed/sealed.env" ]] || ! command -v shred >/dev/null || shred -u "$sealed/sealed.env" || true
+        rm -rf "$sealed"
+    fi
+    [[ -z "$work" ]] || rm -rf "$work"
+    [[ -z "$cvm_id" ]] || summary "$status" >&3
+}
+
 # All of it in a function, so that bash has read the whole script before any command can read the
 # rest of a piped script from stdin.
 main() {
     non_interactive=0 strict=0
+    # fd 3: the script's stdout, for the summary (finish).
+    exec 3>&1
+    # What finish and summary read: the temporary directories, and what is known of the new CVM.
+    work="" sealed="" env_dir="" cvm_id="" app_id="" url="" gateway="" instance_id="" record="" answers=""
     [[ "${PHALA_PAY_REQUIRE_ATTESTATION:-}" != 1 ]] || strict=1
     local argument
     for argument in "$@"; do
@@ -122,6 +211,13 @@ main() {
     done
     (($(node -p 'process.versions.node.split(".")[0]') >= 22)) || die "Node.js 22 or later is required"
     docker info >/dev/null 2>&1 || die "Docker must be running: preflight checks the configuration in the release's image"
+    if [[ "$release" == latest ]]; then
+        release=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repository/releases/latest")
+        release=${release##*/}
+    fi
+    check release '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$' "v<semver>"
+    # The guide of the release deployed.
+    docs=https://github.com/$repository/blob/$release/docs/self-hosting.md
     local provenance="" major minor
     if command -v gh >/dev/null; then
         IFS=. read -r major minor _ <<<"$(gh --version | sed -n '1s/^gh version \([0-9.]*\).*/\1/p')"
@@ -134,11 +230,6 @@ main() {
         say "note: without the GitHub CLI 2.101 or later, logged in, the release is checked against"
         say "      its SHA256SUMS only, not its build provenance; the full check: $docs#verify-a-release"
     fi
-    if [[ "$release" == latest ]]; then
-        release=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repository/releases/latest")
-        release=${release##*/}
-    fi
-    check release '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$' "v<semver>"
 
     say "== Phala Pay $release: settings"
     ask CVM_NAME "Instance name (the CVM's name: 5 to 63 letters, digits, and -)"
@@ -149,7 +240,8 @@ main() {
     say "Quick start: a testnet instance at Phala Cloud's gateway domain, its admin key and backup"
     say "location unattested. Custom domain: every setting attested, for an instance with merchants."
     ask DOMAIN "Custom domain for the API, e.g. pay-api.example.com (empty for the quick start)" ""
-    local variant=template existing=0
+    variant=template
+    local existing=0
     if [[ -n "$DOMAIN" ]]; then
         variant=service
         check DOMAIN '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' "a lowercase DNS name"
@@ -161,21 +253,15 @@ main() {
             die "$ENVIRONMENT_DIR exists without a topup.yaml"
         fi
     fi
-    # One CVM per instance: the run that created it recorded its id, and a later run creates none.
-    local state=$PWD/$CVM_NAME.cvm-id recorded
+    # One CVM per instance: the run that created it recorded its id in the environment directory, or
+    # for the quick start in the directory it ran from, and a later run creates none.
+    state=$PWD/$CVM_NAME.cvm-id
     [[ "$variant" == template ]] || state=$ENVIRONMENT_DIR/cvm-id
     if [[ -f "$state" ]]; then
+        local recorded
         recorded=$(<"$state")
         say "deploy.sh: an earlier run created CVM $recorded for this instance ($state); this run creates none."
-        if [[ "$variant" == service ]]; then
-            say "Finish it with Deploy, which renders the node's gateway, keeps the sealed env, and prints the"
-            say "DNS records: commit $ENVIRONMENT_DIR to your environment repository, set the Environment"
-            say "variable TOPUP_CVM_ID=$recorded, and run Deploy with mode upgrade at $release"
-            say "($docs#4-release-and-provision, step 5)."
-        else
-            say "See it in Phala Cloud's dashboard (npx phala cvms get $recorded); the quick start has no upgrade path."
-        fi
-        say "To start over instead, delete CVM $recorded in Phala Cloud, then $state."
+        recover "$recorded" "$recorded" >&2
         exit 1
     fi
     if ((!existing)); then
@@ -184,9 +270,9 @@ main() {
             ask ADMIN_SEED_FILE "New file for the admin seed" "$PWD/$CVM_NAME-admin.seed"
             local keygen
             if command -v uvx >/dev/null; then
-                keygen=(uvx --from phala-pay topup-sdk)
+                keygen=(uvx --from "$sdk" topup-sdk)
             elif command -v pipx >/dev/null; then
-                keygen=(pipx run --spec phala-pay topup-sdk)
+                keygen=(pipx run --spec "$sdk" topup-sdk)
             else
                 die "generating the admin key needs uv or pipx (the Python SDK's topup-sdk keygen)"
             fi
@@ -205,10 +291,17 @@ main() {
     fi
 
     say "== download and verify the release"
-    work=$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-deploy.XXXXXX")
-    trap 'rm -rf "$work"' EXIT
+    trap finish EXIT
     trap 'exit 130' INT TERM
+    work=$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-deploy.XXXXXX")
     work=$(CDPATH='' cd -- "$work" && pwd)
+    # The sealed env file's private directory: on tmpfs where the session has one, so no secret
+    # reaches a disk.
+    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" ]]; then
+        sealed=$(mktemp -d "$XDG_RUNTIME_DIR/phala-pay-deploy.XXXXXX")
+    else
+        sealed=$(mktemp -d "$work/sealed.XXXXXX")
+    fi
     local assets=$work/release
     kit=$work/kit
     mkdir -p "$assets" "$kit" "$work/cli"
@@ -232,10 +325,28 @@ main() {
     tar -xzf "$assets/phala-pay-deploy-$release.tar.gz" -C "$kit" --strip-components=1
     npm ci --prefix "$kit/deploy/tools" --ignore-scripts --no-audit --no-fund --loglevel=error </dev/null >&2
     phala_cli "$kit/deploy/phala" whoami </dev/null >&2 ||
-        die "log in to Phala Cloud (npx phala login), or export PHALA_CLOUD_API_KEY"
+        die "log in to Phala Cloud with the release's locked CLI (kit/deploy/phala login:" \
+            "$docs#2-your-environment-repository, step 1), or export PHALA_CLOUD_API_KEY"
+    # A CVM's name is unique in its workspace: one there already, perhaps from a run elsewhere whose
+    # recorded id this run cannot see, is refused rather than duplicated.
+    local existing_cvms
+    existing_cvms=$(phala_cli "$kit/deploy/phala" cvms list --search "$CVM_NAME" --page-size 100 --json </dev/null) ||
+        die "could not list the workspace's CVMs"
+    jq -e '(.items | type) == "array" and .totalPages <= 1' <<<"$existing_cvms" >/dev/null ||
+        die "could not check the workspace's CVM names (more than 100 match $CVM_NAME, or another answer)"
+    if jq -e --arg name "$CVM_NAME" 'any(.items[]; .cvmName | ascii_downcase == ($name | ascii_downcase))' \
+        <<<"$existing_cvms" >/dev/null; then
+        say "deploy.sh: the Phala Cloud workspace already has a CVM named $CVM_NAME; this run creates none."
+        say "If an earlier run of deploy.sh created it, that run recorded its id where it ran (the quick"
+        say "start's CVM_NAME.cvm-id in its current directory, a custom domain's cvm-id in the environment"
+        say "directory)."
+        recover "$CVM_NAME" >&2
+        say "Otherwise choose another instance name."
+        exit 1
+    fi
 
     say "== render"
-    local env_dir render
+    local render
     if [[ "$variant" == template ]]; then
         env_dir=$kit/deploy/environments/phala-cloud-template/topup
         render=(--template)
@@ -286,7 +397,7 @@ YAML
     # The compose's sealed names that have a value, which become the CVM's allowed_envs: an optional
     # one left empty is not sent, so it is unset. The template's DSTACK_APP_DOMAIN comes from the
     # pre-launch script.
-    local env_file=$work/sealed.env name
+    local env_file=$sealed/sealed.env name
     (umask 077 && : >"$env_file")
     for name in $("$pinned_compose" -f "$compose" config --variables | awk 'NR > 1 && NF > 0 { print $1 }' | sort); do
         case "$name" in
@@ -313,13 +424,13 @@ YAML
     phala_cvm deploy "$work/deploy.json" --name "$CVM_NAME" "${update[@]}" -e "$env_file" \
         --instance-type tdx.medium --fs ext4 --kms phala --image dstack-0.5.9 --no-dev-os \
         --public-tcbinfo --secure-time </dev/null
-    local cvm_id app_id
     cvm_id=$(jq -er '.vm_uuid' "$work/deploy.json")
     printf '%s\n' "$cvm_id" >"$state"
     app_id=$(jq -er '.app_id' "$work/deploy.json")
-    say "created CVM $cvm_id (app $app_id); waiting for it to boot"
+    say "created CVM $cvm_id (app $app_id), recorded in $state; waiting for it to settle"
+    [[ "$variant" == template ]] || url=https://$DOMAIN
     phala_cvm wait --unsealed "$cvm_id" </dev/null >"$work/cvm.json"
-    local url record gateway instance_id previous answers
+    local previous deployed
     if [[ "$variant" == service ]]; then
         # The node's gateway is attested configuration: upgrade the new CVM to the compose rendered
         # with it. No -e, so the sealed env stays.
@@ -329,52 +440,21 @@ YAML
         previous=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$work/cvm.json")
         phala_cvm deploy "$work/deploy-gateway.json" --cvm-id "$cvm_id" "${update[@]}" </dev/null
         phala_cvm wait --unsealed "$cvm_id" "$previous" </dev/null >"$work/cvm.json"
-        instance_id=$(jq -er '.instance_id | ascii_downcase | ltrimstr("0x") | select(test("^[0-9a-f]{40}$"))' \
-            "$work/cvm.json") || die "CVM $cvm_id reports no instance id"
-        url=https://$DOMAIN
+        # The TXT record names the instance: the attestation of this compose, which the CVM booted,
+        # carries its id in the event log (`cvms get` reports none).
+        deployed=$(jq -er '.compose_hash | ascii_downcase | ltrimstr("0x")' "$work/cvm.json")
+        say "waiting for the CVM to boot compose $deployed and attest it"
+        phala_cvm attestation "$cvm_id" "$deployed" </dev/null >"$work/attestation.json"
+        instance_id=$(phala_cvm instance-id "$work/attestation.json")
         record=$(dirname -- "$env_dir")/docker-compose.$CVM_NAME.yml
+        cp "$compose" "$record"
         answers="the DNS records resolve and $url/healthz answers: Deploy's upgrade with this
     release checks that, the attested compose, and the certificate evidence"
-        cp "$compose" "$record"
     else
+        # The quick start is served at its gateway domain: no instance id to wait for.
         url=$(jq -er '"https://\(.app_id | ltrimstr("0x")).\(.gateway.base_domain)"' "$work/cvm.json")
         record=phala-cloud-template.yml answers="$url/healthz answers"
     fi
-
-    cat <<SUMMARY
-
-Phala Pay $release is provisioned.
-
-  CVM id    $cvm_id
-  App id    $app_id
-  URL       $url
-  Compose   $record$([[ "$variant" == service ]] || echo " (the release's)")
-SUMMARY
-    if [[ "$variant" == service ]]; then
-        cat <<SUMMARY
-
-Create these DNS records, not proxied (Cloudflare: DNS only); dstack-ingress then obtains its
-certificate through port 443:
-
-  CNAME  $DOMAIN  $gateway
-  TXT    _dstack-app-address.$DOMAIN  $instance_id:443
-
-$env_dir holds this instance's settings and no secret. Commit it to your
-environment repository and set TOPUP_CVM_ID=$cvm_id to upgrade the instance with Deploy:
-$docs#2-your-environment-repository
-SUMMARY
-    fi
-    cat <<SUMMARY
-
-The provision proves nothing about the instance's health. It is accepted once
-  - $answers, and
-  - you have verified its attestation with the release's verified kit
-    ($docs#5-verify-the-attestation):
-      kit/deploy/verify-attestation.sh attestation.json info.json $app_id $record $variant
-
-Next, create a merchant account with the admin key (BASE_URL=$url):
-$docs#6-onboard-your-first-account
-SUMMARY
 }
 
 main "$@"

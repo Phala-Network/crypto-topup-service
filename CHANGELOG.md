@@ -9,6 +9,31 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-01
+
+### Fixed
+
+- A provision completes on Phala Cloud. v0.3.1 and v0.3.2 waited for a new CVM to boot by its
+  `instance_id` in `cvms get`, which Phala Cloud reports as `null` in practice, so the one-command
+  deploy's quick start timed out after 15 minutes with nothing printed, though the CVM was healthy,
+  and Deploy's provision timed out the same way. `deploy/phala-cvm.sh wait --unsealed` now waits
+  only until the CVM is settled with the new compose, in any status; that the CVM booted the compose
+  is the attestation's to show, and the instance id comes from its event log's `instance-id` event
+  (`deploy/phala-cvm.sh instance-id`), as Deploy's DNS records already did. The quick start waits
+  for no instance id, as it is served at its gateway domain; a custom domain waits for the
+  attestation of its gateway's compose and reads the TXT record's instance id from it.
+- The one-command deploy prints the CVM id, the URL, and how to finish or remove the CVM on every
+  exit once the CVM exists, including a step that fails or times out later.
+- The one-command deploy refuses an instance name the Phala Cloud workspace already has, before
+  creating anything, with how to find, finish, or remove that CVM: its recorded `cvm-id` is a file
+  in the directory it ran from or the chosen environment directory, which a run from elsewhere
+  cannot see.
+- The one-command deploy writes the sealed env file on tmpfs (`$XDG_RUNTIME_DIR`) where the session
+  has one, mode 0600, and shreds it (where `shred` exists) and removes it on every exit.
+- The one-command deploy generates an admin key with the Python SDK pinned to `phala-pay==0.3.0`,
+  the version this release documents, as does the guide's `uvx` command; its messages name the
+  release's locked CLI (`kit/deploy/phala`) and link the guide at the release's tag.
+
 ## [0.3.2] - 2026-10-01
 
 ### Added
@@ -906,7 +931,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.0
