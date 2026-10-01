@@ -8,6 +8,8 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-01
+
 ### Changed (breaking)
 
 - `ClientQuote` gains `amount_credited` (an integer or `None`: what a credited payment credited in
@@ -355,6 +357,7 @@ Generated from OpenAPI `info.version` 0.1.0.
   rate locks, deposits, limits, refunds, and attestation.
 - `topup-sdk keygen` and `topup-sdk public-key` for credential issuance.
 
-[Unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.3.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.4.0...HEAD
+[0.4.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.3.0...sdk-py-v0.4.0
 [0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.2.0...sdk-py-v0.3.0
 [0.2.0]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-py-v0.2.0
