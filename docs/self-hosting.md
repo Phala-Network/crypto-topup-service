@@ -60,7 +60,7 @@ comes from a release.
    to your repository, with its locked Phala Cloud CLI:
 
    ```sh
-   mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.0.tar.gz -C kit --strip-components=1
+   mkdir kit && tar -xzf release/phala-pay-deploy-v0.3.1.tar.gz -C kit --strip-components=1
    npm ci --prefix kit/deploy/tools --ignore-scripts
    ```
 
@@ -77,7 +77,8 @@ comes from a release.
 3. **Environments.** In your repository's Settings > Environments: `production` and, for a
    pre-production instance with test routes only, `staging` (the only names Deploy accepts).
    Deployment branches: `main` only. The only secret is `PHALA_CLOUD_API_KEY`, the workspace's
-   API key. Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER` names a
+   API key: the Environment's secret, or a repository secret if your repository is in another
+   organisation than Phala Pay's (step 5). Workflows run on `ubuntu-latest` unless the repository variable `CI_RUNNER` names a
    runner label.
 4. **The environment directory**, per Environment and target: copy the kit's
    `deploy/environments/example/topup` to `<Environment>/topup/` in your repository, fill it in,
@@ -97,12 +98,26 @@ comes from a release.
 
 5. **The deploy workflow**, `.github/workflows/deploy.yml` in your repository. It calls the
    release's [Deploy](../.github/workflows/deploy.yml) at the release, which verifies the release
-   and runs the kit's scripts on your environment directory
-   ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)). Pin it by the release's commit SHA,
-   as GitHub recommends for third-party workflows (`gh api
-   repos/Phala-Network/phala-pay/commits/v0.3.0 --jq .sha`); Deploy refuses to run at any commit
-   but `version`'s. It reads only the Environment secret `PHALA_CLOUD_API_KEY`, so pass no
-   secrets:
+   and runs the kit's scripts on your environment directory ([deploy/README.md,
+   "Deploy"](../deploy/README.md#deploy)). Pin it by the release's commit SHA, as GitHub
+   recommends for third-party workflows (`gh api repos/Phala-Network/phala-pay/commits/v0.3.1
+   --jq .sha`); Deploy refuses to run at any commit but `version`'s (called at the `version` tag,
+   it peels the tag to that commit). The only secret it reads is `PHALA_CLOUD_API_KEY`, declared
+   since v0.3.1:
+
+   - **In Phala Pay's organisation** (Phala-Network, or an organisation of its enterprise): pass
+     `secrets: inherit`, with the key as the Environment's secret. A called workflow's Environment
+     secret resolves empty unless the caller inherits secrets
+     ([actions/runner#4453](https://github.com/actions/runner/issues/4453)).
+   - **In another organisation**, where GitHub does not support `inherit`: pass the key from a
+     repository secret, as below. The calling job cannot run in an Environment, so it cannot pass
+     an Environment secret. This is weaker than step 3's Environment: any workflow on any branch
+     can read a repository secret, so anyone who can push a branch can read the key, while an
+     Environment secret reaches only jobs from its deployment branches. Restrict it: give write
+     access to the repository only to those who may deploy, and give the key a workspace that
+     holds only this instance. A repository secret serves both Environments; for a workspace per
+     Environment, store one secret each and pass `${{ inputs.environment == 'production' &&
+     secrets.PHALA_CLOUD_API_KEY_PRODUCTION || secrets.PHALA_CLOUD_API_KEY_STAGING }}`.
 
    ```yaml
    name: Deploy
@@ -122,12 +137,15 @@ comes from a release.
      attestations: read
    jobs:
      deploy:
-       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<the v0.3.0 commit SHA> # v0.3.0
+       uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<the v0.3.1 commit SHA> # v0.3.1
        with:
-         version: v0.3.0
+         version: v0.3.1
          environment: ${{ inputs.environment }}
          mode: ${{ inputs.mode }}
          environment_dir: ${{ inputs.environment }}/topup
+       # In Phala Pay's organisation, `secrets: inherit` instead.
+       secrets:
+         PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
    ```
 
    The Environment's variables are only deployment state: `PHALA_WORKSPACE` (the display name of
@@ -390,11 +408,11 @@ into a directory and stops at the first failure:
 
 ```sh
 gh api -H 'Accept: application/vnd.github.raw' \
-  'repos/Phala-Network/phala-pay/contents/deploy/verify-release.sh?ref=v0.3.0' >verify-release.sh
-bash verify-release.sh v0.3.0 release     # prints the release's commit
+  'repos/Phala-Network/phala-pay/contents/deploy/verify-release.sh?ref=v0.3.1' >verify-release.sh
+bash verify-release.sh v0.3.1 release     # prints the release's commit
 ```
 
-**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch v0.3.0
+**Rebuild instead of trusting the build.** From a clone at the tag (`git clone --branch v0.3.1
 --recurse-submodules https://github.com/Phala-Network/phala-pay.git`), with Buildx v0.37.1:
 
 - `phala-pay` and `phala-pay-reference-product` are reproducible: `make verify-image` builds
@@ -404,8 +422,8 @@ bash verify-release.sh v0.3.0 release     # prints the release's commit
 - `postgres-walg` is not reproducible (apt and dpkg timestamps): it has provenance only. Review
   its [Dockerfile](../deploy/Dockerfile.postgres-walg) at the tag.
 - The kit's tar is `git archive` of the tag's `LICENSE`, `deploy/`, and `docs/`:
-  `gzip -dc phala-pay-deploy-v0.3.0.tar.gz` equals
-  `git archive --prefix=phala-pay-deploy-v0.3.0/ v0.3.0 -- LICENSE deploy docs`.
+  `gzip -dc phala-pay-deploy-v0.3.1.tar.gz` equals
+  `git archive --prefix=phala-pay-deploy-v0.3.1/ v0.3.1 -- LICENSE deploy docs`.
 
 ## The Phala Cloud template
 

@@ -15,15 +15,18 @@ name: Deploy
 # and a new compose hash, in force only through `upgrade`.
 #
 # Controls, in the caller's repository: the job runs only from its `main`, in the GitHub
-# Environment `environment` (deployment branches: `main` only), whose secret PHALA_CLOUD_API_KEY is
-# the only secret it reads (an Environment secret, available to this job without the caller
-# passing any). Whoever dispatches a run is accountable for it; the run's attested compose and
-# verifier read-back are the audit trail. The CVM's env holds only the owner-sealed secrets, the
-# rendered compose's `${NAME:-}` references, which never enter GitHub: `provision` sends them
-# empty, and the owner then seals them from their own machine (the run summary prints the
-# command); `upgrade` sends no env at all, so the sealed env stays. Each target's public origin is
-# its custom domain, served by dstack-ingress in the CVM (deploy/README.md, "Custom domain"); the
-# summary lists the DNS records the owner creates for it.
+# Environment `environment` (deployment branches: `main` only). The only secret it reads is the
+# declared, optional PHALA_CLOUD_API_KEY (docs/self-hosting.md, step 5). A caller in the
+# Phala-Network organisation passes `secrets: inherit`, and the key is the Environment's secret,
+# which GitHub uses over a passed secret of the same name; an Environment secret resolves empty
+# here without `inherit` (actions/runner#4453). A caller in another organisation, where `inherit`
+# is not supported, passes the key from a repository secret. Whoever dispatches a run is
+# accountable for it; the run's attested compose and verifier read-back are the audit trail. The
+# CVM's env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references,
+# which never enter GitHub: `provision` sends them empty, and the owner then seals them from their
+# own machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed
+# env stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
+# (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for it.
 #
 # The kit's deploy/phala runs Phala Cloud CLI 1.1.22 with its dependencies locked (checked against
 # Phala-Network/phala-cloud tag cli-v1.1.22), through deploy/phala-cvm.sh:
@@ -64,6 +67,10 @@ on:
         description: "The target's environment directory in the caller's repository"
         type: string
         required: true
+    secrets:
+      PHALA_CLOUD_API_KEY:
+        description: "The Phala Cloud API key of vars.PHALA_WORKSPACE: inherited from the Environment (secrets: inherit), or passed from a repository secret by a caller in another organisation"
+        required: false
 
 # attestations: read for `gh attestation verify`; the caller's workflow grants both.
 permissions:
@@ -106,7 +113,7 @@ jobs:
         run: |
           status=0
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
-            { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
+            { echo "::error::PHALA_CLOUD_API_KEY is empty: a caller in the Phala-Network organisation passes 'secrets: inherit' with the key as the Environment's secret; a caller in another organisation passes PHALA_CLOUD_API_KEY from a repository secret (docs/self-hosting.md, step 5)"; status=1; }
           [[ -n "$PHALA_WORKSPACE" ]] ||
             { echo "::error::Environment variable PHALA_WORKSPACE is not set"; status=1; }
           [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
@@ -178,7 +185,9 @@ jobs:
           echo "$RUNNER_TEMP/gh_${version}_linux_amd64/bin" >>"$GITHUB_PATH"
 
       # deploy/verify-release.sh of this workflow's own commit verifies the release, whose commit
-      # must then be this workflow's: the caller called Deploy at the release it deploys.
+      # must then be this workflow's: the caller called Deploy at the release it deploys. The
+      # workflow SHA is the commit for a caller that pins it, and the tag object for a caller at an
+      # annotated tag; verify-release.sh peels the tag and accepts either.
       - name: Verify the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,9 +199,8 @@ jobs:
           gh api -H 'Accept: application/vnd.github.raw' \
             "repos/$WORKFLOW_REPOSITORY/contents/deploy/verify-release.sh?ref=$WORKFLOW_SHA" \
             >"$WORK/verify-release.sh"
-          commit=$(bash "$WORK/verify-release.sh" "$VERSION" "$WORK/release")
-          [[ "$commit" == "$WORKFLOW_SHA" ]] ||
-            { echo "::error::Deploy runs at $WORKFLOW_SHA, not $VERSION's commit $commit: call it at $VERSION"; exit 1; }
+          bash "$WORK/verify-release.sh" "$VERSION" "$WORK/release" "$WORKFLOW_SHA" >/dev/null ||
+            { echo "::error::$VERSION did not verify, or Deploy is not called at its commit (the log above)"; exit 1; }
           tar -xzf "$WORK/release/phala-pay-deploy-$VERSION.tar.gz" -C "$KIT" --strip-components=1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

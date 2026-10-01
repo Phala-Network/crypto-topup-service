@@ -9,6 +9,24 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
+### Fixed
+
+- Deploy declares its one secret, `PHALA_CLOUD_API_KEY` (optional), so that an operator's
+  repository in another organisation can pass it from a repository secret: GitHub supports
+  `secrets: inherit` only within an organisation or enterprise, and without it a called workflow's
+  Environment secret resolves empty (actions/runner#4453). v0.3.0 read only the Environment
+  secret, so every caller passing no secrets failed with an empty key. A caller in Phala-Network's
+  organisation passes `secrets: inherit` and keeps the key as the Environment's secret. An empty
+  key now fails with the setup each caller needs (docs/self-hosting.md, step 5, with the trade-off
+  of a repository secret).
+- Deploy runs when called at a release's annotated tag, not only pinned to its commit. A workflow
+  called at an annotated tag runs with `job.workflow_sha` the tag object's SHA, so v0.3.0's Deploy,
+  called at `v0.3.0`, refused its own release ("Deploy runs at e42120e…, not v0.3.0's commit
+  659bd26…"). `deploy/verify-release.sh VERSION DIR CALLED_AT` peels the tag to its commit and
+  accepts either SHA. Pinning the commit SHA remains the recommendation.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added
@@ -825,5 +843,6 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.0

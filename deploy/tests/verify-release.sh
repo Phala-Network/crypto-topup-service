@@ -2,19 +2,21 @@
 # deploy/verify-release.sh against a stub `gh`: a good release verifies every asset, SHA256SUMS,
 # and each image, and prints its commit; it stops, before any image, on an images.json that is not
 # the three images by digest, and it fails on a commit outside main, a checksum mismatch, or a
-# refused attestation.
+# refused attestation. It peels an annotated tag to its commit, and with CALLED_AT, Deploy's
+# job.workflow_sha, accepts the commit (a pinned caller) or the tag object (a caller at the tag).
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
-commit=$(printf 'c%.0s' {1..40})
+commit=$(printf 'c%.0s' {1..40}) tag=$(printf 'a%.0s' {1..40})
 mkdir -p "$tmp/bin" "$tmp/assets"
 cat >"$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$STUB_LOG"
 case "$1 $2" in
-    "api repos/Phala-Network/phala-pay/commits/refs/tags/v9.9.9") echo "$STUB_COMMIT" ;;
+    "api repos/Phala-Network/phala-pay/git/ref/tags/v9.9.9") echo "$STUB_REF" ;;
+    "api repos/Phala-Network/phala-pay/git/tags/$STUB_TAG") echo "commit $STUB_COMMIT" ;;
     "api repos/Phala-Network/phala-pay/compare/$STUB_COMMIT...main") echo "$STUB_COMPARE" ;;
     "release download") cp "$STUB_ASSETS"/* "${@: -2:1}" ;;
     "attestation verify") [[ "$3" != *"$STUB_REFUSE"* ]] ;;
@@ -22,7 +24,8 @@ case "$1 $2" in
 esac
 STUB
 chmod +x "$tmp/bin/gh"
-export PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/log" STUB_ASSETS="$tmp/assets" STUB_COMMIT="$commit"
+export PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/log" STUB_ASSETS="$tmp/assets" STUB_COMMIT="$commit" \
+    STUB_TAG="$tag"
 
 # assets IMAGES_JSON: the release's four assets, with IMAGES_JSON as images.json.
 assets() {
@@ -37,12 +40,14 @@ digest=$(printf '1%.0s' {1..64})
 good="{\"phala-pay\": \"ghcr.io/phala-network/phala-pay@sha256:$digest\",
     \"postgres-walg\": \"ghcr.io/phala-network/postgres-walg@sha256:$digest\",
     \"phala-pay-reference-product\": \"ghcr.io/phala-network/phala-pay-reference-product@sha256:$digest\"}"
-# run NAME [ENV...]: verify-release.sh into a fresh directory, with ENV set.
+# run NAME [ENV...]: verify-release.sh into a fresh directory, with ENV set, and called_at, when
+# set, as its CALLED_AT. v9.9.9 is an annotated tag unless STUB_REF says otherwise.
 run() {
     local name=$1
     shift
     : >"$STUB_LOG"
-    env STUB_COMPARE=ahead STUB_REFUSE=never "$@" "$root/deploy/verify-release.sh" v9.9.9 "$tmp/$name" \
+    env STUB_COMPARE=ahead STUB_REFUSE=never STUB_REF="tag $tag" "$@" \
+        "$root/deploy/verify-release.sh" v9.9.9 "$tmp/$name" ${called_at:+"$called_at"} \
         >"$tmp/$name.out" 2>"$tmp/$name.err"
 }
 fail() {
@@ -63,6 +68,13 @@ for bad in '{"phala-pay": ' "{\"extra\": \"x@sha256:$digest\", ${good#\{}" '{"ph
     ! grep -q '^attestation verify oci://' "$STUB_LOG" || fail "verified an image of a bad images.json"
 done
 assets "$good"
+called_at=$commit run pinned || { cat "$tmp/pinned.err" >&2; fail "refused Deploy pinned at the commit"; }
+called_at=$tag run at-tag || { cat "$tmp/at-tag.err" >&2; fail "refused Deploy called at the annotated tag"; }
+[[ "$(cat "$tmp/at-tag.out")" == "$commit" ]] || fail "did not print the annotated tag's commit"
+called_at=$commit run lightweight STUB_REF="commit $commit" ||
+    { cat "$tmp/lightweight.err" >&2; fail "refused a tag that names the commit directly"; }
+! called_at=$(printf 'e%.0s' {1..40}) run elsewhere || fail "accepted Deploy at another commit"
+! grep -q '^release download' "$STUB_LOG" || fail "downloaded a release Deploy is not called at"
 ! run outside STUB_COMPARE=diverged || fail "accepted a commit outside main"
 ! grep -q '^release download' "$STUB_LOG" || fail "downloaded a release whose commit is outside main"
 ! run unattested STUB_REFUSE=SHA256SUMS || fail "accepted an unattested SHA256SUMS"

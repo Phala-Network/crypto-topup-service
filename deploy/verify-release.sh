@@ -2,8 +2,10 @@
 # Verifies release VERSION of Phala-Network/phala-pay (deploy/README.md, "Releases") and leaves its
 # assets in DIR; prints the release's commit. Deploy runs it, and so does an operator by hand. It
 # stops at the first failure:
-#   1. The release's commit is the one its tag names (a protected tag of an immutable release), and
-#      a commit of main's history.
+#   1. The release's commit is the one its tag names (a protected tag of an immutable release),
+#      peeled through annotated tag objects, and a commit of main's history. With CALLED_AT, the
+#      SHA Deploy runs at (job.workflow_sha), that SHA must be the release's commit (a caller
+#      pinned it) or a tag object naming it (a caller called Deploy at the annotated tag).
 #   2. Every asset matches SHA256SUMS.
 #   3. Every asset and SHA256SUMS has a GitHub build provenance attestation signed by release.yml
 #      at refs/tags/VERSION on a GitHub-hosted runner, for that commit.
@@ -12,15 +14,28 @@
 #
 # It needs the GitHub CLI 2.101.0 (the version Deploy pins), logged in or with GH_TOKEN, and jq.
 #
-# Usage: verify-release.sh VERSION DIR
+# Usage: verify-release.sh VERSION DIR [CALLED_AT]
 set -euo pipefail
 
 repository=Phala-Network/phala-pay
-version=${1:-} dir=${2:-}
-[[ "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ && -n "$dir" ]] ||
-    { echo "usage: $0 VERSION DIR" >&2; exit 64; }
+version=${1:-} dir=${2:-} called_at=${3:-}
+[[ "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ && -n "$dir" &&
+    "$called_at" =~ ^([0-9a-f]{40})?$ ]] ||
+    { echo "usage: $0 VERSION DIR [CALLED_AT]" >&2; exit 64; }
 
-commit=$(gh api "repos/$repository/commits/refs/tags/$version" --jq .sha)
+object='"\(.object.type) \(.object.sha)"'
+named=$(gh api "repos/$repository/git/ref/tags/$version" --jq "$object")
+read -r type commit <<<"$named"
+shas=("$commit")
+while [[ "$type" == tag ]]; do
+    named=$(gh api "repos/$repository/git/tags/$commit" --jq "$object")
+    read -r type commit <<<"$named"
+    shas+=("$commit")
+done
+[[ "$type" == commit && "$commit" =~ ^[0-9a-f]{40}$ ]] ||
+    { echo "$version names $named, not a commit" >&2; exit 1; }
+[[ -z "$called_at" || " ${shas[*]} " == *" $called_at "* ]] ||
+    { echo "Deploy runs at $called_at, not $version's commit $commit: call it at $version" >&2; exit 1; }
 [[ "$(gh api "repos/$repository/compare/$commit...main" --jq .status)" =~ ^(ahead|identical)$ ]] ||
     { echo "$version's commit $commit is not in $repository's main" >&2; exit 1; }
 echo "$version is commit $commit, in main's history" >&2
