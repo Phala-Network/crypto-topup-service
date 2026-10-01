@@ -1,6 +1,6 @@
 {
   "service_url": "https://pay-api-staging.phala.com",
-  "account": "acct_52daedc4c68d4ea1a1c18472506b85f4",
+  "account": "acct_3a36c44a80024b9b9fc8a4ceae9ebc06",
   "api_key_env": "PRODUCT_API_KEY",
   "factory": "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747",
   "implementation": "0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9",
