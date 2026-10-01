@@ -208,7 +208,7 @@ are exactly the names the CVM derives from `/dstack`.
 | The backup-age marker | the fixed path `/run/topup-observability/last-backup-unix-seconds`, written by the postgres-walg scripts and read by `topup` |
 | `DATABASE_URL` | one name; `migrate` and `restore-check` check in code that the login owns the database |
 | `PGPASSFILE` | env (libpq) |
-| `allowed_envs` | the artifact's `${…}` names |
+| `allowed_envs` | some of the artifact's `${…}` names, and no other (`compose-policy.jq`, `allowed_envs_violations`) |
 | `PHALA_WORKSPACE`, `TOPUP_CVM_ID`, `STAGING_PRODUCT_CVM_ID`, secret `PHALA_CLOUD_API_KEY` | GitHub: deployment state and tool credentials, not attested |
 | The product's domain, driver key, service origin, and public URL | the product overlay's `DOMAIN` and literal values in `config.json` |
 

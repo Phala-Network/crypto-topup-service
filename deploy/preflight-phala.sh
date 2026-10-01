@@ -88,10 +88,32 @@ check_phala_cloud() {
     fi
 }
 
+# read_env_file FILE: FILE's KEY=VALUE lines into the array `env`, each value as written. The Phala
+# Cloud CLI reads the same file as dotenv does (@phala/cloud's parseEnv), which cuts a value at `#`
+# and strips quotes and surrounding whitespace; a value with any of those is refused, so that every
+# accepted value is the one the CLI seals. Values are never printed.
+read_env_file() {
+    local file=$1 line value
+    if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$file"; then
+        fail "$file has a line that is not KEY=VALUE"
+    fi
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
+        [[ -v "env[${line%%=*}]" ]] && fail "$file sets ${line%%=*} twice"
+        value=${line#*=}
+        if [[ "$value" == *[\#\'\"\`]* || "$value" == [[:space:]]* || "$value" == *[[:space:]] ]]; then
+            fail "$file: ${line%%=*} has a #, a quote, or surrounding whitespace, which the Phala Cloud" \
+                "CLI's env parser would change; such a value is not supported"
+        fi
+        env[${line%%=*}]=$value
+    done <"$file"
+}
+
 # check_artifact ENV_FILE COMPOSE ENV_DIR VARIANT: the checks every attested compose shares, run
 # with the pinned Compose (deploy/pinned-compose.sh, never downloaded here). Leaves the compose as
 # JSON in $tmp/compose.json, its images in $tmp/images, and the env file in the array `env`.
-# - The env file names exactly the compose's sealed names (the CLI makes them allowed_envs).
+# - The env file names only the compose's sealed names (the CLI makes them allowed_envs; one left
+#   out is unset).
 # - The compose passes deploy/compose-policy.jq for VARIANT.
 # - It is byte for byte a fresh render of ENV_DIR with its own images and gateway or origin, so
 #   no stale render or hand edit reaches the CLI.
@@ -102,14 +124,7 @@ check_artifact() {
         return
     }
     echo "== env file"
-    if grep -Evq '^([[:space:]]*($|#)|[A-Za-z_][A-Za-z0-9_]*=)' "$env_file"; then
-        fail "$env_file has a line that is not KEY=VALUE"
-    fi
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
-        [[ -v "env[${line%%=*}]" ]] && fail "$env_file sets ${line%%=*} twice"
-        env[${line%%=*}]=${line#*=}
-    done <"$env_file"
+    read_env_file "$env_file"
     echo "== compose"
     if ! "$compose_bin" -f "$compose" config --no-interpolate --format json >"$tmp/compose.json" \
         2>"$tmp/compose.err"; then
@@ -118,15 +133,14 @@ check_artifact() {
         return
     fi
     jq -r '.services[].image' "$tmp/compose.json" | sort -u >"$tmp/images"
+    # The template's DSTACK_APP_DOMAIN is no env: the pre-launch script exports it (verify-attestation.sh).
     "$compose_bin" -f "$compose" config --variables 2>/dev/null |
-        awk 'NR > 1 && NF > 0 { print $1 }' | sort >"$tmp/sealed"
-    printf '%s\n' "${!env[@]}" | sed '/^$/d' | sort >"$tmp/actual"
-    # An extra or missing name changes the CLI's allowed_envs and therefore the compose hash.
-    cmp -s "$tmp/sealed" "$tmp/actual" ||
-        fail "$env_file must set exactly the compose's sealed names:" \
-            "$(diff "$tmp/sealed" "$tmp/actual" | grep '^[<>]' | tr '\n' ' ')"
-    violations=$(jq -r -L "$REPO_ROOT/deploy" --arg variant "$variant" \
-        'include "compose-policy"; violations($variant; "dstack")[]' "$tmp/compose.json")
+        awk -v variant="$variant" 'NR > 1 && NF > 0 && !(variant == "template" && $1 == "DSTACK_APP_DOMAIN") { print $1 }' |
+        sort >"$tmp/sealed"
+    printf '%s\n' "${!env[@]}" | jq -R 'select(. != "")' | jq -s . >"$tmp/env-names.json"
+    violations=$(jq -r -L "$REPO_ROOT/deploy" --arg variant "$variant" --slurpfile names "$tmp/env-names.json" \
+        'include "compose-policy"; (violations($variant; "dstack") + allowed_envs_violations($variant; $names[0]))[]' \
+        "$tmp/compose.json")
     while IFS= read -r line; do
         [[ -z "$line" ]] || fail "policy: $line"
     done <<<"$violations"
@@ -136,6 +150,8 @@ check_artifact() {
         "$tmp/compose.json" >"$tmp/release-images.json"
     if [[ "$variant" == restore-check ]]; then
         inputs=(--restore-check --origin "$(jq -r '.services.topup.command[-1]' "$tmp/compose.json")")
+    elif [[ "$variant" == template ]]; then
+        inputs=(--template)
     else
         inputs=(--gateway-domain
             "$(jq -r '.services["dstack-ingress"].environment.GATEWAY_DOMAIN // ""' "$tmp/compose.json")")

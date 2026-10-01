@@ -3,7 +3,8 @@
 # `docker compose config --format json` prints it. `violations($variant; $project)` is the list of
 # broken rules, empty when the compose passes. $variant is `service`, `restore-check` (the topup
 # CVM, deploy/RESTORE.md), `template` (the Phala Cloud template, deploy/compose.template.yaml), or
-# `product` (the reference product); $project is `dstack` on a CVM.
+# `product` (the reference product); $project is `dstack` on a CVM. `allowed_envs_violations` checks
+# the names a CVM's env may set against the compose.
 
 def env_map:
     if type == "array" then map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries
@@ -81,6 +82,25 @@ def secret_violations($variant):
             then empty
             else "a sealed value may not fill \($path | map(tostring) | join("."))"
           end];
+
+# The compose's sealed names: its `${NAME:-}` environment values, the only references
+# secret_violations allows.
+def sealed_names:
+    [.services[] | .environment | env_map | .[]
+        | strings | capture("^\\$\\{(?<name>[A-Z_][A-Z0-9_]*):-\\}$").name] | unique;
+
+# `$allowed`, the app-compose's allowed_envs (the names of the env file the Phala Cloud CLI sends),
+# may name only sealed names of the compose, so the env can fill nothing the compose does not
+# reference; the template's DSTACK_APP_DOMAIN is none, since the pre-launch script exports it. A
+# sealed name it leaves out is unset in the CVM, as an empty one is: a required secret is enforced
+# where it is used, at every start (deploy/scripts/postgres-walg-entrypoint.sh refuses S3 storage
+# without both credentials, in PostgreSQL and the backup job).
+def allowed_envs_violations($variant; $allowed):
+    (sealed_names - if $variant == "template" then ["DSTACK_APP_DOMAIN"] else [] end) as $sealed
+    | if ($allowed | type) == "array" and ($allowed | all(type == "string")) then
+        [$allowed[] | select(. as $name | $sealed | index($name) | not)
+            | "the env may set only the compose's sealed names, not \(.)"]
+      else ["allowed_envs must be a list of names"] end;
 
 def common_violations($variant; $project):
     [ check(([.services[].image] | all(test("^[^@]+@sha256:[0-9a-f]{64}$") and (test("@sha256:0{64}$") | not)));

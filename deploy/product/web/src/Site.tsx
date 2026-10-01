@@ -9,8 +9,8 @@ const LINKS = {
   repo: REPO,
   docs: `${REPO}/blob/main/docs/integration.md`,
   selfHosting: `${REPO}/blob/main/docs/self-hosting.md`,
-  // The guide's first step: fork the repository and deploy it to your own Phala Cloud workspace.
-  deploy: `${REPO}/blob/main/docs/self-hosting.md#1-prerequisites`,
+  // The guide's one-command deploy to your own Phala Cloud workspace, beside its other two paths.
+  deploy: `${REPO}/blob/main/docs/self-hosting.md#one-command-deploy`,
   reference: "https://phala-network.github.io/phala-pay/",
   npm: "https://www.npmjs.com/package/@phala/pay",
   license: `${REPO}/blob/main/LICENSE`,

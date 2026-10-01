@@ -208,7 +208,33 @@ policy template-port template "$tmp/template.json" \
     '.services.migrate.ports = [{mode: "ingress", target: 5432, published: "5432", protocol: "tcp"}]' \
     "only topup may publish a port, 80"
 
-# The product: its one sealed name, and its public_url on its domain.
+# allowed_envs, the names the CLI sends: any subset of the sealed names (one left out is unset),
+# and never another name, nor the template's DSTACK_APP_DOMAIN, which the pre-launch script sets.
+# allowed_envs NAME VARIANT FILE ALLOWED_JSON [MESSAGE]: no violation, or MESSAGE.
+allowed_envs() {
+    jq -r -L "$root/deploy" --arg variant "$2" --argjson allowed "$4" \
+        'include "compose-policy"; allowed_envs_violations($variant; $allowed)[]' "$3" >"$tmp/$1.violations"
+    if (($# == 4)); then
+        [[ ! -s "$tmp/$1.violations" ]] || { echo "allowed_envs refused $1:" >&2; cat "$tmp/$1.violations" >&2; exit 1; }
+    else
+        grep -qxF -- "$5" "$tmp/$1.violations" || { echo "allowed_envs did not refuse $1" >&2; exit 1; }
+    fi
+}
+service_names=$("$compose" -f "$tmp/service.yml" config --variables | awk 'NR > 1 { print $1 }' | jq -R . | jq -sc 'sort')
+[[ "$(jq -c -L "$root/deploy" 'include "compose-policy"; sealed_names' "$tmp/service.json")" == "$service_names" ]] ||
+    { echo "the policy's sealed names are not Compose's" >&2; exit 1; }
+allowed_envs service-all service "$tmp/service.json" "$service_names"
+allowed_envs service-subset service "$tmp/service.json" '["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]'
+allowed_envs service-none service "$tmp/service.json" '[]'
+allowed_envs service-extra service "$tmp/service.json" '["AWS_ACCESS_KEY_ID", "DSTACK_APP_DOMAIN"]' \
+    "the env may set only the compose's sealed names, not DSTACK_APP_DOMAIN"
+allowed_envs template-subset template "$tmp/template.json" \
+    '["AWS_ACCESS_KEY_ID", "AWS_ENDPOINT", "AWS_REGION", "AWS_SECRET_ACCESS_KEY", "TOPUP_ADMIN_PUBLIC_KEY", "WALG_S3_PREFIX"]'
+allowed_envs template-app-domain template "$tmp/template.json" '["DSTACK_APP_DOMAIN"]' \
+    "the env may set only the compose's sealed names, not DSTACK_APP_DOMAIN"
+allowed_envs not-a-list service "$tmp/service.json" 'null' "allowed_envs must be a list of names"
+
+# The product:its one sealed name, and its public_url on its domain.
 product="$root/deploy/environments/phala-network/staging/product"
 render "${gateway[@]}" "$product" >"$tmp/product.yml"
 [[ "$("$compose" -f "$tmp/product.yml" config --variables | awk 'NR > 1 { print $1 }')" == PRODUCT_API_KEY ]]

@@ -9,6 +9,51 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+### Added
+
+- A one-command deploy, `curl -fsSL https://pay.phala.com/deploy.sh | bash`
+  (docs/self-hosting.md, "One-command deploy"). Each release publishes `deploy/deploy.sh` as its
+  attested asset `deploy.sh`, set to deploy that release and listed in `SHA256SUMS`, which
+  `deploy/verify-release.sh` verifies; pay.phala.com redirects `/deploy.sh` to the latest
+  release's asset and `/deploy/v<version>.sh` to that release's. The command is an HTTPS bootstrap,
+  trusting pay.phala.com and Cloudflare as well as GitHub; the guide's high-assurance path verifies
+  the script's attestation first. From the owner's machine it verifies the release (with the
+  GitHub CLI 2.101 or later as Deploy does, otherwise against `SHA256SUMS` only, which it says
+  proves no provenance; `--strict` or `PHALA_PAY_REQUIRE_ATTESTATION=1` requires the GitHub CLI),
+  asks for the settings and secrets or reads them with `--non-interactive` from the environment,
+  and provisions either the Phala Cloud template variant
+  (a testnet quick start at the gateway domain) or the service variant on a custom domain, with
+  the kit's render, preflight, route-mode check, locked CLI, and pre-launch script. It seals the
+  secrets at provision from a mode 0600 file in a temporary directory it removes, prints none, and
+  writes a generated admin seed only to the file the owner names. The Phala Cloud CLI runs in an
+  empty directory, so a `phala.toml` in the caller's directory cannot turn the new CVM into an
+  update of another; the new CVM's id is recorded (`cvm-id`), and a rerun creates no second CVM.
+  It prints the CVM id, the URL,
+  a custom domain's DNS records, and the acceptance steps: a provision proves nothing about the
+  instance's health.
+- `deploy/preflight.sh --template` checks a Phala Cloud template compose and its env file, with the
+  deploy form's values.
+- Preflight refuses an env file value with a `#`, a quote, or surrounding whitespace: the Phala
+  Cloud CLI reads the file as dotenv does and would seal another value (`alpha#bravo` as `alpha`).
+- SDK releases are never marked Latest, and stable service releases always are, so
+  `releases/latest` (and `https://pay.phala.com/deploy.sh`) is the service's; the Release workflow
+  checks that the URL serves the new release's `deploy.sh`.
+
+### Fixed
+
+- `deploy/verify-attestation.sh` accepts a CVM whose `allowed_envs` leaves out a sealed name, such
+  as the optional `SENTRY_DSN`. The Phala Cloud CLI, and the template's deploy form, put in
+  `allowed_envs` only the names of the env they send, so a template CVM deployed without a Sentry
+  DSN failed verification, which required exactly the compose's sealed names. `allowed_envs` must
+  now name only sealed names of the compose (`compose-policy.jq`, `allowed_envs_violations`): any
+  other name, the template's `DSTACK_APP_DOMAIN` included, is still refused. A name left out is
+  unset. Preflight applies the same rule to the env file, and still refuses a required secret that
+  is empty or missing.
+- The postgres-walg entrypoint refuses S3 storage unless both `AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY` are set, on every start of PostgreSQL and the backup job. Only an empty
+  data directory listed the prefix, and `/healthz` reads only PostgreSQL, so a restarted CVM whose
+  storage credentials were unset served without archiving and passed the acceptance upgrade.
+
 ## [0.3.1] - 2026-10-01
 
 ### Fixed

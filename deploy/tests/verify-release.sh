@@ -27,14 +27,15 @@ chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH" STUB_LOG="$tmp/log" STUB_ASSETS="$tmp/assets" STUB_COMMIT="$commit" \
     STUB_TAG="$tag"
 
-# assets IMAGES_JSON: the release's four assets, with IMAGES_JSON as images.json.
+# assets IMAGES_JSON: the release's five assets, with IMAGES_JSON as images.json.
 assets() {
     rm -f "$tmp/assets"/*
     printf '%s\n' "$1" >"$tmp/assets/images.json"
     echo kit >"$tmp/assets/phala-pay-deploy-v9.9.9.tar.gz"
     echo template >"$tmp/assets/phala-cloud-template.yml"
+    echo script >"$tmp/assets/deploy.sh"
     (cd "$tmp/assets" && sha256sum images.json phala-pay-deploy-v9.9.9.tar.gz phala-cloud-template.yml \
-        >SHA256SUMS)
+        deploy.sh >SHA256SUMS)
 }
 digest=$(printf '1%.0s' {1..64})
 good="{\"phala-pay\": \"ghcr.io/phala-network/phala-pay@sha256:$digest\",
@@ -58,7 +59,7 @@ fail() {
 assets "$good"
 run good || { cat "$tmp/good.err" >&2; fail "refused a good release"; }
 [[ "$(cat "$tmp/good.out")" == "$commit" ]] || fail "did not print the release's commit"
-[[ "$(grep -c '^attestation verify' "$STUB_LOG")" == 7 ]] || fail "did not verify 4 assets and 3 images"
+[[ "$(grep -c '^attestation verify' "$STUB_LOG")" == 8 ]] || fail "did not verify 5 assets and 3 images"
 grep -q "^attestation verify $tmp/good/SHA256SUMS .*--source-digest $commit" "$STUB_LOG" ||
     fail "did not verify SHA256SUMS for the release's commit"
 
