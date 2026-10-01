@@ -13,13 +13,14 @@ import type {
 } from "./api.js";
 import { Detail, Details, Empty, ExplorerLink, InfoTip, Subsection } from "./common.js";
 import { assetOf, networkOf } from "./chains.js";
-import { clock, dollars, duration, rate, short, signedDollars, time, tokens } from "./format.js";
+import { approx, clock, dollars, duration, rate, short, signedDollars, time, tokens } from "./format.js";
 import { useNetworks } from "./queries.js";
 
 // Each step's title, what it waits for, and the time it usually takes: the hints are expectations,
 // every time shown next to them is real (the chain's block time, the service's timestamps, or when
 // your server received a webhook).
-// A step that usually takes a known time says so on its line until it happens (`usually`).
+// A step that usually takes a known time says so on its line until it happens (`usually`); the
+// credit's comes from the chain's `typical_credit_seconds` (`GET /v1/config`).
 const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string; usually?: string }> = {
   quote_created: {
     title: "Quote created",
@@ -36,7 +37,6 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
   },
   credited: {
-    usually: "~30 s",
     title: "Credited",
     hint:
       "Usually about 30 s after sending on Ethereum, at 2 confirmations, and about 5 minutes on " +
@@ -88,10 +88,13 @@ export function EventStream({ timeline, loading }: { timeline: Timeline | null; 
   // The payment's own chain and token, for its amounts and links.
   const chainId = timeline?.deposit?.chain_id ?? timeline?.quote?.chain_id;
   const asset = timeline?.deposit?.asset ?? timeline?.quote?.asset ?? null;
+  const network = networkOf(networks, chainId);
   const token: StepToken = {
     chainId,
     symbol: (asset ?? "").toUpperCase(),
-    decimals: assetOf(networkOf(networks, chainId), asset)?.decimals ?? 18,
+    decimals: assetOf(network, asset)?.decimals ?? 18,
+    // The confirmation is per chain, so before there is a token any of the chain's assets has it.
+    creditSeconds: (assetOf(network, asset) ?? network?.assets[0])?.typical_credit_seconds ?? null,
   };
   if (loading === null) {
     return (
@@ -169,6 +172,8 @@ interface StepToken {
   chainId: number | undefined;
   symbol: string;
   decimals: number;
+  /** The chain's typical credit time, for the credit step's `usually`; null until known. */
+  creditSeconds: number | null;
 }
 
 function StreamStep({
@@ -183,6 +188,8 @@ function StreamStep({
   token: StepToken;
 }) {
   const copy = STEP_COPY[step.key];
+  const usually =
+    step.key === "credited" ? (token.creditSeconds === null ? undefined : approx(token.creditSeconds)) : copy.usually;
   // Seconds since the payment was sent, for the steps after it.
   const elapsed =
     step.at !== null && sent !== null && step.key !== "sent" && step.key !== "quote_created" ? step.at - sent : null;
@@ -238,10 +245,10 @@ function StreamStep({
           <span className="text-right font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
             {elapsed !== null ? (
               `+${duration(elapsed)}`
-            ) : (step.state === "upcoming" || step.state === "current") && copy.usually !== undefined ? (
+            ) : (step.state === "upcoming" || step.state === "current") && usually !== undefined ? (
               <>
                 <span className="font-sans">usually </span>
-                {copy.usually}
+                {usually}
               </>
             ) : null}
           </span>

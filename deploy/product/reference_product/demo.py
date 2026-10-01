@@ -880,6 +880,9 @@ class DemoConsole:
                     "pricing": asset.pricing,
                     "min_amount": asset.min_amount,
                     "quote_ttl_seconds": asset.quote_ttl_seconds,
+                    # The typical time from paying to the credit at the account's confirmation on
+                    # the chain, for the page's timeline.
+                    "typical_credit_seconds": asset.typical_credit_seconds,
                     # The page's faucet helper: the visitor's wallet mints a mintable test token;
                     # another testnet token may have its issuer's faucet.
                     "mintable": asset.contract.lower() in mintable,

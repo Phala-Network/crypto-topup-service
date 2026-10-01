@@ -48,6 +48,8 @@ export interface Asset {
   /** Cents. */
   min_amount: number;
   quote_ttl_seconds: number;
+  /** Typical seconds from paying to the credit at the account's confirmation on the chain. */
+  typical_credit_seconds: number;
   /** A test token whose `mint` is public: the visitor's own wallet mints it. */
   mintable: boolean;
   /** The token issuer's testnet faucet, for a test token that does not mint. */

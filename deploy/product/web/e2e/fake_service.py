@@ -68,6 +68,8 @@ LOG = logging.getLogger("fake_service")
 TRANSFER_TOPIC = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
 FLUSHED_TOPIC = "0x" + keccak256(b"Flushed(bytes32,address,address,address,uint256)").hex()
 CREDIT_DEPTH = 2
+# The service's typical credit time at that depth: half a 12 s slot to inclusion, then the blocks.
+CREDIT_SECONDS = CREDIT_DEPTH * 12 + 6
 FINAL_DEPTH = 12
 MIN_REFUND_TOKENS = 20  # the staging PHA route's min_refund_atomic, in whole tokens
 NAMESPACE = uuid.UUID("5b0c6f7e-0f3a-4c9e-9d1e-2f3a4b5c6d7e")
@@ -593,7 +595,7 @@ class FakeTopup:
             payment_status=payment_status,
             confirmations=confirmations,
             amount_credited=None if credited is None else credited["amount"],
-            typical_credit_seconds=CREDIT_DEPTH * 12 + 6,
+            typical_credit_seconds=CREDIT_SECONDS,
         )
         return view
 
@@ -854,7 +856,7 @@ class FakeTopup:
                 "quote_spread_bps": 0,
                 "quote_tolerance_bps": 0,
                 "quote_ttl_seconds": 900,
-                "typical_credit_seconds": CREDIT_DEPTH,
+                "typical_credit_seconds": CREDIT_SECONDS,
                 "typical_finality_seconds": FINAL_DEPTH,
             }
             for chain_id, chain in self.chains.items()

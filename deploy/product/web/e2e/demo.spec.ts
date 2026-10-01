@@ -369,7 +369,10 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   const product = page.getByRole("region", { name: "Acme Cloud · Billing" });
   await expect(product.getByTestId("testnet-badge")).toHaveText("Testnet");
   const scenes = page.getByRole("complementary", { name: "Your backend" });
-  await expect(scenes.getByRole("list", { name: "The steps of a payment" })).toBeVisible();
+  const preview = scenes.getByRole("list", { name: "The steps of a payment" });
+  await expect(preview).toBeVisible();
+  // The credit's expected time is the chain's typical_credit_seconds, from GET /v1/config.
+  await expect(step(preview, "credited")).toContainText("usually ~30\u00a0s");
   const trust = await openTab(scenes, "Trust");
   await expect(trust).toContainText("Attestation verified");
   await expect(trust).toContainText("Verified");
