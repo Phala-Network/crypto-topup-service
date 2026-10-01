@@ -66,9 +66,9 @@ mode".
 |---|---|
 | `loading` | Loading payment details |
 | `waiting` | Payment options, the exact amount, and the time left |
-| `seen` | Payment in a block, with its confirmations (a reorg can still remove it) |
+| `seen` | Payment in a block, with its confirmations and the typical wait for the credit (a reorg can still remove it) |
 | `confirming` | Payment at the route's confirmation (two blocks on Ethereum), being valued and screened |
-| `credited` | Credited, typically about 30 seconds after paying; `onSuccess` is called once |
+| `credited` | What was credited, typically `typical_credit_seconds` after paying; `onSuccess(quote)` is called once |
 | `rejected` | Will not be credited; the payer contacts support |
 | `reversed` | Credited, then its transaction left the chain before finality: the payment did not happen |
 | `expired`, `canceled` | The address is hidden; `onExpire` is called once |
@@ -87,15 +87,18 @@ to offer your own way to fund that wallet.
 
 To resume after a reload, keep the client secret in the browser (for example `localStorage`, per
 signed-in account) until the status is `credited`, `expired`, `canceled`, or `error`. Tell a
-payer who is waiting that the payment is credited in about 30 seconds and the credit arrives on
-its own.
+payer who is waiting that the payment is credited in about the quote's `typical_credit_seconds`
+(30 seconds on Ethereum, about 5 minutes on Base, 15 minutes under a `finalized` policy) and the
+credit arrives on its own.
 
 A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg drops
 the payment's transaction, your backend receives `deposit.reversed` and claws the credit back as
 for `deposit.refunded`; the checkout itself only reflects the quote.
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
-amount, or after expiry, is still credited, at the market price instead of the quote's.
+amount, or after expiry, is still credited, at the market price instead of the quote's: the
+checkout then says so ("Payment credited: $10.00 of $25.00"), and `onSuccess` receives the quote
+with what was credited as `amount_credited`, beside the quoted `amount`.
 
 ### Your own wallet connection
 

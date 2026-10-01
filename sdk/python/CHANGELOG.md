@@ -8,6 +8,12 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `ClientQuote` gains `amount_credited` (an integer or `None`: what a credited payment credited in
+  cents, which differs from `amount` for a payment valued at spot) and `typical_credit_seconds`
+  (`topup_client`), both required, as the service sends them from the release after v0.3.3.
+
 ## [0.3.0] - 2026-10-01
 
 ### Changed (breaking)

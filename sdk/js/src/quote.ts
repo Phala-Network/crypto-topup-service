@@ -8,7 +8,7 @@ export interface ClientQuote {
   livemode: boolean;
   /** `open` until a matching payment completes it, it expires by chain time, or it is canceled. */
   status: "open" | "complete" | "expired" | "canceled";
-  /** Credit in the currency's minor unit (US cents). */
+  /** The quoted credit in the currency's minor unit (US cents). */
   amount: number;
   currency: string;
   /** The token's code, for example `pha`. */
@@ -25,13 +25,24 @@ export interface ClientQuote {
   expires_at: number;
   /**
    * `seen` once in a block (a reorg can remove it), `confirming` while a payment at the route's
-   * confirmation is valued and screened, `credited` once it is credited (about 30 seconds after
-   * paying), `rejected` when it will not be, `reversed` when a credited payment's transaction
-   * left the chain before finality (the payment did not happen).
+   * confirmation is valued and screened, `credited` once it is credited (typically
+   * `typical_credit_seconds` after paying), `rejected` when it will not be, `reversed` when a
+   * credited payment's transaction left the chain before finality (the payment did not happen).
    */
   payment_status: "none" | "seen" | "confirming" | "credited" | "rejected" | "reversed";
   /** Block confirmations while `payment_status` is `seen`, otherwise `null`. */
   confirmations: number | null;
+  /**
+   * While `payment_status` is `credited`: what was credited, in the currency's minor unit. It
+   * differs from `amount` for a payment valued at the market price (another amount, or paid late);
+   * otherwise `null`.
+   */
+  amount_credited: number | null;
+  /**
+   * Typical seconds from paying to the credit at the confirmation this quote's payments need:
+   * 30 on Ethereum (two blocks), about 300 at an OP-stack chain's `safe` block, 900 at finality.
+   */
+  typical_credit_seconds: number;
 }
 
 const QUOTE_STATUSES = ["open", "complete", "expired", "canceled"] as const;
@@ -53,6 +64,7 @@ export function parseClientQuote(value: unknown): ClientQuote {
   }
   const v = value as Record<string, unknown>;
   const confirmations = v["confirmations"];
+  const amountCredited = v["amount_credited"];
   if (
     typeof v["id"] !== "string" ||
     v["object"] !== "quote" ||
@@ -70,7 +82,9 @@ export function parseClientQuote(value: unknown): ClientQuote {
     typeof v["payment_uri"] !== "string" ||
     !isSafeInteger(v["expires_at"]) ||
     !oneOf(v["payment_status"], PAYMENT_STATUSES) ||
-    !(confirmations === null || isSafeInteger(confirmations))
+    !(confirmations === null || isSafeInteger(confirmations)) ||
+    !(amountCredited === null || isSafeInteger(amountCredited)) ||
+    !isSafeInteger(v["typical_credit_seconds"])
   ) {
     throw new TypeError("quote response does not match the public quote view");
   }
@@ -90,6 +104,8 @@ export function parseClientQuote(value: unknown): ClientQuote {
     expires_at: v["expires_at"],
     payment_status: v["payment_status"],
     confirmations,
+    amount_credited: amountCredited,
+    typical_credit_seconds: v["typical_credit_seconds"],
   };
 }
 

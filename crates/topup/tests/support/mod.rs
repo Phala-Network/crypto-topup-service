@@ -188,6 +188,47 @@ where
     }
 }
 
+/// Gives the quote `quote` a client secret tagged with `client_reads`' key, as `POST /v1/quotes`
+/// does, so a test reads the payer's view of a quote it seeded; returns the secret.
+pub async fn issue_client_secret(
+    pool: &PgPool,
+    client_reads: &topup::api::ClientReadLimiter,
+    quote: Uuid,
+) -> Result<String> {
+    let secret = client_reads
+        .key()
+        .issue("acct_test", &topup::locks::quote_id(quote))
+        .map_err(|_| anyhow::anyhow!("no entropy for a client secret"))?;
+    sqlx::query("UPDATE quotes SET client_secret_hash = $2 WHERE id = $1")
+        .bind(quote)
+        .bind(Sha256::digest(secret.as_bytes()).as_slice())
+        .execute(pool)
+        .await?;
+    Ok(secret)
+}
+
+/// The payer's view of the quote whose client secret is `secret`, read without credentials.
+pub async fn client_quote(app: &axum::Router, secret: &str) -> Result<serde_json::Value> {
+    use tower::ServiceExt as _;
+    let id = secret
+        .split("_secret_")
+        .next()
+        .context("quote client secret")?;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/quotes/{id}?client_secret={secret}")).body(Body::empty())?,
+        )
+        .await?;
+    anyhow::ensure!(
+        response.status() == axum::http::StatusCode::OK,
+        "{}",
+        response.status()
+    );
+    let body = axum::body::to_bytes(response.into_body(), 1_048_576).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
 /// Public origin the test routers are configured with and requests are signed for by default.
 pub const TEST_ORIGIN: &str = "http://api.test";
 

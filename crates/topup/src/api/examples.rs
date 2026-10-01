@@ -579,6 +579,8 @@ fn client_quote() -> Value {
         "expires_at": CREATED + 900,
         "payment_status": "seen",
         "confirmations": 1,
+        "amount_credited": null,
+        "typical_credit_seconds": 30,
     })
 }
 

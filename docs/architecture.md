@@ -1093,9 +1093,11 @@ re-issue (§14) also checks the owner tag, so a secret proves which account the 
 id to. Only its SHA-256 is stored with the quote, so no read returns it; a repeat with the same `Idempotency-Key` within 24 hours replays the first response,
 secret included. `GET /v1/quotes/{id}?client_secret=…` without `Authorization` returns the public subset `ClientQuote`: `{id, object, livemode, status, amount,
 currency, asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at,
-payment_status, confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the
-route's confirmation, being valued and screened), `credited`, `rejected` (the reason is not
-exposed), or `reversed`. No account,
+payment_status, confirmations, amount_credited, typical_credit_seconds}`, where `payment_status`
+is `none`, `seen`, `confirming` (at the route's confirmation, being valued and screened),
+`credited`, `rejected` (the reason is not exposed), or `reversed`; `amount_credited` is the
+credited deposit's `amount` while `credited`, and `typical_credit_seconds` the typical credit
+time at the account's confirmation for the chain. No account,
 price, deposit id, or transaction hash. Every such response, errors included, allows any
 origin (`Access-Control-Allow-Origin: *`) and exposes `Request-Id` and `Retry-After`; the secret
 is the bearer. A secret that is not the quote's is `404`. These reads, and a deposit address's,
@@ -1268,7 +1270,7 @@ from fetched state, never from webhook order.
 
 | UI state | Service state | Copy |
 |---|---|---|
-| Detected, N confirmations | none yet: the quote's `payment.status` `seen` (display only) | "Payment received: N confirmations. Crediting in about 30 seconds." When `matches_quote` is false, add: "This payment does not match the quote, so it will be credited at the rate when it is confirmed." |
+| Detected, N confirmations | none yet: the quote's `payment.status` `seen` (display only) | "Payment received: N confirmations. Crediting in about T." (T from `typical_credit_seconds`) When `matches_quote` is false, add: "This payment does not match the quote, so it will be credited at the rate when it is confirmed." |
 | Confirming | `detected` | "Confirmed on Ethereum. Checking the payment and fixing the rate." |
 | Crediting | `confirmed`, or `credited` before the merchant has applied the credit | "Crediting your balance." |
 | Completed | `credited`, `swept`, and the merchant's own credit recorded | "Credited $X at $rate." When a payment to a quote's address was valued at spot (late, wrong amount, second payment), add: "Credited at the rate when your payment became final because it did not match the quote." |

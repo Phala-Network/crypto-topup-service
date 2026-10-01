@@ -7,8 +7,8 @@ import { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./q
  * - `waiting` for a payment, until `expires_at`;
  * - `seen` once a transfer is in a block, `confirming` once it reaches the route's confirmation
  *   (two blocks on Ethereum) and is being valued;
- * - `credited` (about 30 seconds after paying), or `rejected` for a payment that will not be
- *   credited;
+ * - `credited` (typically the quote's `typical_credit_seconds` after paying), or `rejected` for a
+ *   payment that will not be credited;
  * - `reversed` when a credited payment's transaction left the chain before finality;
  * - `expired` or `canceled` without a payment;
  * - `error` when the client secret is not valid, or the quote's address is not the one your

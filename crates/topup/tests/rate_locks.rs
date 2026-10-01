@@ -600,6 +600,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
                     "chain_id": 1, "amount_atomic": "100", "address": created["address"],
                     "payment_uri": created["payment_uri"], "expires_at": created["expires_at"],
                     "payment_status": "none", "confirmations": null,
+                    "amount_credited": null, "typical_credit_seconds": 900,
                 }),
             "{public}"
         );
@@ -1557,6 +1558,139 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
         ));
         ensure!(lock_status(&database.app_pool, lock.id).await? == "open");
         ensure!(exposure(&database.app_pool, &format!("account:{}", account.id)).await? == 100);
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
+/// The payer's view reports what was credited, not what was quoted: an underpayment valued at
+/// spot is credited at its own amount. Its typical credit time is that of the confirmation the
+/// account's payments on the chain wait for: Base's `safe` block, then `finalized` once the
+/// account's policy requires it.
+#[tokio::test]
+async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let (product, product_key) = seed_product(pool, "phala-cloud").await?;
+        seed_account(pool, product.id, "underpaid").await?;
+        const BASE: u64 = 8_453;
+        seed::set_treasury(pool, product.id, true, BASE, seed::FIXTURE_TREASURY).await?;
+        let mut route = test_route();
+        route.chain.chain_id = BASE;
+        route.chain.confirmations = topup_core::route::Confirmations::Safe;
+        let admin_key = SigningKey::from_bytes(&[44; 32]);
+        let app = topup::api::router(AppState {
+            pool: pool.clone(),
+            routes: Arc::new(
+                topup::routes::RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?,
+            ),
+            admin_key: VerificationKey::from_base64(
+                ADMIN_KID.to_owned(),
+                &public_key_base64(&admin_key),
+            )
+            .map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?,
+            attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: Arc::new(FixedQuote),
+            client_reads: Arc::default(),
+            rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        })
+        .0;
+        let body = serde_json::to_vec(&json!({
+            "client_reference_id": "underpaid", "amount": 100, "currency": "usd",
+            "chain_id": BASE, "asset": "pha"
+        }))?;
+        let created = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::POST,
+                "/v1/quotes",
+                body,
+                &product_key,
+            ))
+            .await?;
+        ensure!(created.status() == StatusCode::OK);
+        let created = response_json(created).await?;
+        let quote_id = created["id"].as_str().context("id")?;
+        let secret = created["client_secret"].as_str().context("client_secret")?;
+        let read = || async {
+            let response = app.clone().oneshot(client_read(quote_id, secret)?).await?;
+            ensure!(response.status() == StatusCode::OK);
+            response_json(response).await
+        };
+
+        let unpaid = read().await?;
+        ensure!(unpaid["amount_credited"].is_null(), "{unpaid}");
+        ensure!(unpaid["typical_credit_seconds"] == 300, "{unpaid}");
+        let policy = serde_json::to_vec(&json!({
+            "confirmation_policies": [{"chain_id": BASE, "confirmations": "finalized"}]
+        }))?;
+        let updated = app
+            .clone()
+            .oneshot(merchant_request(
+                Method::POST,
+                "/v1/account",
+                policy,
+                &product_key,
+            ))
+            .await?;
+        ensure!(updated.status() == StatusCode::OK);
+        ensure!(read().await?["typical_credit_seconds"] == 900);
+
+        // 40 of the quoted 100 atomic units, valued at spot: 40 cents, not the quote's 100.
+        let address_id = quote_address_id(pool, quote_id).await?;
+        let inserted = topup::db::insert_deposit(
+            pool,
+            &topup::db::NewDeposit {
+                chain_id: BASE,
+                tx_hash: B256::repeat_byte(0x81),
+                log_index: 0,
+                receipt_log_index: 0,
+                tx_from: Address::repeat_byte(0x84),
+                tx_nonce: 0,
+                is_final: false,
+                block_number: 10,
+                block_hash: B256::repeat_byte(0x82),
+                block_time: Utc::now(),
+                address_id,
+                route: Some(route.route.clone()),
+                route_version: Some(route.version),
+                asset_contract: route.asset.contract,
+                from_address: Address::repeat_byte(0x84),
+                amount_atomic: AtomicAmount::new(U256::from(40_u64)),
+                state: DepositState::Detected,
+                reason: None,
+                next_attempt_at: Utc::now(),
+            },
+        )
+        .await?;
+        ensure!(inserted);
+        let confirming = read().await?;
+        ensure!(
+            confirming["payment_status"] == "confirming" && confirming["amount_credited"].is_null(),
+            "{confirming}"
+        );
+        sqlx::query(
+            "UPDATE deposits SET state = 'credited', price_source = 'spot', credit_minor = 40, \
+             valuation_at = now() WHERE address_id = $1",
+        )
+        .bind(address_id)
+        .execute(pool)
+        .await?;
+        let credited = read().await?;
+        ensure!(
+            credited["payment_status"] == "credited"
+                && credited["amount"] == 100
+                && credited["amount_credited"] == 40,
+            "{credited}"
+        );
         Ok(())
     }
     .await;

@@ -28,10 +28,23 @@ export function tokenAmount(quote: ClientQuote): string {
 
 /** The credit in the quote's currency, for example `$25.00`. */
 export function formatAmount(quote: ClientQuote, locale?: string): string {
+  return formatMinorAmount(quote, quote.amount, locale);
+}
+
+/** `minor` units of the quote's currency, for example `$10.00` for 1000. */
+export function formatMinorAmount(quote: ClientQuote, minor: number, locale?: string): string {
   return new Intl.NumberFormat(locale, {
     style: "currency",
     currency: quote.currency.toUpperCase(),
-  }).format(quote.amount / 100);
+  }).format(minor / 100);
+}
+
+/** A typical wait, for example `about 30 seconds` or `about 15 minutes`. */
+export function formatWait(seconds: number): string {
+  if (seconds < 90) {
+    return `about ${seconds} second${seconds === 1 ? "" : "s"}`;
+  }
+  return `about ${Math.round(seconds / 60)} minutes`;
 }
 
 /** `mm:ss` (or `h:mm:ss`) until `expiresAt` Unix seconds, never negative. */

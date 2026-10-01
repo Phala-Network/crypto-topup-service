@@ -4,7 +4,14 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import type { Hash, WalletClient } from "viem";
 import type { CheckoutErrorCode, CheckoutState, CheckoutStatus } from "../checkout.js";
 import { networkName, transactionUrl } from "../chains.js";
-import { formatAmount, formatCountdown, formatTokenAmount, tokenAmount } from "../format.js";
+import {
+  formatAmount,
+  formatCountdown,
+  formatMinorAmount,
+  formatTokenAmount,
+  formatWait,
+  tokenAmount,
+} from "../format.js";
 import { quoteTransfer } from "../payment.js";
 import type { ClientQuote } from "../quote.js";
 import {
@@ -30,7 +37,9 @@ export interface CheckoutProps {
   expectedAddress: string;
   /** The service origin, for example `https://topup.example.com`. */
   apiBase: string;
-  /** Called once when the payment is credited. Fulfil from the `deposit.credited` webhook, not here. */
+  /** Called once when the payment is credited, with the quote: its `amount_credited` is what was
+   * credited, which differs from `amount` for a payment of another amount or a late one. Fulfil
+   * from the `deposit.credited` webhook, not here. */
   onSuccess?: (quote: ClientQuote) => void;
   /** Called once when the quote expires or is canceled without a payment. */
   onExpire?: (quote: ClientQuote) => void;
@@ -189,13 +198,11 @@ function statusMessage(
     case "waiting":
       return "Waiting for your payment";
     case "seen":
-      return quote?.confirmations == null
-        ? "Payment received, crediting in about 30 seconds"
-        : `Payment received, ${quote.confirmations} confirmation${quote.confirmations === 1 ? "" : "s"}. Crediting in about 30 seconds`;
+      return seenMessage(quote);
     case "confirming":
       return "Payment confirmed on chain, crediting…";
     case "credited":
-      return quote === null ? "Payment credited" : `Payment credited: ${formatAmount(quote)}`;
+      return creditedMessage(quote);
     case "rejected":
       return "This payment cannot be credited. Contact support with your transaction.";
     case "reversed":
@@ -209,6 +216,31 @@ function statusMessage(
         ? "This payment address could not be verified. Do not send funds; contact support."
         : "This payment link is not valid. Start a new top-up.";
   }
+}
+
+function seenMessage(quote: ClientQuote | null): string {
+  if (quote === null) {
+    return "Payment received, crediting once it is confirmed";
+  }
+  const wait = formatWait(quote.typical_credit_seconds);
+  return quote.confirmations === null
+    ? `Payment received, crediting in ${wait}`
+    : `Payment received, ${quote.confirmations} confirmation${quote.confirmations === 1 ? "" : "s"}. Crediting in ${wait}`;
+}
+
+/** What was credited and, when the payment was valued at the market price, the quote it missed. */
+function creditedMessage(quote: ClientQuote | null): string {
+  if (quote?.amount_credited == null) {
+    return "Payment credited";
+  }
+  const credited = formatMinorAmount(quote, quote.amount_credited);
+  if (quote.amount_credited < quote.amount) {
+    return `Payment credited: ${credited} of ${formatAmount(quote)}`;
+  }
+  if (quote.amount_credited > quote.amount) {
+    return `Payment credited: ${credited}, more than the ${formatAmount(quote)} quoted`;
+  }
+  return `Payment credited: ${credited}`;
 }
 
 function Transaction({ hash, chainId }: { hash: Hash; chainId: number }) {

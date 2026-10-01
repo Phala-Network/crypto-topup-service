@@ -64,11 +64,7 @@ pub(crate) async fn get_config(
     let assets = routes
         .iter()
         .map(|route| {
-            let floor = route.chain.confirmations;
-            let confirmations = policies
-                .get(&route.chain.chain_id)
-                .map_or(Some(floor), |policy| floor.stricter(*policy))
-                .unwrap_or(Confirmations::Finalized);
+            let confirmations = credit_confirmations(route, policies.get(&route.chain.chain_id));
             ConfigAsset {
                 chain_id: route.chain.chain_id,
                 asset: route.asset.symbol.clone(),
@@ -100,6 +96,15 @@ pub(crate) async fn get_config(
         max_open_amount_per_customer: limits.max_open_amount_per_customer,
         assets,
     }))
+}
+
+/// The confirmation `route`'s payments are credited at: the stricter of the route's floor and the
+/// account's `policy` for its chain, or finality when no chain family accepts both.
+fn credit_confirmations(route: &RouteFile, policy: Option<&Confirmations>) -> Confirmations {
+    let floor = route.chain.confirmations;
+    policy
+        .map_or(Some(floor), |policy| floor.stricter(*policy))
+        .unwrap_or(Confirmations::Finalized)
 }
 
 #[utoipa::path(
@@ -476,30 +481,37 @@ async fn client_quote_view(
         })?;
     let payment =
         super::pending::quote_payment(&mut *state.pool.acquire().await?, route, &lock).await?;
-    let (payment_status, confirmations) = match payment {
+    let (payment_status, confirmations, amount_credited) = match payment {
         // A reversed deposit is no payment; the page says so rather than ask for one again.
         None if address_has_reversed_deposit(&state.pool, lock.address_id).await? => {
-            ("reversed", None)
+            ("reversed", None, None)
         }
-        None => ("none", None),
-        Some(payment) if payment.status == "seen" => ("seen", payment.confirmations),
+        None => ("none", None, None),
+        Some(payment) if payment.status == "seen" => ("seen", payment.confirmations, None),
         Some(payment) => {
             let deposit =
                 ids::parse(ids::DEPOSIT, &payment.deposit).ok_or_else(ApiError::internal)?;
-            let deposit_state =
-                sqlx::query_scalar::<_, String>("SELECT state FROM deposits WHERE id = $1")
-                    .bind(deposit)
-                    .fetch_one(&state.pool)
-                    .await?;
-            let status = match deposit_state.as_str() {
-                "credited" | "swept" => "credited",
-                "rejected" => "rejected",
-                "reversed" => "reversed",
-                _ => "confirming",
-            };
-            (status, None)
+            let (deposit_state, credit_minor) = sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT state, credit_minor::text FROM deposits WHERE id = $1",
+            )
+            .bind(deposit)
+            .fetch_one(&state.pool)
+            .await?;
+            match deposit_state.as_str() {
+                "credited" | "swept" => {
+                    let credit = credit_minor
+                        .and_then(|credit| credit.parse::<u64>().ok())
+                        .ok_or_else(ApiError::internal)?;
+                    ("credited", None, Some(credit))
+                }
+                "rejected" => ("rejected", None, None),
+                "reversed" => ("reversed", None, None),
+                _ => ("confirming", None, None),
+            }
         }
     };
+    let policies = super::account::confirmation_policies(&state.pool, scope.account_id()).await?;
+    let confirmation = credit_confirmations(route, policies.get(&route.chain.chain_id));
     Ok(ClientQuote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
@@ -516,6 +528,8 @@ async fn client_quote_view(
         expires_at: lock.expires_at.timestamp(),
         payment_status: payment_status.to_owned(),
         confirmations,
+        amount_credited,
+        typical_credit_seconds: confirmation.typical_credit_seconds(),
     })
 }
 

@@ -297,9 +297,14 @@ quote (`quote`), also for a late or wrong-amount payment.
 do not log it. The page reads `GET /v1/quotes/{id}?client_secret=…` without an API key, from any
 origin, as Stripe.js reads a PaymentIntent: `{id, object, livemode, status, amount, currency,
 asset, decimals, chain_id, amount_atomic, address, payment_uri, expires_at, payment_status,
-confirmations}`, where `payment_status` is `none`, `seen`, `confirming` (at the route's
-confirmation, being valued and screened), `credited`, `rejected` (contact support), or `reversed`
-(the credited payment's transaction left the chain before finality: it did not happen). It
+confirmations, amount_credited, typical_credit_seconds}`, where `payment_status` is `none`,
+`seen`, `confirming` (at the route's confirmation, being valued and screened), `credited`,
+`rejected` (contact support), or `reversed` (the credited payment's transaction left the chain
+before finality: it did not happen). While `credited`, `amount_credited` is what the payment
+credited in cents, the deposit's `amount`: it differs from `amount` for a payment valued at spot
+(another amount, or paid late), so show it rather than the quote's. `typical_credit_seconds` is
+the typical time from paying to the credit at your account's confirmation for the chain, as
+`GET /v1/config` reports it. It
 carries no account, price, deposit id,
 or transaction hash, and is rate-limited per quote. The secret is `{quote id}_secret_` and 64
 lowercase hex digits (a nonce and the service's tag of it); treat it as opaque. A malformed or
@@ -316,9 +321,11 @@ and does not pay twice.
 **Drive the page from the checkout.** `<Checkout onChange>` is called once per status change with
 `{ status, quote, error }`, like Stripe Elements' `onChange`. Hide your own "new payment" or
 amount controls while the status is `seen` or `confirming`, so that a waiting payer does not
-start a second payment. While waiting, tell the payer that the payment is credited in about 30
-seconds (`typical_credit_seconds`), that they can close the page, and that the credit arrives
-automatically.
+start a second payment. While waiting, tell the payer that the payment is credited in about the
+quote's `typical_credit_seconds` (30 seconds on Ethereum, about 5 minutes at Base's `safe` block,
+15 minutes at `finalized`), that they can close the page, and that the credit arrives
+automatically. `onSuccess(quote)` is called once credited; `quote.amount_credited` is what was
+credited.
 
 **Theme it.** `appearance` takes a `theme` (`light` or `dark`) and `variables` named as in Stripe's
 Appearance API: `colorPrimary`, `accessibleColorOnColorPrimary` (text on the primary color; set a
@@ -670,8 +677,8 @@ sign and execute it as any Safe transaction
 ### 2.1 The event
 
 `deposit.credited` is the one event that moves a balance. The service writes it when a deposit
-passes screening, in the same transaction that marks the deposit `credited`: the credit is final
-and owed to you, whatever you answer.
+passes screening, in the same transaction that marks the deposit `credited`: the credit is owed
+to you whatever you answer, until a `deposit.reversed` takes it back (§2.3).
 
 ```http
 POST {your webhook endpoint's url}

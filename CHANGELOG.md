@@ -9,6 +9,15 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+### Added
+
+- The payer's view of a quote (`GET /v1/quotes/{id}?client_secret=…`, `ClientQuote`) carries
+  `amount_credited`: while `payment_status` is `credited`, what the payment credited in cents (the
+  deposit's `amount`), which differs from the quoted `amount` for a payment valued at spot (another
+  amount, or paid late); otherwise `null`. It also carries `typical_credit_seconds`, the typical
+  time from paying to the credit at the account's confirmation for the quote's chain, as
+  `GET /v1/config` reports it, so the page no longer assumes Ethereum's 30 seconds.
+
 ## [0.3.3] - 2026-10-01
 
 ### Fixed
