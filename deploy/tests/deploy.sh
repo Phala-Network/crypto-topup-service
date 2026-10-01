@@ -389,6 +389,10 @@ grep -qF "kit/deploy/phala cvms get taken-name" "$tmp/taken.err" || fail "taken 
 # never taken for "no such name", such as total 1 with no items.
 page='"success": true, "page": 1, "pageSize": 100, "total": 1, "totalPages": 1'
 item='"appId": "0xbb", "status": "running", "uptime": null'
+# The refusal says what may be behind it and what to do.
+unreadable="deploy.sh: could not check that no CVM is named unreadable-list: the workspace may have an app"
+unreadable+=" matching it without a current CVM (or more than one page of matches); inspect it in Phala Cloud,"
+unreadable+=" or choose another instance name"
 for answer in 'not JSON' '[]' '{"success": true}' "{$page}" "{$page, \"items\": {}}" \
     "{$page, \"items\": [{$item}]}" "{$page, \"items\": [{$item, \"cvmName\": 7}]}" \
     "{$page, \"items\": [\"listed-name\"]}" "{$page, \"items\": [{$item, \"cvmName\": \"other\", \"appId\": null}]}" \
@@ -404,7 +408,7 @@ for answer in 'not JSON' '[]' '{"success": true}' "{$page}" "{$page, \"items\": 
     "{${page/\"page\": 1/\"page\": 2}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
     "{${page/\"total\": 1/\"total\": 1.5}, \"items\": [{$item, \"cvmName\": \"other\"}]}" \
     "{${page/\"success\": true/\"success\": false}, \"items\": []}"; do
-    refused unreadable-list "could not check the workspace's CVM names" STUB_CVMS_JSON="$answer" \
+    refused unreadable-list "$unreadable" STUB_CVMS_JSON="$answer" \
         TOPUP_ADMIN_PUBLIC_KEY= ADMIN_SEED_FILE="$tmp/unreadable-list.seed"
     [[ ! -e "$tmp/unreadable-list.seed" ]] || fail "unreadable-list generated an admin key for $answer"
 done

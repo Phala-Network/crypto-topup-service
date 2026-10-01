@@ -321,8 +321,9 @@ main() {
         and (.items | type) == "array" and (.items | length) == .total
         and all(.items[]; type == "object" and (.cvmName | type) == "string" and (.appId | type) == "string")' \
         <<<"$existing_cvms" >/dev/null 2>&1 ||
-        die "could not check the workspace's CVM names: the CLI's answer is not one complete page of CVMs" \
-            "(more than 100 match $CVM_NAME, or another answer)"
+        die "could not check that no CVM is named $CVM_NAME: the workspace may have an app matching it" \
+            "without a current CVM (or more than one page of matches); inspect it in Phala Cloud, or choose" \
+            "another instance name"
     if jq -e --arg name "$CVM_NAME" 'any(.items[]; .cvmName | ascii_downcase == ($name | ascii_downcase))' \
         <<<"$existing_cvms" >/dev/null; then
         say "deploy.sh: the Phala Cloud workspace already has a CVM named $CVM_NAME; this run creates none."
