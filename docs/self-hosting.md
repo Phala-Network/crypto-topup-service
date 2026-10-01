@@ -38,7 +38,7 @@ There are three ways to deploy a release, all to your own Phala Cloud workspace:
 
 ```sh
 curl -fsSL https://pay.phala.com/deploy.sh | bash              # the latest release
-curl -fsSL https://pay.phala.com/deploy/v0.3.2.sh | bash       # a given release
+curl -fsSL https://pay.phala.com/deploy/v0.3.3.sh | bash       # a given release
 ```
 
 pay.phala.com redirects to the release's `deploy.sh` asset on GitHub, which deploys that release.
@@ -53,7 +53,7 @@ run it with `--strict`, which refuses to go on unless the GitHub CLI verifies th
 provenance (as `PHALA_PAY_REQUIRE_ATTESTATION=1` does):
 
 ```sh
-version=v0.3.2 repo=Phala-Network/phala-pay
+version=v0.3.3 repo=Phala-Network/phala-pay
 gh release download "$version" -R "$repo" -p deploy.sh
 gh attestation verify deploy.sh -R "$repo" --deny-self-hosted-runners \
   --source-digest "$(gh api "repos/$repo/commits/$version" --jq .sha)" \
@@ -63,8 +63,10 @@ bash deploy.sh --strict
 
 It needs
 `curl`, `tar`, `jq`, bash 4.4, Node.js 22 and npm, Docker (preflight checks the configuration in the
-release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key, and
-your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it never stores. It:
+release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key (with
+the Python SDK `phala-pay==0.3.0`), and your Phala Cloud login (with a release's locked CLI,
+`kit/deploy/phala login`: [section 2](#2-your-environment-repository), step 1) or
+`PHALA_CLOUD_API_KEY`, which it never stores. It:
 
 1. downloads the release into a private temporary directory, removed on exit, and verifies it:
    with the GitHub CLI 2.101 or later, logged in, as [Verify a release](#verify-a-release) does;
@@ -76,21 +78,31 @@ your Phala Cloud login (`npx phala login`) or `PHALA_CLOUD_API_KEY`, which it ne
    Cloud's gateway domain, testnet routes, its admin key and backup location in the CVM's env), or
    a **custom domain** (the service variant, every setting attested, from an environment directory
    it writes from the template's routes, or one of yours with its keyed RPC providers' keys);
-3. renders the compose with the kit's `render.sh`, runs `preflight.sh --offline` and
-   `check-route-modes.sh`, and provisions the CVM with the kit's locked Phala Cloud CLI, pre-launch
-   script, `--image dstack-0.5.9 --no-dev-os`, and Phala Cloud's KMS, sealing the secrets you gave
-   from a mode 0600 file in the temporary directory, and records the new CVM's id in the
-   environment directory's `cvm-id` (the quick start: `./NAME.cvm-id`); for a custom domain it then
-   sets the node's gateway, as Deploy does. The CLI runs in an empty directory of its own, so a
+3. refuses an instance name your Phala Cloud workspace already has (before it generates an admin
+   key), or a workspace CVM list it cannot read, renders the compose with the
+   kit's `render.sh`, runs `preflight.sh --offline` and `check-route-modes.sh`, and provisions the
+   CVM with the kit's locked Phala Cloud CLI, pre-launch script, `--image dstack-0.5.9 --no-dev-os`,
+   and Phala Cloud's KMS, sealing the secrets you gave from a mode 0600 file, on tmpfs
+   (`$XDG_RUNTIME_DIR`) where your session has one and otherwise in the temporary directory,
+   shredded where `shred` exists and removed on every exit. It records the new CVM's id in the
+   environment directory's `cvm-id` (the quick start: `NAME.cvm-id` in the directory you run it
+   from), waits for the CVM to settle with its compose, and for a custom domain then sets the
+   node's gateway, as Deploy does, and waits for the attestation of that compose, which must carry
+   the compose it rendered and match the compose hash Phala Cloud reports, and whose event log names
+   the instance id of the TXT record. The CLI runs in an empty directory of its own, so a
    `phala.toml` where you run the script is never read;
 4. prints the CVM id, the URL, the DNS records of a custom domain, and how to verify the
-   attestation (section 5).
+   attestation (section 5). If a step after the CVM's creation fails or times out, or you press
+   Ctrl-C, it still prints the CVM id, the URL, and how to finish or remove the CVM.
 
 `--non-interactive` takes the inputs from the environment instead (the script's header lists
 them). A secret is written as `NAME=VALUE`, which the Phala Cloud CLI reads as dotenv does, so a
 value with a `#`, a quote, or surrounding whitespace is refused before anything is deployed. A run
 that finds a recorded `cvm-id` creates no other CVM: it prints how to finish that one with Deploy,
-or to delete it and the file to start over. A provision proves nothing about the instance's health: it is accepted once `/healthz`
+or to delete it and the file to start over. That state is a file where you run the script, or in the
+environment directory you choose: run it again from the same directory, with the same environment
+directory. A run that cannot see the file still creates no duplicate, since it refuses a name the
+workspace already has. A provision proves nothing about the instance's health: it is accepted once `/healthz`
 answers and you have verified the attestation, and for a custom domain once the DNS records
 resolve and Deploy's upgrade with the same release has passed (section 4, step 5). Commit the
 custom domain's environment directory to your environment repository and set `TOPUP_CVM_ID` to the
@@ -143,7 +155,7 @@ comes from a release.
    directory's `topup.yaml` (step 4):
 
    ```sh
-   uvx --from phala-pay topup-sdk keygen --keyid admin/production-v1 --seed-out ~/phala-pay/admin.seed
+   uvx --from phala-pay==0.3.0 topup-sdk keygen --keyid admin/production-v1 --seed-out ~/phala-pay/admin.seed
    ```
 
 3. **Environments.** In your repository's Settings > Environments: `production` and, for a

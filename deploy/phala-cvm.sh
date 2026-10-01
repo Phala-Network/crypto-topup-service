@@ -12,11 +12,13 @@
 #   deploy/phala-cvm.sh wait [--unsealed] CVM_ID [PREVIOUS_HASH] >cvm.json
 #                                                    until the CVM runs, settled, with a compose hash
 #                                                    other than PREVIOUS_HASH (15 minutes); with
-#                                                    --unsealed, booted (an instance id) instead of
-#                                                    running
+#                                                    --unsealed, settled in any status
 #   deploy/phala-cvm.sh attestation CVM_ID HASH >attestation.json
 #                                                    until the attestation reports compose hash HASH
-#                                                    (10 minutes; an upgrade attests late)
+#                                                    (10 minutes; an upgrade attests late): the CVM
+#                                                    booted that compose
+#   deploy/phala-cvm.sh instance-id ATTESTATION_JSON the instance id, from the event log's single
+#                                                    instance-id event
 #   deploy/phala-cvm.sh healthz URL                  until URL/healthz answers (10 minutes)
 set -euo pipefail
 
@@ -51,19 +53,21 @@ case "$command" in
         # Settled: no operation in progress, with a new compose. A provision (--unsealed) only
         # creates the CVM: an unsealed CVM's app-compose fails until its owner seals the secrets
         # (topup's PostgreSQL refuses to start without the storage credentials), and Phala Cloud
-        # shows it as error, so it needs only to have booted, its instance id set. The upgrade
-        # after the sealing proves the CVM: running, /healthz, the attestation, the certificate.
+        # shows it as error, so it is accepted in any status. Whether it booted the compose is the
+        # attestation's to say (attestation, then instance-id): `cvms get` reports instance_id
+        # null in practice. The upgrade after the sealing proves the CVM: running, /healthz, the
+        # attestation, the certificate.
         accepted='(.in_progress | not) and ((.compose_hash | '"$normal_hash"') != $previous)'
         if [[ "${1:-}" == --unsealed ]]; then
             shift
-            accepted+=' and ((.instance_id // "") != "")' outcome="boot a new compose"
+            outcome="settle with a new compose"
         else
             accepted='.status == "running" and '$accepted outcome="run a new compose"
         fi
         for _ in $(seq 60); do
             if cvm=$(phala cvms get "$1" --json); then
-                jq -r '"status=\(.status) in_progress=\(.in_progress) instance_id=\(.instance_id)"
-                    + " compose_hash=\(.compose_hash)"' <<<"$cvm" >&2 || true
+                jq -r '"status=\(.status) in_progress=\(.in_progress) compose_hash=\(.compose_hash)"' \
+                    <<<"$cvm" >&2 || true
                 if jq -e --arg previous "${2:-}" "$accepted" <<<"$cvm" >/dev/null; then
                     printf '%s\n' "$cvm"
                     exit 0
@@ -89,6 +93,11 @@ case "$command" in
         echo "::error::the attestation reports compose hash '${attested:-none}', not the deployed $2" >&2
         exit 1
         ;;
+    instance-id)
+        jq -er '[.tcb_info.event_log[]? | select(.event == "instance-id") | .event_payload | ascii_downcase
+            | select(test("^[0-9a-f]{40}$"))] | select(length == 1)[0]' "$1" ||
+            { echo "::error::the attestation's event log names no single instance id" >&2; exit 1; }
+        ;;
     healthz)
         for _ in $(seq 60); do
             curl -fsS --max-time 10 "$1/healthz" >/dev/null && exit 0
@@ -98,7 +107,7 @@ case "$command" in
         exit 1
         ;;
     *)
-        echo "usage: $0 get|url|gateway-domain|deploy|wait|attestation|healthz ARGS..." >&2
+        echo "usage: $0 get|url|gateway-domain|deploy|wait|attestation|instance-id|healthz ARGS..." >&2
         exit 64
         ;;
 esac

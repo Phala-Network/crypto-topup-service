@@ -15,7 +15,9 @@ set -eu
 #
 # ATTESTATION_JSON is `phala cvms attestation --json` (the app certificate's quote, the event log,
 # and the app-compose). INFO_JSON is the guest agent's public `GET /prpc/Info` on port 8090 (the
-# CVM runs with public tcbinfo): the vm_config the quote does not carry.
+# CVM runs with public tcbinfo): the vm_config the quote does not carry. The app-compose's binding to
+# EXPECTED_COMPOSE and the pre-launch script is deploy/attested-compose.sh's, which deploy.sh uses
+# too.
 if [ "$#" -ne 5 ]; then
     echo "usage: verify-attestation.sh ATTESTATION_JSON INFO_JSON APP_ID EXPECTED_COMPOSE service|restore-check|template|product" >&2
     exit 64
@@ -49,9 +51,7 @@ jq -e --slurpfile info "$info" '{
 }
 "$root/deploy/dstack-verifier.sh" <"$tmp/request.json" >"$tmp/result.json"
 
-jq -jer '.compose_file | select(type == "string" and length > 0)' "$attestation" \
-    >"$tmp/app-compose.json"
-compose_hash=$(sha256sum "$tmp/app-compose.json" | awk '{print $1}')
+compose_hash=$("$root/deploy/attested-compose.sh" "$attestation" "$expected_compose" "$tmp")
 jq -e --arg app_id "$app_id" --arg compose_hash "$compose_hash" '
     .details.tcb_status == "UpToDate"
     and .details.app_info.app_id == $app_id
@@ -65,20 +65,6 @@ jq -e --arg app_id "$app_id" --arg compose_hash "$compose_hash" '
 jq -r '"dstack verifier: quote and TCB \(.details.tcb_status), RTMR3 event log, OS image \(.details.app_info.os_image_hash)",
     "attested app id: \(.details.app_info.app_id)",
     "attested compose hash: 0x\(.details.app_info.compose_hash)"' "$tmp/result.json"
-
-jq -e 'type == "object"' "$tmp/app-compose.json" >/dev/null
-jq -j '.pre_launch_script // ""' "$tmp/app-compose.json" >"$tmp/pre-launch.sh"
-cmp -s "$tmp/pre-launch.sh" "$root/deploy/phala-cloud-pre-launch.sh" || {
-    echo "the attested pre_launch_script is not deploy/phala-cloud-pre-launch.sh" >&2
-    exit 1
-}
-jq -jer '.docker_compose_file | select(type == "string" and length > 0)' \
-    "$tmp/app-compose.json" >"$tmp/docker-compose.yml"
-cmp -s "$expected_compose" "$tmp/docker-compose.yml" || {
-    echo "attested docker_compose_file differs from the prepared compose" >&2
-    diff -u "$expected_compose" "$tmp/docker-compose.yml" >&2 || true
-    exit 1
-}
 
 compose=$("$root/deploy/pinned-compose.sh")
 "$compose" -f "$tmp/docker-compose.yml" config --no-interpolate --format json >"$tmp/docker-compose.json"

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # deploy/phala-cvm.sh wait against a stub Phala Cloud CLI that answers `cvms get` with a sequence of
-# CVM states: an upgrade waits for the CVM to run a new compose; a provision (--unsealed) for it to
-# boot a new compose (an instance id), in any status. Neither accepts a CVM still in progress or with
-# the previous compose, and both time out after 60 polls.
+# CVM states, each with instance_id null as Phala Cloud reports it: an upgrade waits for the CVM to
+# run a new compose; a provision (--unsealed) for it to settle with a new compose, in any status.
+# Neither accepts a CVM still in progress or with the previous compose, and both time out after 60
+# polls. And deploy/phala-cvm.sh instance-id reads the instance id from an attestation's event log,
+# which must name exactly one.
 set -euo pipefail
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -24,11 +26,10 @@ printf '#!/bin/sh\n' >"$tmp/bin/sleep"
 chmod +x "$tmp/deploy/phala" "$tmp/bin/sleep"
 export PATH="$tmp/bin:$PATH" STUB_COUNT="$tmp/count" STUB_STATES="$tmp/states"
 
-# state STATUS IN_PROGRESS HASH [INSTANCE_ID]: one `cvms get` answer; an empty instance id is null.
+# state STATUS IN_PROGRESS HASH: one `cvms get` answer.
 state() {
-    jq -nc --arg status "$1" --argjson in_progress "$2" --arg hash "$3" --arg instance "${4-i1}" \
-        '{status: $status, in_progress: $in_progress, compose_hash: $hash,
-            instance_id: (if $instance == "" then null else $instance end)}'
+    jq -nc --arg status "$1" --argjson in_progress "$2" --arg hash "$3" \
+        '{status: $status, in_progress: $in_progress, compose_hash: $hash, instance_id: null}'
 }
 fail() {
     echo "phala-cvm wait: $*" >&2
@@ -55,21 +56,19 @@ timed_out() {
 }
 new=0xAB12 old=0xcd34
 
-# A provision accepts a settled CVM with the new compose that booted, in any status.
-booted=$(state error false "$new")
-output=$({ state starting true "$new" ""; echo "$booted"; } | wait_for --unsealed cvm-1) ||
-    fail "a provision refused the booted CVM: $(tail -1 "$tmp/err")"
-accepted "a provision" "$output" "$booted" 2
+# A provision accepts a settled CVM with the new compose, in any status.
+settled=$(state error false "$new")
+output=$({ state starting true "$new"; echo "$settled"; } | wait_for --unsealed cvm-1) ||
+    fail "a provision refused the settled CVM: $(tail -1 "$tmp/err")"
+accepted "a provision" "$output" "$settled" 2
 redeployed=$(state stopped false ab12)
 output=$({ state error false "$old"; state error true ab12; echo "$redeployed"; } |
     wait_for --unsealed cvm-1 cd34) || fail "a provision's redeploy refused its new compose: $(tail -1 "$tmp/err")"
 accepted "a provision's redeploy" "$output" "$redeployed" 3
-! state error false "$new" "" | wait_for --unsealed cvm-1 >/dev/null || fail "a provision accepted a CVM that never booted"
-timed_out "a CVM without an instance id" "boot a new compose"
 ! state starting true "$new" | wait_for --unsealed cvm-1 >/dev/null || fail "a provision accepted a CVM in progress"
-timed_out "a CVM in progress" "boot a new compose"
+timed_out "a CVM in progress" "settle with a new compose"
 ! state error false "$old" | wait_for --unsealed cvm-1 cd34 >/dev/null || fail "a provision accepted the previous compose"
-timed_out "a provision's redeploy with the previous compose" "boot a new compose"
+timed_out "a provision's redeploy with the previous compose" "settle with a new compose"
 
 # An upgrade accepts only a settled CVM running the new compose.
 running=$(state running false "$new")
@@ -82,4 +81,21 @@ timed_out "an upgrade of a CVM that does not run" "run a new compose"
 timed_out "an upgrade in progress" "run a new compose"
 ! state running false "$old" | wait_for cvm-1 cd34 >/dev/null || fail "an upgrade accepted the previous compose"
 timed_out "an upgrade with the previous compose" "run a new compose"
+
+# instance-id: the event log's single instance-id event, as 40 lowercase hex digits.
+# attestation EVENT... : an attestation whose event log has each instance-id EVENT payload.
+attestation() {
+    jq -n '{tcb_info: {event_log: ([{event: "compose-hash", event_payload: "ab12"}]
+        + [$ARGS.positional[] | {event: "instance-id", event_payload: .}])}}' --args "$@" >"$tmp/attestation.json"
+}
+id=$(printf 'A%.0s' {1..40})
+attestation "$id"
+[[ "$("$tmp/deploy/phala-cvm.sh" instance-id "$tmp/attestation.json")" == "$(printf 'a%.0s' {1..40})" ]] ||
+    fail "instance-id did not read the event log's instance id"
+for events in "" "$id $id" "${id}0"; do
+    # shellcheck disable=SC2086 # each word an event
+    attestation $events
+    ! "$tmp/deploy/phala-cvm.sh" instance-id "$tmp/attestation.json" >/dev/null 2>&1 ||
+        fail "instance-id accepted the events '$events'"
+done
 echo "CVM wait test passed"
