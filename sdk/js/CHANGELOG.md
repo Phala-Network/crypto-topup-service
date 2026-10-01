@@ -4,7 +4,9 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - Unreleased
+## [Unreleased]
+
+## [0.3.0] - 2026-10-01
 
 ### Changed (breaking)
 
@@ -150,7 +152,8 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   without trailing zeros (`1,273.9185`); `tokenAmount(quote)` is the plain decimal a wallet
   accepts, which `<Checkout>`'s "Exact amount" copies.
 
-[0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...HEAD
+[Unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.3.0...HEAD
+[0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...sdk-js-v0.3.0
 [0.2.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.2...sdk-js-v0.2.0
 [0.1.2]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.1...sdk-js-v0.1.2
 [0.1.1]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.0...sdk-js-v0.1.1
