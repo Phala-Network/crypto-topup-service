@@ -1,4 +1,4 @@
-import type { CheckoutStatus, WalletError } from "@phala/pay";
+import type { CheckoutStatus } from "@phala/pay";
 import type { Appearance } from "@phala/pay/react";
 import { Check, CircleAlert, Cloud, CircleCheck, Copy, FlaskConical, Gift, Lock } from "lucide-react";
 import { Suspense, lazy, useId, useState, type FormEvent, type ReactNode } from "react";
@@ -22,6 +22,7 @@ import { DepositAddressPanel } from "./DepositAddressPanel.js";
 import { atomicAmount, dollars, percent, presetDollars, rate, signedDollars, tokenName } from "./format.js";
 import { FundWallet, TestTokens, type Need } from "./Funding.js";
 import { useCreateQuote } from "./queries.js";
+import type { PaidWith } from "./testTokens.js";
 import { cn } from "@/lib/utils";
 
 const Checkout = lazy(() => loadSdk().then((sdk) => ({ default: sdk.Checkout })));
@@ -550,8 +551,8 @@ function QuoteCheckout({
   onNewTopUp: () => void;
 }) {
   const [status, setStatus] = useState<CheckoutStatus>("loading");
-  // The wallet held too little for the quote, so the checkout sent nothing.
-  const [short, setShort] = useState(false);
+  // The wallet that held too little for the quote, so the checkout sent nothing.
+  const [short, setShort] = useState<PaidWith | null>(null);
   const testnet = network?.testnet ?? true;
   const token = assetOf(network, session.asset);
   const bps = token?.bonus_bps ?? 0;
@@ -583,13 +584,13 @@ function QuoteCheckout({
             apiBase={account.api_base}
             appearance={appearance}
             onChange={(state) => setStatus(state.status)}
-            onWalletError={(error: WalletError) => setShort(error.code === "insufficient_balance")}
+            onWalletError={(error, wallet) => setShort(error.code === "insufficient_balance" ? wallet : null)}
             onSuccess={onCredited}
           />
         </Suspense>
       )}
-      {short && status === "waiting" && network !== undefined && token !== undefined && (
-        <FundWallet network={network} token={token} needed={BigInt(session.amount_atomic)} />
+      {short !== null && status === "waiting" && network !== undefined && token !== undefined && (
+        <FundWallet network={network} token={token} needed={BigInt(session.amount_atomic)} wallet={short} />
       )}
       <Button type="button" variant="outline" className="w-full" onClick={onNewTopUp}>
         Add more credits

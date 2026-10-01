@@ -159,6 +159,19 @@ describe("payWithWallet", () => {
     expect(calls.map((c) => c.method)).not.toContain("eth_sendTransaction");
   });
 
+  it("compares the balance in the token's own units (6 decimals)", async () => {
+    const usdc = quote({ asset: "usdc", decimals: 6, amount_atomic: "20000000" });
+    const short = mockProvider(11155111, [11155111]);
+    short.wallet.balance = 19999999n;
+    await expect(payWithWallet(short.provider, usdc)).rejects.toMatchObject({
+      code: "insufficient_balance",
+      message: "Your wallet holds 19.999999 USDC, less than the 20 USDC to pay. Nothing was sent.",
+    });
+    const exact = mockProvider(11155111, [11155111]);
+    exact.wallet.balance = 20000000n;
+    await expect(payWithWallet(exact.provider, usdc)).resolves.toBe(HASH);
+  });
+
   it("still pays when the wallet cannot read the balance", async () => {
     const { provider } = mockProvider(11155111, [11155111], { eth_call: -32601 });
     await expect(payWithWallet(provider, quote())).resolves.toBe(HASH);

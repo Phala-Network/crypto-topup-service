@@ -8,6 +8,7 @@ import {
   http,
   parseAbi,
   parseEther,
+  parseGwei,
   parseUnits,
   publicActions,
   walletActions,
@@ -87,14 +88,17 @@ async function mintUsdc(to: string, amount: bigint): Promise<void> {
   });
 }
 
-/** Anvil's second dev account: gas on both chains, and none of the test tokens. */
-async function emptyAccount(): Promise<Address> {
+/**
+ * Anvil's dev account `index` other than the payer's (0): gas on both chains, and none of the test
+ * tokens until a test gives it some. Each test that needs one takes its own.
+ */
+async function emptyAccount(index: number): Promise<Address> {
   const accounts = await createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) })
     .extend(walletActions)
     .getAddresses();
-  const account = accounts[1];
+  const account = accounts[index];
   if (account === undefined) {
-    throw new Error("anvil has no second dev account");
+    throw new Error(`anvil has no dev account ${index}`);
   }
   return account;
 }
@@ -104,14 +108,23 @@ async function sentCount(account: Address): Promise<number> {
   return createPublicClient({ transport: http(env("ANVIL_URL")) }).getTransactionCount({ address: account });
 }
 
-/** An EIP-6963 wallet on the Anvils holding `account` (the payer's unless named); it starts on mainnet. */
-async function installWallet(page: Page, account = env("PAYER_ADDRESS")) {
+/**
+ * EIP-6963 wallets on the Anvils, announced in order, each holding its account: by default one,
+ * "Test Wallet", holding the payer's. Each starts on mainnet. Resolves with the RPC methods they
+ * forwarded to the Anvils, in order.
+ */
+async function installWallet(
+  page: Page,
+  wallets: { name: string; account: string }[] = [{ name: "Test Wallet", account: env("PAYER_ADDRESS") }],
+): Promise<string[]> {
   const rpcs: Record<number, string> = { [sepolia.id]: env("ANVIL_URL"), [baseSepolia.id]: env("BASE_ANVIL_URL") };
+  const forwarded: string[] = [];
   await page.exposeFunction("anvilRequest", async (chainId: number, method: string, params: unknown) => {
     const rpc = rpcs[chainId];
     if (rpc === undefined) {
       return { error: { code: 4901, message: "wallet is on another chain" } };
     }
+    forwarded.push(method);
     const response = await fetch(rpc, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -124,58 +137,63 @@ async function installWallet(page: Page, account = env("PAYER_ADDRESS")) {
     return body.error === undefined ? { result: body.result } : { error: body.error };
   });
   await page.addInitScript(
-    ({ account, chainIds }) => {
-      let current = 1;
-      const known = new Set([1]);
+    ({ wallets, chainIds }) => {
       const fail = (code: number, message: string) => Object.assign(new Error(message), { code });
-      const provider = {
-        async request({ method, params }: { method: string; params?: unknown }): Promise<unknown> {
-          const [first] = (params ?? []) as [{ chainId?: string }?];
-          switch (method) {
-            case "eth_requestAccounts":
-            case "eth_accounts":
-              return [account];
-            case "eth_chainId":
-              return `0x${current.toString(16)}`;
-            case "wallet_switchEthereumChain": {
-              const id = Number(first?.chainId);
-              if (!known.has(id)) {
-                throw fail(4902, "Unrecognized chain ID");
+      const announced = wallets.map(({ name, account }, index) => {
+        let current = 1;
+        const known = new Set([1]);
+        const provider = {
+          async request({ method, params }: { method: string; params?: unknown }): Promise<unknown> {
+            const [first] = (params ?? []) as [{ chainId?: string }?];
+            switch (method) {
+              case "eth_requestAccounts":
+              case "eth_accounts":
+                return [account];
+              case "eth_chainId":
+                return `0x${current.toString(16)}`;
+              case "wallet_switchEthereumChain": {
+                const id = Number(first?.chainId);
+                if (!known.has(id)) {
+                  throw fail(4902, "Unrecognized chain ID");
+                }
+                current = id;
+                return null;
               }
-              current = id;
-              return null;
+              case "wallet_addEthereumChain":
+                known.add(Number(first?.chainId));
+                return null;
             }
-            case "wallet_addEthereumChain":
-              known.add(Number(first?.chainId));
-              return null;
-          }
-          if (!chainIds.includes(current)) {
-            throw fail(4901, "wallet is on another chain");
-          }
-          const answer = await window.anvilRequest(current, method, params);
-          if ("error" in answer) {
-            throw fail(answer.error.code, answer.error.message);
-          }
-          return answer.result;
-        },
-        on: () => undefined,
-        removeListener: () => undefined,
+            if (!chainIds.includes(current)) {
+              throw fail(4901, "wallet is on another chain");
+            }
+            const answer = await window.anvilRequest(current, method, params);
+            if ("error" in answer) {
+              throw fail(answer.error.code, answer.error.message);
+            }
+            return answer.result;
+          },
+          on: () => undefined,
+          removeListener: () => undefined,
+        };
+        const info = {
+          uuid: `0b6f1e1e-6f0c-4c43-9d7a-2f0d4b0f7a1${index}`,
+          name,
+          icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
+          rdns: `test.wallet${index}`,
+        };
+        return Object.freeze({ info, provider });
+      });
+      const announce = () => {
+        for (const detail of announced) {
+          window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail }));
+        }
       };
-      const info = {
-        uuid: "0b6f1e1e-6f0c-4c43-9d7a-2f0d4b0f7a11",
-        name: "Test Wallet",
-        icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E",
-        rdns: "test.wallet",
-      };
-      const announce = () =>
-        window.dispatchEvent(
-          new CustomEvent("eip6963:announceProvider", { detail: Object.freeze({ info, provider }) }),
-        );
       window.addEventListener("eip6963:requestProvider", announce);
       announce();
     },
-    { account, chainIds: [sepolia.id, baseSepolia.id] as number[] },
+    { wallets, chainIds: [sepolia.id, baseSepolia.id] as number[] },
   );
+  return forwarded;
 }
 
 /**
@@ -681,33 +699,41 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   expect(problems).toEqual([]);
 });
 
-test("a wallet holding too little sends nothing and is told how to fund it; the mint covers the payment", async ({
+test("a quote a wallet cannot cover sends nothing; the mint beside it funds that wallet, not the first", async ({
   page,
 }, testInfo) => {
   test.setTimeout(180_000);
   const problems = await watchConsole(page);
-  const payer = await emptyAccount();
-  await installWallet(page, payer);
+  // Two browser wallets: the payer's, announced first, and an empty one, which pays.
+  const empty = await emptyAccount(1);
+  await installWallet(page, [
+    { name: "Test Wallet", account: env("PAYER_ADDRESS") },
+    { name: "Empty Wallet", account: empty },
+  ]);
   await page.goto(env("SITE_URL"));
   const product = page.getByRole("region", { name: "Acme Cloud · Billing" });
   const helper = page.getByRole("note", { name: "Test tokens" });
-  const pay = product.getByRole("button", { name: "Pay with crypto (Test Wallet)" });
+  const pay = product.getByRole("button", { name: "Pay with crypto (Empty Wallet)" });
   await expect(product.getByTestId("balance")).toHaveText("$0.00");
 
-  // $20 in test USDC from a wallet with none: the checkout sends nothing, and points to Circle's
-  // faucet.
+  // $20 in test USDC from a wallet holding a millionth less, in USDC's 6 decimals: the checkout
+  // sends nothing, and points to Circle's faucet.
+  await mintUsdc(empty, 19_999_999n);
   await product.getByRole("radio", { name: "Test USDC", exact: true }).check({ force: true });
   await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
   await pay.click();
-  await expect(product.getByText("Your wallet holds 0 USDC, less than the 20 USDC to pay. Nothing was sent.")).toBeVisible();
+  await expect(
+    product.getByText("Your wallet holds 19.999999 USDC, less than the 20 USDC to pay. Nothing was sent."),
+  ).toBeVisible();
   const usdc = product.getByTestId("fund-wallet");
   await expect(usdc).toContainText("Not enough Test USDC in your wallet");
   await expect(usdc.getByRole("link", { name: /^Circle USDC faucet/ })).toHaveAttribute("href", "https://faucet.circle.com");
   await expect(helper.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
-  expect(await sentCount(payer)).toBe(0);
+  expect(await sentCount(empty)).toBe(0);
 
   // $500 in test PHA at 0.25 USD per PHA: 2,000 PHA, more than the default mint, which grows to
-  // cover the quote; paying first is refused, and the mint beside the refusal covers it.
+  // cover the quote; paying first is refused, and the mint beside the refusal mints to the wallet
+  // that paid, not the first one announced.
   await product.getByRole("button", { name: "Add more credits" }).click();
   await product.getByRole("radio", { name: "Test PHA", exact: true }).check({ force: true });
   await product.getByText("Custom", { exact: true }).click();
@@ -719,28 +745,88 @@ test("a wallet holding too little sends nothing and is told how to fund it; the 
   await expect(product.getByText("Your wallet holds 0 PHA, less than the 2,000 PHA to pay. Nothing was sent.")).toBeVisible();
   const pha = product.getByTestId("fund-wallet");
   await expect(pha).toContainText("Not enough Test PHA in your wallet");
-  expect(await sentCount(payer)).toBe(0);
+  expect(await sentCount(empty)).toBe(0);
   await page.screenshot({ path: testInfo.outputPath("underfunded.png"), fullPage: true });
+  const payerHeld = await tokenBalance(env("PAYER_ADDRESS"));
   await pha.getByRole("button", { name: "Mint 2,000 test PHA" }).click();
   await expect(pha).toContainText("Minted:");
-  expect(await tokenBalance(payer)).toBe(parseEther("2000"));
+  expect(await tokenBalance(empty)).toBe(parseEther("2000"));
+  expect(await tokenBalance(env("PAYER_ADDRESS"))).toBe(payerHeld);
   await pay.click();
   await expect(product.getByTestId("payment-credited")).toContainText("$500.00", { timeout: 60_000 });
   await expect(pha).toHaveCount(0);
-  expect(await tokenBalance(payer)).toBe(0n);
+  expect(await tokenBalance(empty)).toBe(0n);
+  expect(problems).toEqual([]);
+});
 
-  // To the deposit address, the amount typed sizes the mint; more than the wallet holds sends
-  // nothing.
+test("the deposit address: a canceled mint mints nothing; the amount typed sizes the mint, and too much sends nothing", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const problems = await watchConsole(page);
+  const account = await emptyAccount(2);
+  const forwarded = await installWallet(page, [{ name: "Test Wallet", account }]);
+  await page.goto(env("SITE_URL"));
+  const product = page.getByRole("region", { name: "Acme Cloud · Billing" });
+  const helper = page.getByRole("note", { name: "Test tokens" });
+  await expect(product.getByTestId("balance")).toHaveText("$0.00");
+
+  // The wallet cancels the mint (a 0 ETH transfer to itself with its nonce) before it is mined: the
+  // page says nothing was minted. Anvil holds the mint until the cancel replaces it.
+  const chain = createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) })
+    .extend(walletActions)
+    .extend(publicActions);
+  await chain.setAutomine(false);
+  try {
+    const nonce = await sentCount(account);
+    await helper.getByRole("button", { name: "Mint 1,000 test PHA" }).click();
+    // The page has read its pending mint, so it can tell what replaced it.
+    await expect
+      .poll(() => {
+        const read = forwarded.indexOf("eth_getTransactionByHash");
+        return read >= 0 && forwarded.indexOf("eth_getTransactionReceipt", read) > read;
+      })
+      .toBe(true);
+    await chain.sendTransaction({
+      account,
+      to: account,
+      value: 0n,
+      nonce,
+      maxFeePerGas: parseGwei("1000"),
+      maxPriorityFeePerGas: parseGwei("500"),
+    });
+    await chain.mine({ blocks: 1 });
+  } finally {
+    await chain.setAutomine(true);
+  }
+  await expect(helper).toContainText("The mint was canceled in the wallet; nothing was minted.", { timeout: 30_000 });
+  await expect(helper).not.toContainText("Minted:");
+  expect(await tokenBalance(account)).toBe(0n);
+
   await page.getByRole("tab", { name: "Deposit address" }).click();
   await product.getByRole("button", { name: "Show my deposit address" }).click();
   const form = product.getByRole("form", { name: "Pay to the deposit address from a browser wallet" });
-  await form.getByLabel(/^Send from your browser wallet/).fill("5000");
-  await expect(helper.getByRole("button", { name: "Mint 5,000 test PHA" })).toBeVisible();
-  const sent = await sentCount(payer);
-  await form.getByRole("button", { name: "Send" }).click();
-  await expect(form).toContainText("Your wallet holds 0 PHA, less than the 5,000 PHA to send. Nothing was sent.");
-  await expect(form.getByTestId("fund-wallet").getByRole("button", { name: "Mint 5,000 test PHA" })).toBeVisible();
-  expect(await sentCount(payer)).toBe(sent);
+  const amount = form.getByLabel(/^Send from your browser wallet/);
+  const send = form.getByRole("button", { name: "Send" });
+  const fund = form.getByTestId("fund-wallet");
+  const sent = await sentCount(account);
+  await send.click();
+  await expect(form).toContainText("Your wallet holds 0 PHA, less than the 25 PHA to send. Nothing was sent.");
+  await expect(fund.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
+
+  // Another amount clears that refusal and its mint; 1,234.5 PHA rounds the mint up to 1,300.
+  await amount.fill("1234.5");
+  await expect(fund).toHaveCount(0);
+  await expect(helper.getByRole("button", { name: "Mint 1,300 test PHA" })).toBeVisible();
+  await send.click();
+  await expect(form).toContainText("Your wallet holds 0 PHA, less than the 1,234.5 PHA to send. Nothing was sent.");
+  expect(await sentCount(account)).toBe(sent);
+  await fund.getByRole("button", { name: "Mint 1,300 test PHA" }).click();
+  await expect(fund).toContainText("Minted:");
+  expect(await tokenBalance(account)).toBe(parseEther("1300"));
+  await send.click();
+  await expect(form).toContainText("Sent: 0x");
+  expect(await tokenBalance(account)).toBe(parseEther("65.5"));
   expect(problems).toEqual([]);
 });
 

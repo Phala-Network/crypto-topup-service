@@ -37,10 +37,11 @@ export interface CheckoutProps {
   /** Called whenever the checkout's status changes, like Stripe Elements' `onChange`: for example,
    * to hide your own "new payment" control while a payment is `seen` or `confirming`. */
   onChange?: (state: CheckoutState) => void;
-  /** Called when the wallet tab could not send the payment, with the `WalletError`: for example
-   * `insufficient_balance` (nothing was sent), to offer your own way to fund the wallet. The
+  /** Called when the wallet tab could not send the payment, with the `WalletError` and the wallet
+   * it tried (the chosen browser wallet's provider, or `walletClient`): for example on
+   * `insufficient_balance` (nothing was sent), to offer your own way to fund that wallet. The
    * checkout shows the error's message itself. */
-  onWalletError?: (error: WalletError) => void;
+  onWalletError?: (error: WalletError, wallet: WalletClient | EthereumProvider) => void;
   appearance?: Appearance;
   /** Milliseconds between status reads; default 3000. */
   pollInterval?: number;
@@ -239,7 +240,7 @@ function PaymentOptions({
   buttonText: string;
   walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
-  onWalletError: ((error: WalletError) => void) | undefined;
+  onWalletError: CheckoutProps["onWalletError"];
 }) {
   const [method, setMethod] = useState<Method>("wallet");
   const id = useId();
@@ -340,7 +341,7 @@ function WalletPanel({
   buttonText: string;
   walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
-  onWalletError: ((error: WalletError) => void) | undefined;
+  onWalletError: CheckoutProps["onWalletError"];
 }) {
   const [discovered, setDiscovered] = useState<Wallet[]>([]);
   const [step, setStep] = useState<WalletStep>({ kind: "idle" });
@@ -364,7 +365,7 @@ function WalletPanel({
         message: error instanceof WalletError ? error.message : "The payment could not be sent",
       });
       if (error instanceof WalletError) {
-        onWalletError?.(error);
+        onWalletError?.(error, wallet);
       }
     }
   };

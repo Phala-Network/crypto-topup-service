@@ -80,9 +80,10 @@ Elements' `onChange`, for example to hide your own "new payment" control while a
 
 Before the wallet tab sends a payment, it reads the wallet's token balance; when the wallet holds
 less than the quote, it sends nothing (the transfer would revert and still cost gas) and says how
-much the wallet holds. `onWalletError(error)` is called with the `WalletError` whenever the wallet
-tab could not send (`code` `insufficient_balance`, `rejected`, `wrong_chain`, …), for example to
-link your own way to fund the wallet.
+much the wallet holds. `onWalletError(error, wallet)` is called with the `WalletError` and the
+wallet it tried (the chosen browser wallet's EIP-1193 provider, or your `walletClient`) whenever the
+wallet tab could not send (`code` `insufficient_balance`, `rejected`, `wrong_chain`, …), for example
+to offer your own way to fund that wallet.
 
 To resume after a reload, keep the client secret in the browser (for example `localStorage`, per
 signed-in account) until the status is `credited`, `expired`, `canceled`, or `error`. Tell a

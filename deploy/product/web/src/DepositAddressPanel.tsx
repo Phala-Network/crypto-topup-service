@@ -232,7 +232,11 @@ function PayFromWallet({
           className="h-10 tabular-nums"
           inputMode="decimal"
           value={amount}
-          onChange={(event) => onAmountChange(event.target.value)}
+          onChange={(event) => {
+            onAmountChange(event.target.value);
+            // A refusal, and its mint, were for the amount before.
+            send.reset();
+          }}
         />
         <Button type="submit" variant="outline" size="lg" className="h-10" disabled={send.isPending || to === ""}>
           {send.isPending ? "Confirm in your wallet…" : "Send"}

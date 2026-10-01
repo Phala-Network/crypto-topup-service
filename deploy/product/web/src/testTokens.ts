@@ -1,4 +1,4 @@
-import { WalletError, knownChain, networkName, watchWallets, type Wallet } from "@phala/pay";
+import { WalletError, knownChain, networkName, watchWallets, type EthereumProvider, type Wallet } from "@phala/pay";
 import {
   createWalletClient,
   custom,
@@ -10,6 +10,7 @@ import {
   type Address,
   type Chain,
   type Hash,
+  type ReplacementReason,
   type WalletClient,
 } from "viem";
 import { readContract, waitForTransactionReceipt } from "viem/actions";
@@ -42,18 +43,32 @@ interface Connected {
   chain: Chain;
 }
 
-/** The first browser wallet, its first account, switched to `chainId`. */
-async function connect(chainId: number): Promise<Connected> {
+/**
+ * A wallet a payment used, as the SDK's checkout reports it with a `WalletError`: the chosen browser
+ * wallet's provider, or a page's own viem client.
+ */
+export type PaidWith = WalletClient | EthereumProvider;
+
+/**
+ * `using` (or else the first browser wallet), its account (the client's own, or the wallet's first,
+ * as the SDK pays with), switched to `chainId`.
+ */
+async function connect(chainId: number, using?: PaidWith): Promise<Connected> {
   const chain = knownChain(chainId);
   if (chain === undefined) {
     throw new Error(`Unsupported network ${networkName(chainId)}`);
   }
-  const wallet = await firstWallet();
-  if (wallet === undefined) {
-    throw new Error("No browser wallet found.");
+  let client: WalletClient;
+  if (using !== undefined && "writeContract" in using) {
+    client = using;
+  } else {
+    const provider = using ?? (await firstWallet())?.provider;
+    if (provider === undefined) {
+      throw new Error("No browser wallet found.");
+    }
+    client = createWalletClient({ transport: custom(provider) });
   }
-  const client = createWalletClient({ transport: custom(wallet.provider) });
-  const [account] = await client.requestAddresses();
+  const account = client.account ?? (await client.requestAddresses())[0];
   if (account === undefined) {
     throw new Error("The wallet shared no account");
   }
@@ -68,9 +83,18 @@ async function connect(chainId: number): Promise<Connected> {
   return { client, account, chain };
 }
 
-/** Mints `amountAtomic` of a test token to the visitor's wallet; resolves once it is in a block. */
-export async function mintTestTokens(chainId: number, token: string, amountAtomic: bigint): Promise<Hash> {
-  const { client, account, chain } = await connect(chainId);
+/**
+ * Mints `amountAtomic` of a test token to the visitor's wallet (`using`, else the first browser
+ * wallet); resolves with the mint's transaction once it is in a block, the repriced one if the
+ * wallet sped it up. A mint the wallet canceled or replaced with another call minted nothing.
+ */
+export async function mintTestTokens(
+  chainId: number,
+  token: string,
+  amountAtomic: bigint,
+  using?: PaidWith,
+): Promise<Hash> {
+  const { client, account, chain } = await connect(chainId, using);
   const hash = await client.writeContract({
     account,
     chain,
@@ -80,11 +104,23 @@ export async function mintTestTokens(chainId: number, token: string, amountAtomi
     args: [addressOf(account), amountAtomic],
   });
   // So that a payment right after it sees the minted balance.
-  const { status } = await waitForTransactionReceipt(client, { hash });
-  if (status !== "success") {
+  let replaced: ReplacementReason | undefined;
+  const receipt = await waitForTransactionReceipt(client, {
+    hash,
+    onReplaced: ({ reason }) => {
+      replaced = reason;
+    },
+  });
+  if (replaced === "cancelled") {
+    throw new Error("The mint was canceled in the wallet; nothing was minted.");
+  }
+  if (replaced === "replaced") {
+    throw new Error("The wallet replaced the mint with another transaction; nothing was minted.");
+  }
+  if (receipt.status !== "success") {
     throw new Error("The mint transaction failed.");
   }
-  return hash;
+  return receipt.transactionHash;
 }
 
 /**

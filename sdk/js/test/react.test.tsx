@@ -198,14 +198,15 @@ describe("Checkout", () => {
   it("sends nothing from a wallet holding too little, says so, and reports it to the page", async () => {
     const { provider, methods } = browserWallet(`0x${"ef".repeat(32)}`, 10n ** 18n);
     vi.stubGlobal("ethereum", provider);
-    const errors: WalletError[] = [];
+    const errors: [WalletError, unknown][] = [];
     const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
-    await renderCheckout({ onWalletError: (error) => errors.push(error) });
+    await renderCheckout({ onWalletError: (error, wallet) => errors.push([error, wallet]) });
     await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
     await screen.findByText(
       "Your wallet holds 1 PHA, less than the 100.502512562814070352 PHA to pay. Nothing was sent.",
     );
-    expect(errors.map((error) => error.code)).toEqual(["insufficient_balance"]);
+    // With the wallet that tried, so the page funds that one.
+    expect(errors.map(([error, wallet]) => [error.code, wallet])).toEqual([["insufficient_balance", provider]]);
     expect(methods).not.toContain("eth_sendTransaction");
   });
 });

@@ -8,6 +8,7 @@ import type { Asset, Network } from "./api.js";
 import { ChainIcon, TokenIcon } from "./chains.js";
 import { ExplorerLink, InfoTip, errorMessage, wallet } from "./common.js";
 import { tokenName, tokens } from "./format.js";
+import type { PaidWith } from "./testTokens.js";
 
 /**
  * A row of the test tokens card, the same for its action and its links: the token's mark and what
@@ -39,8 +40,11 @@ function chainName(network: Network): string {
   return network.name.replace(/ testnet$/, "");
 }
 
-/** The test token's public mint, from the visitor's wallet, of enough for `needed`. */
-function useMint(network: Network, token: Asset | undefined, needed: bigint | undefined) {
+/**
+ * The test token's public mint, of enough for `needed`, from the visitor's wallet: `using`, else
+ * the first browser wallet.
+ */
+function useMint(network: Network, token: Asset | undefined, needed: bigint | undefined, using?: PaidWith) {
   const amount = token === undefined ? 0n : mintAmount(needed, token.decimals);
   const mint = useMutation({
     mutationFn: async () => {
@@ -48,7 +52,7 @@ function useMint(network: Network, token: Asset | undefined, needed: bigint | un
         throw new Error("This network has no test token to mint.");
       }
       const { mintTestTokens } = await wallet();
-      return mintTestTokens(network.chain_id, token.contract, amount);
+      return mintTestTokens(network.chain_id, token.contract, amount, using);
     },
   });
   const label = token === undefined ? "" : `Mint ${tokens(amount.toString(), `test ${token.symbol}`, token.decimals)}`;
@@ -135,11 +139,22 @@ export function TestTokens({ network, need, className }: { network: Network; nee
 
 /**
  * Beside a payment the wallet could not cover (nothing was sent): how to get enough of the test
- * token, then pay again. The mintable token mints enough for the payment from the wallet; another
- * test token comes from its issuer's faucet.
+ * token, then pay again. The mintable token mints enough for the payment, to the wallet that tried
+ * it (`wallet`, else the first browser wallet, as the page's own payments use); another test token
+ * comes from its issuer's faucet.
  */
-export function FundWallet({ network, token, needed }: { network: Network; token: Asset; needed: bigint }) {
-  const { mint, label } = useMint(network, token.mintable ? token : undefined, needed);
+export function FundWallet({
+  network,
+  token,
+  needed,
+  wallet: using,
+}: {
+  network: Network;
+  token: Asset;
+  needed: bigint;
+  wallet?: PaidWith | undefined;
+}) {
+  const { mint, label } = useMint(network, token.mintable ? token : undefined, needed, using);
   const name = tokenName(token.symbol, network.testnet);
   if (!network.testnet || (!token.mintable && token.faucet === null)) {
     return null;

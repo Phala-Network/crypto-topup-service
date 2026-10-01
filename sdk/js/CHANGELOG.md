@@ -13,8 +13,9 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   `insufficient_balance`: the transfer would revert and still cost gas. `<Checkout>` shows the
   error's message (what the wallet holds and what the quote needs). A wallet that cannot read the
   balance still pays.
-- `<Checkout onWalletError>`: called with the `WalletError` when the wallet tab could not send the
-  payment, for example to offer your own way to fund the wallet on `insufficient_balance`.
+- `<Checkout onWalletError>`: called with the `WalletError` and the wallet it tried (the chosen
+  browser wallet's provider, or `walletClient`) when the wallet tab could not send the payment, for
+  example to offer your own way to fund that wallet on `insufficient_balance`.
 
 ## [0.3.0] - 2026-10-01
 
