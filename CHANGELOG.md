@@ -9,6 +9,8 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-01
+
 ### Added
 
 - Staging adds USDT on both chains: `phala-cloud-sepolia-usdt-usd` and
@@ -28,11 +30,10 @@ own changelogs in `sdk/js` and `sdk/python`.
 ### Changed
 
 - Compliance is each operator's responsibility: Phala Pay is software, and beyond the service's
-  direct sanctions screening, KYC, KYT, and the Travel Rule are for each operator and its
-  merchants to handle. The
-  legal review that was to gate live mode for third-party merchants on Phala's instance is removed
-  from the design (D12, former §17), the architecture, and the plan: Phala's instance serves only
-  Phala Cloud.
+  direct sanctions screening, KYC, KYT, and the Travel Rule are for each operator and its merchants
+  to handle. The legal review that was to gate live mode for third-party merchants on Phala's
+  instance is removed from the design (D12, former §17), the architecture, and the plan: Phala's
+  instance serves only Phala Cloud.
 
 ## [0.3.4] - 2026-10-01
 
@@ -975,7 +976,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...v0.3.2
