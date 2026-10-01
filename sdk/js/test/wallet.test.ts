@@ -1,4 +1,4 @@
-import { createWalletClient, custom, decodeFunctionData, erc20Abi } from "viem";
+import { createWalletClient, custom, decodeFunctionData, encodeFunctionResult, erc20Abi } from "viem";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   INJECTED_WALLET_UUID,
@@ -19,7 +19,8 @@ interface Call {
 }
 
 /** A wallet on `chainId` that knows `known` chains and fails requests listed in `failures`; it
- * refuses to switch to an unknown chain with `unknownChain`. */
+ * refuses to switch to an unknown chain with `unknownChain`. Its account holds `wallet.balance` of
+ * any token, plenty unless a test sets it. */
 function mockProvider(
   chainId: number,
   known: number[],
@@ -27,6 +28,7 @@ function mockProvider(
   unknownChain: object = { code: 4902 },
 ) {
   const calls: Call[] = [];
+  const wallet = { balance: 10n ** 30n };
   let current = chainId;
   const provider: EthereumProvider = {
     request: ({ method, params }: Call) => {
@@ -51,6 +53,10 @@ function mockProvider(
         case "wallet_addEthereumChain":
           known.push(Number((params as [{ chainId: string }])[0].chainId));
           return Promise.resolve(null);
+        case "eth_call":
+          return Promise.resolve(
+            encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: wallet.balance }),
+          );
         case "eth_sendTransaction":
           return Promise.resolve(HASH);
         default:
@@ -58,7 +64,7 @@ function mockProvider(
       }
     },
   };
-  return { provider, calls };
+  return { provider, calls, wallet };
 }
 
 function sentTransfer(calls: Call[]) {
@@ -139,6 +145,23 @@ describe("payWithWallet", () => {
     const client = createWalletClient({ transport: custom(provider) });
     await expect(payWithWallet(client, quote())).resolves.toBe(HASH);
     expect(calls.map((c) => c.method)).toContain("eth_requestAccounts");
+  });
+
+  it("sends nothing when the wallet holds less than the quote, saying how much it holds", async () => {
+    const { provider, calls, wallet } = mockProvider(11155111, [11155111]);
+    wallet.balance = 12500000000000000000n;
+    const error = await payWithWallet(provider, quote()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WalletError);
+    expect(error).toMatchObject({
+      code: "insufficient_balance",
+      message: "Your wallet holds 12.5 PHA, less than the 100.502512562814070352 PHA to pay. Nothing was sent.",
+    });
+    expect(calls.map((c) => c.method)).not.toContain("eth_sendTransaction");
+  });
+
+  it("still pays when the wallet cannot read the balance", async () => {
+    const { provider } = mockProvider(11155111, [11155111], { eth_call: -32601 });
+    await expect(payWithWallet(provider, quote())).resolves.toBe(HASH);
   });
 
   it("never sends when the payment URI disagrees with the quote", async () => {

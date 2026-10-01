@@ -11,6 +11,7 @@ import {
   parseUnits,
   publicActions,
   walletActions,
+  type Address,
   type Hash,
 } from "viem";
 import { baseSepolia, sepolia } from "viem/chains";
@@ -86,8 +87,25 @@ async function mintUsdc(to: string, amount: bigint): Promise<void> {
   });
 }
 
-/** An EIP-6963 wallet on the Anvils holding the payer account; it starts on mainnet. */
-async function installWallet(page: Page) {
+/** Anvil's second dev account: gas on both chains, and none of the test tokens. */
+async function emptyAccount(): Promise<Address> {
+  const accounts = await createTestClient({ mode: "anvil", chain: sepolia, transport: http(env("ANVIL_URL")) })
+    .extend(walletActions)
+    .getAddresses();
+  const account = accounts[1];
+  if (account === undefined) {
+    throw new Error("anvil has no second dev account");
+  }
+  return account;
+}
+
+/** The transactions `account` has sent on Sepolia. */
+async function sentCount(account: Address): Promise<number> {
+  return createPublicClient({ transport: http(env("ANVIL_URL")) }).getTransactionCount({ address: account });
+}
+
+/** An EIP-6963 wallet on the Anvils holding `account` (the payer's unless named); it starts on mainnet. */
+async function installWallet(page: Page, account = env("PAYER_ADDRESS")) {
   const rpcs: Record<number, string> = { [sepolia.id]: env("ANVIL_URL"), [baseSepolia.id]: env("BASE_ANVIL_URL") };
   await page.exposeFunction("anvilRequest", async (chainId: number, method: string, params: unknown) => {
     const rpc = rpcs[chainId];
@@ -156,7 +174,7 @@ async function installWallet(page: Page) {
       window.addEventListener("eip6963:requestProvider", announce);
       announce();
     },
-    { account: env("PAYER_ADDRESS"), chainIds: [sepolia.id, baseSepolia.id] as number[] },
+    { account, chainIds: [sepolia.id, baseSepolia.id] as number[] },
   );
 }
 
@@ -660,6 +678,69 @@ test("networks and tokens: USDC at $1.00 without a bonus, and PHA on Base Sepoli
   await page.getByRole("button", { name: "Switch to dark theme" }).click();
   await page.screenshot({ path: testInfo.outputPath("base-bonus-dark.png") });
   await page.getByRole("button", { name: "Switch to light theme" }).click();
+  expect(problems).toEqual([]);
+});
+
+test("a wallet holding too little sends nothing and is told how to fund it; the mint covers the payment", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(180_000);
+  const problems = await watchConsole(page);
+  const payer = await emptyAccount();
+  await installWallet(page, payer);
+  await page.goto(env("SITE_URL"));
+  const product = page.getByRole("region", { name: "Acme Cloud · Billing" });
+  const helper = page.getByRole("note", { name: "Test tokens" });
+  const pay = product.getByRole("button", { name: "Pay with crypto (Test Wallet)" });
+  await expect(product.getByTestId("balance")).toHaveText("$0.00");
+
+  // $20 in test USDC from a wallet with none: the checkout sends nothing, and points to Circle's
+  // faucet.
+  await product.getByRole("radio", { name: "Test USDC", exact: true }).check({ force: true });
+  await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  await pay.click();
+  await expect(product.getByText("Your wallet holds 0 USDC, less than the 20 USDC to pay. Nothing was sent.")).toBeVisible();
+  const usdc = product.getByTestId("fund-wallet");
+  await expect(usdc).toContainText("Not enough Test USDC in your wallet");
+  await expect(usdc.getByRole("link", { name: /^Circle USDC faucet/ })).toHaveAttribute("href", "https://faucet.circle.com");
+  await expect(helper.getByRole("button", { name: "Mint 1,000 test PHA" })).toBeVisible();
+  expect(await sentCount(payer)).toBe(0);
+
+  // $500 in test PHA at 0.25 USD per PHA: 2,000 PHA, more than the default mint, which grows to
+  // cover the quote; paying first is refused, and the mint beside the refusal covers it.
+  await product.getByRole("button", { name: "Add more credits" }).click();
+  await product.getByRole("radio", { name: "Test PHA", exact: true }).check({ force: true });
+  await product.getByText("Custom", { exact: true }).click();
+  await product.getByLabel("Custom amount (USD)").fill("500");
+  await product.getByRole("button", { name: "Pay with crypto", exact: true }).click();
+  await expect(product.getByTestId("locked-rate")).toContainText("1 PHA = $0.25");
+  await expect(helper.getByRole("button", { name: "Mint 2,000 test PHA" })).toBeVisible();
+  await pay.click();
+  await expect(product.getByText("Your wallet holds 0 PHA, less than the 2,000 PHA to pay. Nothing was sent.")).toBeVisible();
+  const pha = product.getByTestId("fund-wallet");
+  await expect(pha).toContainText("Not enough Test PHA in your wallet");
+  expect(await sentCount(payer)).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath("underfunded.png"), fullPage: true });
+  await pha.getByRole("button", { name: "Mint 2,000 test PHA" }).click();
+  await expect(pha).toContainText("Minted:");
+  expect(await tokenBalance(payer)).toBe(parseEther("2000"));
+  await pay.click();
+  await expect(product.getByTestId("payment-credited")).toContainText("$500.00", { timeout: 60_000 });
+  await expect(pha).toHaveCount(0);
+  expect(await tokenBalance(payer)).toBe(0n);
+
+  // To the deposit address, the amount typed sizes the mint; more than the wallet holds sends
+  // nothing.
+  await page.getByRole("tab", { name: "Deposit address" }).click();
+  await product.getByRole("button", { name: "Show my deposit address" }).click();
+  const form = product.getByRole("form", { name: "Pay to the deposit address from a browser wallet" });
+  await form.getByLabel(/^Send from your browser wallet/).fill("5000");
+  await expect(helper.getByRole("button", { name: "Mint 5,000 test PHA" })).toBeVisible();
+  const sent = await sentCount(payer);
+  await form.getByRole("button", { name: "Send" }).click();
+  await expect(form).toContainText("Your wallet holds 0 PHA, less than the 5,000 PHA to send. Nothing was sent.");
+  await expect(form.getByTestId("fund-wallet").getByRole("button", { name: "Mint 5,000 test PHA" })).toBeVisible();
+  expect(await sentCount(payer)).toBe(sent);
   expect(problems).toEqual([]);
 });
 

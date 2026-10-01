@@ -37,6 +37,10 @@ export interface CheckoutProps {
   /** Called whenever the checkout's status changes, like Stripe Elements' `onChange`: for example,
    * to hide your own "new payment" control while a payment is `seen` or `confirming`. */
   onChange?: (state: CheckoutState) => void;
+  /** Called when the wallet tab could not send the payment, with the `WalletError`: for example
+   * `insufficient_balance` (nothing was sent), to offer your own way to fund the wallet. The
+   * checkout shows the error's message itself. */
+  onWalletError?: (error: WalletError) => void;
   appearance?: Appearance;
   /** Milliseconds between status reads; default 3000. */
   pollInterval?: number;
@@ -64,6 +68,7 @@ export function Checkout({
   onSuccess,
   onExpire,
   onChange,
+  onWalletError,
   appearance,
   pollInterval,
   className,
@@ -133,6 +138,7 @@ export function Checkout({
             setTxHash(hash);
             refresh();
           }}
+          onWalletError={onWalletError}
         />
       )}
     </div>
@@ -226,12 +232,14 @@ function PaymentOptions({
   buttonText,
   walletClient,
   onSent,
+  onWalletError,
 }: {
   quote: ClientQuote;
   now: number;
   buttonText: string;
   walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
+  onWalletError: ((error: WalletError) => void) | undefined;
 }) {
   const [method, setMethod] = useState<Method>("wallet");
   const id = useId();
@@ -298,6 +306,7 @@ function PaymentOptions({
             buttonText={buttonText}
             walletClient={walletClient}
             onSent={onSent}
+            onWalletError={onWalletError}
           />
         )}
         {method === "qr" && (
@@ -325,11 +334,13 @@ function WalletPanel({
   buttonText,
   walletClient,
   onSent,
+  onWalletError,
 }: {
   quote: ClientQuote;
   buttonText: string;
   walletClient: WalletClient | undefined;
   onSent: (hash: Hash) => void;
+  onWalletError: ((error: WalletError) => void) | undefined;
 }) {
   const [discovered, setDiscovered] = useState<Wallet[]>([]);
   const [step, setStep] = useState<WalletStep>({ kind: "idle" });
@@ -352,6 +363,9 @@ function WalletPanel({
         kind: "failed",
         message: error instanceof WalletError ? error.message : "The payment could not be sent",
       });
+      if (error instanceof WalletError) {
+        onWalletError?.(error);
+      }
     }
   };
 

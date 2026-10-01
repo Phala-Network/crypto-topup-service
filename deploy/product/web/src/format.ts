@@ -1,4 +1,4 @@
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
@@ -21,6 +21,16 @@ export function tokens(atomic: string, symbol: string, decimals = 18): string {
   const [whole = "0", fraction] = formatUnits(BigInt(atomic), decimals).split(".");
   const grouped = BigInt(whole).toLocaleString("en-US");
   return `${fraction === undefined ? grouped : `${grouped}.${fraction}`} ${symbol}`;
+}
+
+/** A decimal amount typed by the visitor, in a token's atomic units; `null` unless it is above 0. */
+export function atomicAmount(amount: string, decimals: number): bigint | null {
+  try {
+    const atomic = parseUnits(amount.trim(), decimals);
+    return atomic > 0n ? atomic : null;
+  } catch {
+    return null;
+  }
 }
 
 export function short(value: string): string {

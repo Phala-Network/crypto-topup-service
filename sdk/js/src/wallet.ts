@@ -6,10 +6,13 @@ import {
   erc20Abi,
   SwitchChainError,
   UserRejectedRequestError,
+  type Address,
   type Hash,
   type WalletClient,
 } from "viem";
+import { readContract } from "viem/actions";
 import { knownChain, networkName } from "./chains.js";
+import { formatTokenAmount, formatUnitsGrouped } from "./format.js";
 import { quoteTransfer } from "./payment.js";
 import type { ClientQuote } from "./quote.js";
 
@@ -83,7 +86,12 @@ function isProvider(value: unknown): value is EthereumProvider {
   return typeof (value as Partial<EthereumProvider> | null | undefined)?.request === "function";
 }
 
-export type WalletErrorCode = "rejected" | "no_account" | "wrong_chain" | "failed";
+export type WalletErrorCode =
+  | "rejected"
+  | "no_account"
+  | "wrong_chain"
+  | "insufficient_balance"
+  | "failed";
 
 export class WalletError extends Error {
   override readonly name = "WalletError";
@@ -101,8 +109,10 @@ export class WalletError extends Error {
  * Pays a quote from a wallet: a viem `WalletClient` (for example wagmi's `useWalletClient()`), or an
  * EIP-1193 provider such as a discovered `Wallet`'s. Connects (unless the client already has an
  * account), switches to (or adds) the quote's chain, and sends the ERC-20 `transfer` that the quote's
- * `payment_uri` states. Resolves with the transaction hash once the wallet has broadcast it; the
- * checkout's status follows the payment from there.
+ * `payment_uri` states. Before sending, it reads the account's token balance and, when it is below
+ * the quote's amount, sends nothing and throws `WalletError` `insufficient_balance`: the transfer
+ * would revert and still cost gas. Resolves with the transaction hash once the wallet has broadcast
+ * it; the checkout's status follows the payment from there.
  */
 export async function payWithWallet(
   wallet: WalletClient | EthereumProvider,
@@ -116,6 +126,16 @@ export async function payWithWallet(
       throw new WalletError("no_account", "The wallet shared no account");
     }
     await ensureChain(client, transfer.chainId);
+    const address = typeof account === "string" ? account : account.address;
+    const balance = await tokenBalance(client, transfer.token, address);
+    if (balance !== undefined && balance < transfer.amount) {
+      const symbol = quote.asset.toUpperCase();
+      throw new WalletError(
+        "insufficient_balance",
+        `Your wallet holds ${formatUnitsGrouped(balance, quote.decimals)} ${symbol}, less than the ` +
+          `${formatTokenAmount(quote)} ${symbol} to pay. Nothing was sent.`,
+      );
+    }
     return await client.writeContract({
       account,
       chain: knownChain(transfer.chainId) ?? null,
@@ -132,6 +152,19 @@ export async function payWithWallet(
       throw new WalletError("rejected", "The request was rejected in the wallet", { cause: error });
     }
     throw new WalletError("failed", "The wallet could not send the payment", { cause: error });
+  }
+}
+
+/**
+ * The account's balance of `token`, read through the wallet on its current chain; `undefined` when
+ * the wallet cannot read it. The check only spares the payer a reverting transfer, so a wallet that
+ * does not serve `eth_call` still pays.
+ */
+async function tokenBalance(wallet: WalletClient, token: Address, owner: Address): Promise<bigint | undefined> {
+  try {
+    return await readContract(wallet, { address: token, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
+  } catch {
+    return undefined;
   }
 }
 

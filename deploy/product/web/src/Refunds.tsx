@@ -153,7 +153,7 @@ function RefundItem({ refund, token }: { refund: Refund; token: RefundToken }) {
   const pay = useMutation({
     mutationFn: async (transfer: NonNullable<Refund["transfer"]>) => {
       const { transferTokens } = await wallet();
-      return transferTokens(chainId, transfer.token, transfer.to, BigInt(transfer.amount_atomic));
+      return transferTokens(chainId, { contract: transfer.token, symbol, decimals }, transfer.to, BigInt(transfer.amount_atomic));
     },
     onSuccess: setHash,
   });
