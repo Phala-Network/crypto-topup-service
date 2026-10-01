@@ -9,6 +9,40 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
+### Fixed
+
+- Deploy declares its one secret, `PHALA_CLOUD_API_KEY` (optional), so that an operator's
+  repository in another organisation can pass it from a repository secret: GitHub supports
+  `secrets: inherit` only within an organisation or enterprise, and without it a called workflow's
+  Environment secret resolves empty (actions/runner#4453). v0.3.0 read only the Environment
+  secret, so every caller passing no secrets failed with an empty key. A caller in Phala-Network's
+  organisation passes `secrets: inherit` and keeps the key as the Environment's secret. An empty
+  key now fails with the setup each caller needs (docs/self-hosting.md, step 5, with the trade-off
+  of a repository secret).
+- Deploy runs when called at a release's annotated tag, not only pinned to its commit. A workflow
+  called at an annotated tag runs with `job.workflow_sha` the tag object's SHA, so v0.3.0's Deploy,
+  called at `v0.3.0`, refused its own release ("Deploy runs at e42120e…, not v0.3.0's commit
+  659bd26…"). `deploy/verify-release.sh VERSION DIR CALLED_AT` peels the tag to its commit and
+  accepts either SHA. Pinning the commit SHA remains the recommendation.
+- Deploy's provision completes on the unsealed CVM it creates. Without the storage credentials
+  PostgreSQL refuses to start, so app-compose fails by design and Phala Cloud shows the CVM as
+  `error`; provision waited for `running` and timed out after 15 minutes, before the DNS records and
+  the sealing step. A provision now only creates the CVM: it waits until the CVM is settled
+  (`in_progress` false) with the new compose and has booted (an instance id), in any status
+  (`deploy/phala-cvm.sh wait --unsealed`), and redeploys the gateway's compose without the CLI's
+  `--wait`. It proves nothing about the CVM's health: the upgrade after the sealing is the acceptance
+  step, and still requires `running`, `/healthz`, the attestation, and the certificate evidence.
+- An upgrade retries the certificate evidence every 30 seconds for at most 10 minutes instead of
+  failing at once: right after a DNS change the domain can still reach the previous instance, or the
+  new one can still be obtaining its certificate. `deploy/verify-ingress-evidence.sh` bounds its TLS
+  handshake to 30 seconds.
+- Deploy names a new CVM after its run (`phala-pay-<environment>-<run id>`,
+  `phala-pay-staging-product-<run id>`): Phala Cloud refuses a duplicate name (`ERR-01-004`), so a
+  provision beside a stopped CVM kept for rollback, as in a reset, failed. A CVM is identified by
+  its id variable, never by its name.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added
@@ -825,5 +859,6 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.0

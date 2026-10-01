@@ -60,7 +60,8 @@ through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workfl
    them). Whoever dispatches Deploy is accountable; the run's actor, summary, and uploaded record
    are the audit trail.
 2. **Phala Cloud.** Create an API key for the Environment's workspace and store it as the
-   Environment secret `PHALA_CLOUD_API_KEY`, the only secret GitHub holds.
+   Environment secret `PHALA_CLOUD_API_KEY`, the only secret GitHub holds (a repository secret for
+   a caller in another organisation, [Deploy](#deploy)).
 3. **Object storage.** Create a bucket (or prefix) per Environment in an S3-compatible store, such
    as Cloudflare R2, that the other Environment's keys cannot reach, and a read-write API token for
    it. The token is sealed into the CVM (below), never stored in GitHub.
@@ -138,20 +139,27 @@ uses: Phala-Network/phala-pay/.github/workflows/deploy.yml@<release commit or ta
 Its inputs are `version`, `environment` (the GitHub Environment), `target` (`topup`, or `product`
 for Phala's reference product), `mode` (`provision` or `upgrade`), and `environment_dir` (the
 target's directory in the caller's repository). The caller grants `contents: read` and
-`attestations: read` and passes no secret: the job runs in the caller's Environment, whose secret
-`PHALA_CLOUD_API_KEY` is the only one it reads. It runs verify-release.sh of its own commit, which
-must be the release's, then only the verified kit's scripts: render, preflight, the deploy with
-the kit's pre-launch script, and the verification of the attested compose with the official
-dstack verifier; it uploads the rendered compose and the verification as the run's record.
-[Deploy Phala's instance](../.github/workflows/deploy-phala.yml) is Phala's caller, the same
-way; adopting a release is a pull request that changes its release.
+`attestations: read`, and the only secret Deploy reads is its declared, optional
+`PHALA_CLOUD_API_KEY`. A caller in the Phala-Network organisation passes `secrets: inherit`, and the
+key is the Environment's secret (an Environment secret resolves empty in a called workflow without
+it, [actions/runner#4453](https://github.com/actions/runner/issues/4453)); a caller in another
+organisation, where `inherit` is not supported, passes it from a repository secret ([self-hosting,
+step 5](../docs/self-hosting.md#2-your-environment-repository)). It runs verify-release.sh of its
+own commit, which must be the release's, then only the verified kit's scripts: render, preflight,
+the deploy with the kit's pre-launch script, and the verification of the attested compose with the
+official dstack verifier; it uploads the rendered compose and the verification as the run's record.
+[Deploy Phala's instance](../.github/workflows/deploy-phala.yml) is Phala's caller, the same way;
+adopting a release is a pull request that changes its release.
 
 1. Merge the change to the environment repository's `main`: a setting, or a new `version`.
 2. First deployment: Deploy with `mode: provision`, then set `TOPUP_CVM_ID` (or, for the product,
    `STAGING_PRODUCT_CVM_ID`) to the CVM id in the summary, [seal the
-   secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. If a provision run fails after the summary shows a CVM id, set
-   the variable, seal the secrets (an upgrade waits for `/healthz`), and re-run with `mode:
-   upgrade` and the same release; never provision twice.
+   secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. A
+   provision only creates the CVM, which must boot but shows `error` until it is sealed, so it
+   proves nothing about its health: the acceptance step is the `mode: upgrade` run with the same
+   release after the sealing, which requires the CVM running, `/healthz`, the attested compose, and
+   the certificate evidence. If a provision run fails after the summary shows a CVM id, set the
+   variable, seal the secrets, and run that upgrade; never provision twice.
 3. Every later change: Deploy with `mode: upgrade`. An upgrade sends only the compose, so the
    sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back, use a
    forward repair migration.

@@ -15,15 +15,18 @@ name: Deploy
 # and a new compose hash, in force only through `upgrade`.
 #
 # Controls, in the caller's repository: the job runs only from its `main`, in the GitHub
-# Environment `environment` (deployment branches: `main` only), whose secret PHALA_CLOUD_API_KEY is
-# the only secret it reads (an Environment secret, available to this job without the caller
-# passing any). Whoever dispatches a run is accountable for it; the run's attested compose and
-# verifier read-back are the audit trail. The CVM's env holds only the owner-sealed secrets, the
-# rendered compose's `${NAME:-}` references, which never enter GitHub: `provision` sends them
-# empty, and the owner then seals them from their own machine (the run summary prints the
-# command); `upgrade` sends no env at all, so the sealed env stays. Each target's public origin is
-# its custom domain, served by dstack-ingress in the CVM (deploy/README.md, "Custom domain"); the
-# summary lists the DNS records the owner creates for it.
+# Environment `environment` (deployment branches: `main` only). The only secret it reads is the
+# declared, optional PHALA_CLOUD_API_KEY (docs/self-hosting.md, step 5). A caller in the
+# Phala-Network organisation passes `secrets: inherit`, and the key is the Environment's secret,
+# which GitHub uses over a passed secret of the same name; an Environment secret resolves empty
+# here without `inherit` (actions/runner#4453). A caller in another organisation, where `inherit`
+# is not supported, passes the key from a repository secret. Whoever dispatches a run is
+# accountable for it; the run's attested compose and verifier read-back are the audit trail. The
+# CVM's env holds only the owner-sealed secrets, the rendered compose's `${NAME:-}` references,
+# which never enter GitHub: `provision` sends them empty, and the owner then seals them from their
+# own machine (the run summary prints the command); `upgrade` sends no env at all, so the sealed
+# env stays. Each target's public origin is its custom domain, served by dstack-ingress in the CVM
+# (deploy/README.md, "Custom domain"); the summary lists the DNS records the owner creates for it.
 #
 # The kit's deploy/phala runs Phala Cloud CLI 1.1.22 with its dependencies locked (checked against
 # Phala-Network/phala-cloud tag cli-v1.1.22), through deploy/phala-cvm.sh:
@@ -64,6 +67,10 @@ on:
         description: "The target's environment directory in the caller's repository"
         type: string
         required: true
+    secrets:
+      PHALA_CLOUD_API_KEY:
+        description: "The Phala Cloud API key of vars.PHALA_WORKSPACE: inherited from the Environment (secrets: inherit), or passed from a repository secret by a caller in another organisation"
+        required: false
 
 # attestations: read for `gh attestation verify`; the caller's workflow grants both.
 permissions:
@@ -106,7 +113,7 @@ jobs:
         run: |
           status=0
           [[ -n "$PHALA_CLOUD_API_KEY" ]] ||
-            { echo "::error::Environment secret PHALA_CLOUD_API_KEY is not set"; status=1; }
+            { echo "::error::PHALA_CLOUD_API_KEY is empty: a caller in the Phala-Network organisation passes 'secrets: inherit' with the key as the Environment's secret; a caller in another organisation passes PHALA_CLOUD_API_KEY from a repository secret (docs/self-hosting.md, step 5)"; status=1; }
           [[ -n "$PHALA_WORKSPACE" ]] ||
             { echo "::error::Environment variable PHALA_WORKSPACE is not set"; status=1; }
           [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
@@ -130,13 +137,16 @@ jobs:
             *) echo "::error::unknown target $TARGET"; exit 1 ;;
           esac
           existing=${!cvm_id_variable}
+          # A new CVM's name is unique per run, since Phala Cloud refuses a duplicate name
+          # (ERR-01-004): a reset provisions while the old CVM, stopped, stays for rollback. A CVM is
+          # identified by its id variable, never by its name.
           {
             echo "KIT=$kit"
             echo "PREFLIGHT=$preflight"
             echo "VARIANT=$variant"
             echo "CVM_ID_VARIABLE=$cvm_id_variable"
             echo "EXISTING_CVM_ID=$existing"
-            echo "CVM_NAME=$cvm_name"
+            echo "CVM_NAME=$cvm_name-$GITHUB_RUN_ID"
             echo "INSTANCE_TYPE=$instance_type"
             echo "IMAGES=$images"
             echo "COMPOSE_NAME=$compose_name"
@@ -178,7 +188,9 @@ jobs:
           echo "$RUNNER_TEMP/gh_${version}_linux_amd64/bin" >>"$GITHUB_PATH"
 
       # deploy/verify-release.sh of this workflow's own commit verifies the release, whose commit
-      # must then be this workflow's: the caller called Deploy at the release it deploys.
+      # must then be this workflow's: the caller called Deploy at the release it deploys. The
+      # workflow SHA is the commit for a caller that pins it, and the tag object for a caller at an
+      # annotated tag; verify-release.sh peels the tag and accepts either.
       - name: Verify the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,9 +202,8 @@ jobs:
           gh api -H 'Accept: application/vnd.github.raw' \
             "repos/$WORKFLOW_REPOSITORY/contents/deploy/verify-release.sh?ref=$WORKFLOW_SHA" \
             >"$WORK/verify-release.sh"
-          commit=$(bash "$WORK/verify-release.sh" "$VERSION" "$WORK/release")
-          [[ "$commit" == "$WORKFLOW_SHA" ]] ||
-            { echo "::error::Deploy runs at $WORKFLOW_SHA, not $VERSION's commit $commit: call it at $VERSION"; exit 1; }
+          bash "$WORK/verify-release.sh" "$VERSION" "$WORK/release" "$WORKFLOW_SHA" >/dev/null ||
+            { echo "::error::$VERSION did not verify, or Deploy is not called at its commit (the log above)"; exit 1; }
           tar -xzf "$WORK/release/phala-pay-deploy-$VERSION.tar.gz" -C "$KIT" --strip-components=1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -325,11 +336,18 @@ jobs:
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-          "$KIT/deploy/phala-cvm.sh" wait "$cvm_id" >"$WORK/cvm.json"
+          # A provision only creates the CVM: unsealed, it boots but does not run (deploy/phala-cvm.sh,
+          # wait). The upgrade after the sealing is the acceptance step.
+          if [[ "$MODE" == provision ]]; then
+            "$KIT/deploy/phala-cvm.sh" wait --unsealed "$cvm_id" >"$WORK/cvm.json"
+          else
+            "$KIT/deploy/phala-cvm.sh" wait "$cvm_id" >"$WORK/cvm.json"
+          fi
 
       # A new CVM lands on a node chosen by Phala Cloud. Its gateway (the domain's CNAME target, which
       # dstack-ingress names) is known only now, and is attested configuration: upgrade the new CVM
-      # to the compose rendered with it (no -e: the env stays).
+      # to the compose rendered with it (no -e: the env stays). Still unsealed, it does not run, so
+      # no --wait (the CLI's waits for `running`): it waits as the provision did.
       - name: Set the values known only after provisioning
         if: inputs.mode == 'provision'
         env:
@@ -347,9 +365,8 @@ jobs:
             --compose "$COMPOSE" \
             --pre-launch-script "$KIT/deploy/phala-cloud-pre-launch.sh" \
             --no-public-logs \
-            --no-public-sysinfo \
-            --wait
-          "$KIT/deploy/phala-cvm.sh" wait "$CVM_ID" "$previous" >"$WORK/cvm.json"
+            --no-public-sysinfo
+          "$KIT/deploy/phala-cvm.sh" wait --unsealed "$CVM_ID" "$previous" >"$WORK/cvm.json"
 
       # After an upgrade the attestation can still describe the previous compose for a while.
       - name: Read back and verify the attested compose
@@ -405,11 +422,20 @@ jobs:
         if: inputs.mode == 'upgrade'
         run: '"$KIT/deploy/phala-cvm.sh" healthz "$PUBLIC_URL"'
 
+      # Right after a DNS change the domain can still reach the previous instance, from a resolver's
+      # cache, or the new one can still be obtaining its certificate: retried every 30 seconds for
+      # at most 10 minutes in all (each check bounds its own requests and TLS handshake).
       - name: Verify the certificate evidence
         if: inputs.mode == 'upgrade'
         run: |
-          "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" 2>&1 |
-            tee "$WORK/ingress-evidence.txt"
+          # shellcheck disable=SC2016  # expanded by the inner bash
+          if ! timeout 600 bash -c 'until "$0" "$1" "$2" >"$3" 2>&1; do cat "$3"; sleep 30; done' \
+            "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" "$WORK/ingress-evidence.txt"; then
+            cat "$WORK/ingress-evidence.txt"
+            echo "::error::the certificate evidence of $DOMAIN did not verify within 10 minutes"
+            exit 1
+          fi
+          cat "$WORK/ingress-evidence.txt"
           { echo '```text'; cat "$WORK/ingress-evidence.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Print the owner's sealing step
@@ -424,8 +450,9 @@ jobs:
               image=$(jq -r '.services.topup.image' <<<"$compose_json")
               echo "### Owner: seal the runtime secrets"
               echo
-              echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
-              echo "it can list the backup prefix, so the service is not up yet. From your own machine,"
+              echo "This provision created the CVM and proves nothing about its health. The CVM waits for"
+              echo "its storage credentials: PostgreSQL refuses to initialize until it can list the backup"
+              echo "prefix, so Phala Cloud shows the CVM as \`error\` until it is sealed. From your own machine,"
               echo "write \`$owner_env\` (mode 0600) with exactly the compose's sealed names: $names."
               echo "\`SENTRY_DSN\` may be empty; each \`TOPUP_RPC_<ID>_KEY\` is the key for the \`{key}\`"
               echo "in provider <ID>'s URL, empty for a keyless URL. The same name set keeps the compose hash."
@@ -460,6 +487,10 @@ jobs:
               echo "aws s3 ls \"${prefix%/}/wal_005/\" --endpoint-url \"$endpoint\" | tail -1"
               echo '```'
             fi
+            echo
+            echo "**Acceptance:** once sealed and the DNS records resolve, dispatch Deploy with mode"
+            echo "\`upgrade\`. It requires the CVM running, \`/healthz\`, the attested compose, and the"
+            echo "certificate evidence; until it passes, nothing about this CVM is verified."
           } >>"$GITHUB_STEP_SUMMARY"
 
       # No secrets: the compose holds the public settings and references to the sealed secrets,
