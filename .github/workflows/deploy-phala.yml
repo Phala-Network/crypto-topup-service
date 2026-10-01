@@ -38,3 +38,6 @@ jobs:
       target: ${{ inputs.target }}
       mode: ${{ inputs.mode }}
       environment_dir: deploy/environments/phala-network/${{ inputs.environment }}/${{ inputs.target }}
+    # The called job's Environment secret (PHALA_CLOUD_API_KEY) resolves only when the caller
+    # inherits secrets (actions/runner#4453); this repository holds no other secret.
+    secrets: inherit
