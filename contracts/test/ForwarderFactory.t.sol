@@ -263,6 +263,48 @@ contract ForwarderFactoryTest is Test {
         assertEq(blacklist.balanceOf(treasury), 13 ether);
     }
 
+    /// Tether's blacklist checks only the sender: a blacklisted forwarder still receives a payer's
+    /// transfer (which the service credits), and only its flush fails, with empty revert data
+    /// (Tether's `require`s carry no message), leaving the deposit stuck in the forwarder.
+    function test_UsdtBlacklistedForwarderReceivesThenCannotFlush() public {
+        UsdtLikeToken usdt = new UsdtLikeToken();
+        bytes32 salt = keccak256("usdt-blacklisted-forwarder");
+        address forwarder = factory.addressOf(treasury, salt);
+        address payer = makeAddr("usdt-payer");
+        usdt.mint(payer, 8e6);
+        usdt.addBlackList(forwarder);
+
+        vm.prank(payer);
+        usdt.transfer(forwarder, 8e6);
+        assertEq(usdt.balanceOf(forwarder), 8e6);
+
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit FlushFailed(salt, forwarder, address(usdt), "");
+        _flush(salt, address(usdt));
+
+        assertEq(usdt.balanceOf(forwarder), 8e6);
+        assertEq(usdt.balanceOf(treasury), 0);
+    }
+
+    /// Tether's blacklist does not check the recipient: a flush to a blacklisted treasury succeeds,
+    /// and the funds land where the treasury cannot move them.
+    function test_UsdtBlacklistedTreasuryReceivesTheFlush() public {
+        UsdtLikeToken usdt = new UsdtLikeToken();
+        bytes32 salt = keccak256("usdt-blacklisted-treasury");
+        address forwarder = factory.addressOf(treasury, salt);
+        usdt.mint(forwarder, 5e6);
+        usdt.addBlackList(treasury);
+
+        vm.expectEmit(true, true, true, true, address(factory));
+        emit Flushed(salt, forwarder, address(usdt), treasury, 5e6);
+        _flush(salt, address(usdt));
+        assertEq(usdt.balanceOf(treasury), 5e6);
+
+        vm.prank(treasury);
+        vm.expectRevert(bytes(""));
+        usdt.transfer(makeAddr("elsewhere"), 5e6);
+    }
+
     function test_BlacklistedTreasuryFailsWithoutRevertingTheTransaction() public {
         BlacklistToken blacklist = new BlacklistToken();
         bytes32 salt = keccak256("blacklisted-treasury");

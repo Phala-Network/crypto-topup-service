@@ -22,16 +22,16 @@ const DETERMINISTIC_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
 
 /**
  * Runs the whole demo locally: two Anvils, as Sepolia (test PHA and a 6-decimal test USDC) and as
- * Base Sepolia (test PHA), each with the real forwarder factory, deployed as deploy/CONTRACTS.md
- * deploys it (through the deterministic deployment proxy with the committed salt), so it lands at
- * its pinned address on both; the fake top-up service
+ * Base Sepolia (test PHA, and a 6-decimal test USDT whose `transfer` returns nothing, minted through
+ * a faucet contract as Aave's is), each with the real forwarder factory, deployed as deploy/CONTRACTS.md deploys it (through the deterministic
+ * deployment proxy with the committed salt), so it lands at its pinned address on both; the fake top-up service
  * (e2e/fake_service.py), the reference product serving the demo's API, pinned to the fake
  * service's webhook key, and the page, built against that API and served from its own origin (as
  * Cloudflare serves pay.phala.com), under the CSP of public/_headers with the local origins: the
  * page calls the API cross-origin, with CORS and the demo account cookie. Tests read SITE_URL,
  * API_URL, SERVICE_URL, ANVIL_URL and BASE_ANVIL_URL, PAYER_ADDRESS, TOKEN_ADDRESS (Sepolia's test PHA),
- * BASE_TOKEN_ADDRESS, USDC_ADDRESS, and TREASURY (which the tests control on Anvil, as the
- * merchant's finance team controls its treasury). Service logs go to test-results/services.
+ * BASE_TOKEN_ADDRESS, USDC_ADDRESS, BASE_USDT_ADDRESS, and TREASURY (which the tests control on
+ * Anvil, as the merchant's finance team controls its treasury). Service logs go to test-results/services.
  */
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const work = mkdtempSync(join(tmpdir(), "demo-e2e-"));
@@ -85,7 +85,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       await freePort(),
       await freePort(),
     ];
-    // One Anvil per chain, with its tokens and the factory at its pinned address.
+    // One Anvil per chain, with its test contracts and the factory at its pinned address.
     const startChain = async (chainId: number, port: number, contracts: [string, string][]) => {
       children.push(
         spawn(process.env["ANVIL"] ?? "anvil", ["--port", String(port), "--chain-id", String(chainId), "--silent"], {
@@ -141,10 +141,20 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       ["TestPha.sol", "TestPha"],
       ["TestPha.sol", "TestUsdc"],
     ]);
-    const onBase = await startChain(baseSepolia.id, basePort, [["TestPha.sol", "TestPha"]]);
+    const onBase = await startChain(baseSepolia.id, basePort, [
+      ["TestPha.sol", "TestPha"],
+      ["TestPha.sol", "TestUsdt"],
+      ["TestPha.sol", "TestFaucet"],
+    ]);
     const [token, usdc] = onSepolia.tokens;
-    const [baseToken] = onBase.tokens;
-    if (token === undefined || usdc === undefined || baseToken === undefined) {
+    const [baseToken, baseUsdt, baseFaucet] = onBase.tokens;
+    if (
+      token === undefined ||
+      usdc === undefined ||
+      baseToken === undefined ||
+      baseUsdt === undefined ||
+      baseFaucet === undefined
+    ) {
       throw new Error("the test tokens were not deployed");
     }
     const anvil = onSepolia.url;
@@ -180,7 +190,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
               // Staging's own PHA rate, to show it formatted: 1 PHA = $0.06041.
               chain_id: baseSepolia.id,
               rpc: onBase.url,
-              tokens: [{ asset: "pha", contract: baseToken, decimals: 18, price: "0.06041314", pricing: "spot" }],
+              tokens: [
+                { asset: "pha", contract: baseToken, decimals: 18, price: "0.06041314", pricing: "spot" },
+                { asset: "usdt", contract: baseUsdt, decimals: 6, price: "1.00000000", pricing: "stablecoin" },
+              ],
             },
           ]),
           ...["--product-webhook", `${product}/webhooks`],
@@ -210,7 +223,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
           name: "Base Sepolia",
           rpc_url: onBase.url,
           treasury: TREASURY,
-          test_tokens: [{ symbol: "PHA", address: baseToken }],
+          test_tokens: [
+            { symbol: "PHA", address: baseToken },
+            { symbol: "USDT", address: baseUsdt, minter: baseFaucet },
+          ],
         },
       ],
       bonus_bps: { pha: 1000 },
@@ -258,6 +274,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       TOKEN_ADDRESS: token,
       BASE_TOKEN_ADDRESS: baseToken,
       USDC_ADDRESS: usdc,
+      BASE_USDT_ADDRESS: baseUsdt,
       TREASURY,
     });
   } catch (error) {

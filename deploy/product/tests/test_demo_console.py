@@ -38,6 +38,8 @@ REFUND = "re_" + "0e" * 16
 ADDRESS_ID = "da_" + "0a" * 16
 TOKEN = "0x" + "44" * 20
 BASE_TOKEN = "0x" + "77" * 20
+BASE_USDT = "0x" + "66" * 20
+BASE_FAUCET = "0x" + "99" * 20
 TREASURY = "0x" + "cc" * 20
 CONFIG = ProductConfig(
     service_url="http://service.test",
@@ -56,7 +58,10 @@ CONFIG = ProductConfig(
             name="Base Sepolia",
             rpc_url="https://rpc.base-sepolia.test",
             treasury=TREASURY,
-            test_tokens=(MintableToken("PHA", BASE_TOKEN),),
+            test_tokens=(
+                MintableToken("PHA", BASE_TOKEN),
+                MintableToken("USDT", BASE_USDT, minter=BASE_FAUCET),
+            ),
         ),
     ),
     factory="0x" + "aa" * 20,
@@ -412,6 +417,7 @@ def test_offers_the_services_tokens_by_network_on_the_products_chains(
         "quote_ttl_seconds": 900,
         "typical_credit_seconds": 30,
         "mintable": True,
+        "minter": None,
         "faucet": None,
         "bonus_bps": 1000,
     }
@@ -432,6 +438,7 @@ def test_a_second_chain_appears_once_the_service_serves_it(
 ) -> None:
     console, service = demo
     service.assets.append(_config_asset("pha", 84532, BASE_TOKEN))
+    service.assets.append(_config_asset("usdt", 84532, BASE_USDT, "stablecoin"))
     response = console.handle("GET", "/api/assets", WEBSITE, b"")
     networks = json.loads(response.body)["networks"]
     # In the config's order, each with its own explorer and gas faucet.
@@ -442,8 +449,13 @@ def test_a_second_chain_appears_once_the_service_serves_it(
     base = networks[1]
     assert base["explorer"] == "https://sepolia.basescan.org"
     assert base["faucet"] == "https://docs.base.org/get-started/get-funds#testnet-base-sepolia"
-    assert [(a["asset"], a["mintable"], a["bonus_bps"]) for a in base["assets"]] == [
-        ("pha", True, 1000)
+    # Test USDT mints through its faucet contract (Aave's on staging), from the visitor's wallet.
+    assert [
+        (a["asset"], a["mintable"], a["minter"], a["faucet"], a["bonus_bps"])
+        for a in base["assets"]
+    ] == [
+        ("pha", True, None, None, 1000),
+        ("usdt", True, BASE_FAUCET, None, 0),
     ]
     cookie = _account(console)
     status, _ = _post(
@@ -838,6 +850,9 @@ def test_the_config_validates_its_chains() -> None:
         replace(CONFIG, chains=())
     with pytest.raises(ValueError, match="distinct"):
         replace(sepolia, test_tokens=(MintableToken("PHA", TOKEN), MintableToken("PHA", TOKEN)))
+    # The deposit driver mints the first test token itself.
+    with pytest.raises(ValueError, match="must mint itself"):
+        replace(sepolia, test_tokens=(MintableToken("USDT", TOKEN, minter=BASE_FAUCET),))
     bonuses: list[dict[str, Any]] = [
         {"PHA": 1000},
         {"pha": 0},

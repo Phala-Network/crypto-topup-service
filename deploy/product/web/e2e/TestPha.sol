@@ -45,3 +45,34 @@ contract TestUsdc {
         return true;
     }
 }
+
+/// Staging's test USDT (Aave's) in miniature, with Tether's Ethereum `transfer`, which returns
+/// nothing: 6 decimals. The page mints it through `TestFaucet`, as Aave's faucet mints it.
+contract TestUsdt {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    string public constant symbol = "USDT";
+    uint8 public constant decimals = 6;
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address account, uint256 amount) external {
+        balanceOf[account] += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
+    function transfer(address to, uint256 value) external {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+    }
+}
+
+/// Aave's testnet faucet in miniature: its public `mint(token, to, amount)` mints a test token,
+/// as staging's test USDT is minted.
+contract TestFaucet {
+    function mint(address token, address to, uint256 amount) external returns (uint256) {
+        TestUsdt(token).mint(to, amount);
+        return amount;
+    }
+}

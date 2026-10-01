@@ -128,7 +128,7 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The committed Sepolia routes (`phala-cloud-sepolia-pha-usd` and `phala-cloud-sepolia-usdc-usd` in
+The committed Sepolia routes (Phala's [staging routes](phala.md#staging-routes) on Sepolia, in
 `deploy/environments/phala-network/staging/topup/topup.yaml`) use the #202 build's deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
 (`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
@@ -170,8 +170,8 @@ implementation runtime code hashes of `reference.json`, `implementation()`, the 
 
 ## Base Sepolia
 
-The committed Base Sepolia routes (`phala-cloud-base-sepolia-pha-usd` and
-`phala-cloud-base-sepolia-usdc-usd`, in the same file) use the same deployment, **deployed on Base Sepolia (84532)
+The committed Base Sepolia routes ([staging routes](phala.md#staging-routes) on Base Sepolia, in the
+same file) use the same deployment, **deployed on Base Sepolia (84532)
 and verified**: `verify-deployment.sh --rpc base-sepolia/a=… --rpc base-sepolia/b=…` passes on both
 staging providers (September 2026), and every runtime code hash equals Sepolia's. Preflight
 re-checks it on every Deploy; the Verify contracts workflow checks Sepolia only.

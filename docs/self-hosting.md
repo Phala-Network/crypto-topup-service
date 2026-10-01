@@ -258,7 +258,8 @@ Deploy `upgrade`, never a runtime setting.
   instance in test mode.
 - **Your own routes** are items of `topup.yaml`'s `routes`, written as route files are. The fields
   and their defaults are in [architecture §14](architecture.md#14-configuration-and-deployment),
-  and [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) is a mainnet example.
+  and [examples/phala-cloud-pha.yaml](../examples/phala-cloud-pha.yaml) and
+  [examples/phala-cloud-usdt.yaml](../examples/phala-cloud-usdt.yaml) are mainnet examples.
   `topup config check FILE` in the release's image checks the file (section 2), and
   `config show FILE` prints it resolved.
 - **What Deploy refuses:** a live route on a test network, a test route on a mainnet, any live

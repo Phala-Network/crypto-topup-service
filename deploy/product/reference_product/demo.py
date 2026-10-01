@@ -870,7 +870,8 @@ class DemoConsole:
         networks = []
         for chain in self.config.chains:
             testnet = chain.chain_id not in MAINNETS
-            mintable = {token.address.lower() for token in chain.test_tokens}
+            # Each mintable test token, with the faucet contract that mints it, if not its own.
+            minters = {token.address.lower(): token.minter for token in chain.test_tokens}
             assets = [
                 {
                     "asset": asset.asset,
@@ -885,7 +886,8 @@ class DemoConsole:
                     "typical_credit_seconds": asset.typical_credit_seconds,
                     # The page's faucet helper: the visitor's wallet mints a mintable test token;
                     # another testnet token may have its issuer's faucet.
-                    "mintable": asset.contract.lower() in mintable,
+                    "mintable": asset.contract.lower() in minters,
+                    "minter": minters.get(asset.contract.lower()),
                     "faucet": TOKEN_FAUCETS.get(asset.asset) if testnet else None,
                     # The product's own promotion (reference_product.fulfillment).
                     "bonus_bps": self.config.bonus_bps.get(asset.asset.lower(), 0),
