@@ -35,8 +35,8 @@ fail with `401`; `ADMIN_KEY_ID` is its `admin_key.id`, `admin/<Environment>-v1` 
 
 ```sh
 export BASE_URL="https://pay-api-staging.phala.com"   # the Environment's public_origin
-# The affected route; staging also serves phala-cloud-sepolia-{usdc,usdt}-usd, and on Base Sepolia
-# (CHAIN_ID=84532, providers base-sepolia-a/-b) phala-cloud-base-sepolia-{pha,usdc,usdt}-usd.
+# The affected route, one of deploy/phala.md's "Staging routes" on staging; Base Sepolia's are
+# CHAIN_ID=84532 with providers base-sepolia-a/-b.
 export ROUTE=phala-cloud-sepolia-pha-usd CHAIN_ID=11155111
 export RPC_PROVIDER_A_URL=https://provider-a.example RPC_PROVIDER_B_URL=https://provider-b.example
 export FACTORY=0x... IMPLEMENTATION=0x... TOKEN=0x... TREASURY=0x...

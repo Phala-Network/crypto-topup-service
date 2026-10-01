@@ -93,14 +93,15 @@ async function connect(chainId: number, using?: PaidWith): Promise<Connected> {
  */
 export async function mintTestTokens(
   chainId: number,
-  token: { contract: string; minter: string | null },
+  token: { contract: string; minter?: string | null },
   amountAtomic: bigint,
   using?: PaidWith,
 ): Promise<Hash> {
   const { client, account, chain } = await connect(chainId, using);
   const to = addressOf(account);
+  const minter = token.minter ?? null;
   const hash =
-    token.minter === null
+    minter === null
       ? await client.writeContract({
           account,
           chain,
@@ -112,7 +113,7 @@ export async function mintTestTokens(
       : await client.writeContract({
           account,
           chain,
-          address: getAddress(token.minter),
+          address: getAddress(minter),
           abi: FAUCET_MINT_ABI,
           functionName: "mint",
           args: [getAddress(token.contract), to, amountAtomic],

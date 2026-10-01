@@ -54,9 +54,10 @@ export interface Asset {
   mintable: boolean;
   /**
    * The faucet contract whose public `mint(token, to, amount)` mints it (Aave's, for its test
-   * USDT), or null when the token's own `mint(address,uint256)` does.
+   * USDT), or null when the token's own `mint(address,uint256)` does. A demo API from before this
+   * field omits it, which means null: the page deploys before the API is upgraded.
    */
-  minter: string | null;
+  minter?: string | null;
   /** The token issuer's testnet faucet, for a test token that does not mint. */
   faucet: string | null;
   /** The demo merchant's own promotion on credits paid in this token, in basis points. */

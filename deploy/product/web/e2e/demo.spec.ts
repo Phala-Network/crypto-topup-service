@@ -881,6 +881,30 @@ test("the deposit address: a canceled mint mints nothing; the amount typed sizes
   expect(problems).toEqual([]);
 });
 
+test("a demo API from before `minter` (the page deploys first) still mints test PHA directly", async ({ page }) => {
+  test.setTimeout(120_000);
+  const problems = await watchConsole(page);
+  await installWallet(page);
+  // The assets as an API without the field answers them.
+  await page.route(`${env("API_URL")}/api/assets`, async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as { networks: { assets: Record<string, unknown>[] }[] };
+    for (const network of body.networks) {
+      for (const asset of network.assets) {
+        delete asset["minter"];
+      }
+    }
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto(env("SITE_URL"));
+  const helper = page.getByRole("note", { name: "Test tokens" });
+  const before = await tokenBalance(env("PAYER_ADDRESS"));
+  await helper.getByRole("button", { name: "Mint 1,000 test PHA" }).click();
+  await expect(helper).toContainText("Minted:");
+  expect(await tokenBalance(env("PAYER_ADDRESS"))).toBe(before + parseEther("1000"));
+  expect(problems).toEqual([]);
+});
+
 test("refuses another browser's payments and refunds, and rate-limits quote creation", async ({ browser }) => {
   const first = await browser.newContext();
   const page = await first.newPage();

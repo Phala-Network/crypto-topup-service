@@ -128,7 +128,7 @@ architecture explicitly selects another deterministic deployer.
 
 ## Sepolia
 
-The committed Sepolia routes (`phala-cloud-sepolia-{pha,usdc,usdt}-usd` in
+The committed Sepolia routes (Phala's [staging routes](phala.md#staging-routes) on Sepolia, in
 `deploy/environments/phala-network/staging/topup/topup.yaml`) use the #202 build's deterministic factory `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747` and implementation
 `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, **deployed and verified on Sepolia**
 (`verify-deployment.sh` passes on two providers; the Verify contracts workflow checks it daily).
@@ -170,8 +170,8 @@ implementation runtime code hashes of `reference.json`, `implementation()`, the 
 
 ## Base Sepolia
 
-The committed Base Sepolia routes (`phala-cloud-base-sepolia-{pha,usdc,usdt}-usd`, in the same
-file) use the same deployment, **deployed on Base Sepolia (84532)
+The committed Base Sepolia routes ([staging routes](phala.md#staging-routes) on Base Sepolia, in the
+same file) use the same deployment, **deployed on Base Sepolia (84532)
 and verified**: `verify-deployment.sh --rpc base-sepolia/a=… --rpc base-sepolia/b=…` passes on both
 staging providers (September 2026), and every runtime code hash equals Sepolia's. Preflight
 re-checks it on every Deploy; the Verify contracts workflow checks Sepolia only.
@@ -184,7 +184,6 @@ re-checks it on every Deploy; the Verify contracts workflow checks Sepolia only.
 | test PHA (`MockERC20`, 18 decimals, public `mint`) | `0x1a6F260377e42ead1418C7C1afDFD5DE371A9284` |
 | a second `MockERC20`, the unsupported-token test contract | `0xC60dE2C49c2b546F968C68a51370250148C52e4b` |
 | Circle's testnet USDC (`FiatTokenProxy` to `FiatTokenV2_2` `0xd74cc5d436923b8ba2c179b4bca2841d8a52c5b5`, 6 decimals) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
-| Aave's testnet USDT (6 decimals; its faucet `0xD9145b5F45Ad4519c7ACcD6E0A4A82e83bB8A6Dc` mints to anyone) | `0x0a215D8ba66387DCA84B284D18c3B4ec3de6E54a` |
 
 The chain carries the canonical proxy and Multicall3 at their committed code hashes, and the
 mocks' code equals Sepolia's.
