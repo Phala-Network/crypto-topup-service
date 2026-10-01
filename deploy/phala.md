@@ -136,8 +136,9 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
 5. **Switch DNS** for `pay-api-staging.phala.com` to the records the summary lists: the CNAME to
    the new node's gateway and the `_dstack-app-address` TXT to the new instance, DNS only
    ([Custom domain](README.md#custom-domain)).
-6. **Upgrade once and verify.** Dispatch the same run with `-f mode=upgrade`: it waits for
-   `/healthz` and verifies the attestation and the certificate evidence. Then verify the
+6. **Upgrade once and verify**, the acceptance step (the provision proved nothing about health).
+   Dispatch the same run with `-f mode=upgrade`: it requires the CVM running, waits for `/healthz`,
+   and verifies the attestation and the certificate evidence. Then verify the
    attestation from your machine ([Attestation](README.md#attestation-ingress-and-egress)), and
    check that `GET /v1/config` with any test key lists the Sepolia and Base Sepolia assets.
 7. **Re-onboard the accounts** ([Operator onboarding](README.md#operator-onboarding), steps 1–3,

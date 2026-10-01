@@ -216,7 +216,8 @@ Deploy `upgrade`, never a runtime setting.
 2. **Provision.** Run your Deploy workflow with `environment: production` and
    `mode: provision`. It runs preflight, creates the CVM with Phala Cloud's KMS, verifies the
    attested compose, and prints the CVM id, the DNS records, and the sealing commands in its
-   summary. Set `TOPUP_CVM_ID` to the CVM id; if a later step of the run fails, set it anyway and
+   summary. It proves nothing about the CVM's health: the CVM only has to boot, and shows `error`
+   until it is sealed; step 5 is the acceptance step. Set `TOPUP_CVM_ID` to the CVM id; if a later step of the run fails, set it anyway and
    continue with `upgrade`, never provision twice
    ([deploy/README.md, "Deploy"](../deploy/README.md#deploy)).
 3. **Seal the secrets** (**HUMAN-ONLY**). The CVM waits for them: PostgreSQL initializes only after
@@ -241,8 +242,9 @@ Deploy `upgrade`, never a runtime setting.
    proxied. dstack-ingress in the CVM then obtains a Let's Encrypt certificate itself, through
    port 443 (`tls-alpn-01`); the CVM holds no DNS credentials
    ([Custom domain](../deploy/README.md#custom-domain)).
-5. **Upgrade once with the same release.** Run Deploy with `mode: upgrade`: it waits for
-   `<public_origin>/healthz` and verifies the attestation and the certificate evidence.
+5. **Upgrade once with the same release**, the acceptance step. Run Deploy with `mode: upgrade`:
+   it requires the CVM running, waits for `<public_origin>/healthz`, and verifies the attestation
+   and the certificate evidence, retrying it for up to 10 minutes after the DNS change.
    Backups have started once a WAL segment younger than two minutes is listed:
 
    ```sh

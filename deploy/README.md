@@ -154,9 +154,12 @@ adopting a release is a pull request that changes its release.
 1. Merge the change to the environment repository's `main`: a setting, or a new `version`.
 2. First deployment: Deploy with `mode: provision`, then set `TOPUP_CVM_ID` (or, for the product,
    `STAGING_PRODUCT_CVM_ID`) to the CVM id in the summary, [seal the
-   secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. If a provision run fails after the summary shows a CVM id, set
-   the variable, seal the secrets (an upgrade waits for `/healthz`), and re-run with `mode:
-   upgrade` and the same release; never provision twice.
+   secrets](#sealing-the-secrets), and create the [DNS records](#custom-domain) it lists. A
+   provision only creates the CVM, which must boot but shows `error` until it is sealed, so it
+   proves nothing about its health: the acceptance step is the `mode: upgrade` run with the same
+   release after the sealing, which requires the CVM running, `/healthz`, the attested compose, and
+   the certificate evidence. If a provision run fails after the summary shows a CVM id, set the
+   variable, seal the secrets, and run that upgrade; never provision twice.
 3. Every later change: Deploy with `mode: upgrade`. An upgrade sends only the compose, so the
    sealed env stays. Rollback is an upgrade to an earlier release; never roll a schema back, use a
    forward repair migration.

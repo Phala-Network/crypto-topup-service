@@ -336,8 +336,8 @@ jobs:
               echo
             fi
           } >>"$GITHUB_STEP_SUMMARY"
-          # A new CVM is unsealed: it may settle without running, but only with its console's
-          # evidence of the unsealed failure and nothing else (deploy/phala-cvm.sh, wait).
+          # A provision only creates the CVM: unsealed, it boots but does not run (deploy/phala-cvm.sh,
+          # wait). The upgrade after the sealing is the acceptance step.
           if [[ "$MODE" == provision ]]; then
             "$KIT/deploy/phala-cvm.sh" wait --unsealed "$cvm_id" >"$WORK/cvm.json"
           else
@@ -423,22 +423,19 @@ jobs:
         run: '"$KIT/deploy/phala-cvm.sh" healthz "$PUBLIC_URL"'
 
       # Right after a DNS change the domain can still reach the previous instance, from a resolver's
-      # cache, or the new one can still be obtaining its certificate: retried for 15 minutes.
+      # cache, or the new one can still be obtaining its certificate: retried every 30 seconds for
+      # at most 10 minutes in all (each check bounds its own requests and TLS handshake).
       - name: Verify the certificate evidence
         if: inputs.mode == 'upgrade'
         run: |
-          for attempt in $(seq 30); do
-            if "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" >"$WORK/ingress-evidence.txt" 2>&1; then
-              cat "$WORK/ingress-evidence.txt"
-              break
-            fi
+          # shellcheck disable=SC2016  # expanded by the inner bash
+          if ! timeout 600 bash -c 'until "$0" "$1" "$2" >"$3" 2>&1; do cat "$3"; sleep 30; done' \
+            "$KIT/deploy/verify-ingress-evidence.sh" "$DOMAIN" "$APP_ID" "$WORK/ingress-evidence.txt"; then
             cat "$WORK/ingress-evidence.txt"
-            if ((attempt == 30)); then
-              echo "::error::the certificate evidence of $DOMAIN did not verify within 15 minutes"
-              exit 1
-            fi
-            sleep 30
-          done
+            echo "::error::the certificate evidence of $DOMAIN did not verify within 10 minutes"
+            exit 1
+          fi
+          cat "$WORK/ingress-evidence.txt"
           { echo '```text'; cat "$WORK/ingress-evidence.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Print the owner's sealing step
@@ -453,9 +450,9 @@ jobs:
               image=$(jq -r '.services.topup.image' <<<"$compose_json")
               echo "### Owner: seal the runtime secrets"
               echo
-              echo "The CVM waits for its storage credentials: PostgreSQL refuses to initialize until"
-              echo "it can list the backup prefix, so the service is not up yet, and Phala Cloud shows the"
-              echo "CVM as \`error\` until it restarts with them. From your own machine,"
+              echo "This provision created the CVM and proves nothing about its health. The CVM waits for"
+              echo "its storage credentials: PostgreSQL refuses to initialize until it can list the backup"
+              echo "prefix, so Phala Cloud shows the CVM as \`error\` until it is sealed. From your own machine,"
               echo "write \`$owner_env\` (mode 0600) with exactly the compose's sealed names: $names."
               echo "\`SENTRY_DSN\` may be empty; each \`TOPUP_RPC_<ID>_KEY\` is the key for the \`{key}\`"
               echo "in provider <ID>'s URL, empty for a keyless URL. The same name set keeps the compose hash."
@@ -490,6 +487,10 @@ jobs:
               echo "aws s3 ls \"${prefix%/}/wal_005/\" --endpoint-url \"$endpoint\" | tail -1"
               echo '```'
             fi
+            echo
+            echo "**Acceptance:** once sealed and the DNS records resolve, dispatch Deploy with mode"
+            echo "\`upgrade\`. It requires the CVM running, \`/healthz\`, the attested compose, and the"
+            echo "certificate evidence; until it passes, nothing about this CVM is verified."
           } >>"$GITHUB_STEP_SUMMARY"
 
       # No secrets: the compose holds the public settings and references to the sealed secrets,

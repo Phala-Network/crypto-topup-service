@@ -60,8 +60,14 @@ jq -e --arg app_id "$app_id" --arg report_data "$manifest" '
     exit 1
 }
 
-served=$(openssl s_client -connect "$domain:443" -servername "$domain" </dev/null 2>/dev/null |
-    openssl x509 -outform DER | sha256sum | cut -c1-64)
+# The handshake is bounded: right after a DNS change the domain may not answer yet.
+timeout 30 openssl s_client -connect "$domain:443" -servername "$domain" </dev/null \
+    >"$tmp/served.txt" 2>/dev/null || true
+openssl x509 -in "$tmp/served.txt" -outform DER >"$tmp/served.der" 2>/dev/null || {
+    echo "$domain:443 served no certificate within 30 seconds" >&2
+    exit 1
+}
+served=$(sha256sum "$tmp/served.der" | cut -c1-64)
 published=$(openssl x509 -in "$tmp/cert-$domain.pem" -outform DER | sha256sum | cut -c1-64)
 [ "$served" = "$published" ] || {
     echo "$domain serves a certificate other than the one in its evidence" >&2
