@@ -23,8 +23,8 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 ### Changed (breaking)
 
 - `parseClientQuote`, and so `<Checkout>` and `createCheckout`, require `amount_credited` (an
-  integer or `null`) and `typical_credit_seconds`, which the service sends from the release after
-  v0.3.3: upgrade the service before the SDK.
+  integer or `null`) and `typical_credit_seconds`, which the service sends from v0.3.4: upgrade
+  the service before the SDK.
 
 ### Fixed
 

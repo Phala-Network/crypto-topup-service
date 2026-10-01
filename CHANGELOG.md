@@ -9,6 +9,8 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-01
+
 ### Added
 
 - The payer's view of a quote (`GET /v1/quotes/{id}?client_secret=…`, `ClientQuote`) carries
@@ -948,7 +950,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Phala-Network/phala-pay/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.3.1
