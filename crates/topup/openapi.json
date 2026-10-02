@@ -496,7 +496,7 @@
             "type": "integer"
           },
           "typical_credit_seconds": {
-            "description": "Typical time from payment to credit, in seconds, at the confirmation this chain's payments\nare credited at, as `GET /v1/config` reports it for each of the chain's tokens. Absent when\nthose tokens are credited at different confirmations, and from a service of v0.3.5 or\nearlier, so a client should not require it.",
+            "description": "Typical time from payment to credit, in seconds, at the confirmation this chain's payments\nare credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share\nthe chain's one floor. Absent from a service of v0.3.5 or earlier, so a client should not\nrequire it.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"

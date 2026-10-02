@@ -596,20 +596,16 @@ async fn client_deposit_address_view(
         .networks
         .into_iter()
         .map(|network| {
-            // Each asset route of the chain may set its own confirmation: the network has a time
-            // only when every one of them credits at the same.
-            let policy = policies.get(&network.chain_id);
-            let mut seconds = state
+            // The chain's routes share one floor (`RouteSet` refuses others), so any current route
+            // of the chain gives its time.
+            let typical_credit_seconds = state
                 .routes
                 .current_in(livemode)
-                .filter(|route| route.chain.chain_id == network.chain_id)
+                .find(|route| route.chain.chain_id == network.chain_id)
                 .map(|route| {
-                    super::quotes::credit_confirmations(route, policy)
+                    super::quotes::credit_confirmations(route, policies.get(&network.chain_id))
                         .typical_credit_seconds(network.chain_id)
                 });
-            let typical_credit_seconds = seconds
-                .next()
-                .filter(|first| seconds.all(|other| other == *first));
             ClientDepositAddressNetwork {
                 chain_id: network.chain_id,
                 address: network.address,

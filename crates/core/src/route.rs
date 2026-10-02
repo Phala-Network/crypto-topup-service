@@ -243,9 +243,9 @@ impl Confirmations {
     }
 
     /// The stricter of two confirmations of one chain (design D1): any depth < `safe` <
-    /// `finalized`, and the deeper of two depths. `safe` outranks every depth because a sequencer
-    /// can reorganize the unsafe head however deep a block is in it, but not a block derived from
-    /// data posted to L1.
+    /// `finalized`, and the deeper of two depths. `safe` outranks every depth because the sequencer
+    /// can rewrite the unsafe head on its own however deep a block is in it, but not a block derived
+    /// from data posted to L1, which only an L1 reorganization reaching that data can change.
     #[must_use]
     pub fn stricter(self, other: Self) -> Self {
         match (self, other) {
@@ -692,9 +692,9 @@ pub const UNIT_DECIMALS: u8 = 2;
 /// Two blocks on Ethereum L1: depth-1 reorgs are routine, deeper ones were not observed (design
 /// D1), and a reversal is recoverable.
 pub const DEFAULT_ETHEREUM_CONFIRMATION_DEPTH: u64 = 2;
-/// Three blocks on an OP-stack chain's unsafe head, 4 s after inclusion: Base reports a single
-/// reorged L2 block ever and none after batching to L1, twice that depth is covered, and a
-/// reversal is recoverable (design D1, owner decision of 2026-10-02).
+/// Three blocks on an OP-stack chain's unsafe head, 4 s after inclusion: a product-risk choice
+/// (design D1, owner decision of 2026-10-02). Base reports a single reorged L2 block ever and none
+/// after batching to L1; the account cap bounds what a deeper reorganization exposes.
 pub const DEFAULT_OP_STACK_CONFIRMATION_DEPTH: u64 = 3;
 /// Ethereum L1's slot time.
 pub const ETHEREUM_BLOCK_SECONDS: u64 = 12;

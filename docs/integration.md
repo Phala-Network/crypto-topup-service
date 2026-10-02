@@ -508,8 +508,8 @@ and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any a
 at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 7 seconds on
 Base Sepolia. You can reuse this address." Each network's time is its `typical_credit_seconds` in
 the address's public view (above), at the confirmation your account's payments on that chain wait
-for, as `GET /v1/config` reports it; it is absent when the network's tokens are credited at
-different confirmations, and then the page names no time.
+for, as `GET /v1/config` reports it; it is absent from a service of v0.3.5 or earlier, and then the
+page names no time.
 `<DepositAddress depositAddress={…} clientSecret={…} apiBase={…}>` from `@phala/pay/react`
 renders exactly that from `address` and `networks` (pass only those and the `client_secret` to the
 browser) and, with the secret, shows each payment as it arrives: "1.5 PHA received on Sepolia, 1
@@ -662,7 +662,8 @@ sign and execute it as any Safe transaction
   (`400` otherwise). From weaker to stricter: a depth, a deeper depth, `"safe"`, `"finalized"`. On
   an OP-stack chain such as Base, the route's depth counts blocks on the sequencer's unsafe head,
   which Base reports reorganized only once ever; `"safe"` waits, about 5 minutes, until the block
-  is derived from data posted to Ethereum, and `"finalized"` until that data is final. `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
+  is derived from data posted to Ethereum, which the sequencer cannot rewrite on its own, and
+  `"finalized"` until that data is final. `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
   `typical_credit_seconds`, and `GET /v1/account` lists your policies. **If you sell goods or
   services you cannot take back (withdrawable balances, gift cards, anything delivered off
   platform), use `finalized`**: a credit before finality can still be reversed by a

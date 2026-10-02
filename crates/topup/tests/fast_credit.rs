@@ -43,6 +43,7 @@ use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::{ChainFamily, ChainHeads, Confirmations, RouteFile};
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use topup_core::valuation::{SourceId, UnixSeconds};
+use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
@@ -587,12 +588,9 @@ async fn an_op_stack_unsafe_head_reorg_reverses_the_credit_and_credits_the_repla
             let credited = chain.deposit(tx).await?;
             ensure!(credited.state == DepositState::Credited);
             ensure!(credited.final_at.is_none());
-            let heads = chain.reader.confirmation_heads(Confirmations::Safe).await?;
-            ensure!(
-                heads.safe.is_some_and(|safe| safe < credited.block_number)
-                    && heads.finalized < credited.block_number,
-                "credited on the unsafe head, above `safe` and `finalized`: {heads:?}"
-            );
+            chain
+                .assert_above_safe_and_finalized(credited.block_number)
+                .await?;
 
             // The unsafe blocks from the payment's on are replaced: the payer's nonce now pays the
             // address from another transaction, in the payment's block.
@@ -631,6 +629,86 @@ async fn an_op_stack_unsafe_head_reorg_reverses_the_credit_and_credits_the_repla
             ensure!(stats.finalized == 1 && stats.reversed == 0, "{stats:?}");
             ensure!(chain.deposit(successor).await?.final_at.is_some());
             ensure!(chain.events("deposit.reversed").await?.len() == 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The residual risk of crediting before finality, the same on both families: a reorganization
+/// that removes the payment without spending the payer's nonce (on OP-stack, verifiers replacing
+/// unsafe blocks the batcher never posted) proves nothing dropped, as the transaction could still
+/// be included again. Past finality the watch keeps the deposit credited and not final, so it holds
+/// its share of the account's cap, and alerts once the block is an hour old; it does not reverse.
+/// Anvil's clock starts two hours back, so the payment's block is past that hour.
+#[tokio::test]
+#[traced_test]
+async fn an_op_stack_payment_removed_without_its_nonce_spent_stays_pending_and_alerts() -> Result<()>
+{
+    let genesis = (Utc::now() - chrono::Duration::hours(2))
+        .timestamp()
+        .to_string();
+    run_on(OP_STACK, &["--timestamp", &genesis], |chain| {
+        Box::pin(async move {
+            let Confirmations::Depth(depth) = OP_STACK.confirmations else {
+                bail!("the OP-stack default is a depth");
+            };
+            let tx = chain.pay(AMOUNT)?;
+            chain.anvil.mine(depth - 1)?;
+            ensure!(chain.scan().await? == 1);
+            chain.settle().await?;
+            let credited = chain.deposit(tx).await?;
+            ensure!(credited.state == DepositState::Credited);
+            let credit = credited
+                .credit_minor
+                .context("a credited deposit has its credit")?
+                .value();
+            chain
+                .assert_above_safe_and_finalized(credited.block_number)
+                .await?;
+            let exposure = || async {
+                Ok::<_, anyhow::Error>(
+                    db::unfinalized_credit(
+                        &chain.pool,
+                        credited.account_id,
+                        credited.livemode,
+                        Uuid::nil(),
+                    )
+                    .await?
+                    .credited,
+                )
+            };
+            ensure!(exposure().await? == credit);
+
+            // The unsafe blocks from the payment's on are replaced by empty ones: the transaction
+            // is gone, and the payer's nonce is not spent.
+            let nonce = chain.payer_nonce()?;
+            chain.reorg(depth, &[])?;
+            ensure!(chain.receipt_block(tx)?.is_none());
+            ensure!(
+                chain.payer_nonce()? == nonce - 1,
+                "the payer's nonce is unspent"
+            );
+
+            chain.anvil.mine(FINALITY_DEPTH + depth)?;
+            let finalized = chain.reader.finalized_head().await?.number;
+            ensure!(
+                finalized > credited.block_number,
+                "past the payment's height"
+            );
+            let stats = chain.watch().await?;
+            ensure!(
+                stats.watched == 1 && stats.reversed == 0 && stats.finalized == 0,
+                "{stats:?}"
+            );
+            let pending = chain.deposit(tx).await?;
+            ensure!(pending.state == DepositState::Credited && pending.final_at.is_none());
+            ensure!(chain.events("deposit.reversed").await?.is_empty());
+            ensure!(
+                exposure().await? == credit,
+                "the credit still holds the cap"
+            );
+            ensure!(logs_contain("TopupDepositPendingAfterReorg"));
             Ok(())
         })
     })
@@ -1156,6 +1234,22 @@ impl FastChain {
             .context("block hash")?
             .parse()?;
         Ok(Some((number, hash)))
+    }
+
+    /// Checks that `block` is above provider A's `safe` and `finalized` heads: on the unsafe head.
+    async fn assert_above_safe_and_finalized(&self, block: u64) -> Result<()> {
+        let safe = self
+            .reader
+            .confirmation_heads(Confirmations::Safe)
+            .await?
+            .safe
+            .context("the safe head")?;
+        let finalized = self.reader.finalized_head().await?.number;
+        ensure!(
+            safe < block && finalized < block,
+            "block {block} is not above safe {safe} and finalized {finalized}"
+        );
+        Ok(())
     }
 
     /// One per-block scan, as the head loop runs on each new head.

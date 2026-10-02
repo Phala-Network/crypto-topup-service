@@ -561,9 +561,9 @@ pub struct ClientDepositAddressNetwork {
     /// The supported tokens on this chain.
     pub assets: Vec<DepositAddressAsset>,
     /// Typical time from payment to credit, in seconds, at the confirmation this chain's payments
-    /// are credited at, as `GET /v1/config` reports it for each of the chain's tokens. Absent when
-    /// those tokens are credited at different confirmations, and from a service of v0.3.5 or
-    /// earlier, so a client should not require it.
+    /// are credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share
+    /// the chain's one floor. Absent from a service of v0.3.5 or earlier, so a client should not
+    /// require it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = u64, required = false)]
     pub typical_credit_seconds: Option<u64>,

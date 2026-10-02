@@ -495,11 +495,16 @@ reads at the position takes the successor's id and `replaces` again (§14).
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
-reproduces crediting only final deposits. A stricter value is a deeper depth, then `safe`, then
-`finalized`: `safe` outranks every depth, since the sequencer can reorganize the unsafe head
-however deep a block is in it, but not a block derived from data posted to L1. A depth credits
-before finality on both families, and the finality watch and the per-account cap on credit
-not yet final (both §7) treat an unsafe-head reorg on an OP-stack chain exactly as a reorg on Ethereum.
+reproduces crediting only final deposits. It is the chain's floor: every loaded route of a chain
+must resolve to the same value, defaults included, or the route set is refused at load
+(`topup config check` too), so the scanner, the confirm step, and the API read one floor. A
+stricter value is a deeper depth, then `safe`, then `finalized`: `safe` outranks every depth, since
+the sequencer can rewrite the unsafe head on its own however deep a block is in it, but not a block
+derived from data posted to L1, which only an L1 reorganization reaching that data can change. A depth credits before finality on both families,
+and the same code handles a reorganization on either: the finality watch (§7) follows a
+re-included transaction and reverses a proven-replaced one, a transaction gone with its nonce
+unspent stays credited and not final with an alert after an hour, and the per-account cap on
+credit not yet final (§7) bounds what is exposed meanwhile.
 
 | Chain family | Values | Default |
 |---|---|---|
@@ -1143,8 +1148,8 @@ rotation returns a new `client_secret`, `da_…_secret_…`, built and checked a
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
 `ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each network
 with its `typical_credit_seconds` (at the account's confirmation on the chain, as `GET /v1/config`
-reports it; absent when the chain's tokens are credited at different confirmations, and from
-v0.3.5 and earlier, so clients do not require it), and each payment with
+reports it, one value for all its tokens since a chain has one floor (§8); absent from v0.3.5 and
+earlier, so clients do not require it), and each payment with
 its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
 treasury, customer, or metadata, under the quote reads' CORS and rate limit.
 
