@@ -1,6 +1,6 @@
 {
   "name": "@phala/pay",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Phala Pay checkout: a framework-agnostic client and React bindings",
   "keywords": [
     "crypto",

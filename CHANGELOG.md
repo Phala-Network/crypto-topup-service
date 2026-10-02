@@ -13,6 +13,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-02
+
 ### Added
 
 - Per-account payment settings, `GET` and `POST /v1/payment_settings` (docs/integration.md §1.9,
@@ -1151,7 +1153,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...v0.5.0
 [0.3.5]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...v0.3.4
