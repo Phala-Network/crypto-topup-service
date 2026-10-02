@@ -180,9 +180,10 @@ POST /v1/payment_settings
   to its default (`null`). `chains: []` accepts nothing.
 - Writes are **last-write-wins**: there is no compare-and-swap. Concurrent writers apply one after
   the other under the account row's lock, and the later one is current. The documentation says so.
-- **While `held`, any `POST` writes a new revision, even an identical document.** This is the
-  merchant's explicit reconfirmation (§11). Otherwise, a request that changes nothing writes
-  nothing.
+- **While `held`, a `POST` must be the complete configuration, and writes a new revision even
+  with an identical document.** This is the merchant's explicit reconfirmation (§11). `chains` is
+  required (`400 parameter_missing` without it), and a top-level parameter not sent takes its
+  default, never the restored value. Otherwise, a request that changes nothing writes nothing.
 
 **Validation** runs against the catalog of the key's mode. A failure is `400 parameter_invalid`,
 with `param` naming the exact path, such as `chains[0][assets][1][quote_spread_bps]`. It fails on:

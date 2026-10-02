@@ -485,13 +485,9 @@ async fn request_refund_in(
     let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
     // The dust floor of the terms that govern the deposit, or the route's default for one no
     // terms govern (docs/design/payment-settings.md §9).
-    let min_refund = crate::payment_config::refund_floor(
-        transaction,
-        routes,
-        refund.deposit_id,
-        refund.route,
-    )
-    .await?;
+    let min_refund =
+        crate::payment_config::refund_floor(transaction, routes, refund.deposit_id, refund.route)
+            .await?;
     refund_eligibility(refund_deposit_from_row(&row, min_refund)?)
         .map_err(|_| ApiError::deposit_not_refundable())?;
     // Nothing is paid back for a deposit that could still be reversed.

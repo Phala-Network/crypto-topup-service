@@ -92,8 +92,9 @@ def sync_detailed(
     when sent, replaces the whole list, and a term an element does not send takes the operator's
     default. Writes are last-write-wins. The settings govern quotes and deposit addresses issued
     from now on, and every payment recorded after the change; a quote keeps the terms it was
-    issued with. After a restore of the service, a `POST` with your complete configuration, even
-    unchanged, reconfirms it. Announced as `payment_settings.updated`.
+    issued with. After a restore of the service the settings are `held` until a `POST` with your
+    complete configuration, even unchanged, reconfirms them: `chains` is then required, and a
+    parameter not sent takes its default. Announced as `payment_settings.updated`.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -133,8 +134,9 @@ def sync(
     when sent, replaces the whole list, and a term an element does not send takes the operator's
     default. Writes are last-write-wins. The settings govern quotes and deposit addresses issued
     from now on, and every payment recorded after the change; a quote keeps the terms it was
-    issued with. After a restore of the service, a `POST` with your complete configuration, even
-    unchanged, reconfirms it. Announced as `payment_settings.updated`.
+    issued with. After a restore of the service the settings are `held` until a `POST` with your
+    complete configuration, even unchanged, reconfirms them: `chains` is then required, and a
+    parameter not sent takes its default. Announced as `payment_settings.updated`.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -169,8 +171,9 @@ async def asyncio_detailed(
     when sent, replaces the whole list, and a term an element does not send takes the operator's
     default. Writes are last-write-wins. The settings govern quotes and deposit addresses issued
     from now on, and every payment recorded after the change; a quote keeps the terms it was
-    issued with. After a restore of the service, a `POST` with your complete configuration, even
-    unchanged, reconfirms it. Announced as `payment_settings.updated`.
+    issued with. After a restore of the service the settings are `held` until a `POST` with your
+    complete configuration, even unchanged, reconfirms them: `chains` is then required, and a
+    parameter not sent takes its default. Announced as `payment_settings.updated`.
 
     Args:
         idempotency_key (None | str | Unset):
@@ -208,8 +211,9 @@ async def asyncio(
     when sent, replaces the whole list, and a term an element does not send takes the operator's
     default. Writes are last-write-wins. The settings govern quotes and deposit addresses issued
     from now on, and every payment recorded after the change; a quote keeps the terms it was
-    issued with. After a restore of the service, a `POST` with your complete configuration, even
-    unchanged, reconfirms it. Announced as `payment_settings.updated`.
+    issued with. After a restore of the service the settings are `held` until a `POST` with your
+    complete configuration, even unchanged, reconfirms them: `chains` is then required, and a
+    parameter not sent takes its default. Announced as `payment_settings.updated`.
 
     Args:
         idempotency_key (None | str | Unset):

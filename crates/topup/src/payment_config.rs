@@ -405,6 +405,15 @@ pub async fn load(connection: &mut PgConnection, scope: Scope) -> Result<Setting
     read_settings(connection, scope, "").await
 }
 
+/// The scope's current settings, with its state row locked `FOR UPDATE` to the end of the
+/// caller's transaction: a writer reads the settings it changes under the lock that orders it.
+pub async fn load_for_update(
+    connection: &mut PgConnection,
+    scope: Scope,
+) -> Result<Settings, sqlx::Error> {
+    read_settings(connection, scope, "FOR UPDATE OF state").await
+}
+
 /// The scope's current settings, with its state row locked `FOR SHARE` to the end of the
 /// caller's transaction, so the revision stays current until it commits: a quote resolved from it
 /// is issued under it.
@@ -434,6 +443,22 @@ pub async fn lock_for_recording(
     Ok(())
 }
 
+/// [`lock_for_recording`] for a recorder that names the account and mode itself: a reversed
+/// deposit restored from its delivered `deposit.reversed` (`crate::restore_mode`).
+pub async fn lock_scope_for_recording(
+    connection: &mut PgConnection,
+    scope: Scope,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT 1 FROM payment_settings_state WHERE account_id = $1 AND livemode = $2 FOR SHARE",
+    )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .fetch_optional(connection)
+    .await?;
+    Ok(())
+}
+
 /// What a written change did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Written {
@@ -453,7 +478,7 @@ pub async fn write(
     document: &Document,
     created_by: &str,
 ) -> Result<Written, sqlx::Error> {
-    let current = read_settings(connection, scope, "FOR UPDATE OF state").await?;
+    let current = load_for_update(connection, scope).await?;
     if current.status == Status::Configured && current.document == *document {
         return Ok(Written {
             changed: false,

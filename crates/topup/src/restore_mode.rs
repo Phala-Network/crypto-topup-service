@@ -785,6 +785,13 @@ async fn restore_reversed(
     if !issued {
         return Ok(ReversedDeposit::AddressUnknown);
     }
+    // The barrier every recorder takes (crate::payment_config): the insert below, a later
+    // statement, binds the deposit to the payment settings its own snapshot reads.
+    crate::payment_config::lock_scope_for_recording(
+        &mut *connection,
+        crate::tenancy::Scope::new(event.account_id, event.livemode),
+    )
+    .await?;
     let route = routes
         .routes()
         .iter()

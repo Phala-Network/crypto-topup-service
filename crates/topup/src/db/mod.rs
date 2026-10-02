@@ -14,12 +14,11 @@ use sqlx::migrate::Migrator;
 
 pub use accounts::{Account, Customer, ensure_customer_in, get_account, get_customer};
 pub use addresses::{Address, get_address, list_chain_addresses};
-pub(crate) use deposits::Evidence;
 pub use deposits::{
     ApplyTransitionError, ApplyTransitionResult, CanonicalEvidence, ClaimedDeposit, Deposit,
-    LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects, TransitionUpdate,
-    TransitionWrites, UnfinalizedCredit, apply_transition, claim_deposit, get_deposit,
-    insert_deposit, release_deposit_lease, unfinalized_credit,
+    Evidence, LockConsumption, NewDeposit, OutboxEvent, StoredValuation, TransitionEffects,
+    TransitionUpdate, TransitionWrites, UnfinalizedCredit, apply_transition, claim_deposit,
+    get_deposit, insert_deposit, insert_deposit_in, release_deposit_lease, unfinalized_credit,
 };
 pub use outbox::{
     EventObject, NewOutboxEvent, Notice, SYSTEM_ACTOR, enqueue_in, enqueue_rendered_in, event_data,

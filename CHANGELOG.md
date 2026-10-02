@@ -55,8 +55,9 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   `asset.quote_amount_decimals`; `quote.max_creations_per_minute` is removed (now per account and
   mode, default 10, at most 60). Every environment's route files are converted.
 - **Breaking:** after a restore from backup, every account's payment settings are `held` until the
-  merchant sends its complete configuration with `POST /v1/payment_settings`; deposits recorded
-  meanwhile wait. A delivered outcome stands: a rebuilt deposit with an imported
+  merchant sends its complete configuration with `POST /v1/payment_settings` (`chains` required,
+  and nothing of the restored settings carried over); deposits recorded meanwhile wait, and the
+  reconfirmation binds them. No imported delivery lifts the hold. A delivered outcome stands: a rebuilt deposit with an imported
   `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded.
 - **Breaking (operators):** the upgrade to this release is a cutover (docs/architecture.md §14):
   `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model (the
@@ -80,7 +81,9 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 #### Removed
 
-- **Breaking:** `pay.account.update(confirmation_policies=)` and `TopupClient.update_account`.
+- **Breaking:** `pay.account.update(confirmation_policies=)` and `TopupClient.update_account`,
+  the generated `ConfirmationPolicy` and `UpdateAccountObjectRequest` models, and
+  `AccountObject.confirmation_policies`.
 
 ## [0.5.0] - 2026-10-01
 

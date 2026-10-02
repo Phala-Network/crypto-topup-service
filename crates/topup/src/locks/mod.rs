@@ -401,12 +401,13 @@ pub async fn create_in(
     let window = i64::try_from(terms.quote_ttl_seconds).map_err(|_| RateLockError::Arithmetic)?;
 
     // One consistent resolution: the revision the quote was priced under, still current and held
-    // so `FOR SHARE` until the quote commits (docs/design/payment-settings.md §7).
-    if payment_config::load_for_share(transaction, scope)
-        .await?
-        .revision
-        != revision
-    {
+    // so `FOR SHARE` until the quote commits (docs/design/payment-settings.md §7). A restore's hold
+    // keeps the revision, so it is checked on its own.
+    let current = payment_config::load_for_share(transaction, scope).await?;
+    if current.status == Status::Held {
+        return Err(RateLockError::SettingsUnconfirmed);
+    }
+    if current.revision != revision {
         return Err(RateLockError::SettingsChanged);
     }
     lock_customer(transaction, customer).await?;

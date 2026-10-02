@@ -1653,4 +1653,6 @@ delivered). So after a restore every account's settings, in each mode, are `held
 quoted or issued (`400 payment_settings_unconfirmed`), and a payment recorded meanwhile waits,
 neither credited nor rejected, unless its outcome was delivered to you before (that outcome
 stands). Once the freeze lifts, send your complete configuration with `POST /v1/payment_settings`,
-even if unchanged (§1.9): it ends the hold, and every waiting payment is decided under it.
+even if unchanged (§1.9): it ends the hold, and every waiting payment is decided under it. While
+held, `chains` is required (`400 parameter_missing` without it), and a parameter you leave out
+takes its default: nothing of the restored settings is carried over.

@@ -492,31 +492,68 @@ async fn record_deposit(
     ensure!(
         db::insert_deposit(
             &harness.pool,
-            &NewDeposit {
-                chain_id: 1,
-                tx_hash,
-                receipt_log_index: 0,
-                log_index: 0,
-                block_number: 120,
-                block_hash: B256::repeat_byte(0xb1),
-                block_time: Utc::now(),
-                address_id,
-                route: Some(harness.route.route.clone()),
-                route_version: Some(harness.route.version),
-                asset_contract: harness.route.asset.contract,
-                from_address: Address::repeat_byte(0x74),
-                amount_atomic: AtomicAmount::new(amount_atomic),
-                state: DepositState::Detected,
-                reason: None,
-                next_attempt_at: Utc::now(),
-                tx_from: Address::repeat_byte(0x74),
-                tx_nonce: 0,
-                is_final: false,
-            },
+            &new_deposit(harness, tx_hash, address_id, amount_atomic),
         )
         .await?
     );
     Ok(deposit_id(1, tx_hash, 0))
+}
+
+/// The transfer of `amount_atomic` to `address_id` in `tx_hash`, as a recorder reads it.
+fn new_deposit(
+    harness: &Harness,
+    tx_hash: B256,
+    address_id: Uuid,
+    amount_atomic: U256,
+) -> NewDeposit {
+    NewDeposit {
+        chain_id: 1,
+        tx_hash,
+        receipt_log_index: 0,
+        log_index: 0,
+        block_number: 120,
+        block_hash: B256::repeat_byte(0xb1),
+        block_time: Utc::now(),
+        address_id,
+        route: Some(harness.route.route.clone()),
+        route_version: Some(harness.route.version),
+        asset_contract: harness.route.asset.contract,
+        from_address: Address::repeat_byte(0x74),
+        amount_atomic: AtomicAmount::new(amount_atomic),
+        state: DepositState::Detected,
+        reason: None,
+        next_attempt_at: Utc::now(),
+        tx_from: Address::repeat_byte(0x74),
+        tx_nonce: 0,
+        is_final: false,
+    }
+}
+
+/// A deposit's payment settings binding: its revision, or the restore whose hold it waits on.
+async fn binding(harness: &Harness, deposit: Uuid) -> Result<(Option<Uuid>, Option<Uuid>)> {
+    Ok(
+        sqlx::query_as("SELECT settings_revision_id, settings_hold_id FROM deposits WHERE id = $1")
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?,
+    )
+}
+
+/// The account's live settings state: its status, current revision, and holding restore.
+async fn settings_state(harness: &Harness) -> Result<(String, Uuid, Option<Uuid>)> {
+    Ok(sqlx::query_as(
+        "SELECT status, current_revision_id, held_by FROM payment_settings_state \
+         WHERE account_id = $1 AND livemode",
+    )
+    .bind(harness.account.id)
+    .fetch_one(&harness.pool)
+    .await?)
+}
+
+/// The revision id of a payment settings object.
+fn revision_of(object: &Value) -> Result<Uuid> {
+    topup::ids::parse("psrev_", object["revision"].as_str().context("revision")?)
+        .context("a psrev_ id")
 }
 
 /// Runs the confirm step once on the recorded deposit, the chain showing its transfer to
@@ -4208,6 +4245,413 @@ async fn a_treasury_change_on_a_chain_without_a_route_stays_pending() -> Result<
                     .fetch_one(&harness.pool)
                     .await?;
             ensure!(applied.is_none());
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A deposit's state and rejection reason.
+async fn outcome(harness: &Harness, deposit: Uuid) -> Result<(String, Option<String>)> {
+    Ok(
+        sqlx::query_as("SELECT state, reason FROM deposits WHERE id = $1")
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?,
+    )
+}
+
+/// The payment settings scenarios of a restore (docs/design/payment-settings.md §11, §12): an
+/// undelivered later update, two deliveries in one second, and a merchant that holds no event.
+#[tokio::test]
+async fn restored_payment_settings_are_held_until_the_merchant_sends_its_complete_configuration()
+-> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-held").await?;
+            let restored = settings_state(&harness).await?.1;
+            let restore = harness.restore().await?;
+            // The transaction that records the restore holds every account and mode.
+            ensure!(
+                settings_state(&harness).await? == ("held".to_owned(), restored, Some(restore.id))
+            );
+
+            // The merchant removed PHA after the restore point, and that update was never
+            // delivered. The two deliveries it holds share a `created` second and still accept
+            // PHA: none is imported to choose or order a configuration, so none lifts the hold.
+            let updated = |id: u8| {
+                json!({
+                    "id": topup::ids::format(topup::ids::EVENT, Uuid::from_bytes([id; 16])),
+                    "object": "event",
+                    "account": harness.account_id(),
+                    "livemode": true,
+                    "type": "payment_settings.updated",
+                    "created": 1_790_000_000,
+                    "actor": "system",
+                    "request": null,
+                    "data": {"object": {
+                        "object": "payment_settings",
+                        "livemode": true,
+                        "status": "configured",
+                        "chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]}],
+                    }},
+                })
+            };
+            let refused = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({
+                        "deliveries": [
+                            harness.delivered(&updated(1)),
+                            harness.delivered(&updated(2)),
+                        ],
+                        "reason": "the merchant's webhook log",
+                    }),
+                )
+                .await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{}",
+                refused.body
+            );
+            ensure!(
+                refused.body["error"]["message"]
+                    == "only deposit.credited, deposit.rejected, and deposit.reversed events are \
+                        imported",
+                "{}",
+                refused.body
+            );
+            ensure!(settings_state(&harness).await?.0 == "held");
+
+            // A payment of PHA recorded meanwhile names the restore, not a revision, and waits.
+            let deposit = record_deposit(
+                &harness,
+                B256::repeat_byte(0x91),
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            ensure!(binding(&harness, deposit).await? == (None, Some(restore.id)));
+            harness.unfreeze(&restore).await?;
+            confirm(&harness, deposit, forwarder, 25_000_000).await?;
+            ensure!(outcome(&harness, deposit).await? == ("detected".to_owned(), None));
+
+            // Nothing is issued on held settings.
+            let settings = harness
+                .merchant(Method::GET, "/v1/payment_settings", &Value::Null)
+                .await?;
+            ensure!(settings.body["status"] == "held", "{}", settings.body);
+            let config = harness
+                .merchant(Method::GET, "/v1/config", &Value::Null)
+                .await?;
+            ensure!(config.body["assets"] == json!([]), "{}", config.body);
+            let quote = harness
+                .merchant(
+                    Method::POST,
+                    "/v1/quotes",
+                    &json!({
+                        "client_reference_id": "team-held", "amount": 100, "currency": "usd",
+                        "chain_id": 1, "asset": "pha"
+                    }),
+                )
+                .await?;
+            ensure!(
+                quote.body["error"]["code"] == "payment_settings_unconfirmed",
+                "{}",
+                quote.body
+            );
+
+            // A partial update is no reconfirmation: nothing of the restored settings is assumed.
+            for partial in [
+                json!({}),
+                json!({"quote_creations_per_customer_per_minute": 5}),
+            ] {
+                let refused = harness
+                    .merchant(Method::POST, "/v1/payment_settings", &partial)
+                    .await?;
+                ensure!(
+                    refused.status == StatusCode::BAD_REQUEST,
+                    "{}",
+                    refused.body
+                );
+                ensure!(refused.body["error"]["code"] == "parameter_missing");
+                ensure!(refused.body["error"]["param"] == "chains");
+            }
+            ensure!(settings_state(&harness).await?.0 == "held");
+            ensure!(binding(&harness, deposit).await? == (None, Some(restore.id)));
+
+            // The merchant's complete configuration, without PHA, lifts the hold and binds the
+            // waiting payment to it, which then rejects it.
+            let lifted = harness
+                .merchant(Method::POST, "/v1/payment_settings", &json!({"chains": []}))
+                .await?;
+            ensure!(lifted.status == StatusCode::OK, "{}", lifted.body);
+            ensure!(lifted.body["status"] == "configured", "{}", lifted.body);
+            let revision = revision_of(&lifted.body)?;
+            ensure!(revision != restored);
+            ensure!(binding(&harness, deposit).await? == (Some(revision), None));
+            // Its next attempt, as the waiting deposit's backoff comes due.
+            sqlx::query("UPDATE deposits SET next_attempt_at = now() WHERE id = $1")
+                .bind(deposit)
+                .execute(&harness.pool)
+                .await?;
+            confirm(&harness, deposit, forwarder, 25_000_000).await?;
+            ensure!(
+                outcome(&harness, deposit).await?
+                    == ("rejected".to_owned(), Some("asset_not_accepted".to_owned()))
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_unchanged_complete_configuration_reconfirms_held_settings() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-same").await?;
+            let pha = json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]}]});
+            let mut limited = pha.clone();
+            limited["quote_creations_per_customer_per_minute"] = json!(5);
+            let before = harness
+                .merchant(Method::POST, "/v1/payment_settings", &limited)
+                .await?;
+            ensure!(before.status == StatusCode::OK, "{}", before.body);
+            let restored = revision_of(&before.body)?;
+            let restore = harness.restore().await?;
+            let deposit = record_deposit(
+                &harness,
+                B256::repeat_byte(0x92),
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            harness.unfreeze(&restore).await?;
+            let updates = || async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM events \
+                     WHERE account_id = $1 AND type = 'payment_settings.updated'",
+                )
+                .bind(harness.account.id)
+                .fetch_one(&harness.pool)
+                .await
+            };
+            let announced = updates().await?;
+
+            // The same chains reconfirm: a new revision and event, and the rate the merchant did
+            // not send again takes its default rather than the restored value.
+            let reconfirmed = harness
+                .merchant(Method::POST, "/v1/payment_settings", &pha)
+                .await?;
+            ensure!(reconfirmed.status == StatusCode::OK, "{}", reconfirmed.body);
+            ensure!(reconfirmed.body["status"] == "configured");
+            ensure!(reconfirmed.body["quote_creations_per_customer_per_minute"].is_null());
+            let revision = revision_of(&reconfirmed.body)?;
+            ensure!(revision != restored);
+            ensure!(updates().await? == announced + 1);
+            ensure!(binding(&harness, deposit).await? == (Some(revision), None));
+            confirm(&harness, deposit, forwarder, 25_000_000).await?;
+            ensure!(
+                valuation(&harness, deposit).await?
+                    == (
+                        "confirmed".to_owned(),
+                        "spot".to_owned(),
+                        "25000000".to_owned(),
+                        "2500".to_owned()
+                    )
+            );
+
+            // Once configured, a request that changes nothing writes nothing.
+            let again = harness
+                .merchant(Method::POST, "/v1/payment_settings", &pha)
+                .await?;
+            ensure!(revision_of(&again.body)? == revision);
+            ensure!(updates().await? == announced + 1);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The barrier (docs/design/payment-settings.md §7): a recorder holds its account and mode's
+/// state row from before its insert to its commit, and the hold lift locks it for update.
+#[tokio::test]
+async fn a_recorder_racing_the_hold_lift_is_bound_by_it() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (_, address_id) = harness.deposit_address("team-race").await?;
+            harness.restore().await?;
+            let scope = topup::tenancy::Scope::new(harness.account.id, true);
+            let document = topup::payment_config::Document::accepting([&harness.route]);
+            let amount = U256::from(10_u64).pow(U256::from(20));
+            let wait = std::time::Duration::from_millis(300);
+            let bound = std::time::Duration::from_secs(5);
+
+            // A rescan reads `held` and records a deposit, and has not committed yet.
+            let mut recorder = harness.pool.begin().await?;
+            let first = db::insert_deposit_in(
+                &mut recorder,
+                &new_deposit(&harness, B256::repeat_byte(0x81), address_id, amount),
+                db::Evidence::Finalized,
+            )
+            .await?
+            .context("recorded")?;
+
+            // The merchant's reconfirmation waits for that transaction, then binds its deposit.
+            let (written_tx, mut written) = tokio::sync::oneshot::channel();
+            let (commit, committed) = tokio::sync::oneshot::channel::<()>();
+            let lift = tokio::spawn({
+                let pool = harness.pool.clone();
+                async move {
+                    let mut transaction = pool.begin().await?;
+                    let write =
+                        topup::payment_config::write(&mut transaction, scope, &document, "test")
+                            .await?;
+                    let revision = topup::payment_config::load(&mut transaction, scope)
+                        .await?
+                        .revision;
+                    written_tx
+                        .send((write.bound, revision))
+                        .map_err(|_| anyhow::anyhow!("the test stopped"))?;
+                    committed.await?;
+                    transaction.commit().await?;
+                    anyhow::Ok(())
+                }
+            });
+            tokio::time::sleep(wait).await;
+            ensure!(
+                written.try_recv().is_err(),
+                "the lift did not wait for the recorder"
+            );
+            recorder.commit().await?;
+            let (bound_pending, revision) = tokio::time::timeout(bound, written).await??;
+            ensure!(bound_pending == 1);
+
+            // A rescan that starts during the lift waits for it and reads the new revision.
+            let recording = tokio::spawn({
+                let pool = harness.pool.clone();
+                let deposit = new_deposit(&harness, B256::repeat_byte(0x82), address_id, amount);
+                async move { db::insert_deposit(&pool, &deposit).await }
+            });
+            tokio::time::sleep(wait).await;
+            ensure!(
+                !recording.is_finished(),
+                "the recorder did not wait for the lift"
+            );
+            commit
+                .send(())
+                .map_err(|_| anyhow::anyhow!("the lift stopped"))?;
+            tokio::time::timeout(bound, lift).await???;
+            ensure!(tokio::time::timeout(bound, recording).await???);
+
+            ensure!(binding(&harness, first).await? == (Some(revision), None));
+            let second = deposit_id(1, B256::repeat_byte(0x82), 0);
+            ensure!(binding(&harness, second).await? == (Some(revision), None));
+            let pending: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM deposits WHERE settings_hold_id IS NOT NULL",
+            )
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(pending == 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn delivered_outcomes_stand_whatever_the_reconfirmed_settings_accept() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-delivered").await?;
+            let restore = harness.restore().await?;
+            let address = format!("{forwarder:#x}");
+            let amount = "100000000000000000000";
+            let credited_hash = B256::repeat_byte(0x61);
+            let credited = deposit_id(1, credited_hash, 0);
+            let rejected_hash = B256::repeat_byte(0x62);
+            let rejected = deposit_id(1, rejected_hash, 0);
+            let delivered_credit = credited_event(
+                &harness,
+                credited,
+                credited_hash,
+                &address,
+                amount,
+                (2_500, "0.25000000", "spot"),
+            );
+            let mut delivered_rejection = credited_event(
+                &harness,
+                rejected,
+                rejected_hash,
+                &address,
+                amount,
+                (2_500, "0.25000000", "spot"),
+            );
+            delivered_rejection["id"] = json!(topup::ids::format(
+                topup::ids::EVENT,
+                topup_core::identity::event_id("deposit.rejected", rejected)
+            ));
+            delivered_rejection["type"] = json!("deposit.rejected");
+            delivered_rejection["data"]["object"]["status"] = json!("rejected");
+            delivered_rejection["data"]["object"]["rejection_reason"] = json!("below_minimum");
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({
+                        "deliveries": [
+                            harness.delivered(&delivered_credit),
+                            harness.delivered(&delivered_rejection),
+                        ],
+                        "reason": "the merchant's webhook log",
+                    }),
+                )
+                .await?;
+            ensure!(imported.status == StatusCode::OK, "{}", imported.body);
+            let amount = U256::from(10_u64).pow(U256::from(20));
+            record_deposit(&harness, credited_hash, address_id, amount).await?;
+            harness.unfreeze(&restore).await?;
+
+            // The reconfirmed settings accept nothing, yet the delivered credit stands.
+            let none = harness
+                .merchant(Method::POST, "/v1/payment_settings", &json!({"chains": []}))
+                .await?;
+            ensure!(none.status == StatusCode::OK, "{}", none.body);
+            ensure!(binding(&harness, credited).await? == (Some(revision_of(&none.body)?), None));
+            confirm(&harness, credited, forwarder, 20_000_000).await?;
+            ensure!(
+                valuation(&harness, credited).await?
+                    == (
+                        "confirmed".to_owned(),
+                        "spot".to_owned(),
+                        "25000000".to_owned(),
+                        "2500".to_owned()
+                    )
+            );
+
+            // Settings that accept PHA, and its amount within every bound, do not undo the
+            // delivered rejection.
+            let pha = harness
+                .merchant(
+                    Method::POST,
+                    "/v1/payment_settings",
+                    &json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]}]}),
+                )
+                .await?;
+            ensure!(pha.status == StatusCode::OK, "{}", pha.body);
+            record_deposit(&harness, rejected_hash, address_id, amount).await?;
+            ensure!(binding(&harness, rejected).await? == (Some(revision_of(&pha.body)?), None));
+            confirm(&harness, rejected, forwarder, 20_000_000).await?;
+            ensure!(
+                outcome(&harness, rejected).await?
+                    == ("rejected".to_owned(), Some("below_minimum".to_owned()))
+            );
             Ok(())
         })
     })

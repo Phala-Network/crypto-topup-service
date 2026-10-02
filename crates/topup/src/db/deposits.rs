@@ -386,7 +386,7 @@ impl TryFrom<DepositRecord> for Deposit {
 /// What a transfer was read from, which decides whether it may take a receipt position whose
 /// deposits were all reversed (architecture §7).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Evidence {
+pub enum Evidence {
     /// Read at the route's confirmation, before finality (the per-block scan): only a position
     /// that never had a deposit. Such a read may be of a log a reorganization has since removed.
     Confirmed,
@@ -420,7 +420,7 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
 /// (`crate::restore_mode`). The deposit is bound to the payment settings of its account and mode
 /// that the insert's own snapshot reads: their current revision, or, while they are held after a
 /// restore, that restore (`crate::payment_config`, design §7).
-pub(crate) async fn insert_deposit_in(
+pub async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
     evidence: Evidence,

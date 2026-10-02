@@ -87,8 +87,9 @@ pub(crate) async fn get_payment_settings(
 /// when sent, replaces the whole list, and a term an element does not send takes the operator's
 /// default. Writes are last-write-wins. The settings govern quotes and deposit addresses issued
 /// from now on, and every payment recorded after the change; a quote keeps the terms it was
-/// issued with. After a restore of the service, a `POST` with your complete configuration, even
-/// unchanged, reconfirms it. Announced as `payment_settings.updated`.
+/// issued with. After a restore of the service the settings are `held` until a `POST` with your
+/// complete configuration, even unchanged, reconfirms them: `chains` is then required, and a
+/// parameter not sent takes its default. Announced as `payment_settings.updated`.
 pub(crate) async fn update_payment_settings(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -143,13 +144,31 @@ async fn update<'c>(
     actor: &Actor,
 ) -> Result<(), ApiError> {
     let mut transaction = db.begin().await?;
+    // The writer's side of the barrier, before anything is read: a concurrent write applies
+    // after this one commits, on what it wrote.
+    let current = payment_config::load_for_update(&mut transaction, scope).await?;
     let object = crate::db::EventObject::PaymentSettings(scope.account_id());
     let before = crate::db::render(&mut transaction, routes, scope, object).await?;
-    let current = payment_config::load(&mut transaction, scope).await?;
-    let document = Document {
-        quote_creations_per_customer_per_minute: rate
-            .unwrap_or(current.document.quote_creations_per_customer_per_minute),
-        chains: chains.unwrap_or(current.document.chains),
+    let document = if current.status == Status::Held {
+        // Held after a restore: the merchant's complete configuration lifts the hold, and
+        // nothing of the restored settings, which may be stale, is carried into it (design §11).
+        let Some(chains) = chains else {
+            return Err(ApiError::missing_param(
+                "your payment settings are held after a restore of the service: send your \
+                 complete configuration, `chains` included, to reconfirm them",
+            )
+            .with_param("chains"));
+        };
+        Document {
+            quote_creations_per_customer_per_minute: rate.flatten(),
+            chains,
+        }
+    } else {
+        Document {
+            quote_creations_per_customer_per_minute: rate
+                .unwrap_or(current.document.quote_creations_per_customer_per_minute),
+            chains: chains.unwrap_or(current.document.chains),
+        }
     };
     let written =
         payment_config::write(&mut transaction, scope, &document, &actor.to_string()).await?;

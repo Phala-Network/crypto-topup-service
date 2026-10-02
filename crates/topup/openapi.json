@@ -7667,7 +7667,7 @@
             "api_key": []
           }
         ],
-        "summary": "Updates your payment settings in the key's mode. A parameter not sent is unchanged; `chains`,\nwhen sent, replaces the whole list, and a term an element does not send takes the operator's\ndefault. Writes are last-write-wins. The settings govern quotes and deposit addresses issued\nfrom now on, and every payment recorded after the change; a quote keeps the terms it was\nissued with. After a restore of the service, a `POST` with your complete configuration, even\nunchanged, reconfirms it. Announced as `payment_settings.updated`.",
+        "summary": "Updates your payment settings in the key's mode. A parameter not sent is unchanged; `chains`,\nwhen sent, replaces the whole list, and a term an element does not send takes the operator's\ndefault. Writes are last-write-wins. The settings govern quotes and deposit addresses issued\nfrom now on, and every payment recorded after the change; a quote keeps the terms it was\nissued with. After a restore of the service the settings are `held` until a `POST` with your\ncomplete configuration, even unchanged, reconfirms them: `chains` is then required, and a\nparameter not sent takes its default. Announced as `payment_settings.updated`.",
         "tags": [
           "payment_settings"
         ]
