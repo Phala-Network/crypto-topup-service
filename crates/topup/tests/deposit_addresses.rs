@@ -632,6 +632,50 @@ async fn the_public_view_states_each_networks_credit_time() -> Result<()> {
     .await
 }
 
+/// A network whose tokens are credited at different confirmations has no one credit time: the
+/// public view omits it rather than state one token's, until the account's policy makes them agree.
+#[tokio::test]
+async fn the_public_view_omits_a_networks_credit_time_its_tokens_disagree_on() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let mut pha = fixture.live_route.clone();
+            pha.chain.confirmations = Confirmations::Depth(2);
+            let mut usdc = fixture.usdc_route.clone();
+            usdc.chain.confirmations = Confirmations::Finalized;
+            let fixture = fixture.with_routes(vec![pha, usdc, fixture.test_route.clone()])?;
+            let (object, secret) = fixture
+                .create_with_secret(&fixture.live_key, "team-42")
+                .await?;
+            let id = object["id"].as_str().context("id")?;
+            let network = || async {
+                let (status, view) = fixture.client_read(id, &secret).await?;
+                ensure!(status == StatusCode::OK, "{view}");
+                let networks = networks(&view)?;
+                ensure!(networks.len() == 1 && networks[0]["assets"].as_array().map(Vec::len) == Some(2), "{view}");
+                Ok(networks[0].clone())
+            };
+            // `GET /v1/config` reports 30 seconds for PHA and 900 for USDC on the chain.
+            let disagreeing = network().await?;
+            ensure!(disagreeing.get("typical_credit_seconds").is_none(), "{disagreeing}");
+
+            let (status, updated) = fixture
+                .request(
+                    Method::POST,
+                    "/v1/account",
+                    &fixture.live_key,
+                    json!({"confirmation_policies": [{"chain_id": 1, "confirmations": "finalized"}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{updated}");
+            ensure!(network().await?["typical_credit_seconds"] == 900);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_chain_added_later_gets_the_same_address_on_the_next_creation() -> Result<()> {
     with_database(|database| {

@@ -11,16 +11,17 @@ All notable changes to `@phala/pay` are recorded here. The format follows
 
 - `ClientDepositAddress.networks` (`parseClientDepositAddress`, `retrieveDepositAddress`): each
   network's `chain_id`, `address`, and optional `typical_credit_seconds`, the typical credit time at
-  the account's confirmation on that chain. A service of v0.3.5 or earlier does not send it, and its
-  view still parses. `ClientDepositAddressNetwork` is exported.
+  the account's confirmation on that chain. It is absent when the chain's tokens are credited at
+  different confirmations, and a service of v0.3.5 or earlier does not send it; its view still
+  parses. `ClientDepositAddressNetwork` is exported.
 
 ### Fixed
 
 - `<DepositAddress>` told the payer "usually in about 30 seconds" on every network. With
   `clientSecret` and `apiBase` it now states each network's typical credit time from the address's
   public view ("usually in about 30 seconds on Sepolia and about 5 minutes on Base Sepolia"; 15
-  minutes under a `finalized` policy). Before the view is read, or from a service that does not send
-  the time, it names none: "credited at the market rate once it is confirmed on its network".
+  minutes under a `finalized` policy). Before the view is read, or when a network has no time, it
+  names none: "credited at the market rate once it is confirmed on its network".
 
 ## [0.4.0] - 2026-10-01
 

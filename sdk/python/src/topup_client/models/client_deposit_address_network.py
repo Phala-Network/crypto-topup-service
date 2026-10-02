@@ -28,8 +28,9 @@ class ClientDepositAddressNetwork:
         chain_id (int): EVM chain identifier.
         typical_credit_seconds (int | Unset): Typical time from payment to credit, in seconds, at the confirmation this
             chain's payments
-            are credited at, as `GET /v1/config` reports it. A service of v0.3.5 or earlier omits it,
-            so a client should not require it.
+            are credited at, as `GET /v1/config` reports it for each of the chain's tokens. Absent when
+            those tokens are credited at different confirmations, and from a service of v0.3.5 or
+            earlier, so a client should not require it.
     """
 
     address: str

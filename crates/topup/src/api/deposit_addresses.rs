@@ -596,22 +596,27 @@ async fn client_deposit_address_view(
         .networks
         .into_iter()
         .map(|network| {
-            // `deposit_address_object` keeps only the networks a route of the mode serves.
-            let route = state
+            // Each asset route of the chain may set its own confirmation: the network has a time
+            // only when every one of them credits at the same.
+            let policy = policies.get(&network.chain_id);
+            let mut seconds = state
                 .routes
                 .current_in(livemode)
-                .find(|route| route.chain.chain_id == network.chain_id)
-                .ok_or_else(ApiError::internal)?;
-            let confirmation =
-                super::quotes::credit_confirmations(route, policies.get(&network.chain_id));
-            Ok(ClientDepositAddressNetwork {
+                .filter(|route| route.chain.chain_id == network.chain_id)
+                .map(|route| {
+                    super::quotes::credit_confirmations(route, policy).typical_credit_seconds()
+                });
+            let typical_credit_seconds = seconds
+                .next()
+                .filter(|first| seconds.all(|other| other == *first));
+            ClientDepositAddressNetwork {
                 chain_id: network.chain_id,
                 address: network.address,
                 assets: network.assets,
-                typical_credit_seconds: confirmation.typical_credit_seconds(),
-            })
+                typical_credit_seconds,
+            }
         })
-        .collect::<ApiResult<_>>()?;
+        .collect();
     Ok(ClientDepositAddress {
         id: object.id,
         object: object.object,

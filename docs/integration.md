@@ -508,7 +508,8 @@ and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any a
 at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 5 minutes on
 Base Sepolia. You can reuse this address." Each network's time is its `typical_credit_seconds` in
 the address's public view (above), at the confirmation your account's payments on that chain wait
-for, as `GET /v1/config` reports it; without it, name no time.
+for, as `GET /v1/config` reports it; it is absent when the network's tokens are credited at
+different confirmations, and then the page names no time.
 `<DepositAddress depositAddress={…} clientSecret={…} apiBase={…}>` from `@phala/pay/react`
 renders exactly that from `address` and `networks` (pass only those and the `client_secret` to the
 browser) and, with the secret, shows each payment as it arrives: "1.5 PHA received on Sepolia, 1

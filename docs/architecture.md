@@ -1134,7 +1134,8 @@ rotation returns a new `client_secret`, `da_…_secret_…`, built and checked a
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
 `ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each network
 with its `typical_credit_seconds` (at the account's confirmation on the chain, as `GET /v1/config`
-reports it; absent from v0.3.5 and earlier, so clients do not require it), and each payment with
+reports it; absent when the chain's tokens are credited at different confirmations, and from
+v0.3.5 and earlier, so clients do not require it), and each payment with
 its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
 treasury, customer, or metadata, under the quote reads' CORS and rate limit.
 
