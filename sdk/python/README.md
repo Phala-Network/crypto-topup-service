@@ -170,5 +170,6 @@ make check   # ruff, mypy --strict, pytest, and the regeneration no-op check
 `phala-pay` is released with the service: the `v<version>` tag's Release workflow publishes it to
 PyPI (environment `pypi`) with trusted publishing
 ([CONTRIBUTING.md, "Releasing"](../../CONTRIBUTING.md#releasing)). Its changes are in the top-level
-[CHANGELOG.md](../../CHANGELOG.md), under "Python SDK"; [its releases before v0.5.0](CHANGELOG.md),
-versioned on their own, stay in this directory.
+[CHANGELOG.md](https://github.com/Phala-Network/phala-pay/blob/main/CHANGELOG.md), under "Python
+SDK"; [its releases before v0.5.0](https://github.com/Phala-Network/phala-pay/blob/main/sdk/python/CHANGELOG.md),
+versioned on their own, stay in `sdk/python`.

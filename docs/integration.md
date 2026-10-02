@@ -47,7 +47,7 @@ quote, the browser renders the checkout with the quote's client secret, and the 
 and pin it ([§5.9, "Compatibility"](#compatibility); `X.Y.Z` below):
 
 ```sh
-npm install "@phala/pay@X.Y.Z" viem
+npm install --save-exact "@phala/pay@X.Y.Z" viem
 uv add "phala-pay==X.Y.Z"   # or: pip install "phala-pay==X.Y.Z"
 ```
 

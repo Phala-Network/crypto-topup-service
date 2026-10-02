@@ -273,18 +273,19 @@ v0.5.0, versioned on their own, stay in their frozen `sdk/js/CHANGELOG.md` and
    ```
 
 3. [Release](.github/workflows/release.yml) checks that the tag is a commit of `main`, that it
-   names the Cargo workspace version, which the SDKs name too, and that a stable version has its
-   dated changelog section, and runs the whole CI workflow on the commit, the SDKs' checks and
-   end-to-end tests included. Then, on GitHub-hosted runners, it builds each image with
-   `deploy/verify-image.sh` (`phala-pay` and the reference product must build to the same digest
-   twice; `postgres-walg` is built once), pushes it tagged `v<version>`, and attests it. Once
-   every image is published, it publishes the SDKs from the `npm` and `pypi` environments with
-   trusted publishing (npm provenance, PyPI attestations). Last, it builds the deploy kit with
-   `deploy/build-kit.sh`, renders every environment with it and the Phala Cloud template's
-   compose from it, and publishes the GitHub release `v<version>`, the Latest release, with
-   `images.json`, the kit, `phala-cloud-template.yml`, `deploy.sh` (whose admin key generation
-   uses this version's Python SDK), and `SHA256SUMS`, each attested, and the changelog section,
-   the SDKs' changes included, as its notes (`scripts/changelog-section.sh`).
+   names the Cargo workspace version, which the SDKs name too, that no stable `v*` tag is newer,
+   and that a stable version has its dated changelog section, and runs the whole CI workflow on
+   the commit, the SDKs' checks and end-to-end tests included. Then, on GitHub-hosted runners, it
+   builds each image with `deploy/verify-image.sh` (`phala-pay` and the reference product must
+   build to the same digest twice; `postgres-walg` is built once), pushes it tagged `v<version>`,
+   and attests it. It builds the deploy kit with `deploy/build-kit.sh`, renders every environment
+   with it and the Phala Cloud template's compose from it, and attests `images.json`, the kit,
+   `phala-cloud-template.yml`, `deploy.sh` (whose admin key generation uses this version's Python
+   SDK), and `SHA256SUMS`. Only then does it publish the SDKs from the `npm` and `pypi`
+   environments with trusted publishing (npm provenance, PyPI attestations). Last, it publishes
+   the GitHub release `v<version>`, the Latest release, with those assets and the changelog
+   section, the SDKs' changes included, as its notes (`scripts/changelog-section.sh`), and checks
+   that `https://pay.phala.com/deploy.sh` serves its `deploy.sh`.
    `deploy/verify-release.sh v<version> DIR` verifies the result.
 4. Adopt it for Phala's instance: a pull request that sets the release in
    [deploy-phala.yml](.github/workflows/deploy-phala.yml) (`uses: …@v<version>` and `version`).
@@ -292,6 +293,40 @@ v0.5.0, versioned on their own, stay in their frozen `sdk/js/CHANGELOG.md` and
 A pre-release, `v<version>-rc.N`, is a candidate for Phala's staging: its pull request runs
 `scripts/version.sh <version>-rc.N` (which Python spells `<version>rcN`) and adds no changelog
 section, and Release publishes it as a GitHub pre-release of the service alone, without the SDKs.
+
+Stable releases go up one at a time: tag the next only after the previous Release run has
+finished, and never release a version older than the newest stable tag (Release refuses one), as it
+would take the Latest release and npm's `latest` from the newer one.
+
+### Recovering a release
+
+Never delete or move a `v*` tag, and never replace a published release's assets: the tag ruleset
+and immutable releases refuse both, and Deploy trusts them. When a Release run fails for a cause
+outside the tagged commit (a registry or GitHub outage, a missing setting), fix the cause and use
+**Re-run failed jobs** on that run. Each job is safe to re-run:
+
+- `py-publish` uploads the run's own build and skips the files PyPI already has, completing a
+  partial upload;
+- `js-publish` is done when npm already has the version from the tagged commit (its `gitHead`), and
+  fails when npm has it from any other commit;
+- `release` creates the GitHub release once. If it failed before the release was published, delete
+  the draft release it may have left (a draft is not yet immutable) and re-run it; once the
+  release is published, never re-run it;
+- `deploy-entry` only reads the published release. If it fails, verify that release as an operator
+  would, without re-creating it, and see what `https://pay.phala.com/deploy.sh` serves:
+
+  ```sh
+  deploy/verify-release.sh v<version> "$(mktemp -d)"
+  gh release view --json tagName --jq .tagName   # the Latest release
+  curl -fsSL https://pay.phala.com/deploy.sh | grep '^release='
+  ```
+
+  Mark it Latest if it is not (`gh release edit v<version> --latest`), or fix pay.phala.com's
+  redirect, then re-run `deploy-entry`.
+
+A failure in the tagged commit itself (a build or a check that fails on it) burns the version: fix
+it on `main` and release the next patch version. Whatever the failed run already published (images,
+SDKs) stays, unused.
 
 ## License
 

@@ -284,5 +284,6 @@ EIP-6963 wallet backed by the node (and again through a viem `WalletClient` pass
 `@phala/pay` is released with the service: the `v<version>` tag's Release workflow publishes it to
 npm (environment `npm`) with trusted publishing and provenance
 ([CONTRIBUTING.md, "Releasing"](../../CONTRIBUTING.md#releasing)). Its changes are in the top-level
-[CHANGELOG.md](../../CHANGELOG.md), under "JS SDK"; [its releases before v0.5.0](CHANGELOG.md),
-versioned on their own, stay in this directory.
+[CHANGELOG.md](https://github.com/Phala-Network/phala-pay/blob/main/CHANGELOG.md), under "JS SDK";
+[its releases before v0.5.0](https://github.com/Phala-Network/phala-pay/blob/main/sdk/js/CHANGELOG.md),
+versioned on their own, stay in `sdk/js`.

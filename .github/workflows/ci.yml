@@ -45,6 +45,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The SDKs name the Cargo workspace version
         run: scripts/version.sh
+      - name: Check that scripts/version.sh catches a drifted version
+        run: scripts/tests/version.sh
 
   # Every Markdown file, linted with .markdownlint-cli2.jsonc, and its relative links and anchors
   # checked offline with lychee.toml (CONTRIBUTING.md, "Documentation").
