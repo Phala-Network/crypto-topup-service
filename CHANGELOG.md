@@ -32,7 +32,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - A quote carries `terms`, the terms it was issued with, which it keeps whatever the settings say
   later. `GET /v1/config` adds `quote_creations_per_customer_per_minute`, and each asset
   `min_deposit_atomic` and `quote_amount_decimals`.
-- Admin: `GET /v1/admin/accounts/{account}`, with each mode's payment settings, and
+- Admin: `GET /v1/admin/accounts/{account}`, with each mode's payment settings and the `legacy`
+  revision the 0.6.0 cutover bound its earlier deposits and quotes to, and
   `POST /v1/admin/recording/resume`, which lifts the 0.6.0 cutover's recording hold. The admin
   deposit view names the deposit's `settings_revision` or `settings_hold`.
 

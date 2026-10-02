@@ -462,8 +462,10 @@ default; that is a known defect and out of this design's scope.
 - `confirmation_policies` dropped, after the backfill has read it.
 
 **One-time backfill.** It runs in `topup migrate` with the attested config (the compose `migrate`
-service mounts it), as the database owner, in one transaction with the schema change. Afterwards
-every binding column is `NOT NULL`, so no runtime rule reads a missing binding.
+service mounts it), as the database owner, in one transaction right after the schema change;
+`topup run` refuses to start until it commits, and a rerun of `topup migrate` resumes it.
+Afterwards every deposit has its binding and every quote its terms (validated constraints), so no
+runtime rule reads a missing binding.
 
 1. Every account and mode gets a state row, `unconfigured`, and an `unconfigured` revision as
    current.

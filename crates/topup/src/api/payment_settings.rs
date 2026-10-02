@@ -30,8 +30,8 @@ use super::handlers::validate_reason;
 use super::idempotency::Idempotent;
 use super::models::{
     AdminReasonRequest, AvailableAsset, AvailableChain, AvailableConfirmations, BoundsAtomic,
-    BoundsU64, PaymentSettingsAsset, PaymentSettingsChain, PaymentSettingsObject, RecordingObject,
-    UpdatePaymentSettingsRequest,
+    BoundsU64, LegacyPaymentSettings, PaymentSettingsAsset, PaymentSettingsChain,
+    PaymentSettingsObject, RecordingObject, UpdatePaymentSettingsRequest,
 };
 
 /// Public id prefix of a payment settings revision.
@@ -467,30 +467,47 @@ pub(crate) async fn payment_settings_object(
         revision: crate::ids::format(REVISION, settings.revision),
         updated: settings.updated.timestamp(),
         quote_creations_per_customer_per_minute: document.quote_creations_per_customer_per_minute,
-        chains: document
-            .chains
-            .iter()
-            .map(|chain| PaymentSettingsChain {
-                chain_id: chain.chain_id,
-                confirmations: chain.confirmations.map(Confirmations::policy_value),
-                assets: chain
-                    .assets
-                    .iter()
-                    .map(|asset| PaymentSettingsAsset {
-                        asset: asset.asset.clone(),
-                        quote_ttl_seconds: asset.quote_ttl_seconds,
-                        quote_spread_bps: asset.quote_spread_bps.map(Bps::value),
-                        quote_tolerance_bps: asset.quote_tolerance_bps.map(Bps::value),
-                        min_amount: asset.min_amount,
-                        min_deposit_atomic: asset.min_deposit_atomic.map(atomic_text),
-                        max_deposit_atomic: asset.max_deposit_atomic.map(atomic_text),
-                        min_refund_atomic: asset.min_refund_atomic.map(atomic_text),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        chains: chains_object(document),
         available,
     })
+}
+
+/// The scope's `legacy` revision as the operator sees it, if the cutover wrote one.
+pub(crate) async fn legacy_object(
+    connection: &mut PgConnection,
+    scope: Scope,
+) -> Result<Option<LegacyPaymentSettings>, ApiError> {
+    Ok(payment_config::legacy(connection, scope)
+        .await?
+        .map(|(revision, document)| LegacyPaymentSettings {
+            revision: crate::ids::format(REVISION, revision),
+            chains: chains_object(&document),
+        }))
+}
+
+fn chains_object(document: &Document) -> Vec<PaymentSettingsChain> {
+    document
+        .chains
+        .iter()
+        .map(|chain| PaymentSettingsChain {
+            chain_id: chain.chain_id,
+            confirmations: chain.confirmations.map(Confirmations::policy_value),
+            assets: chain
+                .assets
+                .iter()
+                .map(|asset| PaymentSettingsAsset {
+                    asset: asset.asset.clone(),
+                    quote_ttl_seconds: asset.quote_ttl_seconds,
+                    quote_spread_bps: asset.quote_spread_bps.map(Bps::value),
+                    quote_tolerance_bps: asset.quote_tolerance_bps.map(Bps::value),
+                    min_amount: asset.min_amount,
+                    min_deposit_atomic: asset.min_deposit_atomic.map(atomic_text),
+                    max_deposit_atomic: asset.max_deposit_atomic.map(atomic_text),
+                    min_refund_atomic: asset.min_refund_atomic.map(atomic_text),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn atomic_text(amount: AtomicAmount) -> String {

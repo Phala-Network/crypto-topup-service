@@ -18,7 +18,7 @@ use topup_core::route::RouteFile;
 use tower::ServiceExt;
 
 use support::seed::{self, NewAccount};
-use support::{TEST_ORIGIN, merchant_request, public_key_base64, with_database};
+use support::{TEST_ORIGIN, merchant_request, public_key_base64, signed_request, with_database};
 
 const TEST_CHAIN: u64 = 11_155_111;
 
@@ -315,6 +315,193 @@ async fn the_account_has_no_confirmation_policies_any_more() -> Result<()> {
     .await
 }
 
+/// The 0.6.0 cutover (docs/design/payment-settings.md §10) on a database with 0.5.0 rows: the
+/// backfill writes each account's 0.5.0 model out as a `legacy` revision, with its former
+/// confirmation policy, and binds every deposit and quote to it; recording stays held until the
+/// operator resumes it once the account is configured.
+#[tokio::test]
+async fn the_cutover_binds_the_0_5_0_rows_and_holds_recording_until_resumed() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let owner = &database.owner_pool;
+            // The 0.5.0 rows are written as the owner, and the service's pool is used only once
+            // the schema is migrated again, so no statement it prepared predates the migration.
+            let (account, live_key) = Fixture::seed_account(owner).await?;
+            // The onboarding record the operator's view shows, as `POST /v1/admin/accounts` keeps.
+            sqlx::query(
+                "UPDATE accounts SET contact = $2, due_diligence = $3 WHERE id = $1",
+            )
+            .bind(account.id)
+            .bind(json!({"name": "Merchant", "email": "security@merchant.example"}))
+            .bind(json!({"reference": "DD-1", "reviewed_at": "2026-10-01", "reviewed_by": "ops"}))
+            .execute(owner)
+            .await?;
+            let routes = Fixture::routes()?;
+            let route = routes
+                .current_in(true)
+                .next()
+                .context("live route")?
+                .clone();
+            let customer = seed::create_customer(
+                owner,
+                &seed::NewCustomer {
+                    id: uuid::Uuid::new_v4(),
+                    account_id: account.id,
+                    livemode: true,
+                    client_reference_id: "team-42".to_owned(),
+                    paused_scopes: Vec::new(),
+                },
+            )
+            .await?;
+            let address = seed::insert_address(
+                owner,
+                &seed::NewAddress {
+                    id: uuid::Uuid::new_v4(),
+                    customer_id: customer.id,
+                    chain_id: 1,
+                    route: route.route.clone(),
+                    salt: alloy_primitives::B256::repeat_byte(7),
+                    address: alloy_primitives::Address::repeat_byte(7),
+                },
+            )
+            .await?;
+            let tx_hash = alloy_primitives::B256::repeat_byte(8);
+            ensure!(
+                topup::db::insert_deposit(
+                    owner,
+                    &topup::db::NewDeposit {
+                        chain_id: 1,
+                        tx_hash,
+                        receipt_log_index: 0,
+                        log_index: 0,
+                        block_number: 100,
+                        block_hash: alloy_primitives::B256::repeat_byte(9),
+                        block_time: chrono::Utc::now(),
+                        address_id: address.id,
+                        route: Some(route.route.clone()),
+                        route_version: Some(route.version),
+                        asset_contract: route.asset.contract,
+                        from_address: alloy_primitives::Address::repeat_byte(10),
+                        amount_atomic: topup_core::money::AtomicAmount::new(
+                            alloy_primitives::U256::from(1_000_u64),
+                        ),
+                        state: topup_core::deposit::DepositState::Detected,
+                        reason: None,
+                        next_attempt_at: chrono::Utc::now(),
+                        tx_from: alloy_primitives::Address::repeat_byte(10),
+                        tx_nonce: 0,
+                        is_final: false,
+                    },
+                )
+                .await?
+            );
+            let deposit = topup_core::identity::deposit_id(1, tx_hash, 0);
+
+            // The database as 0.5.0 left it, with the account's confirmation policy.
+            topup::db::MIGRATOR.undo(owner, 20_261_023_000_000).await?;
+            sqlx::query(
+                "INSERT INTO confirmation_policies (account_id, chain_id, required) \
+                 VALUES ($1, 1, '12')",
+            )
+            .bind(account.id)
+            .execute(owner)
+            .await?;
+            topup::db::migrate(owner).await?;
+            let fixture = Fixture::for_account(pool, account, live_key, routes)?;
+            let mut connection = pool.acquire().await?;
+            ensure!(!topup::payment_config::backfilled(&mut connection).await?);
+            ensure!(topup::payment_config::recording_held(&mut connection).await?);
+
+            let report = topup::payment_config::backfill(owner, &fixture.routes)
+                .await?
+                .context("the backfill runs once")?;
+            ensure!(
+                report
+                    == topup::payment_config::Backfill {
+                        legacy_revisions: 2,
+                        deposits: 1,
+                        quotes: 1,
+                    },
+                "{report:?}"
+            );
+            ensure!(topup::payment_config::backfill(owner, &fixture.routes).await?.is_none());
+            let validated: bool = sqlx::query_scalar(
+                "SELECT bool_and(convalidated) FROM pg_constraint WHERE conname IN \
+                 ('deposits_settings_binding_check', 'quotes_terms_check')",
+            )
+            .fetch_one(owner)
+            .await?;
+            ensure!(validated);
+
+            // The deposit and the quote are bound to the legacy revision: the 0.5.0 model with
+            // the account's policy, never current.
+            let scope = topup::tenancy::Scope::new(fixture.account.id, true);
+            let (legacy, document) = topup::payment_config::legacy(&mut connection, scope)
+                .await?
+                .context("a legacy revision")?;
+            let bound: Option<uuid::Uuid> =
+                sqlx::query_scalar("SELECT settings_revision_id FROM deposits WHERE id = $1")
+                    .bind(deposit)
+                    .fetch_one(pool)
+                    .await?;
+            ensure!(bound == Some(legacy));
+            let terms: Value = sqlx::query_scalar(
+                "SELECT terms FROM quotes WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
+            )
+            .bind(address.id)
+            .fetch_one(pool)
+            .await?;
+            let resolved = topup::payment_config::resolve(&route, &document)
+                .terms()
+                .context("the legacy model accepts the route")?;
+            ensure!(resolved.confirmations == topup_core::route::Confirmations::Depth(12));
+            ensure!(terms == serde_json::to_value(resolved)?, "{terms}");
+
+            // The operator reads the legacy revision to configure the account, which starts
+            // unconfigured.
+            let path = format!("/v1/admin/accounts/{}", fixture.account.public_id);
+            let (status, account) = fixture.admin(Method::GET, &path, Value::Null).await?;
+            ensure!(status == StatusCode::OK, "{account}");
+            let settings = &account["payment_settings"];
+            ensure!(settings["live"]["status"] == "unconfigured", "{settings}");
+            ensure!(
+                settings["legacy"]["live"]["revision"]
+                    == format!("psrev_{}", legacy.simple()),
+                "{settings}"
+            );
+            ensure!(settings["legacy"]["live"]["chains"][0]["confirmations"] == "12");
+            ensure!(settings["legacy"]["test"]["chains"][0]["confirmations"].is_null());
+
+            // Configured, the account still issues nothing until recording resumes.
+            let (status, configured) = fixture
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "confirmations": "12",
+                                       "assets": [{"asset": "pha"}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{configured}");
+            let new_address = json!({"client_reference_id": "team-43"});
+            let (status, held) = fixture.post("/v1/deposit_addresses", new_address.clone()).await?;
+            ensure!(status == StatusCode::BAD_REQUEST && held["error"]["code"] == "paused");
+            let (status, resumed) = fixture
+                .admin(
+                    Method::POST,
+                    "/v1/admin/recording/resume",
+                    json!({"reason": "every account configured and verified"}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{resumed}");
+            ensure!(!topup::payment_config::recording_held(&mut connection).await?);
+            let (status, issued) = fixture.post("/v1/deposit_addresses", new_address).await?;
+            ensure!(status == StatusCode::OK, "{issued}");
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_merchant_pauses_its_own_quotes_and_never_lifts_the_operators_pause() -> Result<()> {
     with_database(|database| {
@@ -375,15 +562,28 @@ async fn a_merchant_pauses_its_own_quotes_and_never_lifts_the_operators_pause() 
 
 struct Fixture {
     app: Router,
+    routes: Arc<topup::routes::RouteSet>,
+    admin_key: SigningKey,
     account: topup::db::Account,
     live_key: String,
 }
 
 impl Fixture {
     async fn new(pool: &sqlx::PgPool) -> Result<Self> {
+        let (account, live_key) = Self::seed_account(pool).await?;
+        Self::for_account(pool, account, live_key, Self::routes()?)
+    }
+
+    /// A live merchant account with a key and a treasury on chain 1.
+    async fn seed_account(pool: &sqlx::PgPool) -> Result<(topup::db::Account, String)> {
         let account = seed::create_account(pool, &NewAccount::named("merchant")).await?;
         let live_key = seed::create_api_key(pool, account.id, true).await?;
         seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
+        Ok((account, live_key))
+    }
+
+    /// The catalog: the fixture's PHA route on chain 1 (live) and on Sepolia (test).
+    fn routes() -> Result<Arc<topup::routes::RouteSet>> {
         let live_route: RouteFile = serde_saphyr::from_str(
             &include_str!("fixtures/phala-cloud-pha.yaml")
                 .replace("confirmations: finalized", "confirmations: 2"),
@@ -397,13 +597,22 @@ impl Fixture {
                 .replace("chain_id: 1", &format!("chain_id: {TEST_CHAIN}"))
                 .replace("livemode: true", "livemode: false"),
         )?;
+        Ok(Arc::new(
+            topup::routes::RouteSet::new(vec![live_route, test_route])
+                .map_err(anyhow::Error::msg)?,
+        ))
+    }
+
+    fn for_account(
+        pool: &sqlx::PgPool,
+        account: topup::db::Account,
+        live_key: String,
+        routes: Arc<topup::routes::RouteSet>,
+    ) -> Result<Self> {
         let admin_key = SigningKey::from_bytes(&[48; 32]);
         let app = topup::api::router(AppState {
             pool: pool.clone(),
-            routes: Arc::new(
-                topup::routes::RouteSet::new(vec![live_route, test_route])
-                    .map_err(anyhow::Error::msg)?,
-            ),
+            routes: Arc::clone(&routes),
             admin_key: VerificationKey::from_base64(
                 "admin/v1".to_owned(),
                 &public_key_base64(&admin_key),
@@ -420,9 +629,31 @@ impl Fixture {
         .0;
         Ok(Self {
             app,
+            routes,
+            admin_key,
             account,
             live_key,
         })
+    }
+
+    async fn admin(&self, method: Method, path: &str, body: Value) -> Result<(StatusCode, Value)> {
+        let body = if body.is_null() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&body)?
+        };
+        let request = signed_request(
+            method,
+            path,
+            body,
+            "admin/v1",
+            &self.admin_key,
+            chrono::Utc::now().timestamp(),
+        );
+        let response = self.app.clone().oneshot(request).await?;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1_048_576).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
     }
 
     async fn request_with(

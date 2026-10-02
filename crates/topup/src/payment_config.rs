@@ -424,6 +424,25 @@ pub async fn load_for_share(
     read_settings(connection, scope, "FOR SHARE OF state").await
 }
 
+/// The scope's `legacy` revision, the 0.5.0 model the cutover bound its earlier deposits and
+/// quotes to (design §10): its id and document, or `None` for an account created after it.
+pub async fn legacy(
+    connection: &mut PgConnection,
+    scope: Scope,
+) -> Result<Option<(Uuid, Document)>, sqlx::Error> {
+    let row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, document FROM payment_settings_revisions \
+         WHERE account_id = $1 AND livemode = $2 AND kind = 'legacy' \
+         ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .fetch_optional(connection)
+    .await?;
+    row.map(|(id, document)| Ok((id, parse_document(document)?)))
+        .transpose()
+}
+
 /// The barrier every recorder of a deposit takes before its insert (design §7): the state row of
 /// the account and mode of `address_id`, `FOR SHARE` to the end of the caller's transaction. The
 /// insert is a later statement, so its snapshot is taken after this lock is held.

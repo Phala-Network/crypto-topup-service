@@ -1,6 +1,38 @@
 {
   "components": {
     "schemas": {
+      "AccountLegacyPaymentSettings": {
+        "description": "An account's `legacy` revision in each mode; `null` for an account created after the cutover.",
+        "properties": {
+          "live": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LegacyPaymentSettings",
+                "description": "Live mode's."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "test": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LegacyPaymentSettings",
+                "description": "Test mode's."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "live",
+          "test"
+        ],
+        "type": "object"
+      },
       "AccountLimits": {
         "description": "An account's effective caps in each mode: the operator's values over the defaults.",
         "properties": {
@@ -51,6 +83,10 @@
       "AccountPaymentSettings": {
         "description": "An account's payment settings in each mode, as the operator sees them.",
         "properties": {
+          "legacy": {
+            "$ref": "#/components/schemas/AccountLegacyPaymentSettings",
+            "description": "The 0.5.0 model the 0.6.0 cutover bound the account's earlier deposits and quotes to, in\neach mode (docs/design/payment-settings.md §10). Its chains' `confirmations` are the\naccount's former confirmation policies, to carry into its payment settings."
+          },
           "live": {
             "$ref": "#/components/schemas/PaymentSettingsObject",
             "description": "Live mode's."
@@ -62,7 +98,8 @@
         },
         "required": [
           "live",
-          "test"
+          "test",
+          "legacy"
         ],
         "type": "object"
       },
@@ -2122,6 +2159,27 @@
         "required": [
           "livemode",
           "reason"
+        ],
+        "type": "object"
+      },
+      "LegacyPaymentSettings": {
+        "description": "A `legacy` revision: never current, it governs only what the cutover bound to it.",
+        "properties": {
+          "chains": {
+            "description": "Every route of the mode accepted at its 0.5.0 values, with the former confirmation\npolicies.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsChain"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "The revision, `psrev_…`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "chains"
         ],
         "type": "object"
       },

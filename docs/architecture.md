@@ -1610,15 +1610,17 @@ it detectable.
 
 **The 0.6.0 payment settings cutover** (design payment-settings §10). On an instance with issued
 addresses, `topup migrate --config FILE` (the compose's `migrate` service mounts the attested
-configuration) runs a one-time backfill in one transaction with the schema: every account and
+configuration) runs a one-time backfill, in its own transaction right after the schema
+migration (until it commits, `topup run` refuses to start and a rerun resumes it): every account and
 mode gets a `legacy` revision that writes out the 0.5.0 model (every route of the mode accepted at
 its route values, with the account's former confirmation policies), every existing deposit is
 bound to it, and every quote, whatever its status, gets the terms it resolves on its route's
 version in the configuration; then the binding constraints are validated, and recording is held.
 `topup run` refuses to start until the backfill has run. While held, the API serves, issuance
 answers `400 paused`, and no scanner, finality watch, reconciler, or pump runs. The operator has
-each authorized account configured (`POST /v1/payment_settings`), verifies the effective config
-(`GET /v1/admin/accounts/{acct}`), and lifts the hold with `POST /v1/admin/recording/resume`; the
+each authorized account configured (`POST /v1/payment_settings`, carrying the stricter
+confirmations of its `legacy` revision, `payment_settings.legacy` in `GET
+/v1/admin/accounts/{acct}`), verifies the effective config there, and lifts the hold with `POST /v1/admin/recording/resume`; the
 recorders start from their cursors. A new instance has nothing to bind, so its cutover is complete
 at once.
 `GET /v1/attestation?nonce=`, authenticated with an API key, returns the key's account's webhook
