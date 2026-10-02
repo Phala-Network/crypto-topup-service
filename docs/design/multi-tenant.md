@@ -10,6 +10,11 @@ Every mechanism names the established practice it follows. External claims were 
 2026-09-27 and 2026-09-28 against the linked sources; where a source could not be verified, the
 text says so.
 
+**Proposed amendment of 2026-10-02 (under review): per-account payment settings.** The route's
+merchant terms and `confirmation_policies` move into one opt-in payment settings resource per
+account and mode, within operator bounds ([design](payment-settings.md)). D1, D16, §12, §14, and
+§15 change when it is accepted.
+
 **Amendment of 2026-09-28 (owner ruling).** There is no merchant dashboard and no self-serve
 onboarding. The operator creates every account through the admin API after due diligence done
 offline; merchants manage everything else through the API and SDKs with secret keys. Users,
