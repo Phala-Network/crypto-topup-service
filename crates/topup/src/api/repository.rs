@@ -486,7 +486,7 @@ async fn request_refund_in(
     // The dust floor of the terms that govern the deposit, or the route's default for one no
     // terms govern (docs/design/payment-settings.md §9).
     let min_refund = crate::payment_config::refund_floor(
-        &mut **transaction,
+        transaction,
         routes,
         refund.deposit_id,
         refund.route,

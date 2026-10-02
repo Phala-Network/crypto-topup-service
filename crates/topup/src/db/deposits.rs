@@ -464,7 +464,7 @@ pub(crate) async fn insert_deposit_in(
     };
     // The barrier (crate::payment_config): the insert below, a later statement, binds the
     // deposit to the payment settings its own snapshot reads.
-    crate::payment_config::lock_for_recording(&mut **transaction, deposit.address_id).await?;
+    crate::payment_config::lock_for_recording(transaction, deposit.address_id).await?;
     let result = sqlx::query!(
         r#"
         INSERT INTO deposits (
