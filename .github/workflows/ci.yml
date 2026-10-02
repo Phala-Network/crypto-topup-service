@@ -37,6 +37,17 @@ jobs:
       - name: Format, clippy with all and with default features, and cargo-deny
         run: make lint
 
+  # The service and both SDKs share one version, the Cargo workspace version (CONTRIBUTING.md,
+  # "Releasing").
+  version:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The SDKs name the Cargo workspace version
+        run: scripts/version.sh
+      - name: Check that scripts/version.sh catches a drifted version
+        run: scripts/tests/version.sh
+
   # Every Markdown file, linted with .markdownlint-cli2.jsonc, and its relative links and anchors
   # checked offline with lychee.toml (CONTRIBUTING.md, "Documentation").
   docs:

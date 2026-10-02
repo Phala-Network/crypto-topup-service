@@ -1,11 +1,15 @@
 # Changelog
 
-The service's releases: changes to the HTTP API and webhook payloads that integrators see, and to
-the deployment operators run. Additive fields are not breaking; webhook receivers must ignore
-unknown fields. Each version's section is its GitHub release's notes (CONTRIBUTING.md, "Releasing
-the service"). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
-versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html); the SDKs keep their
-own changelogs in `sdk/js` and `sdk/python`.
+Phala Pay's releases. The service, the JS SDK `@phala/pay` (`sdk/js`), and the Python SDK
+`phala-pay` (`sdk/python`) share one version and are released together (CONTRIBUTING.md,
+"Releasing"). Each version records the changes to the HTTP API and webhook payloads that
+integrators see and to the deployment operators run, then the SDKs' changes under "JS SDK" and
+"Python SDK". Additive fields are not breaking; webhook receivers must ignore unknown fields. Each
+version's section is its GitHub release's notes. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The SDKs' own releases before v0.5.0
+are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
+[sdk/python/CHANGELOG.md](sdk/python/CHANGELOG.md).
 
 ## [Unreleased]
 
@@ -18,6 +22,33 @@ own changelogs in `sdk/js` and `sdk/python`.
   `safe` block is about 5 minutes, a `finalized` policy about 15). It is absent when the chain's
   tokens are credited at different confirmations; `openapi.json` marks it optional, as v0.3.5 and
   earlier do not send it.
+
+### JS SDK (`@phala/pay`)
+
+#### Added
+
+- `ClientDepositAddress.networks` (`parseClientDepositAddress`, `retrieveDepositAddress`): each
+  network's `chain_id`, `address`, and optional `typical_credit_seconds`, the typical credit time at
+  the account's confirmation on that chain. It is absent when the chain's tokens are credited at
+  different confirmations, and a service of v0.3.5 or earlier does not send it; its view still
+  parses. `ClientDepositAddressNetwork` is exported.
+
+#### Fixed
+
+- `<DepositAddress>` told the payer "usually in about 30 seconds" on every network. With
+  `clientSecret` and `apiBase` it now states each network's typical credit time from the address's
+  public view ("usually in about 30 seconds on Sepolia and about 5 minutes on Base Sepolia"; 15
+  minutes under a `finalized` policy). Before the view is read, or when a network has no time, it
+  names none: "credited at the market rate once it is confirmed on its network".
+
+### Python SDK (`phala-pay`)
+
+#### Added
+
+- `ClientDepositAddressNetwork.typical_credit_seconds` (`topup_client`): the typical credit time at
+  the account's confirmation on the network's chain. Optional (`UNSET` when absent): it is absent
+  when the chain's tokens are credited at different confirmations, and a service of v0.3.5 or
+  earlier does not send it.
 
 ## [0.3.5] - 2026-10-01
 

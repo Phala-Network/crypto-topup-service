@@ -121,7 +121,7 @@ The [documentation index](docs/README.md) lists every document.
 | [`@phala/pay`](sdk/js) | `npm install @phala/pay viem` | The browser checkout (`<Checkout>`, `<DepositAddress>`) and server helpers for Node |
 | [`phala-pay`](sdk/python) | `pip install phala-pay` | The Python backend client, webhook verification, and address pinning |
 
-Pin the minor release that matches your operator's service release
+The SDKs share the service's version: pin the one equal to your operator's service version
 ([compatibility](docs/integration.md#compatibility)). The Python SDK's low-level client is generated
 from [crates/topup/openapi.json](crates/topup/openapi.json), the API's OpenAPI document.
 

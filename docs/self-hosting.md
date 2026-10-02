@@ -65,8 +65,8 @@ bash deploy.sh --strict
 It needs
 `curl`, `tar`, `jq`, bash 4.4, Node.js 22 and npm, Docker (preflight checks the configuration in the
 release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key (with
-the Python SDK `phala-pay==0.3.0`), and your Phala Cloud login (with a release's locked CLI,
-`kit/deploy/phala login`: [section 2](#2-your-environment-repository), step 1) or
+the release's own Python SDK, `phala-pay==<version>`; `phala-pay==0.3.0` before v0.5.0), and your
+Phala Cloud login (with a release's locked CLI, `kit/deploy/phala login`: [section 2](#2-your-environment-repository), step 1) or
 `PHALA_CLOUD_API_KEY`, which it never stores. It:
 
 1. downloads the release into a private temporary directory, removed on exit, and verifies it:

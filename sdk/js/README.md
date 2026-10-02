@@ -11,7 +11,7 @@ Python SDK (`phala-pay`) and fulfils from the signed `deposit.credited` webhook.
 npm install @phala/pay viem
 ```
 
-Pin the minor release that matches your operator's service release
+`@phala/pay` shares the service's version: pin the one equal to your operator's service version
 ([compatibility](../../docs/integration.md#compatibility)).
 
 Peer dependencies: `viem` 2, and `react` 18 or 19 for `@phala/pay/react`. Browser wallets are
@@ -281,5 +281,9 @@ EIP-6963 wallet backed by the node (and again through a viem `WalletClient` pass
 
 ## Releases
 
-A tag `sdk-js-v<version>` matching `package.json` publishes to npm from the Release SDKs workflow
-(environment `npm`) with trusted publishing and provenance. See [CHANGELOG.md](CHANGELOG.md).
+`@phala/pay` is released with the service: the `v<version>` tag's Release workflow publishes it to
+npm (environment `npm`) with trusted publishing and provenance
+([CONTRIBUTING.md, "Releasing"](../../CONTRIBUTING.md#releasing)). Its changes are in the top-level
+[CHANGELOG.md](https://github.com/Phala-Network/phala-pay/blob/main/CHANGELOG.md), under "JS SDK";
+[its releases before v0.5.0](https://github.com/Phala-Network/phala-pay/blob/main/sdk/js/CHANGELOG.md),
+versioned on their own, stay in `sdk/js`.

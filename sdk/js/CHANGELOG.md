@@ -1,27 +1,10 @@
 # Changelog
 
-All notable changes to `@phala/pay` are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in
-[CONTRIBUTING.md](../../CONTRIBUTING.md#releasing-an-sdk); versions follow
+The releases of `@phala/pay` before v0.5.0, when it was versioned on its own and tagged
+`sdk-js-v<version>`. From v0.5.0 it shares the service's version, and its changes are recorded in
+the top-level [CHANGELOG.md](../../CHANGELOG.md), under "JS SDK". This file is no longer updated.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-
-- `ClientDepositAddress.networks` (`parseClientDepositAddress`, `retrieveDepositAddress`): each
-  network's `chain_id`, `address`, and optional `typical_credit_seconds`, the typical credit time at
-  the account's confirmation on that chain. It is absent when the chain's tokens are credited at
-  different confirmations, and a service of v0.3.5 or earlier does not send it; its view still
-  parses. `ClientDepositAddressNetwork` is exported.
-
-### Fixed
-
-- `<DepositAddress>` told the payer "usually in about 30 seconds" on every network. With
-  `clientSecret` and `apiBase` it now states each network's typical credit time from the address's
-  public view ("usually in about 30 seconds on Sepolia and about 5 minutes on Base Sepolia"; 15
-  minutes under a `finalized` policy). Before the view is read, or when a network has no time, it
-  names none: "credited at the market rate once it is confirmed on its network".
 
 ## [0.4.0] - 2026-10-01
 
@@ -200,7 +183,6 @@ All notable changes to `@phala/pay` are recorded here. The format follows
   without trailing zeros (`1,273.9185`); `tokenAmount(quote)` is the plain decimal a wallet
   accepts, which `<Checkout>`'s "Exact amount" copies.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.4.0...HEAD
 [0.4.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.3.0...sdk-js-v0.4.0
 [0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.2.0...sdk-js-v0.3.0
 [0.2.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v0.1.2...sdk-js-v0.2.0

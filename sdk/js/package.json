@@ -1,6 +1,6 @@
 {
   "name": "@phala/pay",
-  "version": "0.4.0",
+  "version": "0.3.5",
   "description": "Phala Pay checkout: a framework-agnostic client and React bindings",
   "keywords": [
     "crypto",
@@ -40,8 +40,7 @@
   },
   "files": [
     "dist",
-    "src",
-    "CHANGELOG.md"
+    "src"
   ],
   "publishConfig": {
     "access": "public"

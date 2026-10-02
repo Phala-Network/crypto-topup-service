@@ -43,12 +43,12 @@ treasuries, sweeps) · [2. Webhooks and fulfillment](#2-webhooks-and-fulfillment
 The whole integration is three pieces, as with Stripe's Payment Element: the backend creates a
 quote, the browser renders the checkout with the quote's client secret, and the webhook fulfils.
 
-**Install** `@phala/pay` from npm and `phala-pay` from PyPI, at the minor release compatible with
-your operator's service release, and pin it ([§5.9, "Compatibility"](#compatibility); `X.Y` below):
+**Install** `@phala/pay` from npm and `phala-pay` from PyPI at your operator's service version,
+and pin it ([§5.9, "Compatibility"](#compatibility); `X.Y.Z` below):
 
 ```sh
-npm install "@phala/pay@~X.Y" viem
-uv add "phala-pay~=X.Y.0"   # or: pip install "phala-pay~=X.Y.0"
+npm install --save-exact "@phala/pay@X.Y.Z" viem
+uv add "phala-pay==X.Y.Z"   # or: pip install "phala-pay==X.Y.Z"
 ```
 
 **Configure.** `PHALA_PAY_API_BASE` is your operator's service URL. The operator creates your
@@ -1454,8 +1454,9 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 
 ### 5.9 Versioning and deprecation
 
-The service and both SDKs are pre-1.0 (0.x), versioned by SemVer's rules for 0.x: a minor release
-may break what came before it, and a patch release only fixes or adds.
+The service and both SDKs share one version and are released together. They are pre-1.0 (0.x),
+versioned by SemVer's rules for 0.x: a minor release may break what came before it, and a patch
+release only fixes or adds.
 
 #### API
 
@@ -1470,25 +1471,24 @@ may break what came before it, and a patch release only fixes or adds.
 
 #### SDK
 
-- `phala-pay` and `@phala/pay` are versioned independently: a minor release may break the public
-  API (`phala_pay` and `topup_sdk` exports, generated `topup_client` names, the JavaScript
-  exports and component props); pin the minor release you tested.
-- Each release records the `info.version` it was generated from.
+- `phala-pay` and `@phala/pay` are released with the service, at its version, changed or not: a
+  minor release may break the public API (`phala_pay` and `topup_sdk` exports, generated
+  `topup_client` names, the JavaScript exports and component props); pin the version you tested.
+- Each release's `topup_client` is generated from that release's `openapi.json`.
 - Only `make -C sdk/python generate` changes `src/topup_client`; CI fails if regeneration is not a
   no-op, so a PR that changes `openapi.json` regenerates the client in the same PR.
 
 #### Compatibility
 
-Use the SDK minor release that matches the service release your operator runs (`info.version` of
-its `GET /openapi.json`). An SDK minor release may require fields that only a later service release
-sends, so upgrade the service before the SDK. The current pairing:
+Use the SDK version equal to your operator's service version, `info.version` of its
+`GET /openapi.json`: against service v0.5.0, `@phala/pay` 0.5.0 and `phala-pay` 0.5.0. An SDK may
+require fields that only its own service release sends, so your operator upgrades the service
+before you upgrade the SDK. [CHANGELOG.md](../CHANGELOG.md) records each release's SDK changes
+under "JS SDK" and "Python SDK".
 
-| Service | `@phala/pay` | `phala-pay` |
-|---|---|---|
-| v0.3.4 or later | 0.4 | 0.4 |
-
-Each SDK's changelog ([JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)) names the
-service release that each breaking change needs.
+Before v0.5.0 the SDKs were versioned on their own: a service from v0.3.4 to v0.3.5 pairs with
+`@phala/pay` 0.4 and `phala-pay` 0.4 (their earlier releases are in the frozen
+[JS](../sdk/js/CHANGELOG.md) and [Python](../sdk/python/CHANGELOG.md) changelogs).
 
 ### 5.10 SDK development
 

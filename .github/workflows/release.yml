@@ -1,23 +1,35 @@
 name: Release
 
-# A versioned release of the service (deploy/README.md, "Releases"), from a `v<version>` tag on a
-# commit of main whose Cargo workspace version is <version> (CONTRIBUTING.md, "Releasing the
-# service"). A stable version needs its dated CHANGELOG.md section, the release notes; a version
-# with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release. Only admins create
-# `v*` tags (a tag ruleset), and a published release is immutable.
+# A versioned release of the service and both SDKs (deploy/README.md, "Releases"), from a
+# `v<version>` tag on a commit of main whose Cargo workspace version is <version>, the version that
+# sdk/js and sdk/python share (scripts/version.sh; CONTRIBUTING.md, "Releasing"). A stable version
+# needs its dated CHANGELOG.md section, the release notes, with the SDKs' changes under it; a
+# version with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release of the service
+# alone, without the SDKs. Only admins create `v*` tags (a tag ruleset), and a published release is
+# immutable.
 #
-# `ci` runs the whole CI workflow on the tagged commit; nothing is built unless it passes. Each
-# image is then built on its own GitHub-hosted runner by deploy/verify-image.sh (Buildx v0.37.1 and
-# the pinned BuildKit, as a local rebuild uses), pushed tagged v<version>, and attested
-# (actions/attest-build-provenance, also pushed to the registry):
+# `ci` runs the whole CI workflow on the tagged commit, the SDKs' checks and end-to-end tests
+# included; nothing is built unless it passes. Each image is then built on its own GitHub-hosted
+# runner by deploy/verify-image.sh (Buildx v0.37.1 and the pinned BuildKit, as a local rebuild
+# uses), pushed tagged v<version>, and attested (actions/attest-build-provenance, also pushed to the
+# registry):
 # - phala-pay and phala-pay-reference-product are reproducible: the pushed build's digest must
 #   equal an earlier build's, and anyone rebuilds the same digest from the tag;
 # - postgres-walg is not (apt and dpkg record wall-clock times): built once, with provenance only.
-# `release` then publishes the GitHub release, each asset attested: images.json (the
-# repository@sha256 references by image name, deploy/render.sh's --images); the deploy kit
+# `assets` then builds, checks, and attests the release assets: images.json (the repository@sha256
+# references by image name, deploy/render.sh's --images); the deploy kit
 # phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
 # Cloud template's compose, rendered from the kit with these images); deploy.sh (deploy/deploy.sh,
-# the one-command deploy, set to deploy this release); and SHA256SUMS.
+# the one-command deploy, set to deploy this release and, for a stable one, to generate the admin
+# key with this release's Python SDK); and SHA256SUMS. Only then does a stable version publish the
+# SDKs: sdk/js to npm as @phala/pay, and sdk/python to PyPI as phala-pay (its `project.name`).
+# Publishing uses trusted publishing (OIDC) only: no token or secret is stored anywhere. The owner
+# registers this repository, this workflow file (release.yml), and the job's environment as the
+# trusted publisher: `npm` on npmjs.com and `pypi` on pypi.org. Each environment accepts only `v*`
+# tags and may add required reviewers. npm's trusted publishing does not support self-hosted
+# runners, so the publish jobs run on GitHub-hosted runners. Last, `release` publishes the GitHub
+# release with those assets, and `deploy-entry` checks that https://pay.phala.com/deploy.sh serves
+# it. Every job can be re-run alone after a failure (CONTRIBUTING.md, "Recovering a release").
 # deploy/verify-release.sh verifies all of it (docs/self-hosting.md, "Verify a release").
 
 on:
@@ -54,13 +66,22 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
             { echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1; }
-          cargo_version=$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          # The Cargo workspace version, which the SDKs must name too.
+          cargo_version=$(scripts/version.sh)
           [[ "$cargo_version" == "$version" ]] ||
             { echo "::error::tag $GITHUB_REF_NAME does not match the Cargo workspace version $cargo_version"; exit 1; }
           git fetch --no-tags --quiet origin main
           git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD ||
             { echo "::error::$GITHUB_REF_NAME is not a commit of main"; exit 1; }
-          [[ "$version" == *-* ]] || sdk/changelog-section.sh CHANGELOG.md "$version" >/dev/null
+          # Stable releases only go up: an older one would take Latest, and npm's `latest`, from a
+          # newer one.
+          if [[ "$version" != *-* ]]; then
+            newest=$(git ls-remote --tags --refs origin 'v*' |
+              sed -n 's#.*refs/tags/v\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p' | sort -V | tail -n 1)
+            [[ "$(printf '%s\n' "$newest" "$version" | sort -V | tail -n 1)" == "$version" ]] ||
+              { echo "::error::v$newest is newer than $GITHUB_REF_NAME, which would take Latest from it"; exit 1; }
+          fi
+          [[ "$version" == *-* ]] || scripts/changelog-section.sh CHANGELOG.md "$version" >/dev/null
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
   image:
@@ -133,12 +154,16 @@ jobs:
           path: ${{ runner.temp }}/ref/${{ matrix.name }}.json
           if-no-files-found: error
 
-  release:
+  # Every release asset is built, checked, and attested before anything is published to a registry:
+  # a failure here leaves no SDK published without its service release. The kit renders the example
+  # environment and Phala's with these images; the template's compose is rendered from the kit
+  # itself. A stable release's deploy.sh pins its own Python SDK, published before the release.
+  assets:
     needs: [version, image]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     env:
@@ -152,8 +177,6 @@ jobs:
           pattern: image-*
           merge-multiple: true
           path: ${{ runner.temp }}/refs
-      # The kit renders the example environment and Phala's with these images before anything is
-      # published; the template's compose is rendered from the kit itself.
       - name: Write images.json, build the deploy kit, render the template, and set deploy.sh's release
         run: |
           dist="$RUNNER_TEMP/dist" kit="$RUNNER_TEMP/kit"
@@ -170,6 +193,10 @@ jobs:
             "$kit/deploy/environments/phala-cloud-template/topup" >"$dist/phala-cloud-template.yml"
           sed "s/^release=latest\$/release=$GITHUB_REF_NAME/" deploy/deploy.sh >"$dist/deploy.sh"
           grep -qx "release=$GITHUB_REF_NAME" "$dist/deploy.sh"
+          if [[ "$VERSION" != *-* ]]; then
+            sed -i "s/^sdk=phala-pay==.*\$/sdk=phala-pay==$VERSION/" "$dist/deploy.sh"
+            grep -qx "sdk=phala-pay==$VERSION" "$dist/deploy.sh"
+          fi
           (cd "$dist" && sha256sum images.json "phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
             phala-cloud-template.yml deploy.sh >SHA256SUMS)
       - name: Attest the release assets
@@ -181,20 +208,133 @@ jobs:
             ${{ runner.temp }}/dist/phala-cloud-template.yml
             ${{ runner.temp }}/dist/deploy.sh
             ${{ runner.temp }}/dist/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+  # The SDKs' checks and end-to-end tests ran in `ci`; this builds the sdist and wheel that
+  # py-publish uploads, outside the job that can mint the publishing token.
+  py-build:
+    needs: [ci, version]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.18"
+      - name: Build the sdist and wheel
+        run: uv build --project sdk/python --out-dir "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-python-dist
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+  # A re-run uploads the same build and skips the files PyPI already has, so it completes a
+  # partial upload (the sdist without the wheel, say).
+  py-publish:
+    needs: [py-build, assets]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdk-python-dist
+          path: dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+
+  js-publish:
+    needs: [version, assets]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: sdk/js
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/sdk-js
+        with:
+          e2e: "false"
+      - name: npm supports trusted publishing (11.5.1 or later)
+        run: |
+          npm --version
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"
+      # `prepare` builds dist from the checked-out tag. A re-run finds the version published by an
+      # earlier run of this commit (npm records the commit as `gitHead`) and is done; a version
+      # published from any other commit, or a registry it cannot read, fails.
+      - name: Publish to npm with provenance
+        run: |
+          if view=$(npm view "@phala/pay@$VERSION" gitHead --json 2>/dev/null); then
+            [[ "$(jq -r . <<<"$view")" == "$GITHUB_SHA" ]] ||
+              { echo "::error::@phala/pay $VERSION is already published, not from $GITHUB_SHA: $view"; exit 1; }
+            echo "@phala/pay $VERSION is already published from $GITHUB_SHA"
+          elif [[ "$(jq -r '.error.code? // empty' <<<"$view" 2>/dev/null)" == E404 ]]; then
+            npm publish --provenance --access public
+          else
+            echo "::error::cannot read @phala/pay $VERSION from npm: $view"
+            exit 1
+          fi
+
+  # After the SDKs, which a pre-release skips: the release's notes link both packages, and its
+  # deploy.sh generates the admin key with its Python SDK.
+  release:
+    needs: [version, assets, py-publish, js-publish]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/dist
       # `gh release create` uploads to a draft and publishes last, as immutable releases require.
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           dist="$RUNNER_TEMP/dist" notes="$RUNNER_TEMP/notes.md"
-          # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; an SDK
-          # release never is (release-sdks.yml), nor a pre-release.
+          # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; a
+          # pre-release never is. The SDK releases before v0.5.0, tagged sdk-js-v* and sdk-py-v*,
+          # were published with --latest=false and never were either.
           kind=(--latest)
           if [[ "$VERSION" == *-* ]]; then
             kind=(--prerelease --latest=false)
-            echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md." >"$notes"
+            echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md, without the SDKs." >"$notes"
           else
-            sdk/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
+            scripts/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
+            {
+              echo
+              echo "## SDKs"
+              echo
+              echo "[\`@phala/pay\` $VERSION](https://www.npmjs.com/package/@phala/pay/v/$VERSION) on npm and"
+              echo "[\`phala-pay\` $VERSION](https://pypi.org/project/phala-pay/$VERSION/) on PyPI."
+            } >>"$notes"
           fi
           {
             echo
@@ -207,14 +347,23 @@ jobs:
             --notes-file "$notes" "${kind[@]}" \
             "$dist/images.json" "$dist/phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
             "$dist/phala-cloud-template.yml" "$dist/deploy.sh" "$dist/SHA256SUMS"
-      # The one-command deploy end to end: pay.phala.com's redirect, then GitHub's latest-release
-      # download, must serve this release's deploy.sh (GitHub's redirect can lag a few minutes).
+
+  # The one-command deploy end to end: pay.phala.com's redirect, then GitHub's latest-release
+  # download, must serve this release's deploy.sh (GitHub's redirect can lag a few minutes). Its own
+  # job, so re-running it never re-creates the release.
+  deploy-entry:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Check that https://pay.phala.com/deploy.sh serves this release
-        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p deploy.sh -D "$RUNNER_TEMP/release"
           for _ in $(seq 20); do
             if curl -fsSL --max-time 30 -o "$RUNNER_TEMP/served.sh" https://pay.phala.com/deploy.sh &&
-              cmp -s "$RUNNER_TEMP/served.sh" "$RUNNER_TEMP/dist/deploy.sh"; then
+              cmp -s "$RUNNER_TEMP/served.sh" "$RUNNER_TEMP/release/deploy.sh"; then
               exit 0
             fi
             sleep 30

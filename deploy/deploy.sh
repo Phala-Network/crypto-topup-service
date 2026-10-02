@@ -53,7 +53,7 @@
 #   ENVIRONMENT_DIR           custom domain: the environment directory, written unless it exists
 #                             (default ./CVM_NAME/topup)
 #   TOPUP_ADMIN_PUBLIC_KEY    the admin public key; empty or unset to generate a keypair with the
-#   ADMIN_SEED_FILE           Python SDK phala-pay 0.3.0, its seed in this new file (default
+#   ADMIN_SEED_FILE           release's Python SDK, phala-pay, its seed in this new file (default
 #                             ./CVM_NAME-admin.seed)
 #   WALG_S3_PREFIX AWS_ENDPOINT AWS_REGION (default auto)      the backup location
 #   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY                    its read-write token
@@ -66,7 +66,9 @@ set -euo pipefail
 repository=Phala-Network/phala-pay
 # The release this script deploys; the Release workflow sets its tag in the published asset.
 release=latest
-# The Python SDK whose topup-sdk keygen generates an admin key: the version this release documents.
+# The Python SDK whose topup-sdk keygen generates an admin key. The Release workflow sets a stable
+# release's own version, which the SDKs share; this published one serves a pre-release and a run
+# from a checkout.
 sdk=phala-pay==0.3.0
 
 say() {

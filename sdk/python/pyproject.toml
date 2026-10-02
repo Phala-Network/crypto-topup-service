@@ -1,6 +1,6 @@
 [project]
 name = "phala-pay"
-version = "0.4.0"
+version = "0.3.5"
 description = "Phala Pay for Python: quotes, deposits, refunds, and webhooks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,7 +33,7 @@ eoa = ["eth-account>=0.14,<0.15"]
 [project.urls]
 Homepage = "https://github.com/Phala-Network/phala-pay/tree/main/sdk/python"
 Repository = "https://github.com/Phala-Network/phala-pay"
-Changelog = "https://github.com/Phala-Network/phala-pay/blob/main/sdk/python/CHANGELOG.md"
+Changelog = "https://github.com/Phala-Network/phala-pay/blob/main/CHANGELOG.md"
 
 [project.scripts]
 topup-sdk = "topup_sdk.__main__:main"

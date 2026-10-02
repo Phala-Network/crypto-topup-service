@@ -36,7 +36,7 @@ For the operator who runs an instance, onboards merchants, and handles incidents
 | [Architecture](architecture.md) | The specification: trust model, contracts, schema, state machine, chain reads, quotes, webhooks, API, reconciliation, deployment, and policies. |
 | [Forwarder contracts](../contracts/README.md) | The `ForwarderFactory` and forwarder model, flush semantics, and tests. |
 | [Database migrations](../crates/topup/migrations/README.md) | Database roles and grants, and what each migration changes. |
-| [Changelog](../CHANGELOG.md) | Integrator-visible changes to the HTTP API and webhooks; the SDKs keep their own ([JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)). |
+| [Changelog](../CHANGELOG.md) | Each release's integrator-visible changes to the HTTP API, webhooks, and SDKs (the SDKs' releases before v0.5.0: [JS](../sdk/js/CHANGELOG.md), [Python](../sdk/python/CHANGELOG.md)). |
 
 ## Design and internals
 
