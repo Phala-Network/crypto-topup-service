@@ -297,26 +297,6 @@ impl ConfirmStep {
             mark_final: is_final,
             ..TransitionEffects::default()
         };
-        let Some((route_name, route_version)) = selected_route else {
-            return rejected_result(
-                deposit,
-                RejectReason::UnsupportedAsset,
-                json!({
-                    "stage": "route",
-                    "result": "unsupported_asset",
-                    "providers": provider_evidence(&canonical),
-                }),
-                effects,
-            );
-        };
-        let Some(runtime) = self.routes.get(&(route_name.clone(), route_version)) else {
-            return retry(
-                RetryError::InvariantViolation,
-                json!({"stage": "route", "error": "unknown_route_version"}),
-                effects,
-            );
-        };
-
         // After a restore, the credit the merchant was told for this deposit stands: a settled
         // amount is immutable. A delivered transfer that is not the chain's holds the deposit
         // until the operator discards the delivered credit (deploy/runbooks/restore.md).
@@ -367,6 +347,26 @@ impl ConfirmStep {
                 effects,
             );
         }
+
+        let Some((route_name, route_version)) = selected_route else {
+            return rejected_result(
+                deposit,
+                RejectReason::UnsupportedAsset,
+                json!({
+                    "stage": "route",
+                    "result": "unsupported_asset",
+                    "providers": provider_evidence(&canonical),
+                }),
+                effects,
+            );
+        };
+        let Some(runtime) = self.routes.get(&(route_name.clone(), route_version)) else {
+            return retry(
+                RetryError::InvariantViolation,
+                json!({"stage": "route", "error": "unknown_route_version"}),
+                effects,
+            );
+        };
 
         // A valid payment of the address's quote is governed by the terms the quote was issued
         // with; every other payment by the payment settings the deposit is bound to (design §8).
@@ -1921,6 +1921,59 @@ mod tests {
                 "delivered_event_contradicts_chain"
             );
             assert_eq!(result.evidence["field"], field);
+            assert!(result.events.is_empty());
+            assert!(result.effects.valuation.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_canonical_token_cannot_rewrite_a_delivered_outcome() {
+        let deposit = deposit(1_000);
+        let mut canonical = transfer(&deposit);
+        canonical.token = Address::repeat_byte(9);
+        let rejection = DeliveredRejection {
+            reason: RejectReason::BelowMinimum,
+            transfer: DeliveredTransfer {
+                account_id: deposit.account_id,
+                livemode: deposit.livemode,
+                chain_id: deposit.chain_id,
+                tx_hash: deposit.tx_hash,
+                address: recipient(),
+                asset_contract: deposit.asset_contract,
+                from_address: deposit.from_address,
+                amount_atomic: deposit.amount_atomic,
+            },
+        };
+        for restored in [
+            ConfirmationContext {
+                delivered: Some(delivered(&deposit, ValuationSource::Spot)),
+                ..context(None)
+            },
+            ConfirmationContext {
+                delivered_rejection: Some(rejection),
+                ..context(None)
+            },
+        ] {
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![canonical.clone()]),
+                chain(100, vec![canonical.clone()]),
+                prices(now_seconds()),
+                restored,
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(
+                result.outcome,
+                StepOutcome::Retry {
+                    error: RetryError::InvariantViolation,
+                }
+            );
+            assert_eq!(
+                result.evidence["error"],
+                "delivered_event_contradicts_chain"
+            );
+            assert_eq!(result.evidence["field"], "asset_contract");
             assert!(result.events.is_empty());
             assert!(result.effects.valuation.is_none());
         }
