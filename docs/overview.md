@@ -89,7 +89,8 @@ merchant backend creates a quote (or the customer's deposit address) with its AP
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
   → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
-  → watched to finality; a dropped transaction becomes deposit.reversed
+  → watched to finality; a payment a reorg proves replaced becomes deposit.reversed; one gone
+    with its nonce unspent stays credited, not final, within the cap, and alerts the operator
   → the merchant (or anyone) flushes forwarders to its treasury; the service marks deposits swept
     from the finalized Flushed events
   → reconciliation of chain and service ledger per forwarder

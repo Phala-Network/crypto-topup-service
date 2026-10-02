@@ -81,8 +81,9 @@ staging instance ([staging reference product](deploy/phala.md#staging-reference-
   on every chain, credited at spot for any amount.
 - **Fast credit, watched to finality**: a deposit is credited at the route's confirmation (about
   30 seconds after paying on Ethereum, about 7 seconds on Base), confirmed by a second RPC
-  provider, and reversed with `deposit.reversed` if its transaction leaves the chain before
-  finality.
+  provider, and watched to finality: reversed with `deposit.reversed` if a reorganization proves
+  the payment replaced; one whose transaction leaves the chain with its nonce unspent stays
+  credited and not final, within the account's cap on such credit, and raises an operator alert.
 - **Signed webhooks**: Standard Webhooks with ed25519 keys per account and mode, derived in the
   CVM and pinned by merchants from TDX attestation.
 - **Merchant sweeps and refunds**: merchants sweep forwarders and pay refunds from their own

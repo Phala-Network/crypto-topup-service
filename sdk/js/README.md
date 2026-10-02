@@ -94,9 +94,10 @@ payer who is waiting that the payment is credited in about the quote's `typical_
 (30 seconds on Ethereum, about 7 seconds on Base, 15 minutes under a `finalized` policy) and the
 credit arrives on its own.
 
-A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg drops
-the payment's transaction, your backend receives `deposit.reversed` and claws the credit back as
-for `deposit.refunded`; the checkout itself only reflects the quote.
+A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg proves
+the payment replaced, your backend receives `deposit.reversed` and claws the credit back as for
+`deposit.refunded`; a payment gone with its nonce unspent instead stays credited and not final,
+and the operator is alerted. The checkout itself only reflects the quote.
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's: the

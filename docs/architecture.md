@@ -58,8 +58,9 @@ holds no funds, sends no transactions, pays no merchant gas, and charges no fee 
 payments reach only the merchant's own treasury, and the merchant sweeps and refunds with its own
 wallet or Safe. Phala Cloud is an ordinary account. A deposit is credited at
 the route's confirmation (two blocks on Ethereum, about 30 seconds after paying) and watched to
-finality; the rare deposit whose transaction leaves the chain is reversed with a signed
-`deposit.reversed`, which the merchant handles like a refund. There are two ways to deposit. A
+finality; the rare deposit a reorganization proves replaced is reversed with a signed
+`deposit.reversed`, which the merchant handles like a refund (one whose transaction leaves the
+chain with its nonce unspent stays credited and not final, with an alert, §7). There are two ways to deposit. A
 **quote** fixes a price: the user states a USD amount, receives a locked price, an exact token
 amount, a single-use address, and a countdown, then pays. This is the checkout model of Coinbase
 Commerce and BitPay. A payment that does not match its quote (late, wrong amount, second
@@ -816,7 +817,8 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
   the same body. `amount` is the quoted credit when `price_source`
   is `quote`, otherwise the spot credit at finality (§9). `quote` is the receiving address's
   quote, also when a late or wrong-amount payment was valued at spot.
-- A credited deposit whose transaction leaves the chain before finality (§7) is `reversed`, and
+- A credited deposit that a reorganization proves replaced before finality (its transaction's
+  nonce spent by another, or another transfer at its position at finality; §7) is `reversed`, and
   `deposit.reversed` follows, with the same derived-id rule. This is Stripe's pattern for a
   payment that fails after success (an ACH failure after `succeeded` becomes a dispute): rare,
   signed, and handled by the merchant like a refund: the snapshot's `amount_reversed` takes the

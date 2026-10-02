@@ -158,9 +158,13 @@ deposit address instead (§1.5). The service watches Ethereum for transfers to i
 route's confirmation (two blocks on Ethereum), prices each deposit, and screens it. A deposit that
 passes is credited, typically **about 30 seconds after paying**, and the service tells you
 with a signed `deposit.credited` webhook. It keeps watching the deposit until it is final (about
-15 minutes on Ethereum); in the rare case that the payment's transaction is dropped from the
-chain before then, the deposit is reversed and a signed `deposit.reversed`, whose deposit nets to
-zero, takes the credit back, as a refund's `deposit.refunded` takes back its share (§2.3). You own the balance: you
+15 minutes on Ethereum). In the rare case that a reorganization before then proves the payment
+replaced (another transaction spent the payer's nonce, or another transfer holds its position at
+finality), the deposit is reversed and a signed `deposit.reversed`, whose deposit nets to zero,
+takes the credit back, as a refund's `deposit.refunded` takes back its share (§2.3). A payment
+whose transaction leaves the chain with its nonce unspent is not reversed, since it could still be
+included: the deposit stays credited and not final, counts against your cap on credit before
+finality (§1.8), and the operator is alerted. You own the balance: you
 verify the signature and credit the deposit once, the pattern of Stripe Checkout fulfillment
 ([docs.stripe.com/checkout/fulfillment](https://docs.stripe.com/checkout/fulfillment)). The
 addresses are CREATE2 forwarders that can only pay your treasury; you sweep them there when you
