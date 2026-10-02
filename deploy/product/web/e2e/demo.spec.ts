@@ -577,8 +577,10 @@ test("a deposit address: one verified address, any amount credited at spot, then
   await expect(tokensOnNetwork.last().locator("xpath=..")).toContainText("Base Sepolia testnet");
   const address = (await scenes.getByTestId("deposit-address").textContent()) ?? "";
   expect(address).toMatch(/^0x[0-9a-fA-F]{40}$/);
-  // The SDK's <DepositAddress> shows the customer the same address to copy.
+  // The SDK's <DepositAddress> shows the customer the same address to copy, and the networks'
+  // typical credit time from the address's public view.
   await expect(product.getByText(address).first()).toBeVisible();
+  await expect(product.getByText(/when it arrives, usually in about 30 seconds\./)).toBeVisible();
 
   // Any amount, sent from a wallet as from an exchange.
   const testTokens = page.getByRole("note", { name: "Test tokens" });

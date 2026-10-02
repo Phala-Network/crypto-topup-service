@@ -82,6 +82,9 @@ describe("DepositAddress", () => {
     expect(screen.getByText(TOKEN)).toBeDefined();
     expect(screen.getByRole("button", { name: "Copy Deposit address" })).toBeDefined();
     expect(screen.getByText(/Send only PHA, USDC on Sepolia, Base Sepolia/)).toBeDefined();
+    // Without the address's public view it knows no network's credit time, and names none.
+    expect(screen.getByText(/credited at the market rate once it is confirmed on its network\./)).toBeDefined();
+    expect(screen.queryByText(/seconds|minutes/)).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "USDC" }));
     expect(qr().getAttribute("aria-label")).toBe("Deposit address for USDC on Sepolia");
@@ -125,16 +128,37 @@ describe("DepositAddress", () => {
 describe("DepositAddress payments", () => {
   const SECRET = `da_${"0d".repeat(16)}_secret_${"ab".repeat(24)}`;
 
-  function view(payments: unknown[]) {
+  function view(payments: unknown[], networks: unknown[] = []) {
     return {
       id: `da_${"0d".repeat(16)}`,
       object: "deposit_address",
       livemode: false,
       status: "active",
       address: ADDRESS,
-      networks: [],
+      networks,
       payments,
     };
+  }
+
+  /** A network of the public view; without `seconds`, as a service of v0.3.5 or earlier sends it. */
+  function clientNetwork(chainId: number, seconds?: number) {
+    return {
+      chain_id: chainId,
+      address: ADDRESS,
+      assets: [asset(chainId, "usdc", USDC)],
+      ...(seconds === undefined ? {} : { typical_credit_seconds: seconds }),
+    };
+  }
+
+  /** The address's message once its public view, served with `networks`, is read. */
+  async function messageWith(networks: unknown[]): Promise<string> {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", () => Promise.resolve(Response.json(view([], networks))));
+    const { container } = render(
+      <DepositAddress depositAddress={details()} clientSecret={SECRET} apiBase="https://pay.example" />,
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    return container.querySelector(".pp-message")?.textContent ?? "";
   }
 
   function payment(overrides: Record<string, unknown> = {}) {
@@ -183,10 +207,40 @@ describe("DepositAddress payments", () => {
     );
   });
 
+  it("states each network's credit time from the public view", async () => {
+    expect(await messageWith([clientNetwork(11155111, 30), clientNetwork(84532, 300)])).toContain(
+      "credited at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 5 minutes on Base Sepolia.",
+    );
+  });
+
+  it("states one time when every network shares it, as under a finalized policy", async () => {
+    expect(await messageWith([clientNetwork(11155111, 900), clientNetwork(84532, 900)])).toContain(
+      "credited at the market rate when it arrives, usually in about 15 minutes.",
+    );
+  });
+
+  it("names no time when the service does not send one for every network", async () => {
+    const message = await messageWith([clientNetwork(11155111, 30), clientNetwork(84532)]);
+    expect(message).toContain("credited at the market rate once it is confirmed on its network.");
+    expect(message).not.toMatch(/seconds|minutes/);
+  });
+
   it("parses the public view and refuses anything else", () => {
     expect(parseClientDepositAddress(view([payment({ status: "reversed" })])).payments[0]?.status).toBe(
       "reversed",
     );
+    expect(
+      parseClientDepositAddress(view([], [clientNetwork(84532, 300), clientNetwork(11155111)])).networks,
+    ).toEqual([
+      { chain_id: 84532, address: ADDRESS, typical_credit_seconds: 300 },
+      { chain_id: 11155111, address: ADDRESS },
+    ]);
+    for (const seconds of [-1, 1.5, "300", null]) {
+      expect(() =>
+        parseClientDepositAddress(view([], [{ ...clientNetwork(84532), typical_credit_seconds: seconds }])),
+      ).toThrow(TypeError);
+    }
+    expect(() => parseClientDepositAddress({ ...view([]), networks: undefined })).toThrow(TypeError);
     expect(() => parseClientDepositAddress(view([payment({ status: "final" })]))).toThrow(TypeError);
     expect(() => parseClientDepositAddress({ ...view([]), livemode: "no" })).toThrow(TypeError);
     expect(() => depositAddressIdFromClientSecret(`qt_${"0c".repeat(16)}_secret_ab`)).toThrow(TypeError);

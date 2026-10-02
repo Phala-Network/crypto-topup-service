@@ -155,7 +155,11 @@ import { DepositAddress } from "@phala/pay/react";
 
 With `clientSecret` and `apiBase` it reads the address's public view every three seconds and lists
 its payments of the last 24 hours: "1.5 PHA received on Sepolia, 1 confirmation" within about a
-block of the transfer, then "credited" (or rejected or reversed). Display only.
+block of the transfer, then "credited" (or rejected or reversed). Display only. It also states each
+network's typical credit time from the view's `typical_credit_seconds` ("usually in about 30 seconds
+on Sepolia and about 5 minutes on Base Sepolia"); without the view, or when a network has none (its
+tokens are credited at different confirmations, or the service is v0.3.5 or earlier), it names no
+time.
 
 `depositAddressTransfer(network, asset)` reads and checks one token's amount-less EIP-681
 `payment_uri` without React.

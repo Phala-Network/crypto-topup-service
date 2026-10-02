@@ -21,15 +21,30 @@ export interface DepositAddressPayment {
   created: number;
 }
 
+/** A deposit address on one network, as the customer's page sees it. */
+export interface ClientDepositAddressNetwork {
+  chain_id: number;
+  /** The forwarder address to pay on this chain. */
+  address: string;
+  /**
+   * Typical seconds from payment to credit at the confirmation this chain's payments are credited
+   * at: about 30 on Ethereum (two blocks), 300 at an OP-stack chain's `safe` block, 900 at
+   * finality. Absent when the chain's tokens are credited at different confirmations, and from a
+   * service of v0.3.5 or earlier.
+   */
+  typical_credit_seconds?: number;
+}
+
 /**
  * The public view of a deposit address, as `GET /v1/deposit_addresses/{id}?client_secret=…`
- * returns it to a browser: its payments in the last 24 hours, newest first.
+ * returns it to a browser: its networks, and its payments in the last 24 hours, newest first.
  */
 export interface ClientDepositAddress {
   id: string;
   object: "deposit_address";
   livemode: boolean;
   status: "active" | "retired";
+  networks: ClientDepositAddressNetwork[];
   payments: DepositAddressPayment[];
 }
 
@@ -79,12 +94,14 @@ export async function retrieveDepositAddress(
 /** Validates a response body against the public deposit address view; throws on anything else. */
 export function parseClientDepositAddress(value: unknown): ClientDepositAddress {
   const v = record(value);
+  const networks = v["networks"];
   const payments = v["payments"];
   if (
     typeof v["id"] !== "string" ||
     v["object"] !== "deposit_address" ||
     typeof v["livemode"] !== "boolean" ||
     (v["status"] !== "active" && v["status"] !== "retired") ||
+    !Array.isArray(networks) ||
     !Array.isArray(payments)
   ) {
     throw new TypeError("response does not match the public deposit address view");
@@ -94,8 +111,26 @@ export function parseClientDepositAddress(value: unknown): ClientDepositAddress 
     object: "deposit_address",
     livemode: v["livemode"],
     status: v["status"],
+    networks: networks.map(parseNetwork),
     payments: payments.map(parsePayment),
   };
+}
+
+function parseNetwork(value: unknown): ClientDepositAddressNetwork {
+  const n = record(value);
+  const seconds = n["typical_credit_seconds"];
+  if (
+    !Number.isSafeInteger(n["chain_id"]) ||
+    typeof n["address"] !== "string" ||
+    !(seconds === undefined || (Number.isSafeInteger(seconds) && (seconds as number) >= 0))
+  ) {
+    throw new TypeError("network does not match the public deposit address view");
+  }
+  const network: ClientDepositAddressNetwork = { chain_id: n["chain_id"] as number, address: n["address"] };
+  if (seconds !== undefined) {
+    network.typical_credit_seconds = seconds as number;
+  }
+  return network;
 }
 
 function parsePayment(value: unknown): DepositAddressPayment {

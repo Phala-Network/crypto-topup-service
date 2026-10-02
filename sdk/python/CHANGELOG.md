@@ -9,6 +9,13 @@ All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded he
 
 ## [Unreleased]
 
+### Added
+
+- `ClientDepositAddressNetwork.typical_credit_seconds` (`topup_client`): the typical credit time at
+  the account's confirmation on the network's chain. Optional (`UNSET` when absent): it is absent
+  when the chain's tokens are credited at different confirmations, and a service of v0.3.5 or
+  earlier does not send it.
+
 ## [0.4.0] - 2026-10-01
 
 ### Changed (breaking)
