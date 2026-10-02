@@ -1132,8 +1132,10 @@ rotation returns a new `client_secret`, `da_…_secret_…`, built and checked a
 `da_` id; the newest 10 per address stay valid
 (`deposit_address_client_secrets`, SHA-256 only), as several pages of one customer may be open.
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
-`ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each payment
-with its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
+`ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each network
+with its `typical_credit_seconds` (at the account's confirmation on the chain, as `GET /v1/config`
+reports it; absent from v0.3.5 and earlier, so clients do not require it), and each payment with
+its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
 treasury, customer, or metadata, under the quote reads' CORS and rate limit.
 
 **Balance, sweeps, forwarders.** `GET /v1/balance` sums per chain and token what the account's
@@ -1297,9 +1299,10 @@ from fetched state, never from webhook order.
   tokens." The payer picks a network and a token; the page shows that network, the token contract,
   the address with a copy button, and a QR of that token's EIP-681 URI (no amount), with "Send
   only PHA, USDC on Ethereum, Base. Any amount is credited at the market rate when it arrives,
-  usually in about 30 seconds." Where a network's address differs (another treasury), show each
-  network's own address. After a rotation, stop showing the retired address; a payment to it is
-  still credited.
+  usually in about 30 seconds on Ethereum and about 5 minutes on Base," each network's time from
+  its `typical_credit_seconds` in the public view; without it, "once it is confirmed on its
+  network". Where a network's address differs (another treasury), show each network's own
+  address. After a rotation, stop showing the retired address; a payment to it is still credited.
 - Network warning on every address: "Ethereum mainnet only. Payments sent on any other network
   are not credited." Support handles such a payment with the
   [wrong-network deposit runbook](../deploy/runbooks/wrong-network-deposit.md).

@@ -691,7 +691,10 @@ class FakeTopup:
             "status": address["status"],
             "address": address["address"],
             "networks": [
-                {k: network[k] for k in ("chain_id", "address", "assets")}
+                {
+                    **{k: network[k] for k in ("chain_id", "address", "assets")},
+                    "typical_credit_seconds": CREDIT_SECONDS,
+                }
                 for network in address["networks"]
             ],
             "payments": payments,

@@ -5,9 +5,11 @@ import { formatUnits } from "viem";
 import { networkName } from "../chains.js";
 import {
   retrieveDepositAddress,
+  type ClientDepositAddress,
   type DepositAddressPayment,
 } from "../deposit-address.js";
 import { CheckoutError, pollDelay } from "../checkout.js";
+import { formatWait } from "../format.js";
 import { depositAddressTransfer, type DepositAddressDetails } from "../payment.js";
 import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
 import { Field } from "./Field.js";
@@ -23,7 +25,8 @@ export interface DepositAddressProps {
   /**
    * The `client_secret` of the same response. With `apiBase`, the component follows the
    * address's payments and shows each one within about a block of arriving: received with its
-   * confirmations, then credited. Display only; credit from your `deposit.credited` webhook.
+   * confirmations, then credited, and states each network's typical credit time. Display only;
+   * credit from your `deposit.credited` webhook.
    */
   clientSecret?: string;
   /** The service origin, for example `https://pay.example.com`; needed with `clientSecret`. */
@@ -52,7 +55,8 @@ export function DepositAddress({
   className,
 }: DepositAddressProps) {
   const { networks } = depositAddress;
-  const payments = usePayments(clientSecret, apiBase, pollInterval ?? 3000);
+  const view = useClientView(clientSecret, apiBase, pollInterval ?? 3000);
+  const payments = view?.payments ?? [];
   const [selectedChain, setSelectedChain] = useState(chainId ?? networks[0]?.chain_id);
   const [selectedAsset, setSelectedAsset] = useState(asset);
   const network = networks.find((candidate) => candidate.chain_id === selectedChain) ?? networks[0];
@@ -135,23 +139,23 @@ export function DepositAddress({
       )}
       <p className="pp-message">
         Send only {tokens.join(", ")} on {networks.map((each) => networkName(each.chain_id)).join(", ")}
-        . Any amount is credited at the market rate when it arrives, usually in about 30 seconds.
-        Other tokens and networks are not credited. You can reuse this address.
+        . {creditMessage(networks.map((each) => each.chain_id), view)} Other tokens and networks are not
+        credited. You can reuse this address.
       </p>
     </div>
   );
 }
 
-/** The address's recent payments, read every `interval` while mounted; empty without a secret. */
-function usePayments(
+/** The address's public view, read every `interval` while mounted; `null` without a secret. */
+function useClientView(
   clientSecret: string | undefined,
   apiBase: string | undefined,
   interval: number,
-): DepositAddressPayment[] {
+): ClientDepositAddress | null {
   const key = clientSecret === undefined || apiBase === undefined ? "" : `${apiBase} ${clientSecret}`;
-  const [current, setCurrent] = useState<{ key: string; payments: DepositAddressPayment[] }>({
+  const [current, setCurrent] = useState<{ key: string; view: ClientDepositAddress | null }>({
     key: "",
-    payments: [],
+    view: null,
   });
   useEffect(() => {
     if (clientSecret === undefined || apiBase === undefined) {
@@ -166,7 +170,7 @@ function usePayments(
         const view = await retrieveDepositAddress({ clientSecret, apiBase });
         failures = 0;
         if (!stopped) {
-          setCurrent({ key, payments: view.payments });
+          setCurrent({ key, view });
         }
       } catch (error) {
         failures += 1;
@@ -186,8 +190,31 @@ function usePayments(
       clearTimeout(timer);
     };
   }, [key, clientSecret, apiBase, interval]);
-  // Another address starts without the previous one's payments.
-  return current.key === key && key !== "" ? current.payments : [];
+  // Another address starts without the previous one's view.
+  return current.key === key && key !== "" ? current.view : null;
+}
+
+/**
+ * When a payment on each of `chainIds` is credited, from `view`'s typical credit times, for
+ * example "usually in about 30 seconds on Ethereum and about 5 minutes on Base". Without the time
+ * of every network (no view yet, or a service that does not send it) it names no time.
+ */
+function creditMessage(chainIds: number[], view: ClientDepositAddress | null): string {
+  const names = new Map<number, string[]>();
+  for (const chainId of chainIds) {
+    const seconds = view?.networks.find((each) => each.chain_id === chainId)?.typical_credit_seconds;
+    if (seconds === undefined) {
+      return "Any amount is credited at the market rate once it is confirmed on its network.";
+    }
+    names.set(seconds, [...(names.get(seconds) ?? []), networkName(chainId)]);
+  }
+  const list = new Intl.ListFormat("en", { type: "conjunction" });
+  const [only, ...others] = names.keys();
+  const usually =
+    only !== undefined && others.length === 0
+      ? formatWait(only)
+      : list.format([...names].map(([seconds, on]) => `${formatWait(seconds)} on ${list.format(on)}`));
+  return `Any amount is credited at the market rate when it arrives, usually in ${usually}.`;
 }
 
 function paymentMessage(payment: DepositAddressPayment): string {

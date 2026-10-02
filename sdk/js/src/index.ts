@@ -17,6 +17,7 @@ export {
   parseClientDepositAddress,
   retrieveDepositAddress,
   type ClientDepositAddress,
+  type ClientDepositAddressNetwork,
   type DepositAddressPayment,
   type RetrieveDepositAddressOptions,
 } from "./deposit-address.js";

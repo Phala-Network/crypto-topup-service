@@ -9,6 +9,15 @@ own changelogs in `sdk/js` and `sdk/python`.
 
 ## [Unreleased]
 
+### Added
+
+- The customer's view of a deposit address (`GET /v1/deposit_addresses/{id}?client_secret=…`,
+  `ClientDepositAddress`) carries `typical_credit_seconds` on each network: the typical time from
+  paying to the credit at the account's confirmation for that chain, as `GET /v1/config` and the
+  payer's view of a quote report it, so the page no longer assumes Ethereum's 30 seconds (Base's
+  `safe` block is about 5 minutes, a `finalized` policy about 15). `openapi.json` marks it optional,
+  as v0.3.5 and earlier do not send it.
+
 ## [0.3.5] - 2026-10-01
 
 ### Added

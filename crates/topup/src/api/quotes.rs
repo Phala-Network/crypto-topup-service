@@ -100,7 +100,10 @@ pub(crate) async fn get_config(
 
 /// The confirmation `route`'s payments are credited at: the stricter of the route's floor and the
 /// account's `policy` for its chain, or finality when no chain family accepts both.
-fn credit_confirmations(route: &RouteFile, policy: Option<&Confirmations>) -> Confirmations {
+pub(super) fn credit_confirmations(
+    route: &RouteFile,
+    policy: Option<&Confirmations>,
+) -> Confirmations {
     let floor = route.chain.confirmations;
     policy
         .map_or(Some(floor), |policy| floor.stricter(*policy))

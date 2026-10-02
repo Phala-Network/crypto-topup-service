@@ -591,21 +591,34 @@ async fn client_deposit_address_view(
         Utc::now(),
     )
     .await?;
+    let policies = super::account::confirmation_policies(&state.pool, account_id).await?;
+    let networks = object
+        .networks
+        .into_iter()
+        .map(|network| {
+            // `deposit_address_object` keeps only the networks a route of the mode serves.
+            let route = state
+                .routes
+                .current_in(livemode)
+                .find(|route| route.chain.chain_id == network.chain_id)
+                .ok_or_else(ApiError::internal)?;
+            let confirmation =
+                super::quotes::credit_confirmations(route, policies.get(&network.chain_id));
+            Ok(ClientDepositAddressNetwork {
+                chain_id: network.chain_id,
+                address: network.address,
+                assets: network.assets,
+                typical_credit_seconds: confirmation.typical_credit_seconds(),
+            })
+        })
+        .collect::<ApiResult<_>>()?;
     Ok(ClientDepositAddress {
         id: object.id,
         object: object.object,
         livemode: object.livemode,
         status: object.status,
         address: object.address,
-        networks: object
-            .networks
-            .into_iter()
-            .map(|network| ClientDepositAddressNetwork {
-                chain_id: network.chain_id,
-                address: network.address,
-                assets: network.assets,
-            })
-            .collect(),
+        networks,
         payments,
     })
 }

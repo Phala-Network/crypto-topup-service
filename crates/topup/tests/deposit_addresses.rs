@@ -24,7 +24,7 @@ use topup_core::address::{deposit_address_salt, forwarder_address};
 use topup_core::deposit::{DepositState, RejectReason};
 use topup_core::identity::deposit_id;
 use topup_core::money::AtomicAmount;
-use topup_core::route::RouteFile;
+use topup_core::route::{Confirmations, RouteFile};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -559,6 +559,73 @@ async fn a_changed_treasury_on_one_chain_changes_only_that_chains_address() -> R
             .await?;
             let back = fixture.create(&fixture.live_key, "team-42").await?;
             ensure!(back == old, "{back} != {old}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The public view states each network's typical credit time at the confirmation its payments
+/// wait for, as `GET /v1/config` does: two blocks on Ethereum and Base's `safe` block, then
+/// finality on Base alone once the account's policy requires it there.
+#[tokio::test]
+async fn the_public_view_states_each_networks_credit_time() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            const BASE: u64 = 8_453;
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            seed::set_treasury(pool, fixture.account.id, true, BASE, seed::FIXTURE_TREASURY)
+                .await?;
+            let mut ethereum = fixture.live_route.clone();
+            ethereum.chain.confirmations = Confirmations::Depth(2);
+            let mut base = fixture.other_route.clone();
+            base.route = "phala-cloud-base-pha-usd".to_owned();
+            base.chain.chain_id = BASE;
+            base.chain.confirmations = Confirmations::Safe;
+            let fixture = fixture.with_routes(vec![ethereum, base, fixture.test_route.clone()])?;
+            let (object, secret) = fixture
+                .create_with_secret(&fixture.live_key, "team-42")
+                .await?;
+            let id = object["id"].as_str().context("id")?;
+            let credit_times = || async {
+                let (status, view) = fixture.client_read(id, &secret).await?;
+                ensure!(status == StatusCode::OK, "{view}");
+                networks(&view)?
+                    .iter()
+                    .map(|network| {
+                        Ok((
+                            network["chain_id"].as_u64().context("chain_id")?,
+                            network["typical_credit_seconds"]
+                                .as_u64()
+                                .context("typical_credit_seconds")?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            };
+            ensure!(credit_times().await? == vec![(1, 30), (BASE, 300)]);
+
+            let (status, updated) = fixture
+                .request(
+                    Method::POST,
+                    "/v1/account",
+                    &fixture.live_key,
+                    json!({"confirmation_policies": [{"chain_id": BASE, "confirmations": "finalized"}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{updated}");
+            ensure!(credit_times().await? == vec![(1, 30), (BASE, 900)]);
+            // The merchant's view, which has `GET /v1/config`, does not repeat it.
+            let (status, merchant) = fixture
+                .request(
+                    Method::GET,
+                    &format!("/v1/deposit_addresses/{id}"),
+                    &fixture.live_key,
+                    Value::Null,
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{merchant}");
+            ensure!(networks(&merchant)?.iter().all(|network| network.get("typical_credit_seconds").is_none()));
             Ok(())
         })
     })

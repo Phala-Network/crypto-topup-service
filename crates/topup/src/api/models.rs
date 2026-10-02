@@ -560,6 +560,11 @@ pub struct ClientDepositAddressNetwork {
     pub address: String,
     /// The supported tokens on this chain.
     pub assets: Vec<DepositAddressAsset>,
+    /// Typical time from payment to credit, in seconds, at the confirmation this chain's payments
+    /// are credited at, as `GET /v1/config` reports it. A service of v0.3.5 or earlier omits it,
+    /// so a client should not require it.
+    #[schema(required = false)]
+    pub typical_credit_seconds: u64,
 }
 
 /// A payment to a deposit address, as its public view shows it.

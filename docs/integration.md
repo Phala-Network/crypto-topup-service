@@ -480,8 +480,9 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   Display only: credit from `deposit.credited`. The customer's page reads the same, without an
   API key, from `GET /v1/deposit_addresses/{id}?client_secret=…` (`ClientDepositAddress`, any
   origin, rate-limited), with each payment's progress: `seen`, `confirming`, `credited`,
-  `rejected`, or `reversed`. Each create or rotation issues a new secret and the newest 10 stay
-  valid, as a Stripe CustomerSession's; give it only to that customer's page and do not log it.
+  `rejected`, or `reversed`, and each network's `typical_credit_seconds`. Each create or rotation
+  issues a new secret and the newest 10 stay valid, as a Stripe CustomerSession's; give it only to
+  that customer's page and do not log it.
 - Recompute the address before showing it, as for quotes: the salt is
   `keccak256(abi.encode(account, livemode, client_reference_id, "deposit_address", version))`
   with the types `(string, bool, string, string, uint256)` (no chain, no asset), and each
@@ -504,7 +505,10 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
 Let the customer pick the network and the token; show that network, the token contract, the full
 address with a copy button, and a QR of that token's `payment_uri` (it carries the token, chain,
 and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any amount is credited
-at the market rate when it arrives, usually in about 30 seconds. You can reuse this address."
+at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 5 minutes on
+Base Sepolia. You can reuse this address." Each network's time is its `typical_credit_seconds` in
+the address's public view (above), at the confirmation your account's payments on that chain wait
+for, as `GET /v1/config` reports it; without it, name no time.
 `<DepositAddress depositAddress={…} clientSecret={…} apiBase={…}>` from `@phala/pay/react`
 renders exactly that from `address` and `networks` (pass only those and the `client_secret` to the
 browser) and, with the secret, shows each payment as it arrives: "1.5 PHA received on Sepolia, 1
