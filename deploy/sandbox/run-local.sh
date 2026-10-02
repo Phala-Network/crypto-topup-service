@@ -142,10 +142,18 @@ wait_for "the sanctions oracle at the finalized block" \
 "$root/deploy/sandbox/set-treasury.sh" --api "$service_url" --key-file "$tmp/product.key" \
     --chain-id 11155111 --private-key "$ANVIL_PRIVATE_KEY" >"$tmp/treasury.json"
 echo "treasury $(jq -er .address "$tmp/treasury.json") is $(jq -er .status "$tmp/treasury.json")"
+# The header file keeps the key out of argv.
+(umask 077 && printf 'authorization: Bearer %s\n' "$(<"$tmp/product.key")" >"$tmp/auth.header")
+
+echo "== accepting the sandbox route through POST /v1/payment_settings"
+# A new account accepts nothing until the merchant lists what it takes
+# (docs/design/payment-settings.md).
+curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H @"$tmp/auth.header" \
+    --data '{"chains": [{"chain_id": 11155111, "assets": [{"asset": "pha"}]}]}' \
+    "$service_url/v1/payment_settings" | jq -e '.status == "configured"' >/dev/null
 
 echo "== registering the product's webhook endpoint through POST /v1/webhook_endpoints"
-# The merchant registers its endpoints with its key; the header file keeps the key out of argv.
-(umask 077 && printf 'authorization: Bearer %s\n' "$(<"$tmp/product.key")" >"$tmp/auth.header")
+# The merchant registers its endpoints with its key.
 jq -n --arg url "$public_url/webhooks" '{url: $url, enabled_events: ["*"]}' >"$tmp/endpoint.json"
 curl --fail-with-body -sS -X POST -H 'content-type: application/json' -H @"$tmp/auth.header" \
     --data-binary @"$tmp/endpoint.json" "$service_url/v1/webhook_endpoints" >/dev/null

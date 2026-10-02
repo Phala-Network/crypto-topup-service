@@ -223,12 +223,13 @@ An unconfigured or held account gets `assets: []`.
 
 ## 5. Bounds and validity
 
-The route file keeps its catalog sections. `quote.amount_decimals` stays in the catalog, under
-`asset`. The `quote:` and `limits:` sections become one `merchant:` section of defaults and bounds:
+The route file keeps its catalog sections. `quote.amount_decimals` stays in the catalog, as
+`asset.quote_amount_decimals`. The `quote:` and `limits:` sections become one `merchant:` section
+of defaults and bounds:
 
 ```yaml
 merchant:                          # each account's terms on this route: default, and hard bounds
-  quote_ttl_seconds:   { default: 900, min: 60, max: 3600 }
+  quote_ttl_seconds:   { default: 900, min: 30, max: 3600 }
   quote_spread_bps:    { default: 50, max: 500 }
   quote_tolerance_bps: { default: 100, max: 500 }
   min_amount:          { default: 100, min: 1 }                       # cents
@@ -238,6 +239,14 @@ merchant:                          # each account's terms on this route: default
                          max: "100000000000000000000" }
 ```
 
+A bound left out keeps the account at the default, so the operator opens each term explicitly. The
+exceptions are three terms with code defaults:
+
+- the quote window, 30 to 3600 seconds;
+- the spread and the tolerance, 0 to 500 basis points (or the default, if higher);
+- `max_deposit_atomic` and `min_deposit_atomic`, which an account may move toward each other: the
+  maximum down to 0, and the minimum up.
+
 **Absolute ceilings in code.** No operator bound may exceed them; `topup config check` and startup
 refuse a catalog that does.
 
@@ -246,15 +255,15 @@ refuse a catalog that does.
   locked price is not representable is refused like an unavailable price.
 - `quote_tolerance_bps` ≤ 1 000, so no payment far below the quoted amount, let alone zero,
   matches a quote.
-- `quote_ttl_seconds` within 60 s to 24 h.
+- `quote_ttl_seconds` within 30 s to 24 h.
 - `min_refund_atomic` `max` ≤ `max_deposit_atomic` `max`.
 
 **Other catalog rules.**
 
 - `chain.confirmations` is the chain's floor and default. Every route of a chain must agree, as
   today.
-- `quote_creations_per_customer_per_minute` has its default and `max` in the service config file,
-  beside `routes`: it is not per route.
+- `quote_creations_per_customer_per_minute` is not per route. Its default (10) and maximum (60)
+  are code constants (`crate::payment_config`), as the API's rate limits are.
 - Every bound left out has a code default, printed by `topup config show`. A default outside its
   own bounds is refused.
 

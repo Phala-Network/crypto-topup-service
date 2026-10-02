@@ -174,11 +174,14 @@ VALUES (
     true,
     'restore-drill-customer'
 );
+-- A quote keeps the terms it was issued with, and a deposit is bound to the account's payment
+-- settings revision (docs/design/payment-settings.md §7); the account's `unconfigured` revision is
+-- the one its creation made.
 INSERT INTO quotes (
     id, account_id, livemode, customer_id, route, amount_atomic, price_scaled, credit_minor,
-    expires_at, status, closed_at
+    expires_at, status, closed_at, route_version, settings_revision_id, terms
 )
-VALUES (
+SELECT
     '55555555-5555-5555-5555-555555555555',
     '11111111-1111-1111-1111-111111111111',
     true,
@@ -189,8 +192,14 @@ VALUES (
     250,
     '2026-09-22T00:15:00Z',
     'expired',
-    '2026-09-22T00:15:00Z'
-);
+    '2026-09-22T00:15:00Z',
+    1,
+    current_revision_id,
+    '{"quote_ttl_seconds": 900, "quote_spread_bps": 50, "quote_tolerance_bps": 100,
+      "quote_amount_decimals": 4, "min_amount": 100, "min_deposit_atomic": "0",
+      "max_deposit_atomic": "1000000", "min_refund_atomic": "1", "confirmations": "finalized"}'
+FROM payment_settings_state
+WHERE account_id = '11111111-1111-1111-1111-111111111111' AND livemode;
 INSERT INTO addresses (
     id, account_id, livemode, chain_id, quote_id, salt, treasury, address
 )
@@ -208,7 +217,7 @@ INSERT INTO deposits (
     id, account_id, livemode, customer_id, chain_id, tx_hash, log_index, receipt_log_index,
     block_number, block_hash, block_time, address_id, route, route_version, asset_contract,
     from_address, tx_from, tx_nonce, amount_atomic, state, next_attempt_at, valuation_at,
-    price_scaled, price_source, credit_minor, final_at
+    price_scaled, price_source, credit_minor, final_at, settings_revision_id
 )
 VALUES (
     '44444444-4444-4444-4444-444444444444',
@@ -236,7 +245,9 @@ VALUES (
     25000000,
     'spot',
     250,
-    '2026-09-22T00:00:00Z'
+    '2026-09-22T00:00:00Z',
+    (SELECT current_revision_id FROM payment_settings_state
+     WHERE account_id = '11111111-1111-1111-1111-111111111111' AND livemode)
 );
 INSERT INTO heartbeat DEFAULT VALUES;
 INSERT INTO restore_drill_marker(mode) VALUES ('base');
@@ -481,6 +492,16 @@ seed_consistency_fixture() {
         -v treasury_v2="$consistency_treasury_v2" -v kept="$kept_key" -v lost="$lost_key" \
         -v salt="$consistency_salt_v1" -v address="$consistency_address_v1" <<'SQL'
 INSERT INTO accounts (id, name) VALUES (:'account', 'restore-drill-consistency');
+-- The merchant accepts the drill's Sepolia PHA route in test mode, as POST /v1/payment_settings
+-- writes it.
+WITH revision AS (
+    INSERT INTO payment_settings_revisions (id, account_id, livemode, kind, document, created_by)
+    VALUES (gen_random_uuid(), :'account', false, 'configured',
+            '{"chains": [{"chain_id": 11155111, "assets": [{"asset": "pha"}]}]}', 'restore drill')
+    RETURNING id
+)
+UPDATE payment_settings_state SET status = 'configured', current_revision_id = revision.id
+FROM revision WHERE account_id = :'account' AND NOT livemode;
 INSERT INTO api_keys (id, account_id, livemode, kind, prefix, last4, key_hash, created_by)
 VALUES ('77777777-7777-7777-7777-777777777771', :'account', false, 'secret', 'ppay_sk_test_',
         right(:'kept', 4), sha256(convert_to(:'kept', 'UTF8')), 'admin'),

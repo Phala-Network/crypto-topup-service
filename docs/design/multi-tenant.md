@@ -10,10 +10,15 @@ Every mechanism names the established practice it follows. External claims were 
 2026-09-27 and 2026-09-28 against the linked sources; where a source could not be verified, the
 text says so.
 
-**Proposed amendment of 2026-10-02 (under review): per-account payment settings.** The route's
-merchant terms and `confirmation_policies` move into one opt-in payment settings resource per
-account and mode, within operator bounds ([design](payment-settings.md)). D1, D16, §12, §14, and
-§15 change when it is accepted.
+**Amendment of 2026-10-02 (owner decision, Astra's review): per-account payment settings.** The
+implicit model, in which a treasury enabled a chain and every routed asset was accepted, is
+replaced ([design](payment-settings.md)). The attested routes are the operator's catalog, with a
+default and hard bounds for each merchant term; each account has, per mode, one opt-in payment
+settings resource (`GET|POST /v1/payment_settings`) choosing the chains and assets it accepts and
+its terms, and a new account accepts nothing. `confirmation_policies` and `POST /v1/account` are
+removed; a chain's stricter confirmation is part of the settings (D1). Quotes keep the terms they
+were issued with, a deposit is bound to the settings current when it is recorded, and a routed
+asset the settings do not accept is `rejected(asset_not_accepted)` and refundable.
 
 **Amendment of 2026-09-28 (owner ruling).** There is no merchant dashboard and no self-serve
 onboarding. The operator creates every account through the admin API after due diligence done
@@ -167,7 +172,7 @@ tightened with standard mechanisms; nothing was live, so the API changed without
 5. *Exposure cap.* Per account and mode, the credit of deposits credited but not final is capped
    (`accounts.max_unfinalized_credit`, $1 000 by default, set by the operator per account); a
    deposit past it waits and is credited at finality. Merchants selling what they cannot take
-   back use the `finalized` confirmation policy (D1).
+   back require `finalized` confirmations in their payment settings (D1).
 6. *Reference implementations.* The FastAPI example and the reference product apply every
    `deposit.*` snapshot by the balance rule, with tests of partial refunds, reversals, and
    out-of-order delivery.
@@ -199,7 +204,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 
 | # | Topic | Decision | Standard followed |
 |---|---|---|---|
-| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2, about 30 s after paying; OP-stack depth 3 on the unsafe head, about 7 s); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
+| D1 | Credit timing | Credit at the stricter of the route floor and the account's payment settings (Ethereum depth 2, about 30 s after paying; OP-stack depth 3 on the unsafe head, about 7 s); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
 | D2 | Custody | Non-custodial: forwarders pay only the merchant's treasury | BTCPay Server; FinCEN FIN-2019-G001 §1.1, §4.2 |
 | D3 | Contracts | One permissionless factory per chain; clones carry `treasury` as the only immutable arg; public `flush` with per-target failure isolation | OZ `Clones.cloneDeterministicWithImmutableArgs` (pinned 5.7.0); BitGo public `flush()`; Multicall3 `allowFailure` |
 | D4 | Sweeping | The merchant sweeps with its own wallet or Safe and pays gas; the SDK builds the call or a Safe Transaction Builder batch | BTCPay (merchant wallet); Safe Transaction Builder JSON |
@@ -214,7 +219,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 | D13 | Isolation | Typed `Scope (account_id, livemode)` built server-side; each route's required permission declared with the routes; per-account limits | Stripe rate limits; OWASP authorization |
 | D14 | Economics | No fee, no invoicing; merchants pay their own sweep and refund gas | BTCPay ("no transaction fees") |
 | D15 | Metadata | `metadata` on quotes, deposits, and refunds with Stripe's limits and merge rules; a deposit starts with a copy of its quote's | Stripe [metadata](https://docs.stripe.com/api/metadata); Checkout `payment_intent_data.metadata` |
-| D16 | Deposit addresses | One persistent, rotatable address per customer for every supported token on every chain (owner's decision, 2026-09-28), the same address wherever the treasury is the same; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
+| D16 | Deposit addresses | One persistent, rotatable address per customer for every token the account accepts on every chain (owner's decision, 2026-09-28; accepted assets per the 2026-10-02 amendment), the same address wherever the treasury is the same; any amount credited at spot; restored per the owner's 2026-09-21 requirement | Stripe customer balance funding instructions (a stable virtual account per customer) |
 
 ## 4. Fast credit and reversal (D1)
 
@@ -639,7 +644,7 @@ a Stripe-hosted Dashboard" (`controller.stripe_dashboard.type = none`,
    audited.
 3. **Hand-over.** The operator sends the key to the recorded contact through an encrypted channel;
    the merchant rolls it at once (D7) and does everything else through the API or SDKs: keys,
-   webhook endpoints, treasuries, confirmation policy, `quotes` pause, refunds, sweeps, and export.
+   webhook endpoints, treasuries, payment settings, `quotes` pause, refunds, sweeps, and export.
 
 `contact` (name, security email) is the only personal data kept about a merchant (§13).
 
@@ -774,7 +779,8 @@ New live accounts get default limits; the operator raises them on request.
   mode.
 - **Account events.** Changes to keys (`api_key.created`, `.revoked`), endpoints
   (`webhook_endpoint.created`, `.updated`, `.deleted`), treasuries (D10), and the account
-  (`account.updated`: confirmation policy, pause, operator actions; emitted in both modes) are
+  (`account.updated`: pause, operator actions; emitted in both modes), and the payment settings
+  (`payment_settings.updated`, 2026-10-02 amendment) are
   events like any other. They are always delivered to every enabled endpoint of the mode, whatever its `enabled_events`,
   and an endpoint that is updated or deleted receives the event about itself first, as GitHub's
   `meta` event tells a webhook "The webhook was deleted"
@@ -923,8 +929,8 @@ Fresh schema (staging is reset); unchanged tables of architecture §6 keep their
 accounts        id, public_id (acct_…), name, contact jsonb, due_diligence jsonb ({reference,
                 reviewed_at, reviewed_by}), charges_enabled bool, restricted bool,
                 paused_scopes text[], webhook_key_version jsonb ({"live": 1, "test": 1}), created_at
-confirmation_policies account_id, chain_id, required (depth | safe | finalized)
-                PRIMARY KEY (account_id, chain_id)          -- absent: the route's value
+payment_settings_revisions, payment_settings_state   per account and mode; replaced
+                confirmation_policies on 2026-10-02 (design payment-settings.md)
 account_limits  account_id, livemode, max_open_quotes, max_open_minor_account,
                 max_open_minor_customer, max_active_deposit_addresses
                                                                   PRIMARY KEY (account_id, livemode)
@@ -977,7 +983,7 @@ asset, pricing, and limits.
 
 ```text
 GET    /v1/account
-POST   /v1/account {confirmation_policies}                stricter confirmation per chain (D1)
+GET|POST /v1/payment_settings                      what the account accepts and on what terms (2026-10-02)
 POST   /v1/account/pause | resume {scopes: ["quotes"]}
 GET    /v1/config                                    routes of the key's mode (confirmations, typical credit time)
 GET|POST /v1/api_keys, POST /v1/api_keys/{id}/roll {expires_in}, DELETE /v1/api_keys/{id}

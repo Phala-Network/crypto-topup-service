@@ -380,10 +380,18 @@ credit then contradicts the transfer it holds, so it is held, and the successor'
 `pending`. Record the two as one incident, settle what the merchant applied with it, then discard
 the held deposit's delivered credit (step 6).
 
+**Payment settings.** The restore held every account's payment settings in both modes
+(docs/design/payment-settings.md §11): nothing is quoted or issued (`400
+payment_settings_unconfirmed`), and a payment recorded meanwhile waits, unless its outcome was
+delivered before (that outcome stands). No delivery proves a merchant's latest configuration, so
+the operator cannot lift the hold: each merchant sends its complete configuration with
+`POST /v1/payment_settings`, even unchanged, which binds its waiting payments. Ask each in the
+second notice; `admin GET "/v1/admin/accounts/$ACCOUNT"` shows `status: held` until it does.
+
 ## Done when
 
 `frozen` is `false`, every chain was `complete` at the unfreeze, no `delivered_events` finding is
 `pending` or `contradicted`, each `mismatch`, `rescanned` finding, and discarded credit is recorded
 and settled, and
 every merchant confirmed that its keys, treasuries, endpoints, deposit addresses, and quotes are as
-it left them.
+it left them and reconfirmed its payment settings in each mode it uses.
