@@ -50,7 +50,6 @@ def _service(request: httpx.Request) -> httpx.Response:
                 "charges_enabled": False,
                 "paused_scopes": [],
                 "webhook_keys": [],
-                "confirmation_policies": [],
                 "created": NOW,
             },
         )
@@ -62,6 +61,7 @@ def _service(request: httpx.Request) -> httpx.Response:
                 "livemode": False,
                 "currency": "usd",
                 "max_open_quotes": 1,
+                "quote_creations_per_customer_per_minute": 10,
                 "max_open_amount_per_account": 1,
                 "max_open_amount_per_customer": 1,
                 "assets": [],

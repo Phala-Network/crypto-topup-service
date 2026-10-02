@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -17,6 +18,7 @@ from topup_client.models import (
     DepositAddress,
     EventObjectResponse,
     Forwarder,
+    PaymentSettingsObject,
     Quote,
     Refund,
     Sweep,
@@ -24,6 +26,7 @@ from topup_client.models import (
     TreasuryChallenge,
     WebhookEndpointObject,
 )
+from topup_client.types import UNSET, Unset
 from topup_sdk import TopupClient, export_account, sign_treasury_challenge
 from topup_sdk.client import Metadata
 
@@ -92,6 +95,7 @@ class PhalaPay:
             transport=transport,
         )
         self.account = AccountResource(self._client)
+        self.payment_settings = PaymentSettingsResource(self._client)
         self.config = ConfigResource(self._client)
         self.quotes = Quotes(self._client)
         self.deposits = Deposits(self._client)
@@ -130,12 +134,6 @@ class AccountResource:
         """The key's account, in the key's mode."""
         return self._client.get_account()
 
-    def update(self, *, confirmation_policies: Mapping[int, str | None]) -> AccountObject:
-        """Requires, per chain, a confirmation stricter than the route's before a payment is
-        credited: a depth such as `"12"`, `"safe"`, or `"finalized"`; `None` restores the
-        route's."""
-        return self._client.update_account(confirmation_policies=confirmation_policies)
-
     def pause_quotes(self) -> AccountObject:
         """Stops issuing quotes, deposit addresses, and networks in both modes, for an
         emergency; existing addresses keep being credited."""
@@ -149,6 +147,30 @@ class AccountResource:
         """Rolls this mode's webhook signing key; the old one signs beside it for `expires_in`
         seconds: 48 hours (the default) to 7 days live, `0` to 7 days in test mode."""
         return self._client.roll_webhook_key(expires_in=expires_in)
+
+
+class PaymentSettingsResource:
+    def __init__(self, client: TopupClient) -> None:
+        self._client = client
+
+    def retrieve(self) -> PaymentSettingsObject:
+        """What the account accepts in the key's mode and on what terms, with the operator's
+        catalog and bounds in `available`; a new account accepts nothing."""
+        return self._client.get_payment_settings()
+
+    def update(
+        self,
+        *,
+        chains: Sequence[Mapping[str, Any]] | Unset = UNSET,
+        quote_creations_per_customer_per_minute: int | Unset | None = UNSET,
+    ) -> PaymentSettingsObject:
+        """Sets the chains and assets the account accepts, replacing the list when given, with a
+        per-chain `confirmations` and per-asset terms within the operator's bounds; a parameter not
+        given is unchanged. Send the complete configuration after a service restore."""
+        return self._client.update_payment_settings(
+            chains=chains,
+            quote_creations_per_customer_per_minute=quote_creations_per_customer_per_minute,
+        )
 
 
 class ConfigResource:

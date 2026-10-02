@@ -23,8 +23,9 @@ class DepositAddressNetwork:
 
     Attributes:
         address (str): The forwarder address to pay on this chain.
-        assets (list[DepositAddressAsset]): The supported tokens on this chain; any other token sent to the address is
-            not credited.
+        assets (list[DepositAddressAsset]): The tokens your payment settings accept on this chain; any other token sent
+            to the
+            address is not credited.
         chain_id (int): EVM chain identifier.
         treasury (str): The treasury the forwarder pays. The address is the same on every network whose treasury
             is the same address.

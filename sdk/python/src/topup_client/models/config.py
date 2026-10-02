@@ -24,15 +24,19 @@ class Config:
     """What a product's UI reads instead of hardcoding: assets, limits, and quote terms.
 
     Example:
-        {'assets': [{'asset': 'PHA', 'chain_id': 1, 'confirmations': '2', 'contract':
+        {'assets': [{'asset': 'PHA', 'chain_id': 1, 'confirmations': '12', 'contract':
             '0x6c5ba91642f10282b576d91922ae6448c9d52f4e', 'decimals': 18, 'max_deposit_atomic': '1000000000000000000000000',
-            'min_amount': 100, 'min_refund_atomic': '1000000000000000000', 'pricing': 'spot', 'quote_spread_bps': 50,
-            'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900, 'typical_credit_seconds': 30, 'typical_finality_seconds':
-            900}], 'currency': 'usd', 'livemode': False, 'max_open_amount_per_account': 1000000,
-            'max_open_amount_per_customer': 500000, 'max_open_quotes': 100, 'object': 'config'}
+            'min_amount': 100, 'min_deposit_atomic': '0', 'min_refund_atomic': '1000000000000000000', 'pricing': 'spot',
+            'quote_amount_decimals': 4, 'quote_spread_bps': 100, 'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900,
+            'typical_credit_seconds': 150, 'typical_finality_seconds': 900}], 'currency': 'usd', 'livemode': False,
+            'max_open_amount_per_account': 1000000, 'max_open_amount_per_customer': 500000, 'max_open_quotes': 100,
+            'object': 'config', 'quote_creations_per_customer_per_minute': 10}
 
     Attributes:
-        assets (list[ConfigAsset]): One entry per payable asset.
+        assets (list[ConfigAsset]): One entry per asset your payment settings accept on a chain where you have a
+            treasury,
+            with its terms: your effective payment config. Empty until you configure
+            `POST /v1/payment_settings`.
         currency (str): Credit currency, `usd`.
         livemode (bool): The mode of the key that reads it: `assets` lists that mode's routes.
         max_open_amount_per_account (int): Cap on the credit of your open quotes in this mode, in cents. Test-mode
@@ -42,6 +46,8 @@ class Config:
             can exceed it.
         max_open_quotes (int): Cap on the number of your open quotes in this mode.
         object_ (ConfigObject): Always `config`.
+        quote_creations_per_customer_per_minute (int): One customer's quote creations in a rolling minute, from your
+            payment settings.
     """
 
     assets: list[ConfigAsset]
@@ -51,6 +57,7 @@ class Config:
     max_open_amount_per_customer: int
     max_open_quotes: int
     object_: ConfigObject
+    quote_creations_per_customer_per_minute: int
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +80,8 @@ class Config:
 
         object_: str = self.object_
 
+        quote_creations_per_customer_per_minute = self.quote_creations_per_customer_per_minute
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -84,6 +93,7 @@ class Config:
                 "max_open_amount_per_customer": max_open_amount_per_customer,
                 "max_open_quotes": max_open_quotes,
                 "object": object_,
+                "quote_creations_per_customer_per_minute": quote_creations_per_customer_per_minute,
             }
         )
 
@@ -113,6 +123,8 @@ class Config:
 
         object_ = check_config_object(d.pop("object"))
 
+        quote_creations_per_customer_per_minute = d.pop("quote_creations_per_customer_per_minute")
+
         config = cls(
             assets=assets,
             currency=currency,
@@ -121,6 +133,7 @@ class Config:
             max_open_amount_per_customer=max_open_amount_per_customer,
             max_open_quotes=max_open_quotes,
             object_=object_,
+            quote_creations_per_customer_per_minute=quote_creations_per_customer_per_minute,
         )
 
         config.additional_properties = d

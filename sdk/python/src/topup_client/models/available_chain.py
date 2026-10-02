@@ -11,36 +11,34 @@ from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
-    from ..models.deposit_address_asset import DepositAddressAsset
+    from ..models.available_asset import AvailableAsset
+    from ..models.available_confirmations import AvailableConfirmations
 
 
-T = TypeVar("T", bound="ClientDepositAddressNetwork")
+T = TypeVar("T", bound="AvailableChain")
 
 
 @_attrs_define
-class ClientDepositAddressNetwork:
-    """A deposit address on one network, as its public view shows it.
+class AvailableChain:
+    """A chain of the operator's catalog in the key's mode.
 
     Attributes:
-        address (str): The forwarder address to pay on this chain.
-        assets (list[DepositAddressAsset]): The tokens accepted on this chain.
+        assets (list[AvailableAsset]): The chain's assets.
         chain_id (int): EVM chain identifier.
-        typical_credit_seconds (int): Typical time from payment to credit, in seconds, at the confirmation this chain's
-            payments
-            are credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share
-            the chain's one floor.
+        confirmations (AvailableConfirmations): A chain's confirmation floor.
+        status (str): `active` (accepted, with a treasury), `treasury_not_set` (accepted, without a treasury:
+            nothing is offered on it until you set one), or `not_configured`.
     """
 
-    address: str
-    assets: list[DepositAddressAsset]
+    assets: list[AvailableAsset]
     chain_id: int
-    typical_credit_seconds: int
+    confirmations: AvailableConfirmations
+    status: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.deposit_address_asset import DepositAddressAsset  # noqa: PLC0415
-
-        address = self.address
+        from ..models.available_asset import AvailableAsset  # noqa: PLC0415
+        from ..models.available_confirmations import AvailableConfirmations  # noqa: PLC0415
 
         assets = []
         for assets_item_data in self.assets:
@@ -49,16 +47,18 @@ class ClientDepositAddressNetwork:
 
         chain_id = self.chain_id
 
-        typical_credit_seconds = self.typical_credit_seconds
+        confirmations = self.confirmations.to_dict()
+
+        status = self.status
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "address": address,
                 "assets": assets,
                 "chain_id": chain_id,
-                "typical_credit_seconds": typical_credit_seconds,
+                "confirmations": confirmations,
+                "status": status,
             }
         )
 
@@ -66,31 +66,32 @@ class ClientDepositAddressNetwork:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.deposit_address_asset import DepositAddressAsset  # noqa: PLC0415
+        from ..models.available_asset import AvailableAsset  # noqa: PLC0415
+        from ..models.available_confirmations import AvailableConfirmations  # noqa: PLC0415
 
         d = dict(src_dict)
-        address = d.pop("address")
-
         assets = []
         _assets = d.pop("assets")
         for assets_item_data in _assets:
-            assets_item = DepositAddressAsset.from_dict(assets_item_data)
+            assets_item = AvailableAsset.from_dict(assets_item_data)
 
             assets.append(assets_item)
 
         chain_id = d.pop("chain_id")
 
-        typical_credit_seconds = d.pop("typical_credit_seconds")
+        confirmations = AvailableConfirmations.from_dict(d.pop("confirmations"))
 
-        client_deposit_address_network = cls(
-            address=address,
+        status = d.pop("status")
+
+        available_chain = cls(
             assets=assets,
             chain_id=chain_id,
-            typical_credit_seconds=typical_credit_seconds,
+            confirmations=confirmations,
+            status=status,
         )
 
-        client_deposit_address_network.additional_properties = d
-        return client_deposit_address_network
+        available_chain.additional_properties = d
+        return available_chain
 
     @property
     def additional_keys(self) -> list[str]:

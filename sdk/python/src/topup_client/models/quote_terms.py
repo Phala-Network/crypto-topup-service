@@ -9,67 +9,40 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 
-T = TypeVar("T", bound="ConfigAsset")
+T = TypeVar("T", bound="QuoteTerms")
 
 
 @_attrs_define
-class ConfigAsset:
-    """A payable asset and its terms.
+class QuoteTerms:
+    """The terms a quote was issued with.
 
     Attributes:
-        asset (str): Asset code.
-        chain_id (int): EVM chain identifier.
-        confirmations (str): The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
-            block and one more), `"safe"`, or `"finalized"`: the stricter of the chain's floor and the
-            `confirmations` of your payment settings. A credit before finality can still be reversed
-            (`deposit.reversed`).
-        contract (str): Token contract address.
-        decimals (int): Token decimals.
+        confirmations (str): The confirmation the quote's payment is credited at: a depth, `safe`, or `finalized`; never
+            weaker than the chain's current floor.
         max_deposit_atomic (str): Maximum creditable deposit in base units, as a decimal string.
-        min_amount (int): Minimum credit in cents, for quotes and deposits; smaller deposits are not credited.
+        min_amount (int): Minimum credit in cents of a payment valued at spot.
         min_deposit_atomic (str): Minimum creditable deposit in base units, as a decimal string.
-        min_refund_atomic (str): Minimum refundable amount in base units, as a decimal string.
-        pricing (str): `spot` or `stablecoin`.
-        quote_amount_decimals (int): Token decimals a quote's amount is rounded up to (the operator's).
-        quote_spread_bps (int): A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no
-            spread.
-        quote_tolerance_bps (int): A payment within this many basis points of the quoted amount, either way, completes
-            the
-            quote at its amount.
-        quote_ttl_seconds (int): Payment window of a quote, in seconds.
-        typical_credit_seconds (int): Typical time from payment to the `deposit.credited` event, in seconds, at
-            `confirmations`.
-        typical_finality_seconds (int): Typical time from payment to finality, in seconds; refunds wait for it.
+        min_refund_atomic (str): Refund dust floor in base units, as a decimal string.
+        quote_amount_decimals (int): Token decimals `amount_atomic` was rounded up to.
+        quote_spread_bps (int): The spread below spot of the locked price, in basis points.
+        quote_tolerance_bps (int): A payment within this many basis points of `amount_atomic`, either way, completes the
+            quote at its `amount`.
+        quote_ttl_seconds (int): The payment window, in seconds.
     """
 
-    asset: str
-    chain_id: int
     confirmations: str
-    contract: str
-    decimals: int
     max_deposit_atomic: str
     min_amount: int
     min_deposit_atomic: str
     min_refund_atomic: str
-    pricing: str
     quote_amount_decimals: int
     quote_spread_bps: int
     quote_tolerance_bps: int
     quote_ttl_seconds: int
-    typical_credit_seconds: int
-    typical_finality_seconds: int
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        asset = self.asset
-
-        chain_id = self.chain_id
-
         confirmations = self.confirmations
-
-        contract = self.contract
-
-        decimals = self.decimals
 
         max_deposit_atomic = self.max_deposit_atomic
 
@@ -79,8 +52,6 @@ class ConfigAsset:
 
         min_refund_atomic = self.min_refund_atomic
 
-        pricing = self.pricing
-
         quote_amount_decimals = self.quote_amount_decimals
 
         quote_spread_bps = self.quote_spread_bps
@@ -89,30 +60,19 @@ class ConfigAsset:
 
         quote_ttl_seconds = self.quote_ttl_seconds
 
-        typical_credit_seconds = self.typical_credit_seconds
-
-        typical_finality_seconds = self.typical_finality_seconds
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
             {
-                "asset": asset,
-                "chain_id": chain_id,
                 "confirmations": confirmations,
-                "contract": contract,
-                "decimals": decimals,
                 "max_deposit_atomic": max_deposit_atomic,
                 "min_amount": min_amount,
                 "min_deposit_atomic": min_deposit_atomic,
                 "min_refund_atomic": min_refund_atomic,
-                "pricing": pricing,
                 "quote_amount_decimals": quote_amount_decimals,
                 "quote_spread_bps": quote_spread_bps,
                 "quote_tolerance_bps": quote_tolerance_bps,
                 "quote_ttl_seconds": quote_ttl_seconds,
-                "typical_credit_seconds": typical_credit_seconds,
-                "typical_finality_seconds": typical_finality_seconds,
             }
         )
 
@@ -121,15 +81,7 @@ class ConfigAsset:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        asset = d.pop("asset")
-
-        chain_id = d.pop("chain_id")
-
         confirmations = d.pop("confirmations")
-
-        contract = d.pop("contract")
-
-        decimals = d.pop("decimals")
 
         max_deposit_atomic = d.pop("max_deposit_atomic")
 
@@ -139,8 +91,6 @@ class ConfigAsset:
 
         min_refund_atomic = d.pop("min_refund_atomic")
 
-        pricing = d.pop("pricing")
-
         quote_amount_decimals = d.pop("quote_amount_decimals")
 
         quote_spread_bps = d.pop("quote_spread_bps")
@@ -149,31 +99,20 @@ class ConfigAsset:
 
         quote_ttl_seconds = d.pop("quote_ttl_seconds")
 
-        typical_credit_seconds = d.pop("typical_credit_seconds")
-
-        typical_finality_seconds = d.pop("typical_finality_seconds")
-
-        config_asset = cls(
-            asset=asset,
-            chain_id=chain_id,
+        quote_terms = cls(
             confirmations=confirmations,
-            contract=contract,
-            decimals=decimals,
             max_deposit_atomic=max_deposit_atomic,
             min_amount=min_amount,
             min_deposit_atomic=min_deposit_atomic,
             min_refund_atomic=min_refund_atomic,
-            pricing=pricing,
             quote_amount_decimals=quote_amount_decimals,
             quote_spread_bps=quote_spread_bps,
             quote_tolerance_bps=quote_tolerance_bps,
             quote_ttl_seconds=quote_ttl_seconds,
-            typical_credit_seconds=typical_credit_seconds,
-            typical_finality_seconds=typical_finality_seconds,
         )
 
-        config_asset.additional_properties = d
-        return config_asset
+        quote_terms.additional_properties = d
+        return quote_terms
 
     @property
     def additional_keys(self) -> list[str]:

@@ -28,6 +28,7 @@ def export_account(client: TopupClient, directory: str | Path) -> dict[str, int]
     target.mkdir(parents=True, exist_ok=True)
     resources: dict[str, Callable[[], Iterable[_Serializable]]] = {
         "account": lambda: [client.get_account()],
+        "payment_settings": lambda: [client.get_payment_settings()],
         "config": lambda: [client.get_config()],
         "balance": lambda: [client.get_balance()],
         "quotes": client.list_quotes,

@@ -13,7 +13,6 @@ from ..models.account_object_object import check_account_object_object
 from typing import cast
 
 if TYPE_CHECKING:
-    from ..models.confirmation_policy import ConfirmationPolicy
     from ..models.webhook_key_version import WebhookKeyVersion
 
 
@@ -25,16 +24,12 @@ class AccountObject:
     """The account of the request's API key (`GET /v1/account`), in the key's mode.
 
     Example:
-        {'charges_enabled': True, 'confirmation_policies': [{'chain_id': 1, 'confirmations': 'finalized'}], 'created':
-            1787961600, 'id': 'acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10', 'livemode': False, 'name': 'Example Cloud', 'object':
-            'account', 'paused_scopes': [], 'webhook_keys': [{'expires_at': None, 'version': 2}, {'expires_at': 1790640000,
-            'version': 1}]}
+        {'charges_enabled': True, 'created': 1787961600, 'id': 'acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10', 'livemode':
+            False, 'name': 'Example Cloud', 'object': 'account', 'paused_scopes': [], 'webhook_keys': [{'expires_at': None,
+            'version': 2}, {'expires_at': 1790640000, 'version': 1}]}
 
     Attributes:
         charges_enabled (bool): Whether the operator enabled live mode.
-        confirmation_policies (list[ConfirmationPolicy]): The confirmations you require on chains of this mode, stricter
-            than the routes' (design
-            D1); a chain not listed uses its route's (`GET /v1/config`).
         created (int): Creation time, Unix seconds.
         id (str): Account id, `acct_…`.
         livemode (bool): The mode of the key that reads it.
@@ -50,7 +45,6 @@ class AccountObject:
     """
 
     charges_enabled: bool
-    confirmation_policies: list[ConfirmationPolicy]
     created: int
     id: str
     livemode: bool
@@ -61,15 +55,9 @@ class AccountObject:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.confirmation_policy import ConfirmationPolicy  # noqa: PLC0415
         from ..models.webhook_key_version import WebhookKeyVersion  # noqa: PLC0415
 
         charges_enabled = self.charges_enabled
-
-        confirmation_policies = []
-        for confirmation_policies_item_data in self.confirmation_policies:
-            confirmation_policies_item = confirmation_policies_item_data.to_dict()
-            confirmation_policies.append(confirmation_policies_item)
 
         created = self.created
 
@@ -93,7 +81,6 @@ class AccountObject:
         field_dict.update(
             {
                 "charges_enabled": charges_enabled,
-                "confirmation_policies": confirmation_policies,
                 "created": created,
                 "id": id,
                 "livemode": livemode,
@@ -108,20 +95,10 @@ class AccountObject:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.confirmation_policy import ConfirmationPolicy  # noqa: PLC0415
         from ..models.webhook_key_version import WebhookKeyVersion  # noqa: PLC0415
 
         d = dict(src_dict)
         charges_enabled = d.pop("charges_enabled")
-
-        confirmation_policies = []
-        _confirmation_policies = d.pop("confirmation_policies")
-        for confirmation_policies_item_data in _confirmation_policies:
-            confirmation_policies_item = ConfirmationPolicy.from_dict(
-                confirmation_policies_item_data
-            )
-
-            confirmation_policies.append(confirmation_policies_item)
 
         created = d.pop("created")
 
@@ -144,7 +121,6 @@ class AccountObject:
 
         account_object = cls(
             charges_enabled=charges_enabled,
-            confirmation_policies=confirmation_policies,
             created=created,
             id=id,
             livemode=livemode,

@@ -84,7 +84,8 @@ an event your own request caused names it in `event.request` (`id`, `idempotency
 
 | Call | API |
 |---|---|
-| `pay.account.retrieve()` / `.update(confirmation_policies=)` / `.pause_quotes()` / `.resume_quotes()` / `.roll_webhook_key(expires_in=)` | `GET\|POST /v1/account`, `POST /v1/account/pause\|resume`, `POST /v1/account/webhook_keys/roll` |
+| `pay.account.retrieve()` / `.pause_quotes()` / `.resume_quotes()` / `.roll_webhook_key(expires_in=)` | `GET /v1/account`, `POST /v1/account/pause\|resume`, `POST /v1/account/webhook_keys/roll` |
+| `pay.payment_settings.retrieve()` / `.update(chains=, quote_creations_per_customer_per_minute=)` | `GET\|POST /v1/payment_settings`: what the account accepts and on what terms; a new account accepts nothing |
 | `pay.quotes.create(client_reference_id=, amount=, chain_id=, asset=, idempotency_key=, metadata=)` | `POST /v1/quotes` |
 | `pay.quotes.retrieve(id)` / `.list(client_reference_id=, status=)` / `.cancel(id)` | `GET /v1/quotes[/{id}]`, `POST /v1/quotes/{id}/cancel` |
 | `pay.quotes.update(id, metadata=)` | `POST /v1/quotes/{id}` |

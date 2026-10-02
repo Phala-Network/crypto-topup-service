@@ -8,8 +8,8 @@ from ...client import AuthenticatedClient, Client
 from ...types import Response, UNSET
 from ... import errors
 
-from ...models.config import Config
 from ...models.error_response import ErrorResponse
+from ...models.payment_settings_object import PaymentSettingsObject
 from typing import cast
 
 
@@ -17,7 +17,7 @@ def _get_kwargs() -> dict[str, Any]:
 
     _kwargs: dict[str, Any] = {
         "method": "get",
-        "url": "/v1/config",
+        "url": "/v1/payment_settings",
     }
 
     return _kwargs
@@ -25,9 +25,9 @@ def _get_kwargs() -> dict[str, Any]:
 
 def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Config | ErrorResponse | None:
+) -> ErrorResponse | PaymentSettingsObject | None:
     if response.status_code == 200:
-        response_200 = Config.from_dict(response.json())
+        response_200 = PaymentSettingsObject.from_dict(response.json())
 
         return response_200
 
@@ -49,7 +49,7 @@ def _parse_response(
 
 def _build_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
-) -> Response[Config | ErrorResponse]:
+) -> Response[ErrorResponse | PaymentSettingsObject]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -61,17 +61,17 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient,
-) -> Response[Config | ErrorResponse]:
-    """Your effective payment config in the key's mode: every asset your payment settings accept on a
-    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
-    open-quote caps. An account that accepts nothing yet gets no asset.
+) -> Response[ErrorResponse | PaymentSettingsObject]:
+    """Your payment settings in the key's mode: the chains and assets you accept and your terms on
+    each, with the operator's catalog of the mode in `available`. A new account accepts nothing
+    until you configure it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Config | ErrorResponse]
+        Response[ErrorResponse | PaymentSettingsObject]
     """
 
     kwargs = _get_kwargs()
@@ -86,17 +86,17 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient,
-) -> Config | ErrorResponse | None:
-    """Your effective payment config in the key's mode: every asset your payment settings accept on a
-    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
-    open-quote caps. An account that accepts nothing yet gets no asset.
+) -> ErrorResponse | PaymentSettingsObject | None:
+    """Your payment settings in the key's mode: the chains and assets you accept and your terms on
+    each, with the operator's catalog of the mode in `available`. A new account accepts nothing
+    until you configure it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Config | ErrorResponse
+        ErrorResponse | PaymentSettingsObject
     """
 
     return sync_detailed(
@@ -107,17 +107,17 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
-) -> Response[Config | ErrorResponse]:
-    """Your effective payment config in the key's mode: every asset your payment settings accept on a
-    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
-    open-quote caps. An account that accepts nothing yet gets no asset.
+) -> Response[ErrorResponse | PaymentSettingsObject]:
+    """Your payment settings in the key's mode: the chains and assets you accept and your terms on
+    each, with the operator's catalog of the mode in `available`. A new account accepts nothing
+    until you configure it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Config | ErrorResponse]
+        Response[ErrorResponse | PaymentSettingsObject]
     """
 
     kwargs = _get_kwargs()
@@ -130,17 +130,17 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient,
-) -> Config | ErrorResponse | None:
-    """Your effective payment config in the key's mode: every asset your payment settings accept on a
-    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
-    open-quote caps. An account that accepts nothing yet gets no asset.
+) -> ErrorResponse | PaymentSettingsObject | None:
+    """Your payment settings in the key's mode: the chains and assets you accept and your terms on
+    each, with the operator's catalog of the mode in `available`. A new account accepts nothing
+    until you configure it.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Config | ErrorResponse
+        ErrorResponse | PaymentSettingsObject
     """
 
     return (
