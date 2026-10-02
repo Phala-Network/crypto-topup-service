@@ -64,7 +64,9 @@ impl RouteFile {
         }
         validate_address("asset.contract", self.asset.contract)?;
         validate_address("chain.sanctions_oracle", self.screening.sanctions_oracle)?;
-        self.chain.confirmations.validate(self.chain.chain_id)?;
+        self.chain
+            .confirmations
+            .validate_for_chain(self.chain.chain_id)?;
         validate_livemode(self.livemode, self.chain.chain_id)?;
         validate_slug("asset.symbol", &self.asset.symbol)?;
         validate_decimals("asset.decimals", self.asset.decimals)?;
@@ -139,8 +141,8 @@ pub enum ChainFamily {
     /// Ethereum L1 proof-of-stake (mainnet, testnets, and Anvil's L1 simulation): a depth or
     /// `finalized`.
     EthereumL1,
-    /// OP-stack L2: `safe` (derived from data posted to L1) or `finalized`; never the sequencer's
-    /// unsafe head.
+    /// OP-stack L2: a depth on the sequencer's unsafe head, `safe` (derived from data posted to
+    /// L1), or `finalized`.
     OpStack,
 }
 
@@ -163,7 +165,17 @@ impl ChainFamily {
     pub const fn default_confirmations(self) -> Confirmations {
         match self {
             Self::EthereumL1 => Confirmations::Depth(DEFAULT_ETHEREUM_CONFIRMATION_DEPTH),
-            Self::OpStack => Confirmations::Safe,
+            Self::OpStack => Confirmations::Depth(DEFAULT_OP_STACK_CONFIRMATION_DEPTH),
+        }
+    }
+
+    /// The family's block time in seconds: Ethereum's 12-second slot, an OP-stack chain's
+    /// 2-second L2 block.
+    #[must_use]
+    pub const fn block_seconds(self) -> u64 {
+        match self {
+            Self::EthereumL1 => ETHEREUM_BLOCK_SECONDS,
+            Self::OpStack => OP_STACK_BLOCK_SECONDS,
         }
     }
 }
@@ -230,16 +242,16 @@ impl Confirmations {
         block <= self.horizon(heads)
     }
 
-    /// The stricter of two confirmations of one chain (design D1): `finalized` over anything, the
-    /// deeper of two depths, `safe` over `safe`. `None` for a depth and `safe`, which no chain
-    /// family accepts together.
+    /// The stricter of two confirmations of one chain (design D1): any depth < `safe` <
+    /// `finalized`, and the deeper of two depths. `safe` outranks every depth because a sequencer
+    /// can reorganize the unsafe head however deep a block is in it, but not a block derived from
+    /// data posted to L1.
     #[must_use]
-    pub fn stricter(self, other: Self) -> Option<Self> {
+    pub fn stricter(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Finalized, _) | (_, Self::Finalized) => Some(Self::Finalized),
-            (Self::Depth(left), Self::Depth(right)) => Some(Self::Depth(left.max(right))),
-            (Self::Safe, Self::Safe) => Some(Self::Safe),
-            (Self::Depth(_), Self::Safe) | (Self::Safe, Self::Depth(_)) => None,
+            (Self::Finalized, _) | (_, Self::Finalized) => Self::Finalized,
+            (Self::Safe, _) | (_, Self::Safe) => Self::Safe,
+            (Self::Depth(left), Self::Depth(right)) => Self::Depth(left.max(right)),
         }
     }
 
@@ -271,29 +283,37 @@ impl Confirmations {
         }
     }
 
-    /// Typical seconds from paying to the `deposit.credited` event on a 12-second-slot chain: half
-    /// a slot waiting for inclusion, the remaining blocks, then polling and delivery; for `safe`
-    /// and `finalized`, the typical delay of those tags (about 15 minutes on Ethereum L1).
+    /// Typical seconds from paying to the `deposit.credited` event on chain `chain_id`: at a
+    /// depth, half a block waiting for inclusion, the remaining blocks, then a block of polling
+    /// and delivery (`depth` blocks and a half: 30 s at depth 2 on Ethereum, 7 s at depth 3 on
+    /// an OP-stack chain); for `safe` and `finalized`, the typical delay of those tags.
     #[must_use]
-    pub const fn typical_credit_seconds(self) -> u64 {
+    pub const fn typical_credit_seconds(self, chain_id: u64) -> u64 {
+        let block = match ChainFamily::of(chain_id) {
+            Some(family) => family.block_seconds(),
+            None => ETHEREUM_BLOCK_SECONDS,
+        };
         match self {
-            Self::Depth(depth) => depth.saturating_mul(12).saturating_add(6),
+            Self::Depth(depth) => depth.saturating_mul(block).saturating_add(block / 2),
             Self::Safe => TYPICAL_SAFE_SECONDS,
             Self::Finalized => TYPICAL_FINALIZED_SECONDS,
         }
     }
 
-    fn validate(self, chain_id: u64) -> Result<(), RouteError> {
+    /// Checks this confirmation against the family of `chain_id` (design D1): a depth or
+    /// `finalized` on Ethereum L1; a depth, `safe`, or `finalized` on OP-stack; only `finalized`
+    /// on a chain of no reviewed family.
+    ///
+    /// # Errors
+    ///
+    /// Returns the constraint the value fails, for the field `chain.confirmations`.
+    pub fn validate_for_chain(self, chain_id: u64) -> Result<(), RouteError> {
         const FIELD: &str = "chain.confirmations";
         match (self, ChainFamily::of(chain_id)) {
             (Self::Depth(0), _) => Err(RouteError::validation(FIELD, "a depth must be at least 1")),
             (Self::Finalized, _)
-            | (Self::Depth(_), Some(ChainFamily::EthereumL1))
+            | (Self::Depth(_), Some(_))
             | (Self::Safe, Some(ChainFamily::OpStack)) => Ok(()),
-            (Self::Depth(_), Some(ChainFamily::OpStack)) => Err(RouteError::validation(
-                FIELD,
-                "an OP-stack chain accepts `safe` or `finalized`, never a depth on the sequencer's unsafe head",
-            )),
             (Self::Safe, Some(ChainFamily::EthereumL1)) => Err(RouteError::validation(
                 FIELD,
                 "an Ethereum L1 chain accepts a depth or `finalized`",
@@ -672,7 +692,16 @@ pub const UNIT_DECIMALS: u8 = 2;
 /// Two blocks on Ethereum L1: depth-1 reorgs are routine, deeper ones were not observed (design
 /// D1), and a reversal is recoverable.
 pub const DEFAULT_ETHEREUM_CONFIRMATION_DEPTH: u64 = 2;
-/// Typical delay of an OP-stack `safe` head behind the sequencer: a few L1 batch intervals.
+/// Three blocks on an OP-stack chain's unsafe head, 4 s after inclusion: Base reports a single
+/// reorged L2 block ever and none after batching to L1, twice that depth is covered, and a
+/// reversal is recoverable (design D1, owner decision of 2026-10-02).
+pub const DEFAULT_OP_STACK_CONFIRMATION_DEPTH: u64 = 3;
+/// Ethereum L1's slot time.
+pub const ETHEREUM_BLOCK_SECONDS: u64 = 12;
+/// An OP-stack chain's L2 block time (OP Mainnet, Base, and their testnets).
+pub const OP_STACK_BLOCK_SECONDS: u64 = 2;
+/// Typical delay of an OP-stack `safe` head behind the sequencer: a few L1 batch intervals (Base
+/// documents about 2 minutes to batch inclusion; chains that batch less often take longer).
 pub const TYPICAL_SAFE_SECONDS: u64 = 300;
 /// Typical Ethereum delay from inclusion to the `finalized` tag: a block in epoch `n` is final
 /// once the checkpoint of epoch `n + 1` finalizes, 64 to 95 slots of 12 s.
@@ -1192,24 +1221,17 @@ mod tests {
         );
         assert_eq!(
             ChainFamily::of(8_453).map(ChainFamily::default_confirmations),
-            Some(Confirmations::Safe)
+            Some(Confirmations::Depth(3))
         );
-        assert!(Confirmations::Depth(2).validate(1).is_ok());
-        assert!(Confirmations::Finalized.validate(1).is_ok());
-        assert!(Confirmations::Safe.validate(1).is_err());
-        assert!(Confirmations::Safe.validate(8_453).is_ok());
-        assert!(Confirmations::Depth(10).validate(8_453).is_err());
-        assert!(Confirmations::Finalized.validate(137).is_ok());
-        assert!(Confirmations::Depth(2).validate(137).is_err());
-        assert_eq!(
-            Confirmations::Depth(2).stricter(Confirmations::Depth(5)),
-            Some(Confirmations::Depth(5))
-        );
-        assert_eq!(
-            Confirmations::Safe.stricter(Confirmations::Finalized),
-            Some(Confirmations::Finalized)
-        );
-        assert_eq!(Confirmations::Depth(2).stricter(Confirmations::Safe), None);
+        assert!(Confirmations::Depth(2).validate_for_chain(1).is_ok());
+        assert!(Confirmations::Finalized.validate_for_chain(1).is_ok());
+        assert!(Confirmations::Safe.validate_for_chain(1).is_err());
+        assert!(Confirmations::Safe.validate_for_chain(8_453).is_ok());
+        assert!(Confirmations::Depth(3).validate_for_chain(8_453).is_ok());
+        assert!(Confirmations::Depth(0).validate_for_chain(8_453).is_err());
+        assert!(Confirmations::Finalized.validate_for_chain(137).is_ok());
+        assert!(Confirmations::Depth(2).validate_for_chain(137).is_err());
+        assert!(Confirmations::Safe.validate_for_chain(137).is_err());
         assert_eq!(
             Confirmations::parse_policy("12"),
             Some(Confirmations::Depth(12))
@@ -1222,7 +1244,26 @@ mod tests {
             assert_eq!(Confirmations::parse_policy(invalid), None, "{invalid}");
         }
         assert_eq!(Confirmations::Depth(12).policy_value(), "12");
-        assert_eq!(Confirmations::Depth(2).typical_credit_seconds(), 30);
-        assert_eq!(Confirmations::Finalized.typical_credit_seconds(), 900);
+        assert_eq!(Confirmations::Depth(2).typical_credit_seconds(1), 30);
+        assert_eq!(Confirmations::Depth(3).typical_credit_seconds(8_453), 7);
+        assert_eq!(Confirmations::Safe.typical_credit_seconds(8_453), 300);
+        assert_eq!(Confirmations::Finalized.typical_credit_seconds(8_453), 900);
+    }
+
+    #[test]
+    fn stricter_orders_any_depth_below_safe_below_finalized() {
+        use Confirmations::{Depth, Finalized, Safe};
+        assert_eq!(Depth(2).stricter(Depth(5)), Depth(5));
+        assert_eq!(Depth(5).stricter(Depth(2)), Depth(5));
+        // `safe` is derived from data posted to L1, which no depth on the unsafe head is.
+        assert_eq!(Depth(999_999).stricter(Safe), Safe);
+        assert_eq!(Safe.stricter(Depth(3)), Safe);
+        assert_eq!(Safe.stricter(Finalized), Finalized);
+        assert_eq!(Depth(3).stricter(Finalized), Finalized);
+        for left in [Depth(1), Depth(3), Safe, Finalized] {
+            for right in [Depth(1), Depth(3), Safe, Finalized] {
+                assert_eq!(left.stricter(right), right.stricter(left));
+            }
+        }
     }
 }

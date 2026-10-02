@@ -80,7 +80,7 @@ staging instance ([staging reference product](deploy/phala.md#staging-reference-
 - **Deposit addresses**: one persistent, rotatable address per customer for every supported token
   on every chain, credited at spot for any amount.
 - **Fast credit, watched to finality**: a deposit is credited at the route's confirmation (about
-  30 seconds after paying on Ethereum, about 5 minutes on Base), confirmed by a second RPC
+  30 seconds after paying on Ethereum, about 7 seconds on Base), confirmed by a second RPC
   provider, and reversed with `deposit.reversed` if its transaction leaves the chain before
   finality.
 - **Signed webhooks**: Standard Webhooks with ed25519 keys per account and mode, derived in the

@@ -604,7 +604,8 @@ async fn client_deposit_address_view(
                 .current_in(livemode)
                 .filter(|route| route.chain.chain_id == network.chain_id)
                 .map(|route| {
-                    super::quotes::credit_confirmations(route, policy).typical_credit_seconds()
+                    super::quotes::credit_confirmations(route, policy)
+                        .typical_credit_seconds(network.chain_id)
                 });
             let typical_credit_seconds = seconds
                 .next()

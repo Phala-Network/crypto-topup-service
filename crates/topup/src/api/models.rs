@@ -968,9 +968,9 @@ pub struct ConfirmationPolicy {
     /// A chain of the key's mode (`GET /v1/config`).
     pub chain_id: u64,
     /// A depth (`"12"`: the block and eleven more), `"safe"`, or `"finalized"`: never weaker than
-    /// the route's `confirmations`, and of the chain's kind (a depth or `finalized` on Ethereum,
-    /// `safe` or `finalized` on an OP-stack chain). In a request, `null` removes the chain's
-    /// policy, so its route's applies.
+    /// the route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a
+    /// depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In
+    /// a request, `null` removes the chain's policy, so its route's applies.
     pub confirmations: Option<String>,
 }
 

@@ -891,7 +891,7 @@
             "type": "integer"
           },
           "confirmations": {
-            "description": "A depth (`\"12\"`: the block and eleven more), `\"safe\"`, or `\"finalized\"`: never weaker than\nthe route's `confirmations`, and of the chain's kind (a depth or `finalized` on Ethereum,\n`safe` or `finalized` on an OP-stack chain). In a request, `null` removes the chain's\npolicy, so its route's applies.",
+            "description": "A depth (`\"12\"`: the block and eleven more), `\"safe\"`, or `\"finalized\"`: never weaker than\nthe route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a\ndepth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In\na request, `null` removes the chain's policy, so its route's applies.",
             "type": [
               "string",
               "null"

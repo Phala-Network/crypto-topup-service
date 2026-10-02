@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn base_sepolia_routes_credit_at_safe_on_their_own_providers() {
+    fn base_sepolia_routes_credit_at_the_op_stack_depth_on_their_own_providers() {
         let pha = staging(DEPLOY_BASE_PHA_ROUTE).expect("Base PHA route");
         let usdc = staging(DEPLOY_BASE_USDC_ROUTE).expect("Base USDC route");
         assert!(!pha.livemode, "Base Sepolia is a test route");
@@ -217,10 +217,10 @@ mod tests {
             pha.chain, usdc.chain,
             "one chain has one set of chain settings"
         );
-        // An OP-stack chain credits at `safe`, never at a depth on the unsafe head (design D1).
+        // An OP-stack chain credits at the family's depth on the unsafe head (design D1).
         assert_eq!(
             pha.chain.confirmations,
-            topup_core::route::Confirmations::Safe
+            topup_core::route::ChainFamily::OpStack.default_confirmations()
         );
         assert_eq!(
             pha.chain.rpc_providers,

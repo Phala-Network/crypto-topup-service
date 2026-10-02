@@ -196,7 +196,7 @@ function useClientView(
 
 /**
  * When a payment on each of `chainIds` is credited, from `view`'s typical credit times, for
- * example "usually in about 30 seconds on Ethereum and about 5 minutes on Base". Without the time
+ * example "usually in about 30 seconds on Ethereum and about 7 seconds on Base". Without the time
  * of every network (no view yet, a network whose tokens are credited at different confirmations,
  * or a service that does not send it) it names no time.
  */

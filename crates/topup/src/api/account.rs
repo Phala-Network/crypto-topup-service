@@ -226,14 +226,21 @@ fn validate_policies(
                         "confirmations must be a depth of 1 to 999999, safe, or finalized",
                     )
                 })?;
-                if floor.stricter(required) == Some(required) {
+                if required.validate_for_chain(policy.chain_id).is_err() {
+                    return Err(ApiError::invalid_param(
+                        param("confirmations"),
+                        "the chain accepts a depth or finalized (Ethereum), or a depth, safe, or \
+                         finalized (OP-stack)",
+                    ));
+                }
+                if floor.stricter(required) == required {
                     Ok(required)
                 } else {
                     Err(ApiError::invalid_param(
                         param("confirmations"),
                         format!(
-                            "the chain's route requires {}; a policy may only be stricter, of \
-                             the same kind or finalized",
+                            "the chain's route requires {}; a policy may only be stricter: a \
+                             deeper depth, then safe (OP-stack), then finalized",
                             floor.policy_value()
                         ),
                     ))

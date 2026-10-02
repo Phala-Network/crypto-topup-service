@@ -7,7 +7,8 @@
 mod head;
 
 pub use head::{
-    DEFAULT_HEAD_POLL_INTERVAL, FinalizedHeads, HeadScan, head_scan_once, scan_new_blocks,
+    DEFAULT_HEAD_POLL_INTERVAL, FinalizedHeads, HeadScan, head_poll_interval, head_scan_once,
+    scan_new_blocks,
 };
 
 use std::collections::BTreeMap;
@@ -40,8 +41,8 @@ pub const MAX_SCAN_WINDOW: u64 = MAX_BLOCKS_PER_REQUEST;
 /// Scanner timing (`topup run --head-poll-interval-s`, `--finalized-poll-interval-s`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScanConfig {
-    /// Delay between `eth_blockNumber` polls of provider A; `None` uses
-    /// [`DEFAULT_HEAD_POLL_INTERVAL`], one block time.
+    /// Delay between `eth_blockNumber` polls of provider A; `None` uses each chain's
+    /// [`head_poll_interval`], one block time.
     pub head_poll_interval: Option<Duration>,
     /// Least delay between reads of provider A's `finalized` head, whose advance wakes the
     /// finalized backstop, the finality watch, and the reconciler.

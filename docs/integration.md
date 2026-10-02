@@ -210,8 +210,8 @@ mode: open quotes (`max_open_quotes`), their credit in cents (`max_open_amount_p
 one customer's (`max_open_amount_per_customer`, which also bounds one quote), the
 refund floor, the quote window, spread,
 and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more;
-`"safe"` on an OP-stack chain such as Base, about 300 s), the typical credit time
-(`typical_credit_seconds`, 30 on Ethereum), and the typical finality time
+`"3"` on an OP-stack chain such as Base: the payment's 2-second block and two more), the typical
+credit time (`typical_credit_seconds`, 30 on Ethereum, 7 on Base), and the typical finality time
 (`typical_finality_seconds`, 900). Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
@@ -322,8 +322,8 @@ and does not pay twice.
 `{ status, quote, error }`, like Stripe Elements' `onChange`. Hide your own "new payment" or
 amount controls while the status is `seen` or `confirming`, so that a waiting payer does not
 start a second payment. While waiting, tell the payer that the payment is credited in about the
-quote's `typical_credit_seconds` (30 seconds on Ethereum, about 5 minutes at Base's `safe` block,
-15 minutes at `finalized`), that they can close the page, and that the credit arrives
+quote's `typical_credit_seconds` (30 seconds on Ethereum, about 7 seconds on Base, about 5 minutes
+under a `safe` policy, 15 minutes at `finalized`), that they can close the page, and that the credit arrives
 automatically. `onSuccess(quote)` is called once credited; `quote.amount_credited` is what was
 credited.
 
@@ -505,7 +505,7 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
 Let the customer pick the network and the token; show that network, the token contract, the full
 address with a copy button, and a QR of that token's `payment_uri` (it carries the token, chain,
 and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any amount is credited
-at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 5 minutes on
+at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 7 seconds on
 Base Sepolia. You can reuse this address." Each network's time is its `typical_credit_seconds` in
 the address's public view (above), at the confirmation your account's payments on that chain wait
 for, as `GET /v1/config` reports it; it is absent when the network's tokens are credited at
@@ -658,8 +658,11 @@ sign and execute it as any Safe transaction
 - **A stricter confirmation.** `POST /v1/account {"confirmation_policies": [{"chain_id": 1,
   "confirmations": "finalized"}]}` (`pay.account.update(confirmation_policies={1: "finalized"})`)
   credits that chain's payments only at the stricter of the route's floor and your value: a depth
-  such as `"12"`, `"safe"`, or `"finalized"`, never weaker than the route's (`400` otherwise);
-  `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
+  such as `"12"`, `"safe"` (OP-stack chains only), or `"finalized"`, never weaker than the route's
+  (`400` otherwise). From weaker to stricter: a depth, a deeper depth, `"safe"`, `"finalized"`. On
+  an OP-stack chain such as Base, the route's depth counts blocks on the sequencer's unsafe head,
+  which Base reports reorganized only once ever; `"safe"` waits, about 5 minutes, until the block
+  is derived from data posted to Ethereum, and `"finalized"` until that data is final. `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
   `typical_credit_seconds`, and `GET /v1/account` lists your policies. **If you sell goods or
   services you cannot take back (withdrawable balances, gift cards, anything delivered off
   platform), use `finalized`**: a credit before finality can still be reversed by a
@@ -1071,8 +1074,8 @@ key selects the mode (§5.2): `ppay_*_test_` keys act on test routes (test netwo
 Sepolia) and test objects, `ppay_*_live_` keys, issued once the operator enables live mode, on live
 routes. Integrate in test mode. The repository's test routes are Phala's staging routes on
 Sepolia and Base Sepolia, listed with their tokens and faucets in
-[deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes); Base Sepolia's credit once
-the block is `safe`, typically about 5 minutes. Route files carry no treasury, so set your own on
+[deploy/phala.md, "Staging routes"](../deploy/phala.md#staging-routes); Base Sepolia's credit at
+depth 3, typically about 7 seconds after paying. Route files carry no treasury, so set your own on
 each chain first (§1.6).
 
 For example, Phala's own instance, which serves only Phala Cloud's account: production

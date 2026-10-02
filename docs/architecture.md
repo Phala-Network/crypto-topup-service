@@ -495,22 +495,28 @@ reads at the position takes the successor's id and `replaces` again (§14).
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
-reproduces crediting only final deposits.
+reproduces crediting only final deposits. A stricter value is a deeper depth, then `safe`, then
+`finalized`: `safe` outranks every depth, since the sequencer can reorganize the unsafe head
+however deep a block is in it, but not a block derived from data posted to L1. A depth credits
+before finality on both families, and the finality watch and the per-account cap on credit
+not yet final (both §7) treat an unsafe-head reorg on an OP-stack chain exactly as a reorg on Ethereum.
 
 | Chain family | Values | Default |
 |---|---|---|
 | Ethereum L1 (mainnet 1, Sepolia, Holesky, Hoodi, Anvil 31337) | a depth ≥ 1, or `finalized` | 2 (credited about 30 s after paying): depth-1 reorgs are routine, deeper ones were not observed |
-| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` (about 5 minutes) |
+| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | a depth ≥ 1 on the sequencer's unsafe head, `safe` (derived from data posted to L1), or `finalized` | 3 (credited about 7 s after paying): Base reports one reorged L2 block ever and none after batching to L1 (design D1, owner decision of 2026-10-02) |
 | Any other chain | `finalized` | `finalized` |
 
 **Head loop** per chain, on provider A: the only reader of provider A's heads. It polls
-`latest` with `eth_blockNumber` once per block time (12 s by default, `--head-poll-interval-s`;
-also the rate at which an OP-stack `safe` head, which follows L1, can move) and locks onto block
-arrival: after a poll that found a new head it waits one block time; after one that did not, a
+`latest` with `eth_blockNumber` once per block time (by default the family's block time for a
+route crediting at a depth, 12 s on Ethereum and 2 s on an OP-stack chain, and 12 s otherwise,
+the rate at which an OP-stack `safe` head, which follows L1, can move; `--head-poll-interval-s`
+overrides it) and locks onto block arrival: after a poll that found a new head it waits one block time; after one that did not, a
 quarter of one (up to four times, then a block time again, for a missed slot or a stalled chain);
 and until the phase is known, and every eighth block, three quarters of one, so the next block is
-found early or missed, which fixes the phase. A block is thus seen within about 3 s of arriving,
-for about 1.1 polls per block. It reads `finalized` (`eth_getBlockByNumber`, with its time) at
+found early or missed, which fixes the phase. A block is thus seen within about a quarter block
+time of arriving (3 s on Ethereum, 0.5 s on an OP-stack chain), for about 1.1 polls per block. It
+reads `finalized` (`eth_getBlockByNumber`, with its time) at
 most once per `--finalized-poll-interval-s` (60 s by default; Ethereum finalizes once per 6.4-minute
 epoch) and publishes each advance, which wakes the finalized backstop, the finality watch, and the
 reconciler; none of them polls a head. `safe` is read on each new head only for a `safe` route.
@@ -545,8 +551,11 @@ horizon (the highest block that has reached the confirmation) become `detected` 
 same transaction, so the blocks above it are read again on the next head and a block below it is
 not read by this loop again. The pump confirms them on both providers at once, so a payment to any
 issued address (an open quote's, a closed or expired one's, a repeated or wrong amount, or a
-persistent address) is typically credited about 30 seconds after paying at depth 2 (half a slot to
-inclusion, one more slot, up to a quarter slot of polling, confirmation; `typical_credit_seconds`).
+persistent address) is typically credited about 30 seconds after paying at depth 2 on Ethereum
+(half a slot to inclusion, one more slot, up to a quarter slot of polling, confirmation;
+`typical_credit_seconds`), and about 7 seconds after paying at depth 3 on an OP-stack chain (half a
+2-second block to inclusion, two more blocks, polling, confirmation; measured on Anvil at about
+4.5 s after inclusion).
 A transfer the per-block scan does not record (in a range it skipped after downtime longer than a
 window, or introduced below its cursor by a reorg deeper than the confirmation) is recorded by the
 finalized backstop and credited at finality. In token mode, transfers of other tokens are not
@@ -1300,7 +1309,7 @@ from fetched state, never from webhook order.
   tokens." The payer picks a network and a token; the page shows that network, the token contract,
   the address with a copy button, and a QR of that token's EIP-681 URI (no amount), with "Send
   only PHA, USDC on Ethereum, Base. Any amount is credited at the market rate when it arrives,
-  usually in about 30 seconds on Ethereum and about 5 minutes on Base," each network's time from
+  usually in about 30 seconds on Ethereum and about 7 seconds on Base," each network's time from
   its `typical_credit_seconds` in the public view; without it, "once it is confirmed on its
   network". Where a network's address differs (another treasury), show each network's own
   address. After a rotation, stop showing the retired address; a payment to it is still credited.
@@ -1386,7 +1395,7 @@ defaulted addresses from it. The defaults and why:
 
 | Value | Default |
 |---|---|
-| `chain.confirmations` | per chain family (§8): 2 on Ethereum L1, `safe` on OP-stack, `finalized` elsewhere; a route may require more (for example `finalized`), and a family accepts only its values |
+| `chain.confirmations` | per chain family (§8): 2 on Ethereum L1, 3 on OP-stack, `finalized` elsewhere; a route may require more (for example `finalized`), and a family accepts only its values |
 | `chain.implementation` | the factory's first `CREATE` (nonce 1), which its constructor deploys; startup verifies `implementation()` on chain (§4) |
 | `chain.sanctions_oracle` | the Chainalysis oracle published for the chain (Ethereum and most EVM chains `0x40C5…aC8fb`, Base `0x3A91…D739B`); required on any other chain, such as Sepolia |
 | `chain.rpc_providers` | `[provider-a, provider-b]`; an id (lowercase letters, digits, `-`) names its attested URL in the configuration's `rpc_providers` and its sealed key `TOPUP_RPC_<ID>_KEY`, and serves one chain ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |

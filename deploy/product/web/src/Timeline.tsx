@@ -32,16 +32,17 @@ const STEP_COPY: Record<StepKey, { title: string; hint: string; failed?: string;
     failed: "The quote expired without a payment.",
   },
   received: {
-    usually: "~12 s",
     title: "Received by Phala Pay",
-    hint: "Usually about 12 s after sending: the service scans every new block for its addresses.",
+    hint:
+      "Usually within a block of sending, about 12 s on Sepolia and 2 s on Base Sepolia: the " +
+      "service scans every new block for its addresses.",
   },
   credited: {
     title: "Credited",
     hint:
-      "At the chain's confirmation: 2 blocks on Sepolia, about 30 s after sending, and the safe block " +
-      "on Base Sepolia, about 5 minutes. Once both RPC providers report the same block, the deposit " +
-      "is valued and screened.",
+      "At the chain's confirmation: 2 blocks on Sepolia, about 30 s after sending, and 3 blocks on " +
+      "Base Sepolia, about 7 s. Once both RPC providers report the same block, the deposit is " +
+      "valued and screened.",
     failed: "The deposit was rejected and will not be credited.",
   },
   webhook_received: {

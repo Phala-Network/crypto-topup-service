@@ -19,9 +19,29 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   `ClientDepositAddress`) carries `typical_credit_seconds` on each network: the typical time from
   paying to the credit at the account's confirmation for that chain, as `GET /v1/config` and the
   payer's view of a quote report it, so the page no longer assumes Ethereum's 30 seconds (Base's
-  `safe` block is about 5 minutes, a `finalized` policy about 15). It is absent when the chain's
-  tokens are credited at different confirmations; `openapi.json` marks it optional, as v0.3.5 and
-  earlier do not send it.
+  depth 3 is about 7 seconds, a `safe` policy about 5 minutes, a `finalized` policy about 15). It
+  is absent when the chain's tokens are credited at different confirmations; `openapi.json` marks
+  it optional, as v0.3.5 and earlier do not send it.
+
+### Changed
+
+- OP-stack chains (OP Mainnet, Base, Base Sepolia, OP Sepolia) credit at a depth on the sequencer's
+  unsafe head, as Ethereum does, by owner decision (design D1): the family default is 3 blocks,
+  about 7 seconds after paying (`GET /v1/config` reports `confirmations: "3"` and
+  `typical_credit_seconds: 7`), instead of `safe`, about 5 minutes. Base reports a single reorged
+  L2 block ever, and none after batching to Ethereum. A credit before finality is reversed with
+  `deposit.reversed` if a reorganization drops its transaction, and the per-account
+  `max_unfinalized_credit` cap applies, as on Ethereum. Staging's Base Sepolia routes credit at
+  depth 3.
+- A route's `chain.confirmations` and an account's `confirmation_policies` accept a depth on an
+  OP-stack chain; `safe` and `finalized` remain as stricter values. A policy may be any depth
+  deeper than the route's, `safe` (OP-stack only), or `finalized`: from weaker to stricter, a depth,
+  `safe`, `finalized`. A value the chain's family does not accept, such as `safe` on Ethereum, is
+  `400` with its own message.
+- The head loop polls a chain whose route credits at a depth once per block of its family: every
+  2 s on an OP-stack chain, 12 s on Ethereum (`--head-poll-interval-s` still overrides it). An
+  OP-stack chain crediting at a depth takes about six times the head polls and per-block log
+  requests on provider A of one crediting at `safe` (deploy/README.md, "Measuring RPC usage").
 
 ### JS SDK (`@phala/pay`)
 

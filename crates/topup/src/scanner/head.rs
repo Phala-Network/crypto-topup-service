@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::{
     ChainError, ChainReader, FinalizedHead, FinalizedReader, TransferLog,
 };
-use topup_core::route::{ChainHeads, Confirmations};
+use topup_core::route::{ChainConfig, ChainFamily, ChainHeads, Confirmations};
 
 use super::{
     ChainRoutes, MAX_SCAN_WINDOW, ScanConfig, ScannerError, address_index, record_committed,
@@ -39,9 +39,21 @@ use super::{
 };
 use crate::db::{self, HeadCommit, NewPendingTransfer, ScanAddress};
 
-/// Block time of every supported chain family: Ethereum's 12-second slot, and the rate at which
-/// an OP-stack `safe` head, which follows L1, can advance.
+/// Head poll interval of a chain whose route credits at `safe` or `finalized`, or that has no
+/// reviewed family: Ethereum's 12-second slot, also the rate at which an OP-stack `safe` head,
+/// which follows L1, can advance.
 pub const DEFAULT_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(12);
+
+/// The head poll interval of `chain` without an override: for a route crediting at a depth, whose
+/// credit follows each block, its family's block time (12 s on Ethereum, 2 s on an OP-stack
+/// chain); otherwise [`DEFAULT_HEAD_POLL_INTERVAL`].
+#[must_use]
+pub fn head_poll_interval(chain: &ChainConfig) -> Duration {
+    match (chain.confirmations, ChainFamily::of(chain.chain_id)) {
+        (Confirmations::Depth(_), Some(family)) => Duration::from_secs(family.block_seconds()),
+        _ => DEFAULT_HEAD_POLL_INTERVAL,
+    }
+}
 
 /// Provider A's `finalized` head of each chain, as the head loops last read it.
 ///
@@ -365,7 +377,7 @@ pub(super) async fn run_head_loop(
     let chain_id = routes.chain.chain_id;
     let interval = config
         .head_poll_interval
-        .unwrap_or(DEFAULT_HEAD_POLL_INTERVAL);
+        .unwrap_or_else(|| head_poll_interval(&routes.chain));
     let monitor = crate::observability::CronMonitor::scanner(chain_id);
     let mut state = HeadState::default();
     loop {
@@ -484,6 +496,42 @@ mod tests {
         }
         pacing.observe(Some(10), 10);
         assert_eq!(next_poll_delay(interval, pacing), interval);
+    }
+
+    #[test]
+    fn a_depth_route_polls_once_per_block_of_its_chain_family() {
+        let chain = |chain_id, confirmations| ChainConfig {
+            chain_id,
+            confirmations,
+            rpc_providers: Vec::new(),
+            contracts: topup_core::route::ChainContracts {
+                forwarder_factory: alloy_primitives::Address::ZERO,
+                implementation: alloy_primitives::Address::ZERO,
+            },
+        };
+        let interval =
+            |chain_id, confirmations| head_poll_interval(&chain(chain_id, confirmations));
+        assert_eq!(
+            interval(1, Confirmations::Depth(2)),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            interval(8_453, Confirmations::Depth(3)),
+            Duration::from_secs(2)
+        );
+        // `safe` follows L1, and `finalized` credits only final blocks: one L1 slot.
+        assert_eq!(
+            interval(8_453, Confirmations::Safe),
+            DEFAULT_HEAD_POLL_INTERVAL
+        );
+        assert_eq!(
+            interval(8_453, Confirmations::Finalized),
+            DEFAULT_HEAD_POLL_INTERVAL
+        );
+        assert_eq!(
+            interval(137, Confirmations::Finalized),
+            DEFAULT_HEAD_POLL_INTERVAL
+        );
     }
 
     #[test]

@@ -392,7 +392,7 @@ impl ChainReader for StagingReader {
     }
 }
 
-/// The committed Base Sepolia routes: an OP-stack chain credited at `safe`, in address mode.
+/// The committed Base Sepolia routes: an OP-stack chain credited at depth 3, in address mode.
 fn base_sepolia_routes() -> Result<ChainRoutes> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../deploy/environments/phala-network/staging/topup/topup.yaml");
@@ -756,7 +756,8 @@ async fn run_backfill_retry_scenario(database: &TestDatabase) -> Result<()> {
 /// The Base Sepolia staging incident of 2026-09-29, on its block numbers. The chain's first pass
 /// walked its history from genesis, so the quote address, issued at the cursor the walk had
 /// committed, was created 20 windows below the `finalized` head the pass then committed without
-/// it. The head loop saw the payment, the chain stopped before `safe` reached it, and after the
+/// it. The head loop saw the payment, the chain stopped before the route's confirmation reached it
+/// (then `safe`; now the depth 3 a payment reaches 4 s after inclusion), and after the
 /// restart the head loop's window no longer covers it: only the finalized backstop can record it,
 /// once the address's backfill completes, on a provider that refuses one request in five.
 async fn run_stop_restart_scenario(database: &TestDatabase) -> Result<()> {
@@ -777,14 +778,14 @@ async fn run_stop_restart_scenario(database: &TestDatabase) -> Result<()> {
     let address_id = issue_base_sepolia_address(pool, customer_id, quote).await?;
     db::commit_scan(pool, BASE_SEPOLIA, &[], &[], Some(STOPPED_AT), None).await?;
 
-    // 3. The head loop sees the payment, 100 blocks deep, before `safe` reaches it.
+    // 3. The head loop sees the payment two blocks deep, before the route's depth 3 reaches it.
     let seen = scan_new_blocks(
         pool,
         &reader,
         &routes,
         ChainHeads {
-            latest: Some(PAYMENT + 100),
-            safe: Some(PAYMENT - 50),
+            latest: Some(PAYMENT + 1),
+            safe: None,
             finalized: STOPPED_AT,
         },
     )
@@ -801,7 +802,7 @@ async fn run_stop_restart_scenario(database: &TestDatabase) -> Result<()> {
         &routes,
         ChainHeads {
             latest: Some(RESTARTED_AT + 1_000),
-            safe: Some(RESTARTED_AT + 900),
+            safe: None,
             finalized: RESTARTED_AT,
         },
     )

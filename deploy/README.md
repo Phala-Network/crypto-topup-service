@@ -521,8 +521,10 @@ cost per day   = Σ_m n(m) × p(m)
 cost per month = 30 × cost per day
 ```
 
-The cadences of docs/architecture.md §8 predict `n(m)` for provider A with `B` blocks a day
-(86 400 / block time; 7 200 on Ethereum), `F` `finalized` advances a day (225 on Ethereum),
+The cadences of docs/architecture.md §8 predict `n(m)` for provider A with `B` scanned heads a day
+(86 400 / head poll interval: 7 200 on Ethereum; 43 200 on an OP-stack chain crediting at a depth,
+polled every 2-second block; 7 200 on one crediting at `safe` or `finalized`, polled every 12 s),
+`F` `finalized` advances a day (225 on Ethereum),
 `R` reconciliation rounds a day (at most 144, and at most `F`), `P` payments a day, `A` issued
 addresses, `U` forwarders holding unswept funds, and `L = 1` in token mode or `⌈A / 1 000⌉` in
 address mode:
