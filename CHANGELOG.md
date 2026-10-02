@@ -13,6 +13,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-01
+
 ### Added
 
 - The customer's view of a deposit address (`GET /v1/deposit_addresses/{id}?client_secret=…`,
@@ -24,6 +26,10 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ### Changed
 
+- **Breaking:** the service and both SDKs share one version from this release, released together
+  by one `v<version>` tag: `@phala/pay` and `phala-pay` go from 0.4.0 to 0.5.0. Use the SDK
+  version equal to your operator's service version (docs/integration.md §5.9); the SDKs' earlier
+  releases stay in their frozen changelogs in `sdk/js` and `sdk/python`.
 - OP-stack chains (OP Mainnet, Base, Base Sepolia, OP Sepolia) credit at a depth on the sequencer's
   unsafe head, as Ethereum does, by owner decision (design D1): the family default is 3 blocks,
   about 7 seconds after paying (`GET /v1/config` reports `confirmations: "3"` and
@@ -1058,7 +1064,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...v0.5.0
 [0.3.5]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/Phala-Network/phala-pay/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/Phala-Network/phala-pay/compare/v0.3.2...v0.3.3
