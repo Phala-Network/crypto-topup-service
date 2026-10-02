@@ -93,13 +93,13 @@ async function connect(chainId: number, using?: PaidWith): Promise<Connected> {
  */
 export async function mintTestTokens(
   chainId: number,
-  token: { contract: string; minter?: string | null },
+  token: { contract: string; minter: string | null },
   amountAtomic: bigint,
   using?: PaidWith,
 ): Promise<Hash> {
   const { client, account, chain } = await connect(chainId, using);
   const to = addressOf(account);
-  const minter = token.minter ?? null;
+  const { minter } = token;
   const hash =
     minter === null
       ? await client.writeContract({

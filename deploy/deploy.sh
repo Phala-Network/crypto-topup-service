@@ -66,10 +66,9 @@ set -euo pipefail
 repository=Phala-Network/phala-pay
 # The release this script deploys; the Release workflow sets its tag in the published asset.
 release=latest
-# The Python SDK whose topup-sdk keygen generates an admin key. The Release workflow sets a stable
-# release's own version, which the SDKs share; this published one serves a pre-release and a run
-# from a checkout.
-sdk=phala-pay==0.3.0
+# The Python SDK whose topup-sdk keygen generates an admin key: the release's own version, which
+# scripts/version.sh sets. A pre-release publishes no SDK, so its run needs TOPUP_ADMIN_PUBLIC_KEY.
+sdk=phala-pay==0.3.5
 
 say() {
     printf '%s\n' "$*" >&2

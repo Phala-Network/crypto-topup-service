@@ -65,7 +65,7 @@ bash deploy.sh --strict
 It needs
 `curl`, `tar`, `jq`, bash 4.4, Node.js 22 and npm, Docker (preflight checks the configuration in the
 release's image), [uv](https://docs.astral.sh/uv/) or pipx if it is to generate the admin key (with
-the release's own Python SDK, `phala-pay==<version>`; `phala-pay==0.3.0` before v0.5.0), and your
+the release's own Python SDK, `phala-pay==<version>`), and your
 Phala Cloud login (with a release's locked CLI, `kit/deploy/phala login`: [section 2](#2-your-environment-repository), step 1) or
 `PHALA_CLOUD_API_KEY`, which it never stores. It:
 
@@ -151,12 +151,12 @@ comes from a release.
 
    The kit is `LICENSE`, `deploy/`, and `docs/` of the release: the attested stack, `render.sh`,
    the policy, preflight, the verifiers, the example environment, and this guide.
-2. **Create the admin key** on the machine that will keep it, one per Environment. The seed
-   never leaves that machine; the printed `public_key` and the key id go into the environment
-   directory's `topup.yaml` (step 4):
+2. **Create the admin key** on the machine that will keep it, one per Environment, with the
+   release's own Python SDK. The seed never leaves that machine; the printed `public_key` and the
+   key id go into the environment directory's `topup.yaml` (step 4):
 
    ```sh
-   uvx --from phala-pay==0.3.0 topup-sdk keygen --keyid admin/production-v1 --seed-out ~/phala-pay/admin.seed
+   uvx --from "phala-pay==${version#v}" topup-sdk keygen --keyid admin/production-v1 --seed-out ~/phala-pay/admin.seed
    ```
 
 3. **Environments.** In your repository's Settings > Environments: `production` and, for a
@@ -187,8 +187,8 @@ comes from a release.
    "Deploy"](../deploy/README.md#deploy)). Pin it by the release's commit SHA, as GitHub
    recommends for third-party workflows (`gh api "repos/Phala-Network/phala-pay/commits/$version"
    --jq .sha`); Deploy refuses to run at any commit but `version`'s (called at the `version` tag,
-   it peels the tag to that commit). The only secret it reads is `PHALA_CLOUD_API_KEY`, declared
-   since v0.3.1:
+   it peels the tag to that commit). The only secret it reads is `PHALA_CLOUD_API_KEY`, which it
+   declares:
 
    - **In Phala Pay's organisation** (Phala-Network, or an organisation of its enterprise): pass
      `secrets: inherit`, with the key as the Environment's secret. A called workflow's Environment

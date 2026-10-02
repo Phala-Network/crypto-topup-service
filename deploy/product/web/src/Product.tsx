@@ -605,7 +605,6 @@ function QuoteCheckout({
  */
 function Credited({ session, account, bps }: { session: CreatedQuote; account: Account; bps: number }) {
   const row = account.payments.find((each) => each.quote === session.quote && each.id.startsWith("dep_"));
-  const credit = session.amount ?? row?.amount ?? null;
   const bonus = row?.bonus ?? 0;
   const symbol = session.asset.toUpperCase();
   return (
@@ -616,7 +615,7 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
         <dl className="mt-1 grid w-full gap-1.5 tabular-nums">
           <div className="flex justify-between gap-3">
             <dt>Credit</dt>
-            <dd>{credit === null ? "—" : dollars(credit)}</dd>
+            <dd>{dollars(session.amount)}</dd>
           </div>
           {bonus > 0 && (
             <div className="flex justify-between gap-3" data-testid="bonus-credited">
@@ -626,10 +625,10 @@ function Credited({ session, account, bps }: { session: CreatedQuote; account: A
               <dd className="text-success">{signedDollars(bonus)}</dd>
             </div>
           )}
-          {bonus > 0 && credit !== null && (
+          {bonus > 0 && (
             <div className="flex justify-between gap-3 border-t pt-1.5 font-medium">
               <dt>Total</dt>
-              <dd>{dollars(credit + bonus)}</dd>
+              <dd>{dollars(session.amount + bonus)}</dd>
             </div>
           )}
           {row?.tx_hash != null && (

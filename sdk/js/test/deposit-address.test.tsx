@@ -140,14 +140,9 @@ describe("DepositAddress payments", () => {
     };
   }
 
-  /** A network of the public view; without `seconds`, as a service of v0.3.5 or earlier sends it. */
-  function clientNetwork(chainId: number, seconds?: number) {
-    return {
-      chain_id: chainId,
-      address: ADDRESS,
-      assets: [asset(chainId, "usdc", USDC)],
-      ...(seconds === undefined ? {} : { typical_credit_seconds: seconds }),
-    };
+  /** A network of the public view. */
+  function clientNetwork(chainId: number, seconds = 30) {
+    return { chain_id: chainId, address: ADDRESS, assets: [asset(chainId, "usdc", USDC)], typical_credit_seconds: seconds };
   }
 
   /** The address's message once its public view, served with `networks`, is read. */
@@ -219,23 +214,17 @@ describe("DepositAddress payments", () => {
     );
   });
 
-  it("names no time when the service does not send one for every network", async () => {
-    const message = await messageWith([clientNetwork(11155111, 30), clientNetwork(84532)]);
-    expect(message).toContain("credited at the market rate once it is confirmed on its network.");
-    expect(message).not.toMatch(/seconds|minutes/);
-  });
-
   it("parses the public view and refuses anything else", () => {
     expect(parseClientDepositAddress(view([payment({ status: "reversed" })])).payments[0]?.status).toBe(
       "reversed",
     );
     expect(
-      parseClientDepositAddress(view([], [clientNetwork(84532, 300), clientNetwork(11155111)])).networks,
+      parseClientDepositAddress(view([], [clientNetwork(84532, 300), clientNetwork(11155111, 30)])).networks,
     ).toEqual([
       { chain_id: 84532, address: ADDRESS, typical_credit_seconds: 300 },
-      { chain_id: 11155111, address: ADDRESS },
+      { chain_id: 11155111, address: ADDRESS, typical_credit_seconds: 30 },
     ]);
-    for (const seconds of [-1, 1.5, "300", null]) {
+    for (const seconds of [undefined, -1, 1.5, "300", null]) {
       expect(() =>
         parseClientDepositAddress(view([], [{ ...clientNetwork(84532), typical_credit_seconds: seconds }])),
       ).toThrow(TypeError);

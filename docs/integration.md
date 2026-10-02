@@ -512,8 +512,7 @@ and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any a
 at the market rate when it arrives, usually in about 30 seconds on Sepolia and about 7 seconds on
 Base Sepolia. You can reuse this address." Each network's time is its `typical_credit_seconds` in
 the address's public view (above), at the confirmation your account's payments on that chain wait
-for, as `GET /v1/config` reports it; it is absent from a service of v0.3.5 or earlier, and then the
-page names no time.
+for, as `GET /v1/config` reports it; until the view is loaded the page names no time.
 `<DepositAddress depositAddress={…} clientSecret={…} apiBase={…}>` from `@phala/pay/react`
 renders exactly that from `address` and `networks` (pass only those and the `client_secret` to the
 browser) and, with the secret, shows each payment as it arrives: "1.5 PHA received on Sepolia, 1
@@ -1489,14 +1488,9 @@ release only fixes or adds.
 #### Compatibility
 
 Use the SDK version equal to your operator's service version, `info.version` of its
-`GET /openapi.json`: against service v0.5.0, `@phala/pay` 0.5.0 and `phala-pay` 0.5.0. An SDK may
-require fields that only its own service release sends, so your operator upgrades the service
-before you upgrade the SDK. [CHANGELOG.md](../CHANGELOG.md) records each release's SDK changes
-under "JS SDK" and "Python SDK".
-
-Before v0.5.0 the SDKs were versioned on their own: a service from v0.3.4 to v0.3.5 pairs with
-`@phala/pay` 0.4 and `phala-pay` 0.4 (their earlier releases are in the frozen
-[JS](../sdk/js/CHANGELOG.md) and [Python](../sdk/python/CHANGELOG.md) changelogs).
+`GET /openapi.json`: against service v0.5.0, `@phala/pay` 0.5.0 and `phala-pay` 0.5.0. No other
+pairing is supported, so upgrade the SDKs when your operator upgrades the service.
+[CHANGELOG.md](../CHANGELOG.md) records each release's SDK changes under "JS SDK" and "Python SDK".
 
 ### 5.10 SDK development
 

@@ -20,7 +20,7 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   paying to the credit at the account's confirmation for that chain, as `GET /v1/config` and the
   payer's view of a quote report it, so the page no longer assumes Ethereum's 30 seconds (Base's
   depth 3 is about 7 seconds, a `safe` policy about 5 minutes, a `finalized` policy about 15).
-  `openapi.json` marks it optional, as v0.3.5 and earlier do not send it.
+  It is required: a chain's routes share one confirmation floor, so every network has one value.
 
 ### Changed
 
@@ -48,31 +48,48 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   2 s on an OP-stack chain, 12 s on Ethereum (`--head-poll-interval-s` still overrides it). An
   OP-stack chain crediting at a depth takes about six times the head polls and per-block log
   requests on provider A of one crediting at `safe` (deploy/README.md, "Measuring RPC usage").
+- **Breaking:** `deploy.sh` generates the admin key with the Python SDK of its own release, which
+  `scripts/version.sh` pins with the other version files, instead of `phala-pay==0.3.0`. A
+  pre-release publishes no SDK, so its `deploy.sh` needs `TOPUP_ADMIN_PUBLIC_KEY`.
+
+### Removed
+
+- **Breaking:** Every backward-compatibility path for an earlier release, in the service, the SDKs,
+  the demo, and the documentation. An SDK works only with the service release of its own version
+  (integration guide §5.9, "Compatibility"); no other pairing is supported.
 
 ### JS SDK (`@phala/pay`)
 
 #### Added
 
 - `ClientDepositAddress.networks` (`parseClientDepositAddress`, `retrieveDepositAddress`): each
-  network's `chain_id`, `address`, and optional `typical_credit_seconds`, the typical credit time at
-  the account's confirmation on that chain. A service of v0.3.5 or earlier does not send it; its
-  view still parses. `ClientDepositAddressNetwork` is exported.
+  network's `chain_id`, `address`, and `typical_credit_seconds`, the typical credit time at the
+  account's confirmation on that chain. `ClientDepositAddressNetwork` is exported.
+
+#### Removed
+
+- **Breaking:** Support for a service of another version: `parseClientDepositAddress` requires each
+  network's `typical_credit_seconds`, so it refuses a v0.3.5 service's view of a deposit address.
 
 #### Fixed
 
 - `<DepositAddress>` told the payer "usually in about 30 seconds" on every network. With
   `clientSecret` and `apiBase` it now states each network's typical credit time from the address's
   public view ("usually in about 30 seconds on Sepolia and about 7 seconds on Base Sepolia"; 15
-  minutes under a `finalized` policy). Before the view is read, or when a network has no time, it
-  names none: "credited at the market rate once it is confirmed on its network".
+  minutes under a `finalized` policy). Before the view is read it names none: "credited at the
+  market rate once it is confirmed on its network".
 
 ### Python SDK (`phala-pay`)
 
 #### Added
 
 - `ClientDepositAddressNetwork.typical_credit_seconds` (`topup_client`): the typical credit time at
-  the account's confirmation on the network's chain. Optional (`UNSET` when absent): a service of
-  v0.3.5 or earlier does not send it.
+  the account's confirmation on the network's chain.
+
+#### Removed
+
+- **Breaking:** Support for a service of another version: `ClientDepositAddressNetwork` requires
+  `typical_credit_seconds`, so it refuses a v0.3.5 service's view of a deposit address.
 
 ## [0.3.5] - 2026-10-01
 

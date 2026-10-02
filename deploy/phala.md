@@ -92,9 +92,7 @@ mkdir kit && tar -xzf "release/phala-pay-deploy-$version.tar.gz" -C kit --strip-
 npm ci --prefix kit/deploy/tools --ignore-scripts
 ```
 
-Run a reset with v0.3.3 or later: v0.3.0's Deploy cannot provision (it waits for the unsealed CVM
-to run, and reuses the CVM name), and v0.3.1's and v0.3.2's wait for an instance id that Phala
-Cloud's `cvms get` never reports. Before the reset, a pull request points staging's
+Before the reset, a pull request points staging's
 [compose.yaml](environments/phala-network/staging/topup/compose.yaml) at a new, empty prefix
 (v0.3.0's: `s3://crypto-topup-test/staging-v030`); from then until the reset, never upgrade the old
 staging CVM from `main`. The factory

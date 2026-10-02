@@ -54,10 +54,9 @@ export interface Asset {
   mintable: boolean;
   /**
    * The faucet contract whose public `mint(token, to, amount)` mints it (Aave's, for its test
-   * USDT), or null when the token's own `mint(address,uint256)` does. A demo API from before this
-   * field omits it, which means null: the page deploys before the API is upgraded.
+   * USDT), or null when the token's own `mint(address,uint256)` does.
    */
-  minter?: string | null;
+  minter: string | null;
   /** The token issuer's testnet faucet, for a test token that does not mint. */
   faucet: string | null;
   /** The demo merchant's own promotion on credits paid in this token, in basis points. */
@@ -238,8 +237,8 @@ export interface CreatedQuote {
   /** The quote's address as the product's SDK recomputed it from the pins. */
   expected_address: string;
   order_id: string;
-  /** Cents; absent from a product before it returned it. */
-  amount?: number;
+  /** Cents. */
+  amount: number;
   chain_id: number;
   asset: string;
   amount_atomic: string;

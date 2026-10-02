@@ -31,7 +31,7 @@ use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-use topup_core::route::{Confirmations, TYPICAL_FINALIZED_SECONDS};
+use topup_core::route::{ChainConfig, Confirmations, TYPICAL_FINALIZED_SECONDS};
 
 #[utoipa::path(
     get,
@@ -64,7 +64,8 @@ pub(crate) async fn get_config(
     let assets = routes
         .iter()
         .map(|route| {
-            let confirmations = credit_confirmations(route, policies.get(&route.chain.chain_id));
+            let confirmations =
+                credit_confirmations(&route.chain, policies.get(&route.chain.chain_id));
             ConfigAsset {
                 chain_id: route.chain.chain_id,
                 asset: route.asset.symbol.clone(),
@@ -98,13 +99,13 @@ pub(crate) async fn get_config(
     }))
 }
 
-/// The confirmation `route`'s payments are credited at: the stricter of the route's floor and the
-/// account's `policy` for its chain.
+/// The confirmation `chain`'s payments are credited at: the stricter of the chain's floor and the
+/// account's `policy` for it.
 pub(super) fn credit_confirmations(
-    route: &RouteFile,
+    chain: &ChainConfig,
     policy: Option<&Confirmations>,
 ) -> Confirmations {
-    let floor = route.chain.confirmations;
+    let floor = chain.confirmations;
     policy.map_or(floor, |policy| floor.stricter(*policy))
 }
 
@@ -512,7 +513,7 @@ async fn client_quote_view(
         }
     };
     let policies = super::account::confirmation_policies(&state.pool, scope.account_id()).await?;
-    let confirmation = credit_confirmations(route, policies.get(&route.chain.chain_id));
+    let confirmation = credit_confirmations(&route.chain, policies.get(&route.chain.chain_id));
     Ok(ClientQuote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),

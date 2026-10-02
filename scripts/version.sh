@@ -3,8 +3,9 @@
 # phala-pay (sdk/python) share, all released by one `v<version>` tag (CONTRIBUTING.md, "Releasing").
 #
 #   scripts/version.sh            prints it, and fails unless sdk/js/package.json,
-#                                 sdk/python/pyproject.toml, and sdk/python/uv.lock name it too
-#   scripts/version.sh VERSION    sets it in Cargo.toml, Cargo.lock, and those three (needs cargo,
+#                                 sdk/python/pyproject.toml, sdk/python/uv.lock, and the Python SDK
+#                                 deploy/deploy.sh pins name it too
+#   scripts/version.sh VERSION    sets it in Cargo.toml, Cargo.lock, and those four (needs cargo,
 #                                 jq, and uv)
 #
 # VERSION is X.Y.Z, or X.Y.Z-rc.N for a pre-release, which Python spells X.Y.ZrcN (PEP 440).
@@ -23,6 +24,10 @@ python_lock_version() {
     awk '/^\[\[package\]\]$/ { own = 0 } $0 == "name = \"phala-pay\"" { own = 1 }
         own && /^version = / { gsub(/^version = "|"$/, ""); print; exit }' sdk/python/uv.lock
 }
+# The Python SDK version deploy/deploy.sh generates an admin key with.
+deploy_sdk_version() {
+    sed -n 's/^sdk=phala-pay==//p' deploy/deploy.sh
+}
 
 if (($# == 1)); then
     [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]] ||
@@ -32,6 +37,7 @@ if (($# == 1)); then
     jq --arg version "$1" '.version = $version' sdk/js/package.json >sdk/js/package.json.tmp
     mv sdk/js/package.json.tmp sdk/js/package.json
     uv version --quiet --project sdk/python --no-sync "$1"
+    sed -i "s/^sdk=phala-pay==.*\$/sdk=phala-pay==${1/-rc./rc}/" deploy/deploy.sh
 elif (($# != 0)); then
     echo "usage: version.sh [VERSION]" >&2
     exit 64
@@ -48,5 +54,6 @@ mismatch() {
     mismatch sdk/js/package.json "$(jq -r .version sdk/js/package.json)"
 [[ "$(python_version)" == "$python" ]] || mismatch sdk/python/pyproject.toml "$(python_version)"
 [[ "$(python_lock_version)" == "$python" ]] || mismatch sdk/python/uv.lock "$(python_lock_version)"
+[[ "$(deploy_sdk_version)" == "$python" ]] || mismatch deploy/deploy.sh "$(deploy_sdk_version)"
 ((status == 0)) || exit 1
 echo "$version"

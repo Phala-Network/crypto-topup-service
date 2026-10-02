@@ -30,6 +30,9 @@ export TOPUP
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 version=v9.9.9 commit=$(git -C "$root" rev-parse HEAD)
+# The Python SDK of this commit's version, as Python spells it.
+sdk_version=$("$root/scripts/version.sh")
+sdk=phala-pay==${sdk_version/-rc./rc}
 fail() {
     echo "deploy: $*" >&2
     exit 1
@@ -44,10 +47,8 @@ jq -n '{"phala-pay": "ghcr.io/phala-network/phala-pay@sha256:\("1" * 64)",
     >"$assets/images.json"
 "$root/deploy/render.sh" --template --images "$assets/images.json" \
     "$root/deploy/environments/phala-cloud-template/topup" >"$assets/phala-cloud-template.yml"
-sed -e "s/^release=latest\$/release=$version/" -e "s/^sdk=phala-pay==.*\$/sdk=phala-pay==${version#v}/" \
-    "$root/deploy/deploy.sh" >"$assets/deploy.sh"
+sed "s/^release=latest\$/release=$version/" "$root/deploy/deploy.sh" >"$assets/deploy.sh"
 grep -qx "release=$version" "$assets/deploy.sh" || fail "the release's deploy.sh does not name it"
-grep -qx "sdk=phala-pay==${version#v}" "$assets/deploy.sh" || fail "the release's deploy.sh does not pin its SDK"
 (cd "$assets" && sha256sum images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml deploy.sh \
     >SHA256SUMS)
 # The pinned Compose, fetched once before curl is stubbed.
@@ -98,9 +99,9 @@ case "$1" in info | pull) ;; *) exit 1 ;; esac
 STUB
 cat >"$bin/uvx" <<'STUB'
 #!/usr/bin/env bash
-# uvx --from phala-pay==9.9.9 topup-sdk keygen --keyid ID --seed-out FILE: the release's own SDK.
+# uvx --from phala-pay==VERSION topup-sdk keygen --keyid ID --seed-out FILE: the release's own SDK.
 echo "uvx $*" >>"$STUB_LOG"
-[[ "$*" == "--from phala-pay==9.9.9 topup-sdk keygen --keyid admin/v1 --seed-out "* ]] || exit 1
+[[ "$*" == "--from $STUB_SDK topup-sdk keygen --keyid admin/v1 --seed-out "* ]] || exit 1
 (umask 077 && echo "seed-never-printed" >"${@: -1}")
 echo '{"keyid": "admin/v1", "public_key": "23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo="}'
 STUB
@@ -209,7 +210,7 @@ deploy() {
     : >"$tmp/log"
     cd "$tmp"
     exec env PATH="$bin:$PATH" TMPDIR="$tmp/tmp" XDG_RUNTIME_DIR="$tmp/runtime" STUB_BIN="$bin" STUB_ASSETS="$assets" \
-        STUB_ROOT="$root" STUB_COMMIT="$commit" STUB_LOG="$tmp/log" STUB_STATE="$tmp/state" \
+        STUB_ROOT="$root" STUB_COMMIT="$commit" STUB_LOG="$tmp/log" STUB_STATE="$tmp/state" STUB_SDK="$sdk" \
         STUB_GH_VERSION=2.101.0 STUB_REFUSE=never CVM_NAME="$name" \
         WALG_S3_PREFIX=s3://operator-backups/"$name" AWS_ENDPOINT=https://objects.operator.test \
         AWS_ACCESS_KEY_ID="${secrets[0]}" AWS_SECRET_ACCESS_KEY="${secrets[1]}" "$@" \

@@ -242,8 +242,9 @@ releases, never a commit ([deploy/README.md, "Releases"](deploy/README.md#releas
 
 The version's one source is the Cargo workspace version (`version` under `[workspace.package]` in
 `Cargo.toml`). `scripts/version.sh` prints it and fails unless `sdk/js/package.json`,
-`sdk/python/pyproject.toml`, and `sdk/python/uv.lock` name it too, as CI checks;
-`scripts/version.sh <version>` sets it in all of them and in `Cargo.lock`.
+`sdk/python/pyproject.toml`, `sdk/python/uv.lock`, and the Python SDK `deploy/deploy.sh` generates
+the admin key with name it too, as CI checks; `scripts/version.sh <version>` sets it in all of them
+and in `Cargo.lock`.
 
 The top-level [CHANGELOG.md](CHANGELOG.md) follows
 [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). A pull request that changes what
@@ -292,7 +293,8 @@ v0.5.0, versioned on their own, stay in their frozen `sdk/js/CHANGELOG.md` and
 
 A pre-release, `v<version>-rc.N`, is a candidate for Phala's staging: its pull request runs
 `scripts/version.sh <version>-rc.N` (which Python spells `<version>rcN`) and adds no changelog
-section, and Release publishes it as a GitHub pre-release of the service alone, without the SDKs.
+section, and Release publishes it as a GitHub pre-release of the service alone, without the SDKs
+(so its `deploy.sh` needs `TOPUP_ADMIN_PUBLIC_KEY`).
 
 Stable releases go up one at a time: tag the next only after the previous Release run has
 finished, and never release a version older than the newest stable tag (Release refuses one), as it
