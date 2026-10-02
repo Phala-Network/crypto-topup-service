@@ -286,6 +286,8 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "payment_settings": {
                 "live": unconfigured_settings(true),
                 "test": payment_settings(),
+                // An account created after the 0.6.0 cutover has no `legacy` revision.
+                "legacy": {"live": null, "test": null},
             },
             "created": CREATED - 2_592_000,
             "api_keys": [first_key()],

@@ -153,6 +153,10 @@
           "object": "account",
           "paused_scopes": [],
           "payment_settings": {
+            "legacy": {
+              "live": null,
+              "test": null
+            },
             "live": {
               "available": [
                 {
