@@ -1,23 +1,35 @@
 name: Release
 
-# A versioned release of the service (deploy/README.md, "Releases"), from a `v<version>` tag on a
-# commit of main whose Cargo workspace version is <version> (CONTRIBUTING.md, "Releasing the
-# service"). A stable version needs its dated CHANGELOG.md section, the release notes; a version
-# with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release. Only admins create
-# `v*` tags (a tag ruleset), and a published release is immutable.
+# A versioned release of the service and both SDKs (deploy/README.md, "Releases"), from a
+# `v<version>` tag on a commit of main whose Cargo workspace version is <version>, the version that
+# sdk/js and sdk/python share (scripts/version.sh; CONTRIBUTING.md, "Releasing"). A stable version
+# needs its dated CHANGELOG.md section, the release notes, with the SDKs' changes under it; a
+# version with a pre-release suffix (`-rc.1`) is published as a GitHub pre-release of the service
+# alone, without the SDKs. Only admins create `v*` tags (a tag ruleset), and a published release is
+# immutable.
 #
-# `ci` runs the whole CI workflow on the tagged commit; nothing is built unless it passes. Each
-# image is then built on its own GitHub-hosted runner by deploy/verify-image.sh (Buildx v0.37.1 and
-# the pinned BuildKit, as a local rebuild uses), pushed tagged v<version>, and attested
-# (actions/attest-build-provenance, also pushed to the registry):
+# `ci` runs the whole CI workflow on the tagged commit, the SDKs' checks and end-to-end tests
+# included; nothing is built unless it passes. Each image is then built on its own GitHub-hosted
+# runner by deploy/verify-image.sh (Buildx v0.37.1 and the pinned BuildKit, as a local rebuild
+# uses), pushed tagged v<version>, and attested (actions/attest-build-provenance, also pushed to the
+# registry):
 # - phala-pay and phala-pay-reference-product are reproducible: the pushed build's digest must
 #   equal an earlier build's, and anyone rebuilds the same digest from the tag;
 # - postgres-walg is not (apt and dpkg record wall-clock times): built once, with provenance only.
+# Once every image is published, a stable version publishes the SDKs: sdk/js to npm as @phala/pay,
+# and sdk/python to PyPI as phala-pay (its `project.name`). Publishing uses trusted publishing
+# (OIDC) only: no token or secret is stored anywhere. The owner registers this repository, this
+# workflow file (release.yml), and the job's environment as the trusted publisher: `npm` on
+# npmjs.com and `pypi` on pypi.org. Each environment accepts only `v*` tags and may add required
+# reviewers. npm's trusted publishing does not support self-hosted runners, so the publish jobs run
+# on GitHub-hosted runners. npm refuses provenance from a private repository: `--provenance` fails
+# until the repository is public.
 # `release` then publishes the GitHub release, each asset attested: images.json (the
 # repository@sha256 references by image name, deploy/render.sh's --images); the deploy kit
 # phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
 # Cloud template's compose, rendered from the kit with these images); deploy.sh (deploy/deploy.sh,
-# the one-command deploy, set to deploy this release); and SHA256SUMS.
+# the one-command deploy, set to deploy this release and, for a stable one, to generate the admin
+# key with this release's Python SDK); and SHA256SUMS.
 # deploy/verify-release.sh verifies all of it (docs/self-hosting.md, "Verify a release").
 
 on:
@@ -54,13 +66,14 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] ||
             { echo "::error::tag $GITHUB_REF_NAME is not v<semver>"; exit 1; }
-          cargo_version=$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          # The Cargo workspace version, which the SDKs must name too.
+          cargo_version=$(scripts/version.sh)
           [[ "$cargo_version" == "$version" ]] ||
             { echo "::error::tag $GITHUB_REF_NAME does not match the Cargo workspace version $cargo_version"; exit 1; }
           git fetch --no-tags --quiet origin main
           git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD ||
             { echo "::error::$GITHUB_REF_NAME is not a commit of main"; exit 1; }
-          [[ "$version" == *-* ]] || sdk/changelog-section.sh CHANGELOG.md "$version" >/dev/null
+          [[ "$version" == *-* ]] || scripts/changelog-section.sh CHANGELOG.md "$version" >/dev/null
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
   image:
@@ -133,8 +146,74 @@ jobs:
           path: ${{ runner.temp }}/ref/${{ matrix.name }}.json
           if-no-files-found: error
 
-  release:
+  # The SDKs' checks and end-to-end tests ran in `ci`; this builds the sdist and wheel that
+  # py-publish uploads, outside the job that can mint the publishing token.
+  py-build:
+    needs: [ci, version]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.18"
+      - name: Build the sdist and wheel
+        run: uv build --project sdk/python --out-dir "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdk-python-dist
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  py-publish:
+    needs: [py-build, image]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdk-python-dist
+          path: dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  js-publish:
     needs: [version, image]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdk/js
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/sdk-js
+        with:
+          e2e: "false"
+      - name: npm supports trusted publishing (11.5.1 or later)
+        run: |
+          npm --version
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "$(npm --version)"
+      # `prepare` builds dist from the checked-out tag.
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+
+  # After the SDKs, which a pre-release skips: the stable release's deploy.sh generates the admin
+  # key with its Python SDK, and its notes link both packages.
+  release:
+    needs: [version, image, py-publish, js-publish]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -170,6 +249,10 @@ jobs:
             "$kit/deploy/environments/phala-cloud-template/topup" >"$dist/phala-cloud-template.yml"
           sed "s/^release=latest\$/release=$GITHUB_REF_NAME/" deploy/deploy.sh >"$dist/deploy.sh"
           grep -qx "release=$GITHUB_REF_NAME" "$dist/deploy.sh"
+          if [[ "$VERSION" != *-* ]]; then
+            sed -i "s/^sdk=phala-pay==.*\$/sdk=phala-pay==$VERSION/" "$dist/deploy.sh"
+            grep -qx "sdk=phala-pay==$VERSION" "$dist/deploy.sh"
+          fi
           (cd "$dist" && sha256sum images.json "phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
             phala-cloud-template.yml deploy.sh >SHA256SUMS)
       - name: Attest the release assets
@@ -187,14 +270,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           dist="$RUNNER_TEMP/dist" notes="$RUNNER_TEMP/notes.md"
-          # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; an SDK
-          # release never is (release-sdks.yml), nor a pre-release.
+          # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; a
+          # pre-release never is. The SDK releases before v0.5.0, tagged sdk-js-v* and sdk-py-v*,
+          # were published with --latest=false and never were either.
           kind=(--latest)
           if [[ "$VERSION" == *-* ]]; then
             kind=(--prerelease --latest=false)
-            echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md." >"$notes"
+            echo "Pre-release of the changes under [Unreleased] in CHANGELOG.md, without the SDKs." >"$notes"
           else
-            sdk/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
+            scripts/changelog-section.sh CHANGELOG.md "$VERSION" >"$notes"
+            {
+              echo
+              echo "## SDKs"
+              echo
+              echo "[\`@phala/pay\` $VERSION](https://www.npmjs.com/package/@phala/pay/v/$VERSION) on npm and"
+              echo "[\`phala-pay\` $VERSION](https://pypi.org/project/phala-pay/$VERSION/) on PyPI."
+            } >>"$notes"
           fi
           {
             echo

@@ -5,8 +5,8 @@
 #   which holds exactly the names given a value (no SENTRY_DSN), written under $XDG_RUNTIME_DIR, and
 #   prints its gateway URL without waiting for an instance id or the attestation;
 # - the custom domain, verified by SHA256SUMS, writes the environment directory with a generated
-#   admin key (the pinned Python SDK), provisions the service variant, upgrades it to its node's
-#   gateway without an env, and prints the DNS records, the TXT record's instance id from the
+#   admin key (the release's own Python SDK), provisions the service variant, upgrades it to its
+#   node's gateway without an env, and prints the DNS records, the TXT record's instance id from the
 #   attestation's event log, once the attested app-compose carries the rendered compose and the
 #   API's compose hash is its hash;
 # - a custom domain whose CVM reports another compose hash than its own app-compose's, or attests
@@ -44,8 +44,10 @@ jq -n '{"phala-pay": "ghcr.io/phala-network/phala-pay@sha256:\("1" * 64)",
     >"$assets/images.json"
 "$root/deploy/render.sh" --template --images "$assets/images.json" \
     "$root/deploy/environments/phala-cloud-template/topup" >"$assets/phala-cloud-template.yml"
-sed "s/^release=latest\$/release=$version/" "$root/deploy/deploy.sh" >"$assets/deploy.sh"
+sed -e "s/^release=latest\$/release=$version/" -e "s/^sdk=phala-pay==.*\$/sdk=phala-pay==${version#v}/" \
+    "$root/deploy/deploy.sh" >"$assets/deploy.sh"
 grep -qx "release=$version" "$assets/deploy.sh" || fail "the release's deploy.sh does not name it"
+grep -qx "sdk=phala-pay==${version#v}" "$assets/deploy.sh" || fail "the release's deploy.sh does not pin its SDK"
 (cd "$assets" && sha256sum images.json "phala-pay-deploy-$version.tar.gz" phala-cloud-template.yml deploy.sh \
     >SHA256SUMS)
 # The pinned Compose, fetched once before curl is stubbed.
@@ -96,9 +98,9 @@ case "$1" in info | pull) ;; *) exit 1 ;; esac
 STUB
 cat >"$bin/uvx" <<'STUB'
 #!/usr/bin/env bash
-# uvx --from phala-pay==0.3.0 topup-sdk keygen --keyid ID --seed-out FILE
+# uvx --from phala-pay==9.9.9 topup-sdk keygen --keyid ID --seed-out FILE: the release's own SDK.
 echo "uvx $*" >>"$STUB_LOG"
-[[ "$*" == "--from phala-pay==0.3.0 topup-sdk keygen --keyid admin/v1 --seed-out "* ]] || exit 1
+[[ "$*" == "--from phala-pay==9.9.9 topup-sdk keygen --keyid admin/v1 --seed-out "* ]] || exit 1
 (umask 077 && echo "seed-never-printed" >"${@: -1}")
 echo '{"keyid": "admin/v1", "public_key": "23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo="}'
 STUB

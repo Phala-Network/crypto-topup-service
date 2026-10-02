@@ -99,8 +99,8 @@ through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workfl
 
 ### Releases
 
-A release is a `v<version>` tag of Phala Pay on a commit of `main`, the Cargo workspace version
-([CONTRIBUTING.md, "Releasing the service"](../CONTRIBUTING.md#releasing-the-service)).
+A release is a `v<version>` tag of Phala Pay on a commit of `main`, the Cargo workspace version,
+which the SDKs share ([CONTRIBUTING.md, "Releasing"](../CONTRIBUTING.md#releasing)).
 **Prerequisites (repository settings, HUMAN-ONLY, admin; both in place):** a `refs/tags/v*`
 ruleset restricting creation, update, and deletion to admins, and immutable releases, so a
 published `v<version>` always names the same commit and assets.
@@ -113,13 +113,16 @@ verify-image` rebuilds the same way), pushes it to `ghcr.io/phala-network/` tagg
 BuildKit reports for the push (`--metadata-file`), never by the tag.
 `phala-pay` and `phala-pay-reference-product` are reproducible: the pushed build must have the
 digest of an earlier build, and anyone rebuilds it from the tag. `postgres-walg` is not (apt and
-dpkg timestamps): it has provenance only. The GitHub release's assets, each attested, are:
+dpkg timestamps): it has provenance only. A stable release then publishes the SDKs at its version,
+`@phala/pay` to npm and `phala-pay` to PyPI, with trusted publishing. The GitHub release's assets,
+each attested, are:
 
 - `images.json`, each image's `repository@sha256` by name ([render.sh](render.sh)'s `--images`);
 - the deploy kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): `LICENSE`,
   `deploy/`, and `docs/` of the tag, a tar identical to their `git archive`);
 - `phala-cloud-template.yml` ([The Phala Cloud template variant](#the-phala-cloud-template-variant));
-- `deploy.sh`, [deploy.sh](deploy.sh) set to deploy this release, the one-command deploy that
+- `deploy.sh`, [deploy.sh](deploy.sh) set to deploy this release (and, from v0.5.0, to generate
+  an admin key with its Python SDK), the one-command deploy that
   `https://pay.phala.com/deploy.sh` (the latest release) and `/deploy/v<version>.sh` redirect to
   ([self-hosting, "One-command deploy"](../docs/self-hosting.md#one-command-deploy));
 - `SHA256SUMS`.

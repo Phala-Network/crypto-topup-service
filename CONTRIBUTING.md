@@ -109,6 +109,7 @@ make sdk-check                                  # Python: ruff, mypy --strict, p
 make sdk-generate                               # Python: regenerate the client after an openapi.json change
 (cd sdk/js && pnpm install && pnpm run check)   # TypeScript: typecheck, lint, unit tests, and build
 (cd sdk/js && pnpm run e2e:docker)              # TypeScript: the browser end-to-end tests on Anvil
+scripts/version.sh                              # Both: the SDKs name the Cargo workspace version
 ```
 
 A pull request that changes `crates/topup/openapi.json` regenerates the Python client in the same
@@ -159,8 +160,8 @@ code comments, runbooks, and Sentry alerts link to some of them.
 - Keep each pull request to one change, and fill in the
   [pull request template](.github/PULL_REQUEST_TEMPLATE.md): what changed, the specification
   sections it implements, and the verification commands you ran with their results.
-- Record integrator-visible API or webhook changes in [CHANGELOG.md](CHANGELOG.md) under
-  `## [Unreleased]`, and SDK changes in the SDK's own changelog (see [Releasing an SDK](#releasing-an-sdk)).
+- Record integrator-visible API, webhook, and SDK changes in [CHANGELOG.md](CHANGELOG.md) under
+  `## [Unreleased]` (see [Releasing](#releasing)).
 
 ## Code conventions
 
@@ -229,23 +230,35 @@ twice and checks that the digests match, as the Release workflow does before it 
 6. Migrations are additive and reversible; append-only tables have no update or delete path.
 7. The pull request names the verification commands actually run and their results.
 
-## Releases
+## Releasing
 
-### Releasing the service
+The service, its images, and its deployment files, and both SDKs, `@phala/pay` (sdk/js) and
+`phala-pay` (sdk/python), share one version and are released together as `v<version>`, under
+[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html): while the major version is 0, a
+breaking change bumps the minor version. Every release publishes both SDKs at its version, changed
+or not, so an integrator uses the SDK version equal to the operator's service version
+([integration guide, §5.9](docs/integration.md#59-versioning-and-deprecation)). Operators deploy
+releases, never a commit ([deploy/README.md, "Releases"](deploy/README.md#releases)).
 
-The service, its images, and its deployment files are released together as `v<version>`, the
-Cargo workspace version, under [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+The version's one source is the Cargo workspace version (`version` under `[workspace.package]` in
+`Cargo.toml`). `scripts/version.sh` prints it and fails unless `sdk/js/package.json`,
+`sdk/python/pyproject.toml`, and `sdk/python/uv.lock` name it too, as CI checks;
+`scripts/version.sh <version>` sets it in all of them and in `Cargo.lock`.
+
 The top-level [CHANGELOG.md](CHANGELOG.md) follows
-[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/); a pull request that changes what
-integrators or operators see adds its entry under `## [Unreleased]`. Operators deploy releases,
-never a commit ([deploy/README.md, "Releases"](deploy/README.md#releases)).
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). A pull request that changes what
+integrators or operators see adds its entry under `## [Unreleased]`, in `Added`, `Changed`,
+`Deprecated`, `Removed`, `Fixed`, or `Security`, and marks breaking changes **Breaking**; an SDK
+change goes under ``### JS SDK (`@phala/pay`)`` or ``### Python SDK (`phala-pay`)``, below the
+service's entries, in the same kinds one level down (`#### Added`). The SDKs' releases before
+v0.5.0, versioned on their own, stay in their frozen `sdk/js/CHANGELOG.md` and
+`sdk/python/CHANGELOG.md`.
 
-1. Open a release pull request, `chore(release): v<version>`, that sets `version` under
-   `[workspace.package]` in `Cargo.toml` (and runs `cargo update -w` for `Cargo.lock`), regenerates
-   the OpenAPI snapshots, whose `info.version` is the crate version
-   (`UPDATE_OPENAPI=1 cargo test -p topup --test api openapi_snapshot`), renames `## [Unreleased]`
-   in `CHANGELOG.md` to `## [<version>] - <YYYY-MM-DD>` above a new empty `## [Unreleased]`, and
-   updates the link references at its end:
+1. Open a release pull request, `chore(release): v<version>`, that runs
+   `scripts/version.sh <version>`, regenerates the OpenAPI snapshots, whose `info.version` is the
+   crate version (`UPDATE_OPENAPI=1 cargo test -p topup --test api openapi_snapshot`), renames
+   `## [Unreleased]` in `CHANGELOG.md` to `## [<version>] - <YYYY-MM-DD>` above a new empty
+   `## [Unreleased]`, and updates the link references at its end:
 
    ```markdown
    [unreleased]: https://github.com/Phala-Network/phala-pay/compare/v<version>...HEAD
@@ -260,52 +273,25 @@ never a commit ([deploy/README.md, "Releases"](deploy/README.md#releases)).
    ```
 
 3. [Release](.github/workflows/release.yml) checks that the tag is a commit of `main`, that it
-   names the Cargo workspace version, and that a stable version has its dated changelog section,
-   and runs the whole CI workflow on the commit. Then, on GitHub-hosted runners, it builds each
-   image with `deploy/verify-image.sh` (`phala-pay` and the reference product must build to the same
-   digest twice; `postgres-walg` is built once), pushes it tagged `v<version>`, and attests it.
-   Last, it builds the deploy kit with `deploy/build-kit.sh`, renders every environment with it and
-   the Phala Cloud template's compose from it, and publishes the GitHub release `v<version>` with
-   `images.json`, the kit, `phala-cloud-template.yml`, and `SHA256SUMS`, each attested, and the
-   changelog section as its notes. `deploy/verify-release.sh v<version> DIR` verifies the result.
+   names the Cargo workspace version, which the SDKs name too, and that a stable version has its
+   dated changelog section, and runs the whole CI workflow on the commit, the SDKs' checks and
+   end-to-end tests included. Then, on GitHub-hosted runners, it builds each image with
+   `deploy/verify-image.sh` (`phala-pay` and the reference product must build to the same digest
+   twice; `postgres-walg` is built once), pushes it tagged `v<version>`, and attests it. Once
+   every image is published, it publishes the SDKs from the `npm` and `pypi` environments with
+   trusted publishing (npm provenance, PyPI attestations). Last, it builds the deploy kit with
+   `deploy/build-kit.sh`, renders every environment with it and the Phala Cloud template's
+   compose from it, and publishes the GitHub release `v<version>`, the Latest release, with
+   `images.json`, the kit, `phala-cloud-template.yml`, `deploy.sh` (whose admin key generation
+   uses this version's Python SDK), and `SHA256SUMS`, each attested, and the changelog section,
+   the SDKs' changes included, as its notes (`scripts/changelog-section.sh`).
+   `deploy/verify-release.sh v<version> DIR` verifies the result.
 4. Adopt it for Phala's instance: a pull request that sets the release in
    [deploy-phala.yml](.github/workflows/deploy-phala.yml) (`uses: …@v<version>` and `version`).
 
-A pre-release, `v<version>-rc.N`, is a candidate for Phala's staging: its pull request sets the
-Cargo workspace version to the same pre-release and adds no changelog section, and Release
-publishes it as a GitHub pre-release.
-
-### Releasing an SDK
-
-The SDKs, `@phala/pay` (sdk/js) and `phala-pay` (sdk/python), follow
-[Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html): while the major version is 0, a
-breaking change bumps the minor version. Each keeps a [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
-`CHANGELOG.md`; a pull request that changes an SDK adds its entry under `## [Unreleased]`, in
-`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, or `Security`, and marks breaking changes
-**Breaking**. The [integration guide](docs/integration.md#59-versioning-and-deprecation) has the
-versioning and deprecation policy.
-
-1. Open a release pull request, `chore(release): <package> <version>`, that sets the version in
-   `package.json` or `pyproject.toml`, renames `## [Unreleased]` to `## [<version>] - <YYYY-MM-DD>`
-   above a new empty `## [Unreleased]`, and updates the link references at the end of the
-   changelog (`sdk-py-v` for the Python SDK):
-
-   ```markdown
-   [unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-js-v<version>...HEAD
-   [<version>]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-js-v<version>
-   ```
-
-2. After it merges, a repository admin tags the merge commit on `main` (only admins may create
-   `sdk-js-v*` and `sdk-py-v*` tags):
-
-   ```sh
-   git tag sdk-js-v<version> <merge commit> && git push origin sdk-js-v<version>
-   ```
-
-3. [Release SDKs](.github/workflows/release-sdks.yml) checks that the tag names the version and
-   that the changelog has its dated section, runs the SDK's tests, publishes from the `npm` or
-   `pypi` environment with trusted publishing (npm provenance, PyPI attestations), and creates the
-   GitHub release with the changelog section as its notes (`sdk/changelog-section.sh`).
+A pre-release, `v<version>-rc.N`, is a candidate for Phala's staging: its pull request runs
+`scripts/version.sh <version>-rc.N` (which Python spells `<version>rcN`) and adds no changelog
+section, and Release publishes it as a GitHub pre-release of the service alone, without the SDKs.
 
 ## License
 

@@ -2,19 +2,12 @@
 
 <!-- markdownlint-disable-file MD024 -->
 
-All notable changes to `phala-pay` (formerly `crypto-topup-sdk`) are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the rules in
-[CONTRIBUTING.md](../../CONTRIBUTING.md#releasing-an-sdk); versions follow
+The releases of `phala-pay` (formerly `crypto-topup-sdk`) before v0.5.0, when it was versioned on
+its own and tagged `sdk-py-v<version>`. From v0.5.0 it shares the service's version, and its
+changes are recorded in the top-level [CHANGELOG.md](../../CHANGELOG.md), under "Python SDK". This
+file is no longer updated. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-
-- `ClientDepositAddressNetwork.typical_credit_seconds` (`topup_client`): the typical credit time at
-  the account's confirmation on the network's chain. Optional (`UNSET` when absent): it is absent
-  when the chain's tokens are credited at different confirmations, and a service of v0.3.5 or
-  earlier does not send it.
 
 ## [0.4.0] - 2026-10-01
 
@@ -365,7 +358,6 @@ Generated from OpenAPI `info.version` 0.1.0.
   rate locks, deposits, limits, refunds, and attestation.
 - `topup-sdk keygen` and `topup-sdk public-key` for credential issuance.
 
-[Unreleased]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.4.0...HEAD
 [0.4.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.3.0...sdk-py-v0.4.0
 [0.3.0]: https://github.com/Phala-Network/phala-pay/compare/sdk-py-v0.2.0...sdk-py-v0.3.0
 [0.2.0]: https://github.com/Phala-Network/phala-pay/releases/tag/sdk-py-v0.2.0
