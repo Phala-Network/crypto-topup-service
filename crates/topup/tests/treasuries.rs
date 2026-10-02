@@ -39,7 +39,7 @@ use topup_adapters::risk::oracle::SanctionsSource;
 use topup_core::deposit::{StepOutcome, WaitReason};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::RouteFile;
-use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
+use topup_core::screening::{SanctionsAnswer, SanctionsResult};
 use tower::ServiceExt;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create_in_profile, run_checked};
@@ -1303,10 +1303,16 @@ impl Fixture {
         // Two-decimal tokens at 1 USD, so a quote of 100 cents is 1 token, 100 atomic units.
         for route in &mut routes {
             route.asset.decimals = 2;
-            route.rate_lock.amount_decimals = 2;
-            route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));
-            route.screening.max_deposit_atomic = AtomicAmount::new(U256::from(1_000_000_u64));
-            route.screening.min_credit_minor = 1;
+            route.asset.quote_amount_decimals = 2;
+            route.merchant.min_deposit_atomic =
+                topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_u64)));
+            route.merchant.max_deposit_atomic =
+                topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_000_000_u64)));
+            route.merchant.min_amount = topup_core::route::Bounded::at(1);
+        }
+        let route_set = RouteSet::new(routes.clone()).map_err(anyhow::Error::msg)?;
+        for livemode in [false, true] {
+            seed::accept_all(pool, account.id, livemode, &route_set).await?;
         }
         Ok(Self {
             app: app(pool, routes.clone(), Arc::new(Clear), contracts)?,
@@ -1473,13 +1479,7 @@ impl Fixture {
         let route = self.routes.first().context("route")?;
         Ok(ScreenStep::new(
             self.pool.clone(),
-            [ScreenRoute::new(
-                route.route.clone(),
-                route.version,
-                route.screening.sanctions_oracle,
-                Bounds::from(&route.screening),
-                Arc::new(ClearPayers),
-            )],
+            [ScreenRoute::new(route.clone(), Arc::new(ClearPayers))],
         )?)
     }
 

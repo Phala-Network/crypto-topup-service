@@ -32,7 +32,7 @@ use topup_core::identity::{
 };
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::{ChainHeads, Confirmations, RouteFile};
-use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
+use topup_core::screening::{SanctionsAnswer, SanctionsResult};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use uuid::Uuid;
 
@@ -376,7 +376,7 @@ struct Scenario {
 impl Scenario {
     async fn setup(database: &TestDatabase) -> Result<Self> {
         let pool = database.app_pool.clone();
-        let (_, customer) = seed::create_account_and_customer(
+        let (account, customer) = seed::create_account_and_customer(
             &pool,
             &NewAccount {
                 livemode: false,
@@ -386,6 +386,7 @@ impl Scenario {
             "workspace-reorg",
         )
         .await?;
+        seed::accept_assets(&pool, account.id, false, CHAIN_ID, &["pha"]).await?;
         let mut route: RouteFile = serde_saphyr::from_str(
             &include_str!("fixtures/phala-cloud-pha.yaml")
                 .replace("chain_id: 1", &format!("chain_id: {CHAIN_ID}"))
@@ -397,9 +398,10 @@ impl Scenario {
         )?;
         route.chain.confirmations = Confirmations::Depth(2);
         route.asset.decimals = 0;
-        route.rate_lock.amount_decimals = 0;
-        route.screening.min_credit_minor = 1;
-        route.screening.min_deposit_atomic = AtomicAmount::new(U256::ZERO);
+        route.asset.quote_amount_decimals = 0;
+        route.merchant.min_amount = topup_core::route::Bounded::at(1);
+        route.merchant.min_deposit_atomic =
+            topup_core::route::Bounded::at(AtomicAmount::new(U256::ZERO));
         route.validate()?;
         let issue = |byte: u8| {
             let pool = pool.clone();
@@ -445,13 +447,7 @@ impl Scenario {
         );
         let screen = ScreenStep::new(
             pool.clone(),
-            [ScreenRoute::new(
-                route.route.clone(),
-                route.version,
-                route.screening.sanctions_oracle,
-                Bounds::from(&route.screening),
-                Arc::new(ClearSanctions),
-            )],
+            [ScreenRoute::new(route.clone(), Arc::new(ClearSanctions))],
         )?;
         let pump = Pump::new(
             pool.clone(),
@@ -671,13 +667,16 @@ impl Scenario {
             UPDATE quotes
             SET route = $2, amount_atomic = $3::text::numeric, price_scaled = 9000000,
                 expires_at = now() + interval '1 hour', credit_minor = 900, status = 'open',
-                exposure_reserved = true, closed_at = NULL
+                exposure_reserved = true, closed_at = NULL, terms = $4
             WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
             "#,
         )
         .bind(self.recipient_id)
         .bind(&self.route.route)
         .bind(amount.to_string())
+        .bind(sqlx::types::Json(topup::payment_config::Terms::defaults(
+            &self.route,
+        )))
         .execute(&self.pool)
         .await?;
         Ok(())

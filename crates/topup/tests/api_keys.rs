@@ -1368,6 +1368,7 @@ async fn restricted_keys_hold_only_their_grants() -> Result<()> {
         // What the runtime key reaches.
         for path in [
             "/v1/account",
+            "/v1/payment_settings",
             "/v1/config",
             "/v1/quotes",
             "/v1/deposit_addresses",
@@ -1428,10 +1429,11 @@ async fn restricted_keys_hold_only_their_grants() -> Result<()> {
                 "/v1/account/webhook_keys/roll".to_owned(),
                 Some(json!({"expires_in": 0})),
             ),
+            // A restricted key reads the payment settings but never widens what is accepted.
             (
                 Method::POST,
-                "/v1/account".to_owned(),
-                Some(json!({"confirmation_policies": []})),
+                "/v1/payment_settings".to_owned(),
+                Some(json!({"chains": []})),
             ),
             (
                 Method::POST,

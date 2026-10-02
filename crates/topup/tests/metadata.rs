@@ -141,6 +141,7 @@ async fn metadata_is_set_merged_unset_and_copied_from_quote_to_deposit() -> Resu
         )
         .await?;
         seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
+        seed::accept_routes(pool, account.id, true, &[&test_route()]).await?;
         let route = test_route();
         let merchant = Merchant {
             app: router(pool, &route)?,
@@ -486,10 +487,13 @@ fn test_route() -> RouteFile {
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
             .expect("route fixture");
     route.asset.decimals = 2;
-    route.rate_lock.amount_decimals = 2;
-    route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
-    route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));
-    route.screening.max_deposit_atomic = AtomicAmount::new(U256::from(1_000_000_u64));
-    route.screening.min_credit_minor = 1;
+    route.asset.quote_amount_decimals = 2;
+    route.merchant.quote_spread_bps =
+        topup_core::route::Bounded::at(topup_core::money::Bps::new(0).expect("zero bps"));
+    route.merchant.min_deposit_atomic =
+        topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_u64)));
+    route.merchant.max_deposit_atomic =
+        topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_000_000_u64)));
+    route.merchant.min_amount = topup_core::route::Bounded::at(1);
     route
 }

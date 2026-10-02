@@ -41,7 +41,7 @@ use topup_core::deposit::DepositState;
 use topup_core::identity::{credited_event_id, deposit_id, reversed_event_id};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
 use topup_core::route::{ChainFamily, ChainHeads, Confirmations, RouteFile};
-use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
+use topup_core::screening::{SanctionsAnswer, SanctionsResult};
 use topup_core::valuation::{SourceId, UnixSeconds};
 use tracing_test::traced_test;
 use uuid::Uuid;
@@ -338,6 +338,7 @@ async fn payments_to_active_and_retired_deposit_addresses_are_credited_at_spot()
                 "team-da",
             )
             .await?;
+            seed::accept_routes(&chain.pool, account.id, false, &[&chain.route]).await?;
             seed::set_treasury(
                 &chain.pool,
                 account.id,
@@ -410,6 +411,7 @@ async fn a_treasury_change_moves_the_chains_address_and_the_old_address_still_cr
                 "team-tc",
             )
             .await?;
+            seed::accept_routes(&chain.pool, account.id, false, &[&chain.route]).await?;
             let chain_id = chain.route.chain.chain_id;
             seed::set_treasury(
                 &chain.pool,
@@ -988,9 +990,10 @@ impl FastChain {
         )?;
         route.chain.confirmations = network.confirmations;
         route.asset.decimals = 2;
-        route.rate_lock.amount_decimals = 2;
-        route.screening.min_credit_minor = 1;
-        route.screening.min_deposit_atomic = AtomicAmount::new(U256::ZERO);
+        route.asset.quote_amount_decimals = 2;
+        route.merchant.min_amount = topup_core::route::Bounded::at(1);
+        route.merchant.min_deposit_atomic =
+            topup_core::route::Bounded::at(AtomicAmount::new(U256::ZERO));
         route.validate()?;
         let route_set = Arc::new(RouteSet::new(vec![route.clone()]).map_err(anyhow::Error::msg)?);
         let routes = chain_routes(&route_set)
@@ -1017,13 +1020,7 @@ impl FastChain {
         );
         let screen = ScreenStep::new(
             pool.clone(),
-            [ScreenRoute::new(
-                route.route.clone(),
-                route.version,
-                route.screening.sanctions_oracle,
-                Bounds::from(&route.screening),
-                Arc::new(ClearSanctions),
-            )],
+            [ScreenRoute::new(route.clone(), Arc::new(ClearSanctions))],
         )?;
         let pump = Pump::new(
             pool.clone(),
@@ -1304,13 +1301,16 @@ impl FastChain {
             UPDATE quotes
             SET route = $2, amount_atomic = $3::text::numeric, price_scaled = 9000000,
                 expires_at = now() + interval '1 hour', credit_minor = 90, status = 'open',
-                exposure_reserved = true, closed_at = NULL
+                exposure_reserved = true, closed_at = NULL, terms = $4
             WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)
             "#,
         )
         .bind(self.address_id)
         .bind(&self.route.route)
         .bind(AMOUNT.to_string())
+        .bind(sqlx::types::Json(topup::payment_config::Terms::defaults(
+            &self.route,
+        )))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1377,7 +1377,7 @@ fn labeled_reader(rpc_url: &str, label: &str, chain_id: u64) -> Result<Finalized
 }
 
 async fn seed_address(pool: &PgPool, chain_id: u64) -> Result<(Uuid, Uuid, Address)> {
-    let (_, customer) = seed::create_account_and_customer(
+    let (account, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
             livemode: false,
@@ -1387,6 +1387,7 @@ async fn seed_address(pool: &PgPool, chain_id: u64) -> Result<(Uuid, Uuid, Addre
         "workspace-fast",
     )
     .await?;
+    seed::accept_assets(pool, account.id, false, chain_id, &["pha"]).await?;
     let (address_id, address) = issue_address(pool, chain_id, customer.id, 0x5a).await?;
     Ok((customer.id, address_id, address))
 }

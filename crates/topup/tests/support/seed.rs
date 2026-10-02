@@ -56,6 +56,87 @@ pub struct NewAddress {
     pub address: EvmAddress,
 }
 
+/// Writes `document` as the account's payment settings in `livemode`, as `POST
+/// /v1/payment_settings` does; a new account accepts nothing until it is configured.
+pub async fn configure_payments(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    document: &topup::payment_config::Document,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    topup::payment_config::write(
+        &mut transaction,
+        topup::tenancy::Scope::new(account_id, livemode),
+        document,
+        "test",
+    )
+    .await?;
+    transaction.commit().await
+}
+
+/// Configures the account to accept the asset of each of `routes` in `livemode`, on the
+/// operator's defaults.
+pub async fn accept_routes(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    routes: &[&topup_core::route::RouteFile],
+) -> Result<(), sqlx::Error> {
+    configure_payments(
+        pool,
+        account_id,
+        livemode,
+        &topup::payment_config::Document::accepting(routes.iter().copied()),
+    )
+    .await
+}
+
+/// Configures the account to accept `assets` on `chain_id` in `livemode`, on the operator's
+/// defaults.
+pub async fn accept_assets(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    chain_id: u64,
+    assets: &[&str],
+) -> Result<(), sqlx::Error> {
+    configure_payments(
+        pool,
+        account_id,
+        livemode,
+        &topup::payment_config::Document {
+            quote_creations_per_customer_per_minute: None,
+            chains: vec![topup::payment_config::ChainChoice {
+                chain_id,
+                confirmations: None,
+                assets: assets
+                    .iter()
+                    .map(|asset| topup::payment_config::AssetChoice::on_defaults(*asset))
+                    .collect(),
+            }],
+        },
+    )
+    .await
+}
+
+/// Configures the account to accept every current route of `livemode` in `routes`, on the
+/// operator's defaults.
+pub async fn accept_all(
+    pool: &PgPool,
+    account_id: Uuid,
+    livemode: bool,
+    routes: &topup::routes::RouteSet,
+) -> Result<(), sqlx::Error> {
+    configure_payments(
+        pool,
+        account_id,
+        livemode,
+        &topup::payment_config::Document::accepting_all(routes, livemode),
+    )
+    .await
+}
+
 /// Inserts a secret key of the account in the given mode and returns the key.
 pub async fn create_api_key(
     pool: &PgPool,
@@ -153,6 +234,15 @@ pub async fn create_account_and_customer(
     Ok((account_row, customer))
 }
 
+/// The terms a seeded quote is stored with: the fixture route's defaults. Seeded quotes are
+/// canceled, so their terms are only shown.
+pub fn fixture_terms() -> topup::payment_config::Terms {
+    let route: topup_core::route::RouteFile =
+        serde_saphyr::from_str(include_str!("../fixtures/phala-cloud-pha.yaml"))
+            .expect("route fixture");
+    topup::payment_config::Terms::defaults(&route)
+}
+
 pub async fn insert_address(pool: &PgPool, address: &NewAddress) -> Result<Address, sqlx::Error> {
     let chain_id = i64::try_from(address.chain_id).map_err(|error| encode_error(&error))?;
     let quote_id = Uuid::new_v4();
@@ -161,16 +251,21 @@ pub async fn insert_address(pool: &PgPool, address: &NewAddress) -> Result<Addre
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-            credit_minor, expires_at, status, closed_at
+            credit_minor, expires_at, status, closed_at, route_version, settings_revision_id,
+            terms
         )
-        SELECT $1, account_id, livemode, id, $3, 1, 100000000, 1, now(), 'cancelled', now()
-        FROM customers
-        WHERE id = $2
+        SELECT $1, customer.account_id, customer.livemode, customer.id, $3, 1, 100000000, 1,
+               now(), 'cancelled', now(), 1, settings.current_revision_id, $4
+        FROM customers AS customer
+        JOIN payment_settings_state AS settings
+            ON settings.account_id = customer.account_id AND settings.livemode = customer.livemode
+        WHERE customer.id = $2
         "#,
     )
     .bind(quote_id)
     .bind(address.customer_id)
     .bind(&address.route)
+    .bind(sqlx::types::Json(fixture_terms()))
     .execute(&mut *transaction)
     .await?;
     sqlx::query(

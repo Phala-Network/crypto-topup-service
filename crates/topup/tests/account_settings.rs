@@ -1,6 +1,6 @@
-//! The account's own settings through the API (docs/design/multi-tenant.md D1, §12): a
-//! confirmation policy stricter than a route's floor, reported by `GET /v1/config`, and the
-//! merchant's own `quotes` pause, which never lifts the operator's.
+//! The account's own settings through the API: its payment settings (docs/design/payment-settings.md),
+//! which accept nothing until configured, bound the merchant's terms, and feed `GET /v1/config`;
+//! and the merchant's own `quotes` pause, which never lifts the operator's.
 
 mod support;
 
@@ -23,87 +23,292 @@ use support::{TEST_ORIGIN, merchant_request, public_key_base64, with_database};
 const TEST_CHAIN: u64 = 11_155_111;
 
 #[tokio::test]
-async fn a_confirmation_policy_is_only_ever_stricter_and_config_reports_it() -> Result<()> {
+async fn a_new_account_accepts_nothing_until_it_configures_its_payment_settings() -> Result<()> {
     with_database(|database| {
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
-            let asset = fixture.config_asset().await?;
-            ensure!(asset["confirmations"] == "2" && asset["typical_credit_seconds"] == 30);
+            let (status, settings) = fixture
+                .request(Method::GET, "/v1/payment_settings", Value::Null)
+                .await?;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(settings["status"] == "unconfigured" && settings["chains"] == json!([]));
+            ensure!(settings["available"][0]["status"] == "not_configured", "{settings}");
+            ensure!(settings["available"][0]["assets"][0]["accepted"] == false);
+            ensure!(fixture.config_assets().await?.is_empty());
+            ensure!(fixture.quote_error().await? == "asset_not_accepted");
+            let (status, body) = fixture
+                .post(
+                    "/v1/deposit_addresses",
+                    json!({"client_reference_id": "team-42"}),
+                )
+                .await?;
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
+            ensure!(body["error"]["code"] == "asset_not_accepted", "{body}");
 
+            // Accepting the asset offers it with the merchant's terms, within the route's bounds.
+            let (status, settings) = fixture
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "confirmations": "12",
+                                       "assets": [{"asset": "pha", "quote_spread_bps": 100}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(settings["status"] == "configured", "{settings}");
+            ensure!(
+                settings["chains"]
+                    == json!([{"chain_id": 1, "confirmations": "12",
+                               "assets": [{"asset": "pha", "quote_ttl_seconds": null,
+                                           "quote_spread_bps": 100, "quote_tolerance_bps": null,
+                                           "min_amount": null, "min_deposit_atomic": null,
+                                           "max_deposit_atomic": null, "min_refund_atomic": null}]}]),
+                "{settings}"
+            );
+            ensure!(settings["available"][0]["status"] == "active");
+            let assets = fixture.config_assets().await?;
+            ensure!(assets.len() == 1, "{assets:?}");
+            ensure!(assets[0]["confirmations"] == "12" && assets[0]["typical_credit_seconds"] == 150);
+            ensure!(assets[0]["quote_spread_bps"] == 100 && assets[0]["quote_ttl_seconds"] == 900);
+            ensure!(fixture.quote_error().await? == "unavailable");
+
+            // Each change is one revision and one `payment_settings.updated` in the key's mode, with
+            // what changed; a repeat writes nothing.
+            let revision = settings["revision"].clone();
+            let (status, repeated) = fixture
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "confirmations": "12",
+                                       "assets": [{"asset": "pha", "quote_spread_bps": 100}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK && repeated["revision"] == revision);
+            let (status, changed) = fixture
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK && changed["revision"] != revision);
+            let events: Vec<(bool, Value)> = sqlx::query_as(
+                "SELECT livemode, data FROM events \
+                 WHERE account_id = $1 AND type = 'payment_settings.updated' ORDER BY created, id",
+            )
+            .bind(fixture.account.id)
+            .fetch_all(pool)
+            .await?;
+            ensure!(events.len() == 2 && events.iter().all(|(livemode, _)| *livemode));
+            ensure!(events[0].1["previous_attributes"]["status"] == "unconfigured");
+            ensure!(events[1].1["previous_attributes"]["chains"][0]["confirmations"] == "12");
+            ensure!(fixture.config_assets().await?[0]["confirmations"] == "2");
+
+            // `[]` accepts nothing again.
+            let (status, cleared) = fixture
+                .post("/v1/payment_settings", json!({"chains": []}))
+                .await?;
+            ensure!(status == StatusCode::OK && cleared["status"] == "configured");
+            ensure!(fixture.config_assets().await?.is_empty());
+            ensure!(fixture.quote_error().await? == "asset_not_accepted");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn payment_settings_are_validated_against_the_catalog_and_its_bounds() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let asset = |extra: Value| {
+                let mut asset = json!({"asset": "pha"});
+                if let (Some(asset), Some(extra)) = (asset.as_object_mut(), extra.as_object()) {
+                    asset.extend(extra.clone());
+                }
+                json!({"chains": [{"chain_id": 1, "assets": [asset]}]})
+            };
+            for (request, param, message) in [
+                (
+                    json!({"chains": [{"chain_id": TEST_CHAIN, "assets": [{"asset": "pha"}]}]}),
+                    "chains[0][chain_id]",
+                    "not a chain of the key's mode",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "assets": [{"asset": "usdc"}]}]}),
+                    "chains[0][assets][0][asset]",
+                    "routed: pha",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]},
+                                      {"chain_id": 1, "assets": [{"asset": "pha"}]}]}),
+                    "chains[1][chain_id]",
+                    "once",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}, {"asset": "pha"}]}]}),
+                    "chains[0][assets][1][asset]",
+                    "once",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "assets": []}]}),
+                    "chains[0][assets]",
+                    "at least one",
+                ),
+                // Weaker than the floor, of another chain family, or malformed.
+                (
+                    json!({"chains": [{"chain_id": 1, "confirmations": "1", "assets": [{"asset": "pha"}]}]}),
+                    "chains[0][confirmations]",
+                    "floor",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "confirmations": "safe", "assets": [{"asset": "pha"}]}]}),
+                    "chains[0][confirmations]",
+                    "Ethereum",
+                ),
+                (
+                    json!({"chains": [{"chain_id": 1, "confirmations": "02", "assets": [{"asset": "pha"}]}]}),
+                    "chains[0][confirmations]",
+                    "depth",
+                ),
+                // Outside the route's bounds.
+                (
+                    asset(json!({"quote_spread_bps": 600})),
+                    "chains[0][assets][0][quote_spread_bps]",
+                    "between 0 and 500",
+                ),
+                (
+                    asset(json!({"quote_ttl_seconds": 10})),
+                    "chains[0][assets][0][quote_ttl_seconds]",
+                    "between 30 and 3600",
+                ),
+                (
+                    asset(json!({"min_amount": 50})),
+                    "chains[0][assets][0][min_amount]",
+                    "between 100",
+                ),
+                (
+                    asset(json!({"min_refund_atomic": "1"})),
+                    "chains[0][assets][0][min_refund_atomic]",
+                    "between 20 and 20",
+                ),
+                (
+                    asset(json!({"max_deposit_atomic": "1e3"})),
+                    "chains[0][assets][0][max_deposit_atomic]",
+                    "decimal string",
+                ),
+                // Terms that cannot be used together.
+                (
+                    asset(json!({"min_deposit_atomic": "200000000000000000000000",
+                                 "max_deposit_atomic": "100"})),
+                    "chains[0][assets][0]",
+                    "min_deposit_atomic exceeds max_deposit_atomic",
+                ),
+                (
+                    json!({"quote_creations_per_customer_per_minute": 61}),
+                    "quote_creations_per_customer_per_minute",
+                    "between 1 and 60",
+                ),
+            ] {
+                let (status, body) = fixture.post("/v1/payment_settings", request.clone()).await?;
+                ensure!(status == StatusCode::BAD_REQUEST, "{request}: {body}");
+                ensure!(body["error"]["param"] == param, "{request}: {body}");
+                ensure!(
+                    body["error"]["message"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(message)),
+                    "{request}: {body}"
+                );
+            }
+            let (_, settings) = fixture
+                .request(Method::GET, "/v1/payment_settings", Value::Null)
+                .await?;
+            ensure!(settings["status"] == "unconfigured", "nothing was written: {settings}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_chain_is_offered_only_with_both_its_settings_and_a_treasury() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            // The test mode's chain is configured, but has no treasury yet.
+            let test_key = seed::create_api_key(pool, fixture.account.id, false).await?;
+            let (status, settings) = fixture
+                .request_with(
+                    &test_key,
+                    Method::POST,
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": TEST_CHAIN, "assets": [{"asset": "pha"}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(settings["livemode"] == false);
+            ensure!(
+                settings["available"][0]["status"] == "treasury_not_set",
+                "{settings}"
+            );
+            let (_, config) = fixture
+                .request_with(&test_key, Method::GET, "/v1/config", Value::Null)
+                .await?;
+            ensure!(config["assets"] == json!([]), "{config}");
+            let (status, body) = fixture
+                .request_with(
+                    &test_key,
+                    Method::POST,
+                    "/v1/quotes",
+                    json!({"client_reference_id": "team-42", "amount": 1000, "currency": "usd",
+                           "chain_id": TEST_CHAIN, "asset": "pha"}),
+                )
+                .await?;
+            ensure!(status == StatusCode::BAD_REQUEST, "{body}");
+            ensure!(body["error"]["code"] == "treasury_not_set", "{body}");
+
+            // With a treasury the chain is active; the live mode's settings are untouched.
+            seed::set_treasury(
+                pool,
+                fixture.account.id,
+                false,
+                TEST_CHAIN,
+                seed::FIXTURE_TREASURY,
+            )
+            .await?;
+            let (_, settings) = fixture
+                .request_with(&test_key, Method::GET, "/v1/payment_settings", Value::Null)
+                .await?;
+            ensure!(settings["available"][0]["status"] == "active", "{settings}");
+            let (_, config) = fixture
+                .request_with(&test_key, Method::GET, "/v1/config", Value::Null)
+                .await?;
+            ensure!(config["assets"][0]["chain_id"] == TEST_CHAIN, "{config}");
+            ensure!(fixture.config_assets().await?.is_empty());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn the_account_has_no_confirmation_policies_any_more() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let fixture = Fixture::new(&database.app_pool).await?;
             let (status, account) = fixture
+                .request(Method::GET, "/v1/account", Value::Null)
+                .await?;
+            ensure!(status == StatusCode::OK, "{account}");
+            ensure!(account.get("confirmation_policies").is_none(), "{account}");
+            let (status, body) = fixture
                 .post(
                     "/v1/account",
                     json!({"confirmation_policies": [{"chain_id": 1, "confirmations": "12"}]}),
                 )
                 .await?;
-            ensure!(status == StatusCode::OK, "{account}");
-            ensure!(
-                account["confirmation_policies"] == json!([{"chain_id": 1, "confirmations": "12"}]),
-                "{account}"
-            );
-            let asset = fixture.config_asset().await?;
-            ensure!(asset["confirmations"] == "12" && asset["typical_credit_seconds"] == 150);
-            let (status, account) = fixture
-                .post(
-                    "/v1/account",
-                    json!({"confirmation_policies": [{"chain_id": 1, "confirmations": "finalized"}]}),
-                )
-                .await?;
-            ensure!(status == StatusCode::OK, "{account}");
-            ensure!(fixture.config_asset().await?["confirmations"] == "finalized");
-            let stored: String = sqlx::query_scalar(
-                "SELECT required FROM confirmation_policies WHERE account_id = $1 AND chain_id = 1",
-            )
-            .bind(fixture.account.id)
-            .fetch_one(pool)
-            .await?;
-            ensure!(stored == "finalized");
-
-            // Weaker than the route, of another chain family, malformed, another mode's chain, or
-            // listed twice: refused, naming the entry.
-            for (policies, param) in [
-                (json!([{"chain_id": 1, "confirmations": "1"}]), "confirmation_policies[0][confirmations]"),
-                (json!([{"chain_id": 1, "confirmations": "safe"}]), "confirmation_policies[0][confirmations]"),
-                (json!([{"chain_id": 1, "confirmations": "02"}]), "confirmation_policies[0][confirmations]"),
-                (json!([{"chain_id": TEST_CHAIN, "confirmations": "finalized"}]), "confirmation_policies[0][chain_id]"),
-                (
-                    json!([{"chain_id": 1, "confirmations": "3"}, {"chain_id": 1, "confirmations": null}]),
-                    "confirmation_policies[1][chain_id]",
-                ),
-            ] {
-                let (status, body) = fixture
-                    .post("/v1/account", json!({"confirmation_policies": policies}))
-                    .await?;
-                ensure!(status == StatusCode::BAD_REQUEST, "{policies}: {body}");
-                ensure!(body["error"]["param"] == param, "{body}");
-            }
-            ensure!(fixture.config_asset().await?["confirmations"] == "finalized");
-
-            // `null` removes it: the route's floor applies again.
-            let (status, account) = fixture
-                .post(
-                    "/v1/account",
-                    json!({"confirmation_policies": [{"chain_id": 1, "confirmations": null}]}),
-                )
-                .await?;
-            ensure!(status == StatusCode::OK && account["confirmation_policies"] == json!([]));
-            ensure!(fixture.config_asset().await?["confirmations"] == "2");
-            // Each effective change is announced once in the key's mode; repeats write nothing.
-            let (status, _) = fixture
-                .post(
-                    "/v1/account",
-                    json!({"confirmation_policies": [{"chain_id": 1, "confirmations": null}]}),
-                )
-                .await?;
-            ensure!(status == StatusCode::OK);
-            let events: Vec<bool> = sqlx::query_scalar(
-                "SELECT livemode FROM events WHERE account_id = $1 AND type = 'account.updated'",
-            )
-            .bind(fixture.account.id)
-            .fetch_all(pool)
-            .await?;
-            ensure!(events == vec![true; 3], "{events:?}");
+            ensure!(status == StatusCode::NOT_FOUND, "{body}");
             Ok(())
         })
     })
@@ -116,6 +321,7 @@ async fn a_merchant_pauses_its_own_quotes_and_never_lifts_the_operators_pause() 
         Box::pin(async move {
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
+            fixture.accept_the_live_route().await?;
             let (status, account) = fixture
                 .post("/v1/account/pause", json!({"scopes": ["quotes"]}))
                 .await?;
@@ -219,8 +425,9 @@ impl Fixture {
         })
     }
 
-    async fn request(
+    async fn request_with(
         &self,
+        key: &str,
         method: Method,
         path: &str,
         body: Value,
@@ -233,29 +440,45 @@ impl Fixture {
         let response = self
             .app
             .clone()
-            .oneshot(merchant_request(method, path, body, &self.live_key))
+            .oneshot(merchant_request(method, path, body, key))
             .await?;
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1_048_576).await?;
         Ok((status, serde_json::from_slice(&bytes)?))
     }
 
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Value,
+    ) -> Result<(StatusCode, Value)> {
+        self.request_with(&self.live_key, method, path, body).await
+    }
+
     async fn post(&self, path: &str, body: Value) -> Result<(StatusCode, Value)> {
         self.request(Method::POST, path, body).await
     }
 
-    async fn config_asset(&self) -> Result<Value> {
-        let (status, config) = self.request(Method::GET, "/v1/config", Value::Null).await?;
-        ensure!(status == StatusCode::OK, "{config}");
-        config["assets"]
-            .as_array()
-            .and_then(|assets| assets.first())
-            .cloned()
-            .context("one asset")
+    async fn accept_the_live_route(&self) -> Result<()> {
+        let (status, body) = self
+            .post(
+                "/v1/payment_settings",
+                json!({"chains": [{"chain_id": 1, "assets": [{"asset": "pha"}]}]}),
+            )
+            .await?;
+        ensure!(status == StatusCode::OK, "{body}");
+        Ok(())
     }
 
-    /// The error code of a quote request; pricing is unavailable in these tests, so an unpaused
-    /// request fails later with another code.
+    async fn config_assets(&self) -> Result<Vec<Value>> {
+        let (status, config) = self.request(Method::GET, "/v1/config", Value::Null).await?;
+        ensure!(status == StatusCode::OK, "{config}");
+        config["assets"].as_array().cloned().context("assets")
+    }
+
+    /// The error code of a quote request; pricing is unavailable in these tests, so an accepted,
+    /// unpaused request fails later with `unavailable`.
     async fn quote_error(&self) -> Result<String> {
         let (status, body) = self
             .post(

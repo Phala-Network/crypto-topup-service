@@ -146,6 +146,7 @@ impl Harness {
         .await?;
         let key = seed::create_api_key(&pool, account.id, true).await?;
         seed::set_treasury(&pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
+        seed::accept_routes(&pool, account.id, true, &[&route]).await?;
         // Set long before anything the tests issue over it.
         sqlx::query(
             "UPDATE treasuries SET applied_at = now() - interval '1 day' WHERE account_id = $1",
@@ -520,6 +521,13 @@ async fn record_deposit(
 
 /// Runs the confirm step once on the recorded deposit, the chain showing its transfer to
 /// `recipient` and spot at `spot` scaled dollars.
+/// The merchant reconfirms its payment settings after the unfreeze, as `POST /v1/payment_settings`
+/// does: the restore held them, and deposits recorded meanwhile wait for it.
+async fn reconfirm(harness: &Harness) -> Result<()> {
+    seed::accept_routes(&harness.pool, harness.account.id, true, &[&harness.route]).await?;
+    Ok(())
+}
+
 async fn confirm(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64) -> Result<()> {
     let step = confirm_step(harness, deposit, recipient, spot).await?;
     run_pump(
@@ -1879,6 +1887,7 @@ async fn a_delivered_credit_the_chain_contradicts_holds_the_deposit_until_discar
 
             // The confirm step holds it: not valued, not credited.
             let recipient = Address::from_str(&forwarder)?;
+            reconfirm(&harness).await?;
             confirm(&harness, deposit, recipient, 20_000_000).await?;
             let (state, attempt_error): (String, Option<String>) = sqlx::query_as(
                 "SELECT state, (SELECT evidence ->> 'error' FROM transitions \
@@ -2128,6 +2137,7 @@ async fn a_quote_given_out_after_the_restore_point_is_reissued_and_credited() ->
                 U256::from(10_u64).pow(U256::from(20)),
             )
             .await?;
+            reconfirm(&harness).await?;
             confirm(&harness, deposit, address, 8_000_000).await?;
             ensure!(
                 valuation(&harness, deposit).await?
@@ -2232,10 +2242,7 @@ async fn a_credit_delivered_by_the_service_round_trips_through_a_restore() -> Re
                 let screen = topup::steps::screen::ScreenStep::new(
                     harness.pool.clone(),
                     [topup::steps::screen::ScreenRoute::new(
-                        harness.route.route.clone(),
-                        harness.route.version,
-                        harness.route.screening.sanctions_oracle,
-                        topup_core::screening::Bounds::from(&harness.route.screening),
+                        harness.route.clone(),
                         Arc::new(ClearSanctions),
                     )],
                 )?;
@@ -2668,10 +2675,7 @@ impl Pipeline {
         let screen = topup::steps::screen::ScreenStep::new(
             harness.pool.clone(),
             [topup::steps::screen::ScreenRoute::new(
-                route.route.clone(),
-                route.version,
-                route.screening.sanctions_oracle,
-                topup_core::screening::Bounds::from(&route.screening),
+                route.clone(),
                 Arc::new(ClearSanctions),
             )],
         )?;
@@ -3077,10 +3081,7 @@ async fn credit(harness: &Harness, deposit: Uuid, recipient: Address, spot: u64)
         let screen = topup::steps::screen::ScreenStep::new(
             harness.pool.clone(),
             [topup::steps::screen::ScreenRoute::new(
-                harness.route.route.clone(),
-                harness.route.version,
-                harness.route.screening.sanctions_oracle,
-                topup_core::screening::Bounds::from(&harness.route.screening),
+                harness.route.clone(),
                 Arc::new(ClearSanctions),
             )],
         )?;
@@ -3448,6 +3449,7 @@ async fn addresses_paid_over_a_treasury_change_lost_in_the_restore_are_reissued_
                 record_deposit(&harness, tx_hash, reissued_address, U256::from(10_u64).pow(U256::from(20)))
                     .await?;
             ensure!(rederived == deposit);
+            reconfirm(&harness).await?;
             confirm(&harness, deposit, forwarder, 20_000_000).await?;
             let valued = valuation(&harness, deposit).await?;
             ensure!((&valued.2, &valued.3) == (&credited.2, &credited.3), "{valued:?}");

@@ -189,7 +189,10 @@ fn config_commands_validate_without_secrets_and_check_them_on_request() {
         resolved["rpc_providers"]["alchemy"],
         "https://eth-mainnet.g.alchemy.com/v2/{key}"
     );
-    assert_eq!(resolved["routes"][0]["quote"]["window_s"], 900);
+    assert_eq!(
+        resolved["routes"][0]["merchant"]["quote_ttl_seconds"]["default"],
+        900
+    );
     assert!(!String::from_utf8_lossy(&shown.stdout).contains("sealed-key"));
 
     let missing = Command::new(env!("CARGO_BIN_EXE_topup"))
@@ -396,7 +399,7 @@ fn route_show_prints_the_resolved_route_as_json() {
     assert!(output.status.success());
     let resolved: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("route show prints JSON");
-    assert_eq!(resolved["quote"]["window_s"], 900);
+    assert_eq!(resolved["merchant"]["quote_ttl_seconds"]["default"], 900);
 
     let invalid = topup(&["route", "show", "/definitely/missing/route.yaml"]);
     assert!(!invalid.status.success());

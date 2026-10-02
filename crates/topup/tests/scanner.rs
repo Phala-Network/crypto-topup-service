@@ -1006,8 +1006,8 @@ async fn run_confirm_scenario(
 
     let mut route: RouteFile = serde_saphyr::from_str(&std::fs::read_to_string(&fixture.path)?)?;
     route.asset.decimals = 2;
-    route.rate_lock.amount_decimals = 2;
-    route.screening.min_credit_minor = 1;
+    route.asset.quote_amount_decimals = 2;
+    route.merchant.min_amount = topup_core::route::Bounded::at(1);
     let now = u64::try_from(chrono::Utc::now().timestamp())?;
     let primary_price: Arc<dyn PriceSource> =
         Arc::new(FixedPrice(observation("coinmetrics", 10_000_000, now)));
@@ -1178,7 +1178,7 @@ fn current_block(rpc_url: &str) -> Result<u64> {
 
 /// Seeds an account and one customer, and returns the customer id.
 async fn seed_account(pool: &PgPool) -> Result<Uuid> {
-    let (_, customer) = seed::create_account_and_customer(
+    let (account, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
             livemode: false,
@@ -1188,6 +1188,7 @@ async fn seed_account(pool: &PgPool) -> Result<Uuid> {
         "workspace-scanner",
     )
     .await?;
+    seed::accept_assets(pool, account.id, false, CHAIN_ID, &["pha"]).await?;
     Ok(customer.id)
 }
 

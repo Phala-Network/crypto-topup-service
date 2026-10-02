@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use topup::api::{AppState, PublicOrigin, VerificationKey};
 use topup::db::{self, NewDeposit};
 use topup::deposit_addresses::MAX_ROTATIONS_PER_HOUR;
+use topup::payment_config::{AssetChoice, ChainChoice, Document};
 use topup_adapters::attestation::DstackAttestor;
 use topup_core::address::{deposit_address_salt, forwarder_address};
 use topup_core::deposit::{DepositState, RejectReason};
@@ -286,6 +287,7 @@ async fn other_accounts_and_modes_see_no_deposit_address() -> Result<()> {
             let stranger = seed::create_account(pool, &NewAccount::named("stranger")).await?;
             let stranger_key = seed::create_api_key(pool, stranger.id, true).await?;
             seed::set_treasury(pool, stranger.id, true, 1, seed::FIXTURE_TREASURY).await?;
+            seed::accept_routes(pool, stranger.id, true, &[&fixture.live_route]).await?;
             for key in [&stranger_key, &fixture.test_key] {
                 for (method, path) in [
                     (Method::GET, format!("/v1/deposit_addresses/{id}")),
@@ -608,9 +610,12 @@ async fn the_public_view_states_each_networks_credit_time() -> Result<()> {
             let (status, updated) = fixture
                 .request(
                     Method::POST,
-                    "/v1/account",
+                    "/v1/payment_settings",
                     &fixture.live_key,
-                    json!({"confirmation_policies": [{"chain_id": BASE, "confirmations": "finalized"}]}),
+                    json!({"chains": [
+                        {"chain_id": 1, "assets": [{"asset": "pha"}]},
+                        {"chain_id": BASE, "confirmations": "finalized", "assets": [{"asset": "pha"}]},
+                    ]}),
                 )
                 .await?;
             ensure!(status == StatusCode::OK, "{updated}");
@@ -990,6 +995,15 @@ impl Fixture {
                 )
                 .replace("chain_id: 1", &format!("chain_id: {OTHER_CHAIN}")),
         )?;
+        // The merchant accepts every route of its fixture, and PHA on Base, which a test adds.
+        let mut live = Document::accepting([&live_route, &usdc_route, &other_route]);
+        live.chains.push(ChainChoice {
+            chain_id: 8_453,
+            confirmations: None,
+            assets: vec![AssetChoice::on_defaults("pha")],
+        });
+        seed::configure_payments(pool, account.id, true, &live).await?;
+        seed::accept_routes(pool, account.id, false, &[&test_route]).await?;
         Ok(Self {
             app: app(
                 pool,
