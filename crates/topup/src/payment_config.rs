@@ -670,7 +670,7 @@ pub async fn deposit_terms(
     }
 }
 
-/// The route version in `routes` a deposit was recorded on, if it has one that is loaded.
+/// The deposit's recorded route version; an unloaded bound version is an error.
 async fn recorded_route<'r>(
     connection: &mut PgConnection,
     routes: &'r RouteSet,
@@ -681,14 +681,22 @@ async fn recorded_route<'r>(
             .bind(deposit_id)
             .fetch_one(&mut *connection)
             .await?;
-    let (Some(route), Some(version)) = (route, version) else {
-        return Ok(None);
+    let (route, version) = match (route, version) {
+        (None, None) => return Ok(None),
+        (Some(route), Some(version)) => (route, version),
+        _ => return Err(decode("incomplete deposit route binding".to_owned())),
     };
     let version = u64::try_from(version).map_err(|_| decode("route_version".to_owned()))?;
-    Ok(routes
+    routes
         .routes()
         .iter()
-        .find(|candidate| candidate.route == route && candidate.version == version))
+        .find(|candidate| candidate.route == route && candidate.version == version)
+        .map(Some)
+        .ok_or_else(|| {
+            decode(format!(
+                "deposit route `{route}` version {version} is not loaded"
+            ))
+        })
 }
 
 /// [`deposit_terms`] of a deposit recorded on `route`.
@@ -717,7 +725,7 @@ pub async fn deposit_terms_on(
 /// A deposit's refund dust floor (design §9): its governing terms' floor, or, for a deposit no
 /// terms govern (not accepted, or still pending), the operator's default of the route version it
 /// was recorded on, so a later default never strands it. `route` (the token's current route)
-/// stands in only for a deposit without a loaded route version.
+/// stands in only for an unrouted deposit; a missing bound version fails closed.
 pub async fn refund_floor(
     connection: &mut PgConnection,
     routes: &RouteSet,
@@ -974,6 +982,11 @@ pub async fn migrate(
     routes: Option<&RouteSet>,
 ) -> Result<Option<Backfill>, BackfillError> {
     let mut transaction = pool.begin().await?;
+    // SQLx releases its session lock when run returns, before this transaction commits. This
+    // separate transaction lock covers schema, backfill, validation, and commit together.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('payment-settings-migration', 0))")
+        .execute(&mut *transaction)
+        .await?;
     crate::db::MIGRATOR.run(&mut *transaction).await?;
     let report = if backfilled(&mut transaction).await? {
         None

@@ -59,6 +59,292 @@ fn refund_body(deposit: Uuid, destination: &str, amount: &str) -> Result<Vec<u8>
     }))?)
 }
 
+async fn pending_credited_refund(pool: &sqlx::PgPool) -> Result<(Merchant, Uuid, String, Uuid)> {
+    let app = test_router(pool, &SigningKey::from_bytes(&[43; 32]));
+    let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+    let deposit = seed_deposit(
+        pool,
+        merchant.account.id,
+        "sanctioned-credit",
+        150,
+        DepositState::Credited,
+        None,
+    )
+    .await?;
+    let id = merchant.refund(deposit, "100").await?;
+    let refund = topup::ids::parse(topup::ids::REFUND, &id).context("refund id")?;
+    Ok((merchant, deposit, id, refund))
+}
+
+async fn wait_for_deposit_lock<T>(
+    pool: &sqlx::PgPool,
+    task: &tokio::task::JoinHandle<T>,
+) -> Result<()> {
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            ensure!(
+                !task.is_finished(),
+                "refund verification bypassed the deposit lock"
+            );
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                     AND query LIKE 'SELECT deposit.sanctions_hit_at IS NULL%')",
+            )
+            .fetch_one(pool)
+            .await?;
+            if blocked {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pending_refund_cannot_be_marked_paid_after_a_sanctions_hit() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let (merchant, deposit, id, refund) = pending_credited_refund(pool).await?;
+            let mut hit = database.owner_pool.begin().await?;
+            sqlx::query("UPDATE deposits SET sanctions_hit_at = now() WHERE id = $1")
+                .bind(deposit)
+                .execute(&mut *hit)
+                .await?;
+            let request = tokio::spawn({
+                let merchant = merchant.clone();
+                let id = id.clone();
+                async move {
+                    merchant
+                        .post(
+                            &format!("/v1/refunds/{id}/mark_paid"),
+                            mark_paid_body(REFUND_TX)?,
+                        )
+                        .await
+                }
+            });
+            wait_for_deposit_lock(&database.owner_pool, &request).await?;
+            hit.commit().await?;
+            let (status, error) =
+                tokio::time::timeout(StdDuration::from_secs(5), request).await???;
+            ensure!(status == StatusCode::BAD_REQUEST, "{error}");
+            ensure!(
+                error["error"]["code"] == "deposit_not_refundable",
+                "{error}"
+            );
+            let hash: Option<String> =
+                sqlx::query_scalar("SELECT tx_hash FROM refunds WHERE id = $1")
+                    .bind(refund)
+                    .fetch_one(pool)
+                    .await?;
+            ensure!(hash.is_none());
+            ensure!(refund_status(pool, refund).await? == "pending");
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_paid_pending_refund_is_not_claimed_after_a_sanctions_hit() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let (merchant, deposit, id, refund) = pending_credited_refund(pool).await?;
+            merchant.mark_paid(&id, REFUND_TX).await?;
+            let paying = finalized(vec![transfer(
+                FIXTURE_TREASURY,
+                REFUND_DESTINATION,
+                100,
+                7,
+            )?]);
+            let worker = test_worker(pool, vec![paying.clone()], vec![paying]);
+            let mut hit = database.owner_pool.begin().await?;
+            sqlx::query("UPDATE deposits SET sanctions_hit_at = now() WHERE id = $1")
+                .bind(deposit)
+                .execute(&mut *hit)
+                .await?;
+            // The claim skips the locked deposit even while the marker is still uncommitted.
+            let while_locked =
+                tokio::time::timeout(StdDuration::from_secs(5), worker.check_once()).await;
+            hit.commit().await?;
+            ensure!(while_locked?? == Verification::Idle);
+            ensure!(worker.check_once().await? == Verification::Idle);
+            ensure!(refund_status(pool, refund).await? == "pending");
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE type = 'deposit.refunded'")
+                    .fetch_one(pool)
+                    .await?;
+            ensure!(events == 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
+struct ReceiptGate {
+    receipt: RefundReceipt,
+    gate: Option<(Arc<Notify>, Arc<Notify>)>,
+}
+
+#[async_trait]
+impl RefundChainReader for ReceiptGate {
+    async fn receipt(
+        &self,
+        _chain_id: u64,
+        _tx_hash: B256,
+    ) -> Result<RefundReceipt, RefundReadError> {
+        if let Some((started, resume)) = &self.gate {
+            started.notify_one();
+            resume.notified().await;
+        }
+        Ok(self.receipt.clone())
+    }
+    async fn origin(
+        &self,
+        _chain_id: u64,
+        _tx_hash: B256,
+    ) -> Result<Option<(Address, u64)>, RefundReadError> {
+        Ok(None)
+    }
+    async fn finalized_nonce(
+        &self,
+        _chain_id: u64,
+        _account: Address,
+    ) -> Result<u64, RefundReadError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+async fn a_sanctions_hit_during_verification_keeps_the_refund_pending() -> Result<()> {
+    for valid_payment in [true, false] {
+        support::with_database(|database| {
+            Box::pin(async move {
+                let pool = &database.app_pool;
+                let (merchant, deposit, id, refund) = pending_credited_refund(pool).await?;
+                merchant.mark_paid(&id, REFUND_TX).await?;
+                let paying = finalized(vec![transfer(
+                    FIXTURE_TREASURY,
+                    REFUND_DESTINATION,
+                    if valid_payment { 100 } else { 99 },
+                    7,
+                )?]);
+                let started = Arc::new(Notify::new());
+                let resume = Arc::new(Notify::new());
+                let worker = RefundVerificationWorker::new(
+                    pool.clone(),
+                    Arc::new(
+                        topup::routes::RouteSet::new(vec![route_fixture()])
+                            .map_err(anyhow::Error::msg)?,
+                    ),
+                    ReceiptGate {
+                        receipt: paying.clone(),
+                        gate: Some((started.clone(), resume.clone())),
+                    },
+                    ReceiptGate {
+                        receipt: paying,
+                        gate: None,
+                    },
+                    RefundVerificationConfig {
+                        retry_interval: StdDuration::ZERO,
+                        observe_timeout: StdDuration::from_secs(10),
+                        ..Default::default()
+                    },
+                );
+                let verifying = tokio::spawn(async move { worker.check_once().await });
+                tokio::time::timeout(StdDuration::from_secs(5), started.notified()).await?;
+                let mut hit = database.owner_pool.begin().await?;
+                sqlx::query("UPDATE deposits SET sanctions_hit_at = now() WHERE id = $1")
+                    .bind(deposit)
+                    .execute(&mut *hit)
+                    .await?;
+                resume.notify_one();
+                wait_for_deposit_lock(&database.owner_pool, &verifying).await?;
+                hit.commit().await?;
+                ensure!(
+                    tokio::time::timeout(StdDuration::from_secs(5), verifying).await???
+                        == Verification::Waiting
+                );
+                ensure!(refund_status(pool, refund).await? == "pending");
+                let events: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM events WHERE type = 'deposit.refunded'",
+                )
+                .fetch_one(pool)
+                .await?;
+                ensure!(events == 0);
+                Ok(())
+            })
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_missing_bound_route_version_never_uses_the_current_refund_floor() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let app = test_router(pool, &SigningKey::from_bytes(&[43; 32]));
+            let merchant = Merchant::seed(pool, &app, "phala-cloud").await?;
+            let deposit = seed_deposit(
+                pool,
+                merchant.account.id,
+                "missing-version",
+                100,
+                DepositState::Rejected,
+                Some(RejectReason::AssetNotAccepted),
+            )
+            .await?;
+            let mut current = route_fixture();
+            current.version = 2;
+            current.merchant.min_refund_atomic =
+                topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1)));
+            let routes =
+                topup::routes::RouteSet::new(vec![current.clone()]).map_err(anyhow::Error::msg)?;
+            let error = topup::payment_config::refund_floor(
+                &mut *pool.acquire().await?,
+                &routes,
+                deposit,
+                &current,
+            )
+            .await
+            .expect_err("a missing bound version must fail closed");
+            ensure!(
+                error.to_string().contains("version 1 is not loaded"),
+                "{error}"
+            );
+            let app = test_router_on(
+                pool,
+                &SigningKey::from_bytes(&[43; 32]),
+                Arc::new(StaticScreener::Listing),
+                Arc::default(),
+                vec![current],
+            );
+            let merchant = Merchant { app, ..merchant };
+            let (status, error) = merchant
+                .post(
+                    "/v1/refunds",
+                    refund_body(deposit, REFUND_DESTINATION, "100")?,
+                )
+                .await?;
+            ensure!(status == StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+            ensure!(error["error"]["code"] == "internal_error", "{error}");
+            ensure!(!error.to_string().contains("version 1"));
+            let refunds: i64 = sqlx::query_scalar("SELECT count(*) FROM refunds")
+                .fetch_one(pool)
+                .await?;
+            ensure!(refunds == 0);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_refund_paid_from_the_address_treasury_succeeds_at_finality() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {

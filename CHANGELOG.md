@@ -53,7 +53,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - A chain's confirmation floor is that of its current route versions: a new version may raise it,
   and an earlier version keeps its own value only for the terms of what it governed. A quote's
   `terms` are always the stored ones, `confirmations` included; a deposit's refund floor, when no
-  accepted terms govern it, is the default of the route version it was recorded on.
+  accepted terms govern it, is the default of the route version it was recorded on. An unloaded
+  bound version fails closed rather than using the current default.
 - **Breaking:** route files replace `quote:` and `limits:` with a `merchant:` section of each
   term's operator default and bounds (`quote_ttl_seconds`, `quote_spread_bps`,
   `quote_tolerance_bps`, `min_amount`, `min_deposit_atomic`, `max_deposit_atomic`,
@@ -68,13 +69,15 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   amount; otherwise the deposit is held for reconciliation): a rebuilt deposit with an imported
   `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded. A
   sanctions hit on a delivered credit keeps the credit, raises `TopupDeliveredCreditSanctioned`,
-  blocks refunds, and keeps its forwarder out of `GET /v1/forwarders?sweepable`. Delivered
-  rejection identity contradictions also appear in `GET /v1/admin/restore` for reconciliation.
+  blocks refunds (including pending refunds from being marked paid or completing verification),
+  and keeps its forwarder out of `GET /v1/forwarders?sweepable`. Delivered rejection identity
+  contradictions also appear in `GET /v1/admin/restore` for reconciliation.
 - **Breaking (operators):** the upgrade to this release is a cutover (docs/architecture.md §14):
   `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model in one
-  transaction with the schema change, after loading the configuration (the compose's `migrate`
-  service mounts it), `topup run` refuses to start before it,
-  and recording stays held until the accounts are configured and `POST /v1/admin/recording/resume`.
+  transaction with the schema change, serialized through commit by an advisory lock, after loading
+  the configuration (the compose's `migrate` service mounts it), `topup run` refuses to start before
+  it, and recording stays held until the accounts are configured and
+  `POST /v1/admin/recording/resume`.
 
 ### Removed
 

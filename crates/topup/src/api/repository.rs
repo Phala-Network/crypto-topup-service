@@ -609,6 +609,12 @@ async fn mark_refund_paid_in(
     receipt_log_index: Option<u64>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
+    let clear = crate::refunds::lock_refund_deposit(transaction, scope, refund_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !clear {
+        return Err(ApiError::deposit_not_refundable());
+    }
     let (status, current_hash, current_log) = locked_refund(transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;

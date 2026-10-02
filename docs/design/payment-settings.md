@@ -443,10 +443,13 @@ nothing (`core::refund_eligibility`). The usual conditions still apply:
 - the deposit must be final;
 - the amount must reach the dust floor, `handling.refund_floor`: for a pair not accepted, the
   route version's operator default, since the merchant set none;
-- a sanctioned deposit is never refundable.
+- a sanctioned deposit is never refundable. A sanctions hit blocks mark-paid and verification of
+  an already pending refund: mark-paid, verification claim, and the final verification transaction
+  lock and recheck the deposit.
 
 The merchant declares the refund, pays it from the treasury of the deposit's address, marks it
-paid, and the service verifies it, as for any other refund.
+paid, and the service verifies it, as for any other refund. A deposit bound to a route version
+that is no longer loaded fails closed; its refund floor never falls back to the current version.
 
 A token without a route stays `unsupported_asset`. Its dust floor today is another token's route
 default; that is a known defect and out of this design's scope.
@@ -466,7 +469,9 @@ default; that is a known defect and out of this design's scope.
 service mounts it), as the database owner, in one transaction with the schema change and the
 validation of the binding constraints. The config is loaded and validated before anything is
 migrated, so a failure leaves the database as 0.5.0 left it. Afterwards every deposit has its
-binding and every quote its terms, so no runtime rule reads a missing binding.
+binding and every quote its terms, so no runtime rule reads a missing binding. A transaction
+advisory lock serializes concurrent migrations through schema changes, backfill, validation, and
+commit.
 
 1. Every account and mode gets a state row, `unconfigured`, and an `unconfigured` revision as
    current.

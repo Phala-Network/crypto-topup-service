@@ -744,6 +744,117 @@ async fn the_operator_tightens_the_floor_and_a_bound_in_a_new_route_version() ->
     .await
 }
 
+fn cutover_test_config() -> Result<std::path::PathBuf> {
+    let config = std::env::temp_dir().join(format!(
+        "topup-cutover-{}.yaml",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let routes = include_str!("fixtures/phala-cloud-pha.yaml")
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        &config,
+        format!(
+            "environment: test\npublic_origin: https://topup.example\nadmin_key:\n  \
+             id: admin/v1\n  public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n\
+             rpc_providers:\n  alchemy: https://eth-mainnet.g.alchemy.com/v2/{{key}}\n  \
+             quicknode: https://rpc.example/eth\nroutes:\n  -\n{routes}\n"
+        ),
+    )?;
+    Ok(config)
+}
+
+#[tokio::test]
+async fn concurrent_migrates_wait_for_the_backfill_and_outer_commit() -> Result<()> {
+    with_database(|database| Box::pin(async move {
+        let owner = &database.owner_pool;
+        let (account, _) = Fixture::seed_account(owner).await?;
+        let route = live_route(1, "2", "")?;
+        seed_payment(owner, account.id, &route, 0x34).await?;
+        topup::db::MIGRATOR.undo(owner, 20_261_023_000_000).await?;
+        // Install a test-only gate in the old schema. It blocks legacy inserts, after SQLx
+        // has applied the DDL and released its own lock, without blocking schema migrations.
+        sqlx::raw_sql(r#"
+            CREATE FUNCTION test_pause_backfill() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.kind = 'legacy' THEN
+                    PERFORM pg_advisory_xact_lock(hashtextextended('test-payment-settings-backfill', 0));
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE FUNCTION test_install_backfill_gate() RETURNS event_trigger LANGUAGE plpgsql AS $$
+            DECLARE command record;
+            BEGIN
+                FOR command IN SELECT * FROM pg_event_trigger_ddl_commands() LOOP
+                    IF command.object_identity = 'public.payment_settings_revisions'
+                       AND NOT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'test_backfill_gate') THEN
+                        EXECUTE 'CREATE TRIGGER test_backfill_gate BEFORE INSERT ON payment_settings_revisions
+                                 FOR EACH ROW EXECUTE FUNCTION test_pause_backfill()';
+                    END IF;
+                END LOOP;
+            END $$;
+            CREATE EVENT TRIGGER test_install_backfill_gate ON ddl_command_end
+                WHEN TAG IN ('CREATE TABLE') EXECUTE FUNCTION test_install_backfill_gate();
+        "#).execute(owner).await?;
+        let config = cutover_test_config()?;
+        let result = async {
+            let mut gate = owner.begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('test-payment-settings-backfill', 0))")
+                .execute(&mut *gate).await?;
+            let migrate = || {
+                let url = database.owner_url.clone();
+                let config = config.clone();
+                tokio::task::spawn_blocking(move || {
+                    std::process::Command::new(env!("CARGO_BIN_EXE_topup"))
+                        .args(["migrate", "--config"]).arg(config)
+                        .env("DATABASE_URL", url).output()
+                })
+            };
+            let first = migrate();
+            wait_for_migrate_waiters(owner, "%INSERT INTO payment_settings_revisions%", 1).await?;
+            let second = migrate();
+            wait_for_migrate_waiters(owner, "%", 2).await?;
+            gate.commit().await?;
+            for output in [first, second] {
+                let output = tokio::time::timeout(std::time::Duration::from_secs(10), output).await???;
+                ensure!(output.status.success(), "{}{}",
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+            let legacy: i64 = sqlx::query_scalar("SELECT count(*) FROM payment_settings_revisions WHERE account_id = $1 AND kind = 'legacy'")
+                .bind(account.id).fetch_one(owner).await?;
+            ensure!(legacy == 2);
+            let valid: bool = sqlx::query_scalar("SELECT bool_and(convalidated) FROM pg_constraint WHERE conname IN ('deposits_settings_binding_check', 'quotes_terms_check')")
+                .fetch_one(owner).await?;
+            ensure!(valid);
+            anyhow::Ok(())
+        }.await;
+        let cleanup = std::fs::remove_file(config).context("remove migration test config");
+        result.and(cleanup)
+    })).await
+}
+
+async fn wait_for_migrate_waiters(pool: &sqlx::PgPool, pattern: &str, count: i64) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+                 AND wait_event_type = 'Lock' AND query LIKE $1",
+            )
+            .bind(pattern)
+            .fetch_one(pool)
+            .await?;
+            if waiting >= count {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("migration did not reach the expected lock")?
+}
+
 /// `topup migrate --config` applies the schema, the cutover backfill, and its validation in one
 /// transaction: a backfill that fails leaves the database as 0.5.0 left it (design §10).
 #[tokio::test]
@@ -763,24 +874,7 @@ async fn a_failed_cutover_backfill_leaves_the_schema_unmigrated() -> Result<()> 
             .bind(address_id)
             .execute(owner)
             .await?;
-            let config = std::env::temp_dir().join(format!(
-                "topup-cutover-{}.yaml",
-                uuid::Uuid::new_v4().simple()
-            ));
-            let routes = include_str!("fixtures/phala-cloud-pha.yaml")
-                .lines()
-                .map(|line| format!("    {line}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            std::fs::write(
-                &config,
-                format!(
-                    "environment: test\npublic_origin: https://topup.example\nadmin_key:\n  \
-                     id: admin/v1\n  public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n\
-                     rpc_providers:\n  alchemy: https://eth-mainnet.g.alchemy.com/v2/{{key}}\n  \
-                     quicknode: https://rpc.example/eth\nroutes:\n  -\n{routes}\n"
-                ),
-            )?;
+            let config = cutover_test_config()?;
             let migrate = || {
                 std::process::Command::new(env!("CARGO_BIN_EXE_topup"))
                     .args(["migrate", "--config"])
