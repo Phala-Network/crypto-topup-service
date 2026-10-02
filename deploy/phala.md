@@ -86,7 +86,7 @@ owner, except the workflow runs, which the owner dispatches; agents and CI run n
 exported and the release's verified kit in `kit/`:
 
 ```sh
-version=v0.3.5   # the release deploy-phala.yml pins
+version=v0.5.0   # the release deploy-phala.yml pins
 bash deploy/verify-release.sh "$version" release
 mkdir kit && tar -xzf "release/phala-pay-deploy-$version.tar.gz" -C kit --strip-components=1
 npm ci --prefix kit/deploy/tools --ignore-scripts
