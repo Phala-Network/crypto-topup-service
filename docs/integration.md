@@ -57,7 +57,10 @@ account and sends your contact its first secret key,
 key) and keep the new key offline, for administration.
 Create a restricted key for your servers (§5.4). Pin your account's webhook key for the mode from
 its attestation (§5.3). Set your treasury on each chain you accept (§1.6): payments go only there,
-and quotes answer `400 treasury_not_set` until it is.
+and quotes answer `400 treasury_not_set` until it is. Then choose what you accept: **an account
+accepts nothing until its payment settings list the chains and assets it takes**, in each mode
+(`POST /v1/payment_settings` with the secret key, §1.9); quotes and deposit addresses answer
+`400 asset_not_accepted` until they do.
 
 **Pin your addresses (required).** Configure in your own server, never from an API response, the
 inputs every address you show is recomputed from: your account id (`acct_…`), the forwarder
@@ -207,16 +210,21 @@ sequenceDiagram
 
 ### 1.2 Creating and showing a quote
 
-Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead of hardcoding:
-the payable assets (chain, asset code, contract, decimals), the minimum `amount` in cents
-(`min_amount`), the maximum deposit in token units (`max_deposit_atomic`), your caps in the key's
-mode: open quotes (`max_open_quotes`), their credit in cents (`max_open_amount_per_account`), and
-one customer's (`max_open_amount_per_customer`, which also bounds one quote), the
-refund floor, the quote window, spread,
-and tolerance, the route's `confirmations` (`"2"` on Ethereum: the payment's block and one more;
-`"3"` on an OP-stack chain such as Base: the payment's 2-second block and two more), the typical
-credit time (`typical_credit_seconds`, 30 on Ethereum, 7 on Base), and the typical finality time
-(`typical_finality_seconds`, 900). Quotes are priced at
+Read `GET /v1/config` (`pay.config.retrieve()`) for what the page shows instead of hardcoding. It
+is your **effective payment config**: every asset your payment settings accept (§1.9) on a chain
+where you have a treasury, each with your terms: the asset (chain, asset code, contract,
+decimals), the minimum `amount` in cents (`min_amount`), the minimum and maximum deposit in token
+units (`min_deposit_atomic`, `max_deposit_atomic`), the refund floor, the quote window, spread,
+and tolerance, `confirmations` (the stricter of the chain's floor and yours: `"2"` on Ethereum
+by default, the payment's block and one more; `"3"` on an OP-stack chain such as Base, the
+payment's 2-second block and two more), the typical credit time (`typical_credit_seconds`, 30 on
+Ethereum, 7 on Base), and the typical finality time (`typical_finality_seconds`, 900); and your
+caps in the key's mode: open quotes (`max_open_quotes`), their credit in cents
+(`max_open_amount_per_account`), one customer's (`max_open_amount_per_customer`, which also
+bounds one quote), and one customer's quotes per minute
+(`quote_creations_per_customer_per_minute`). A quote of an asset your settings do not accept is
+`400 asset_not_accepted`. A quote keeps the terms it was issued with, shown in its `terms`,
+whatever your settings say later. Quotes are priced at
 `spot / (1 + quote_spread_bps / 10 000)`; a payment valued at spot (late, wrong amount, second
 payment) carries no spread; network and exchange fees are the payer's; sweep gas is yours, paid
 when you sweep, and never reduces a credit.
@@ -370,10 +378,11 @@ locally ([deploy/sandbox/README.md](../deploy/sandbox/README.md#scenarios)).
 | Overpayment beyond tolerance | Credited at spot for the full amount; quote not completed. |
 | After the window (mined after `expires_at`) | `quote.expired`, then credited at spot (the deposit's `quote` still names the quote). A payment mined inside the window stays at the quoted price even if final later; the quote stays `open` past `expires_at` until then. |
 | Second payment to a quote's address, or to a canceled quote's | Credited at spot. |
-| Deposit address (§1.5), active or retired, any amount of any supported token on any listed network | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`, its `chain_id`, and its `address`. |
+| Deposit address (§1.5), active or retired, any amount of an accepted token on any listed network | Credited at spot when confirmed; the deposit has `quote: null` and names the `deposit_address`, its `chain_id`, and its `address`. |
+| A routed token your payment settings do not accept (§1.9), on a chain or for an asset not configured, or anything while the account accepts nothing | `rejected(asset_not_accepted)` once both providers confirm it, before it is valued; never credited; refundable once final, above the route's dust floor, like any rejected deposit (§3). The settings that decide are those current when the payment is recorded. A payment that completes a quote (its asset, in time, within its tolerance) is honoured at the quote's terms even if you stopped accepting the asset after issuing it. |
 | Token without a route | Once final (about 15 minutes, up to one more reconciliation round), `rejected(unsupported_asset)`; never credited; the tokens stay in the forwarder. |
-| Below `min_credit_minor` | `rejected(below_minimum)`. |
-| Outside `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
+| Below your `min_amount` | `rejected(below_minimum)`. |
+| Outside your `min_deposit_atomic`..`max_deposit_atomic`, or credit overflow | `rejected(out_of_bounds)` or `rejected(out_of_range)`. |
 | Sanctioned sender | `rejected(sanctioned)`; not refundable. |
 | Transaction dropped before finality (another transaction took its nonce), or its transfer is gone at finality | Deposit `reversed`; `deposit.reversed` if you were told of it (credited or rejected): its `amount_reversed` takes the whole credit back (§2.3). A quote it completed opens again while its window lasts, otherwise expires. A transaction re-included in another block keeps its deposit id and is not reversed. |
 | A payment made through a contract (a router, a swap output) whose transaction is re-included before finality against other state, so that it pays you another amount, or another of your addresses | The first deposit is `reversed` as above, and the transfer now in the final chain is a **new deposit with a new id**, credited (or rejected) through the usual events, already final. The new deposit's `replaces` names the reversed one, and the reversed one's `replaced_by` names it (both `null` when the other deposit is in another account or mode). If it pays the same quote, it completes that quote in the first deposit's place, with no `quote.expired` in between. The events of the two deposits can arrive in any order (a new deposit's `deposit.rejected` can even come before the old one's `deposit.reversed`): apply each through the balance rule (§2.3), which nets the customer to what the final chain paid whatever the order. A plain transfer of a routed token cannot change this way: routes never take fee-on-transfer or rebasing tokens. |
@@ -421,14 +430,14 @@ pay.refunds.update(refund.id, metadata={"ticket": ""})   # unsets `ticket`
 
 ### 1.5 Deposit addresses
 
-A deposit address is the customer's own address, **one address for all supported tokens and
-networks**, like the stable bank-transfer details Stripe gives each customer
+A deposit address is the customer's own address, **one address for all the tokens and networks
+you accept** (§1.9), like the stable bank-transfer details Stripe gives each customer
 ([customer balance funding instructions](https://docs.stripe.com/payments/customer-balance/funding-instructions)),
 and like the one deposit address an exchange gives a user for every token and every EVM chain.
-It never expires: the customer sends **any amount of a supported token, at any time, on any
-supported network**, and each transfer is credited at the market (spot) rate when it arrives,
+It never expires: the customer sends **any amount of an accepted token, at any time, on any
+listed network**, and each transfer is credited at the market (spot) rate when it arrives,
 about 30 seconds after paying, through the same `deposit.credited` webhook as a quote payment.
-**Send only supported tokens**: a token that is not listed is not credited.
+**Send only listed tokens**: a token that is not listed is not credited.
 
 | Use | When |
 |---|---|
@@ -460,9 +469,11 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   `CREATE2` rule; then the top-level `address` is it. Where a network's treasury differs, that network's address differs,
   and the top-level `address` is `null`: show each network's own `networks[].address` then, never
   one address for all.
-- Show only the networks in `networks` and the tokens in their `assets`. A transfer of a listed
-  token on a listed network is credited; any other token is recorded as `rejected
-  (unsupported_asset)` and not credited. Funds sent on a network that is not listed are not seen:
+- Show only the networks in `networks` and the tokens in their `assets`: the networks and tokens
+  your payment settings accept, read when the address is returned, so a change of your settings
+  shows on the next read. A transfer of a listed token on a listed network is credited; a routed
+  token you do not accept is `rejected(asset_not_accepted)`, any other token `rejected
+  (unsupported_asset)`, and neither is credited. Funds sent on a network that is not listed are not seen:
   they stay at the address on that chain and can be swept only once the forwarder factory is
   deployed there, and only if your treasury is the same address on that chain; contact the
   operator.
@@ -505,7 +516,7 @@ address = pay.deposit_addresses.create(client_reference_id="team-42",
   while `quotes` is paused (`400 paused`), and a network frozen by reconciliation gets no new
   address until it is lifted.
 
-**Page copy.** "One address for all supported tokens and networks. Send only supported tokens."
+**Page copy.** "One address for all listed tokens and networks. Send only listed tokens."
 Let the customer pick the network and the token; show that network, the token contract, the full
 address with a copy button, and a QR of that token's `payment_uri` (it carries the token, chain,
 and address and no amount): "Send only PHA, USDC on Sepolia, Base Sepolia. Any amount is credited
@@ -658,16 +669,20 @@ sign and execute it as any Safe transaction
 
 ### 1.8 Confirmations and pausing
 
-- **A stricter confirmation.** `POST /v1/account {"confirmation_policies": [{"chain_id": 1,
-  "confirmations": "finalized"}]}` (`pay.account.update(confirmation_policies={1: "finalized"})`)
-  credits that chain's payments only at the stricter of the route's floor and your value: a depth
-  such as `"12"`, `"safe"` (OP-stack chains only), or `"finalized"`, never weaker than the route's
-  (`400` otherwise). From weaker to stricter: a depth, a deeper depth, `"safe"`, `"finalized"`. On
-  an OP-stack chain such as Base, the route's depth counts blocks on the sequencer's unsafe head,
-  which Base reports reorganized only once ever; `"safe"` waits, about 5 minutes, until the block
-  is derived from data posted to Ethereum, which the sequencer cannot rewrite on its own, and
-  `"finalized"` until that data is final. `null` restores the route's. `GET /v1/config` then reports the chain's `confirmations` and
-  `typical_credit_seconds`, and `GET /v1/account` lists your policies. **If you sell goods or
+- **A stricter confirmation.** A chain's `confirmations` in your payment settings (§1.9), such as
+  `POST /v1/payment_settings {"chains": [{"chain_id": 1, "confirmations": "finalized", "assets":
+  [{"asset": "pha"}]}]}`, credits that chain's payments only at the stricter of the chain's floor
+  and your value: a depth such as `"12"`, `"safe"` (OP-stack chains only), or `"finalized"`, never
+  weaker than the floor (`400` otherwise). From weaker to stricter: a depth, a deeper depth,
+  `"safe"`, `"finalized"`. On an OP-stack chain such as Base, the floor's depth counts blocks on
+  the sequencer's unsafe head, which Base reports reorganized only once ever; `"safe"` waits,
+  about 5 minutes, until the block is derived from data posted to Ethereum, which the sequencer
+  cannot rewrite on its own, and `"finalized"` until that data is final. `null` keeps the floor.
+  A payment waits for the requirement of the settings it is bound to (those current when it was
+  recorded, or its quote's) or the operator's current floor, whichever is stricter: a change
+  applies to payments recorded after it, so to hold payments already recorded, pause crediting
+  of the treasury (§1.6). `GET /v1/config` reports each chain's `confirmations` and
+  `typical_credit_seconds`. **If you sell goods or
   services you cannot take back (withdrawable balances, gift cards, anything delivered off
   platform), use `finalized`**: a credit before finality can still be reversed by a
   reorganization, and a reversal is recoverable only by clawing the credit back (§2.3); a deposit
@@ -683,6 +698,56 @@ sign and execute it as any Safe transaction
   leaked key during a treasury time-lock; payments to existing addresses keep being credited.
   `POST /v1/account/resume` lifts your own pause; a pause the operator set stays in
   `paused_scopes` until the operator lifts it. Both are announced as `account.updated`.
+
+### 1.9 Payment settings
+
+Your payment settings say what you accept and on what terms, per mode, like Stripe's
+[payment method configurations](https://docs.stripe.com/api/payment_method_configurations): the
+chains and assets you take, a stricter confirmation per chain, and your terms on each asset,
+chosen from your operator's routes within the bounds the operator sets. **A new account accepts
+nothing**: quotes and deposit addresses answer `400 asset_not_accepted`, and a payment to an
+address is `rejected(asset_not_accepted)`, until you configure the mode. Manage them with the
+secret key; a restricted key can read them (`account.read`) but not change them (§5.4).
+
+```python
+settings = pay.payment_settings.update(chains=[
+    {"chain_id": 11155111, "assets": [{"asset": "usdc"}, {"asset": "usdt"}]},
+    {"chain_id": 84532, "confirmations": "safe",
+     "assets": [{"asset": "usdc", "quote_spread_bps": 0, "min_amount": 500}]},
+])
+# GET /v1/payment_settings: {"object": "payment_settings", "livemode": false,
+#  "status": "configured", "revision": "psrev_…", "updated": 1790409600,
+#  "quote_creations_per_customer_per_minute": null, "chains": [ … as sent … ],
+#  "available": [{"chain_id": 11155111, "status": "active",
+#                 "confirmations": {"floor": "2", "default": "2"},
+#                 "assets": [{"asset": "usdc", "accepted": true, "enabled": true,
+#                             "quote_spread_bps": {"default": 0, "min": 0, "max": 500}, …}, …]}]}
+```
+
+- **What you can set.** Per chain, `confirmations` (stricter than the floor, §1.8). Per asset:
+  `quote_ttl_seconds`, `quote_spread_bps`, `quote_tolerance_bps` (two-sided: a payment within it of
+  the quoted amount, under or over, completes the quote at its `amount`), `min_amount` (cents),
+  `min_deposit_atomic`, `max_deposit_atomic`, and `min_refund_atomic`. Top-level:
+  `quote_creations_per_customer_per_minute` (1 to 60). A term not sent, or `null`, takes the
+  operator's default, so you follow a change of it. `available` lists every chain and asset of the
+  mode with its defaults and bounds; a value outside them is `400 parameter_invalid` with the exact
+  `param` path and the bounds. The rounding of a quote's amount (`quote_amount_decimals`) is the
+  operator's.
+- **Updates.** A parameter not sent is unchanged. `chains`, when sent, replaces the whole list,
+  and a term an element leaves out resets to the default; `"chains": []` accepts nothing. Writes
+  are last-write-wins: two concurrent updates apply one after the other, and the later one is
+  current. Each change has a new `revision` and is announced as `payment_settings.updated` with
+  `previous_attributes`, delivered to every endpoint whatever it subscribes to.
+- **Active chains.** A chain is offered only where you also have a treasury (`available[].status`
+  `active`; `treasury_not_set` until you set one, §1.6).
+- **Which settings govern a payment.** A quote keeps the terms it was issued with; a payment that
+  completes it (its asset, in time, within its tolerance) is credited on them even after you
+  stop accepting the asset. Every other payment is governed by the settings current when it is
+  recorded: a change applies to payments recorded after it, never to one recorded before.
+- **Disabled pairs.** If the operator tightens a bound so that your terms on an asset no longer
+  fit together (for example a maximum deposit below your minimum), that asset is `enabled: false`:
+  not offered or credited until you or the operator change it.
+- **After a service restore** your settings are `held` until you reconfirm them (§5.12).
 
 ## 2. Webhooks and fulfillment
 
@@ -934,13 +999,14 @@ Standard Webhooks, not `Stripe-Signature`, because you hold only the service's p
 | `treasury.created` | A treasury was proven (§1.6): `active` at once for a chain's first one and in test mode, else `pending` until `effective_at`. Cancel a change you did not request. | The treasury |
 | `treasury.updated` | A pending treasury took effect (`status: "active"`), a newer one replaced it (`status: "replaced"`), or crediting of it was paused or resumed (`crediting_paused`, `crediting_paused_by`); `data.previous_attributes` has the former values. | The treasury |
 | `treasury.canceled` | A pending change was canceled, by you or because a sanctions list named it at its effective time. | The treasury, `status: "canceled"` |
-| `account.updated` | The operator changed your account (live mode, restriction, pauses), or your settings, pause, or webhook keys changed; `data.previous_attributes` names what changed. | The account, in the event's mode |
+| `account.updated` | The operator changed your account (live mode, restriction, pauses), or your pause or webhook keys changed; `data.previous_attributes` names what changed. | The account, in the event's mode |
+| `payment_settings.updated` | Your payment settings in the mode changed or were reconfirmed (§1.9); `data.previous_attributes` names what changed. | The payment settings, in the event's mode |
 | `api_key.created`, `api_key.updated`, `api_key.revoked` | A key of the mode was created, rolled (`updated`, with its former `status` and `expires_at`), or revoked (§5.4). | The key, without its secret |
 | `webhook_endpoint.created`, `webhook_endpoint.updated`, `webhook_endpoint.deleted` | An endpoint of the mode changed; `updated` carries the replaced values in `data.previous_attributes` (§5.11). | The endpoint, as it was after the change |
 | `webhook_endpoint.test` | `POST /v1/webhook_endpoints/{id}/test`; sent to that endpoint only. | The endpoint |
 
-The account events (`account.*`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`) are your
-security notices: every enabled endpoint of the mode receives them whatever its `enabled_events`.
+The account events (`account.*`, `api_key.*`, `payment_settings.*`, `treasury.*`,
+`webhook_endpoint.*`) are your security notices: every enabled endpoint of the mode receives them whatever its `enabled_events`.
 
 #### Delivery health
 
@@ -1147,7 +1213,8 @@ backend, run on Phala's staging, the model for fulfillment, holds, and refunds.
       held credits and unknown accounts; a refund marked paid is never canceled (§3).
 - [ ] Every `deposit.*` event applied by the balance rule, per deposit, serially, from its
       snapshot, tested with partial refunds, a reversal, and out-of-order delivery (§2.3).
-- [ ] Goods you cannot take back are sold only under a `finalized` confirmation policy (§1.8).
+- [ ] Your live payment settings accept exactly the chains and assets you sell for (§1.9), and
+      goods you cannot take back are sold only under `"confirmations": "finalized"` (§1.8).
 - [ ] Alerts on your side: webhook signature failures (rate-limited, for example through error
       tracking rather than paging, since anyone can post to the URL), a repeated deposit id with a
       different amount, payments to unknown accounts, and held credits waiting for a refund.
@@ -1269,7 +1336,7 @@ With a secret key you manage the keys of its account and mode (design D7), as St
 permissions it is created with, so a server compromise cannot redirect your funds or silence your
 notices. Keep secret keys offline, for administration only: keys, treasuries (and their crediting
 pause), webhook endpoints (and resending events), webhook keys, and account settings
-(confirmation policies, pause) are managed only with a secret key, and no permission lets a
+(payment settings, pause) are managed only with a secret key, and no permission lets a
 restricted key do so (it can never hold `api_keys.write`, `treasury.write`, `endpoints.write`, or
 `account.write`) (`400` when requested, `403 permission_denied`
 when tried). A `write` permission includes its resource's `read`. A checkout server needs:
@@ -1387,10 +1454,10 @@ method.
 
 | Method and path | Purpose | `TopupClient` |
 |---|---|---|
-| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes` (the operator's and yours), the key's `livemode`, the mode's `webhook_keys` versions, and your `confirmation_policies`. | `get_account` |
-| `POST /v1/account` `{confirmation_policies}` | Require a stricter confirmation per chain (§1.8). | `update_account` |
+| `GET /v1/account` | Your account: `id` (`acct_…`), `name`, `charges_enabled` (live mode), `paused_scopes` (the operator's and yours), the key's `livemode`, and the mode's `webhook_keys` versions. | `get_account` |
+| `GET /v1/payment_settings`, `POST /v1/payment_settings` `{chains?, quote_creations_per_customer_per_minute?}` | What you accept in the mode and on what terms, with the operator's catalog and bounds in `available` (§1.9). | `get_payment_settings`, `update_payment_settings` |
 | `POST /v1/account/pause`, `POST /v1/account/resume` `{scopes: ["quotes"]}` | Pause or resume issuing quotes and deposit addresses (§1.8). | `pause_quotes`, `resume_quotes` |
-| `GET /v1/config` | Payable assets (chain, asset code, contract, decimals), minimum and maximum amounts, quote window, spread, tolerance, confirmations, and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
+| `GET /v1/config` | Your effective payment config: the assets you accept on chains with a treasury (chain, asset code, contract, decimals), with your terms (minimum and maximum amounts, quote window, spread, tolerance, confirmations) and typical credit and finality times: what your UI shows instead of hardcoding. | `get_config` |
 | `POST /v1/quotes` `{client_reference_id, amount, currency: "usd", chain_id, asset, metadata?}` | Quote `amount` cents: a locked price, the exact token amount, and a single-use address. The customer is created by its first quote. The response alone carries the quote's `client_secret`; a repeat with the same `Idempotency-Key` replays it. | `create_quote` |
 | `GET /v1/quotes` | Your quotes, newest first; filters `client_reference_id`, `status`; `limit`, `starting_after`, `ending_before` (`qt_…`). | `list_quotes` |
 | `GET /v1/quotes/{id}` | Resume a checkout: `status`, `expires_at`, and the seen `payment`. Without an API key, with `?client_secret=`, the payer's page reads the public `ClientQuote` (`payment_status`: `none`, `seen`, `confirming`, `credited`, `rejected`, `reversed`); any origin, rate-limited. Give the secret only to the paying customer's page and do not log it. | `get_quote` |
@@ -1439,6 +1506,8 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 | 400 | `exposure_cap_exceeded` | A cap on your open quotes in the mode (their number, their credit, or one customer's credit); the message states what is left. |
 | 400 | `paused`, `chain_frozen` | Scope paused, or chain frozen pending reconciliation; show "temporarily unavailable". Not retried. |
 | 400 | `treasury_not_set` | No treasury on the chain yet (§1.6). |
+| 400 | `asset_not_accepted` | Your payment settings do not accept the asset on the chain in this mode, or accept nothing yet (§1.9). |
+| 400 | `payment_settings_unconfirmed` | After a service restore, your payment settings await your reconfirmation (§5.12). |
 | 400 | `quote_payment_received`, `quote_window_closed`, `quote_unexpected_state` | Quote cancel refused: its address already received a payment, its window closed, or it is complete or expired. |
 | 400 | `deposit_address_cap_exceeded`, `deposit_address_retired` | The mode's cap of active deposit addresses; a rotation of a retired address (§1.5). |
 | 400 | `deposit_not_refundable`, `deposit_not_final` | The deposit is not eligible for a refund, or could still be reversed: request the refund once it is final (§3). |
@@ -1454,7 +1523,7 @@ requests), and `409` is only an `Idempotency-Key` still in use. Every response n
 | 404 | `resource_missing` | Unknown or foreign resource. |
 | 409 | `idempotency_key_in_use` (`type: idempotency_error`) | A request with this key still runs; retry with the same key. |
 | 429 | `rate_limit` | Requests per account and mode (§5.5), or reads of one quote's or deposit address's public view by its `client_secret`; retry after `Retry-After`. |
-| 429 | `customer_rate_limit` | The customer's quotes per minute (the route's limit) or deposit address rotations per hour (10); retry after `Retry-After`, or tell the customer to wait. |
+| 429 | `customer_rate_limit` | The customer's quotes per minute (your `quote_creations_per_customer_per_minute`) or deposit address rotations per hour (10); retry after `Retry-After`, or tell the customer to wait. |
 | 503 | `unavailable` | Temporarily unavailable (for example no fresh price); retry. |
 | 503 | `service_restoring` | Every request with an API key, reads included, while the service is frozen after a restore from backup. Retry after `Retry-After` (§5.12). |
 | 500 | `internal_error` | Retry with the same `Idempotency-Key`: it replays this failure, so the request never runs twice (§5.6). |
@@ -1577,3 +1646,13 @@ it: create them again and mark them paid with the same transaction; the deposit'
 yourself after the freeze: `POST /v1/deposit_addresses` returns version 1 identically, and each
 `POST /v1/deposit_addresses/{id}/rotate` the next version, but payments made before you register
 it are then not found; give the operator your records instead.
+
+**Reconfirm your payment settings.** The restored payment settings may predate a change you made,
+and no delivered event can prove which configuration is your latest (one may never have been
+delivered). So after a restore every account's settings, in each mode, are `held`: nothing is
+quoted or issued (`400 payment_settings_unconfirmed`), and a payment recorded meanwhile waits,
+neither credited nor rejected, unless its outcome was delivered to you before (that outcome
+stands). Once the freeze lifts, send your complete configuration with `POST /v1/payment_settings`,
+even if unchanged (§1.9): it ends the hold, and every waiting payment is decided under it. While
+held, `chains` is required (`400 parameter_missing` without it), and a parameter you leave out
+takes its default: nothing of the restored settings is carried over.

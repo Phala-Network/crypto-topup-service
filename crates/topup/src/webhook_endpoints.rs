@@ -30,7 +30,8 @@ use crate::tenancy::Scope;
 pub const MAX_ENDPOINTS: i64 = 16;
 
 /// The event types an endpoint may subscribe to in `enabled_events`, besides `*`. Account events
-/// (`account.*`, `api_key.*`, `treasury.*`, `webhook_endpoint.*`) reach every enabled endpoint
+/// (`account.*`, `api_key.*`, `payment_settings.*`, `treasury.*`, `webhook_endpoint.*`) reach every
+/// enabled endpoint
 /// whatever it subscribes to; they are listed so a subscription may name them.
 pub const EVENT_TYPES: &[&str] = &[
     "account.updated",
@@ -41,6 +42,7 @@ pub const EVENT_TYPES: &[&str] = &[
     "deposit.refunded",
     "deposit.rejected",
     "deposit.reversed",
+    "payment_settings.updated",
     "quote.canceled",
     "quote.expired",
     "refund.created",

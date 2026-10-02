@@ -403,14 +403,19 @@ setup"](../deploy/README.md#merchant-setup) the summary.
    chain with the `CompatibilityFallbackHandler`, signs it as a Safe message
    ([§1.6](integration.md#16-treasuries)). A test-mode treasury applies at once; a later live change
    waits 48 hours.
-4. **Webhook endpoint**: `POST /v1/webhook_endpoints` with the receiver's HTTPS URL, then
+4. **Payment settings**, per mode: the chains and assets the merchant accepts, with
+   `POST /v1/payment_settings` ([§1.9](integration.md#19-payment-settings)). A new account accepts
+   nothing, so quotes, deposit addresses, and payments are refused until it is configured;
+   `GET /v1/config` then lists what is offered.
+5. **Webhook endpoint**: `POST /v1/webhook_endpoints` with the receiver's HTTPS URL, then
    `POST /v1/webhook_endpoints/{id}/test` ([§5.11](integration.md#511-webhook-endpoints-and-events)).
-5. **Pins**: the account id, the factory and implementation, and the treasury of each chain,
+6. **Pins**: the account id, the factory and implementation, and the treasury of each chain,
    configured in the merchant's server; the SDKs recompute every address from them.
 
 ## 8. A first credited test deposit
 
-With the committed Sepolia route, the account's test key, a Sepolia treasury, and a public HTTPS
+With the committed Sepolia route, the account's test key, a Sepolia treasury, test-mode payment
+settings accepting the route's asset (section 7), and a public HTTPS
 URL for the webhook receiver (a tunnel will do), the reference product, from a clone of Phala Pay at
 the release's tag, runs a merchant backend and one deposit end to end: it creates a quote, pays it from a Foundry keystore holding Sepolia ETH
 (minting the test token), and waits for the verified `deposit.credited` webhook, about 30 seconds
@@ -432,11 +437,12 @@ directory's scenarios play late, partial, rejected, and refunded payments.
 1. A reviewed pull request to your environment repository adding the live route and its chain's
    providers to `topup.yaml`, with the factory verified on its chain; then Deploy `upgrade`
    ([Deploy](../deploy/README.md#deploy)).
-2. Your own sign-off of the limits: route bounds, each account's caps, and
+2. Your own sign-off of the limits: each route's `merchant` defaults and bounds, each account's caps, and
    `max_unfinalized_credit` ([architecture §14](architecture.md#14-configuration-and-deployment)), and a
    passed restore drill (section 10).
 3. `charges_enabled: true` for each account you enable; the merchant then proves a live
-   treasury and follows the [go-live checklist](integration.md#44-go-live-checklist).
+   treasury, configures its live payment settings, and follows the
+   [go-live checklist](integration.md#44-go-live-checklist).
 
 ## 10. Backups and restore
 
@@ -465,6 +471,16 @@ read the old app's backups, so never delete the app, and give a new app a new pr
   to an earlier release, and a schema is never rolled back ([Deploy](../deploy/README.md#deploy)).
   Tell merchants the new compose hash. The OS image is fixed; moving to dstack 0.6 changes every
   derived key ([OS image](../deploy/README.md#os-image)).
+- **The 0.6.0 upgrade** is a cutover ([architecture §14](architecture.md#14-configuration-and-deployment),
+  [design §10](design/payment-settings.md#10-migration-and-cutover)). First move every route
+  file's `quote:` and `limits:` to `merchant:`, keeping every quoted route. Deploy `upgrade` stops
+  the 0.5.0 recorders, and the `migrate` service binds every existing deposit and quote to each
+  account's `legacy` revision, the 0.5.0 model, in the transaction of the schema change. The service then starts with recording held:
+  issuance answers `400 paused`. Have each account send `POST /v1/payment_settings` per mode it
+  uses, with its secret key and the stricter `confirmations` its `legacy` revision shows
+  (`payment_settings.legacy` in `GET /v1/admin/accounts/{acct}`). Verify each account's settings
+  there and `GET /v1/config` with its key, check that no `TopupPaymentSettingsInvalid` is raised,
+  then resume with `POST /v1/admin/recording/resume {reason}`.
 - **Operations.** A production CVM has no SSH, logs, or database access: you work through Sentry,
   the admin API (daily report, deposit view, pauses, metrics), and the chain. Every alert names its
   runbook ([runbooks](../deploy/runbooks/README.md#alert-and-symptom-index)); RPC usage and cost

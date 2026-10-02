@@ -180,6 +180,26 @@ pub async fn create_account(
     })
 }
 
+/// An account and its effective caps, for the operator's `GET /v1/admin/accounts/{account}`.
+pub async fn admin_account(pool: &PgPool, account_id: Uuid) -> Result<IssuedAccount, ApiError> {
+    let mut connection = pool.acquire().await?;
+    let account = sqlx::query_as::<_, AdminAccount>(concat!(
+        "SELECT ",
+        admin_account_columns!(),
+        " FROM accounts WHERE id = $1"
+    ))
+    .bind(account_id)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    let limits = account_limits(&mut connection, account_id).await?;
+    Ok(IssuedAccount {
+        account,
+        limits,
+        api_keys: Vec::new(),
+    })
+}
+
 /// An admin update of an account; absent fields stay.
 pub struct AccountChanges {
     /// Live mode.
@@ -433,6 +453,7 @@ async fn request_refund_in(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
                deposit.chain_id, deposit.final_at IS NOT NULL AS is_final,
+               deposit.sanctions_hit_at IS NOT NULL AS sanctions_hit,
                customer.paused_scopes AS customer_scopes,
                account.paused_scopes AS account_scopes,
                COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
@@ -462,8 +483,18 @@ async fn request_refund_in(
         return Err(ApiError::paused("refund requests are paused"));
     }
 
+    // A sanctions hit on a delivered credit preserves its outcome, but not refund eligibility.
+    if row.try_get::<bool, _>("sanctions_hit")? {
+        return Err(ApiError::deposit_not_refundable());
+    }
+
     let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;
-    refund_eligibility(refund_deposit_from_row(&row, refund.route)?)
+    // The dust floor of the terms that govern the deposit, or the route's default for one no
+    // terms govern (docs/design/payment-settings.md §9).
+    let min_refund =
+        crate::payment_config::refund_floor(transaction, routes, refund.deposit_id, refund.route)
+            .await?;
+    refund_eligibility(refund_deposit_from_row(&row, min_refund)?)
         .map_err(|_| ApiError::deposit_not_refundable())?;
     // Nothing is paid back for a deposit that could still be reversed.
     if !row.try_get::<bool, _>("is_final")? {
@@ -578,6 +609,12 @@ async fn mark_refund_paid_in(
     receipt_log_index: Option<u64>,
     actor: &Actor,
 ) -> Result<(), ApiError> {
+    let clear = crate::refunds::lock_refund_deposit(transaction, scope, refund_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !clear {
+        return Err(ApiError::deposit_not_refundable());
+    }
     let (status, current_hash, current_log) = locked_refund(transaction, scope, refund_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -729,7 +766,7 @@ pub async fn admin_deposit(
         SELECT deposit.account_id, deposit.livemode, account.public_id AS account,
                deposit.state, deposit.route, deposit.route_version, deposit.receipt_log_index,
                deposit.block_time, deposit.final_at, deposit.price_scaled::text AS price_scaled,
-               deposit.updated_at
+               deposit.updated_at, deposit.settings_revision_id, deposit.settings_hold_id
         FROM deposits AS deposit
         JOIN accounts AS account ON account.id = deposit.account_id
         WHERE deposit.id = $1
@@ -776,6 +813,10 @@ pub async fn admin_deposit(
             .map(u64::try_from)
             .transpose()
             .map_err(|_| ApiError::internal())?,
+        settings_revision: row
+            .settings_revision_id
+            .map(|id| crate::ids::format("psrev_", id)),
+        settings_hold: row.settings_hold_id,
         receipt_log_index: u64::try_from(row.receipt_log_index)
             .map_err(|_| ApiError::internal())?,
         block_time: row.block_time,
@@ -1014,6 +1055,8 @@ struct DepositAdminRow {
     final_at: Option<DateTime<Utc>>,
     price_scaled: Option<String>,
     updated_at: DateTime<Utc>,
+    settings_revision_id: Option<Uuid>,
+    settings_hold_id: Option<Uuid>,
 }
 
 #[derive(FromRow)]
@@ -1465,14 +1508,17 @@ fn parse_atomic(value: String) -> Result<U256, ApiError> {
     U256::from_str(&value).map_err(|_| ApiError::internal())
 }
 
-fn refund_deposit_from_row(row: &PgRow, route: &RouteFile) -> Result<RefundDeposit, ApiError> {
+fn refund_deposit_from_row(
+    row: &PgRow,
+    min_refund: AtomicAmount,
+) -> Result<RefundDeposit, ApiError> {
     let state: String = row.try_get("state")?;
     let reason: Option<String> = row.try_get("reason")?;
     Ok(RefundDeposit {
         state: crate::db::parse_state(&state).map_err(|_| ApiError::internal())?,
         reason: crate::db::parse_reason(reason.as_deref()).map_err(|_| ApiError::internal())?,
         amount: AtomicAmount::new(parse_atomic(row.try_get("amount_atomic")?)?),
-        min_refund: route.asset.min_refund_atomic,
+        min_refund,
     })
 }
 

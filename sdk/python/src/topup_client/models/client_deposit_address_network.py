@@ -23,7 +23,7 @@ class ClientDepositAddressNetwork:
 
     Attributes:
         address (str): The forwarder address to pay on this chain.
-        assets (list[DepositAddressAsset]): The supported tokens on this chain.
+        assets (list[DepositAddressAsset]): The tokens accepted on this chain.
         chain_id (int): EVM chain identifier.
         typical_credit_seconds (int): Typical time from payment to credit, in seconds, at the confirmation this chain's
             payments

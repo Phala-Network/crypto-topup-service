@@ -114,12 +114,15 @@ async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> 
             let quote = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO quotes (id, account_id, livemode, customer_id, route, \
-                 amount_atomic, price_scaled, credit_minor, expires_at) \
-                 VALUES ($1, $2, true, $3, 'r', 1, 1, 1, now())",
+                 amount_atomic, price_scaled, credit_minor, expires_at, route_version, \
+                 settings_revision_id, terms) \
+                 SELECT $1, $2, true, $3, 'r', 1, 1, 1, now(), 1, current_revision_id, $4 \
+                 FROM payment_settings_state WHERE account_id = $2 AND livemode",
             )
             .bind(quote)
             .bind(seed.account_id)
             .bind(seed.customer_id)
+            .bind(sqlx::types::Json(seed::fixture_terms()))
             .execute(pool)
             .await?;
 
@@ -147,12 +150,15 @@ async fn tenant_rows_cannot_join_another_accounts_or_modes_rows() -> Result<()> 
             assert_sqlstate(
                 sqlx::query(
                     "INSERT INTO quotes (id, account_id, livemode, customer_id, route, \
-                     amount_atomic, price_scaled, credit_minor, expires_at) \
-                     VALUES ($1, $2, true, $3, 'r', 1, 1, 1, now())",
+                     amount_atomic, price_scaled, credit_minor, expires_at, route_version, \
+                     settings_revision_id, terms) \
+                     SELECT $1, $2, true, $3, 'r', 1, 1, 1, now(), 1, current_revision_id, $4 \
+                     FROM payment_settings_state WHERE account_id = $2 AND livemode",
                 )
                 .bind(Uuid::new_v4())
                 .bind(other.account_id)
                 .bind(seed.customer_id)
+                .bind(sqlx::types::Json(seed::fixture_terms()))
                 .execute(pool)
                 .await
                 .err(),
@@ -590,7 +596,9 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("restore_delivered_credits", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),
     ("accounts", OPERATIONAL),
-    ("confirmation_policies", OPERATIONAL),
+    ("payment_settings_revisions", &["SELECT", "INSERT"]),
+    ("payment_settings_state", OPERATIONAL),
+    ("payment_settings_cutover", &["SELECT", "UPDATE"]),
     ("account_limits", OPERATIONAL),
     ("api_keys", OPERATIONAL),
     ("treasuries", OPERATIONAL),

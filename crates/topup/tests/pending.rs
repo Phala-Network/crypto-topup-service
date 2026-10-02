@@ -320,7 +320,7 @@ async fn a_lagging_head_leaves_pending_rows_above_it() -> Result<()> {
 }
 
 async fn run_lagging_head_scenario(pool: &sqlx::PgPool) -> Result<()> {
-    let (_, customer) = seed::create_account_and_customer(
+    let (account, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
             livemode: false,
@@ -329,6 +329,7 @@ async fn run_lagging_head_scenario(pool: &sqlx::PgPool) -> Result<()> {
         "ws-0",
     )
     .await?;
+    seed::accept_assets(pool, account.id, false, CHAIN_ID, &["pha"]).await?;
     let address_id = Uuid::new_v4();
     seed::insert_address(
         pool,
@@ -540,6 +541,7 @@ async fn seed_account(pool: &sqlx::PgPool) -> Result<String> {
     )
     .await?;
     seed::set_treasury(pool, account.id, false, CHAIN_ID, seed::FIXTURE_TREASURY).await?;
+    seed::accept_assets(pool, account.id, false, CHAIN_ID, &["pha"]).await?;
     Ok(seed::create_api_key(pool, account.id, false).await?)
 }
 
@@ -553,10 +555,12 @@ fn test_route(token: Address) -> RouteFile {
         );
     let mut route: RouteFile = serde_saphyr::from_str(&yaml).expect("route fixture");
     route.asset.decimals = 2;
-    route.rate_lock.amount_decimals = 2;
-    route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
-    route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));
-    route.screening.min_credit_minor = 1;
+    route.asset.quote_amount_decimals = 2;
+    route.merchant.quote_spread_bps =
+        topup_core::route::Bounded::at(topup_core::money::Bps::new(0).expect("zero bps"));
+    route.merchant.min_deposit_atomic =
+        topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_u64)));
+    route.merchant.min_amount = topup_core::route::Bounded::at(1);
     route
 }
 

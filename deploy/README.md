@@ -716,8 +716,11 @@ helper](runbooks/README.md#environment), in order:
    servers with a restricted key (`POST /v1/api_keys {"type": "restricted", "permissions": […]}`,
    `ppay_rk_…`), which cannot manage keys, treasuries, endpoints, webhook keys, or account settings
    (docs/integration.md §5.4). Everything else the merchant does itself through the API or SDKs:
-   [treasury](#treasury-setup), [webhook endpoint](#webhook-endpoint) and webhook key pinning,
-   confirmation policy, `quotes` pause, refunds, and [sweeps](#sweeping).
+   [treasury](#treasury-setup), [payment settings](#payment-settings) (a new account accepts
+   nothing until it configures them), [webhook endpoint](#webhook-endpoint) and webhook key
+   pinning, `quotes` pause, refunds, and [sweeps](#sweeping). The operator sets no merchant term:
+   it bounds them in each route's `merchant` section (docs/architecture.md §14), and reads an
+   account's settings and effective config with `admin GET "/v1/admin/accounts/$ACCOUNT"`.
 4. **Live enablement** (HUMAN-ONLY, admin key holder), when the review allows it: the answer holds
    the first live key, handed over as in step 3. Live payments also need a proven live treasury.
 
@@ -770,6 +773,25 @@ for 48 hours and cancellable, and is announced as `treasury.created` to every en
 - Update the treasury pinned in the merchant's server (the SDKs' `treasuries` pin) when a change
   applies (`treasury.updated`); addresses issued before keep paying the old treasury.
 
+### Payment settings
+
+A new account accepts nothing in either mode: quotes and deposit addresses answer
+`400 asset_not_accepted`, and a payment to an existing address is rejected, until the merchant
+lists the chains and assets it takes, with its secret key (docs/integration.md §1.9,
+docs/design/payment-settings.md). For example, every staging route:
+
+```sh
+curl -fsS "https://$DOMAIN/v1/payment_settings" -H "Authorization: Bearer $SECRET_KEY" \
+  -H 'content-type: application/json' -d '{"chains": [
+    {"chain_id": 11155111, "assets": [{"asset": "pha"}, {"asset": "usdc"}, {"asset": "usdt"}]},
+    {"chain_id": 84532, "assets": [{"asset": "pha"}, {"asset": "usdc"}, {"asset": "usdt"}]}]}'
+```
+
+The answer's `available` lists every chain and asset of the mode with the operator's defaults and
+bounds, and each chain's `status` (`active` once it also has a treasury). `GET /v1/config` then
+lists exactly what is offered. After a service restore, the merchant sends its complete
+configuration again to lift the hold ([After a restore](#after-a-restore-the-merchant-notice)).
+
 ### Webhook endpoint
 
 With a secret key, `POST /v1/webhook_endpoints {"url": "https://…/webhooks", "enabled_events":
@@ -820,7 +842,9 @@ revocations (id, or prefix and last four), treasury cancellations and crediting 
 endpoints, deposit addresses and quotes given to customers, and the raw deliveries of deposit
 events with their webhook headers; a quote or delivery it cannot produce is lost (a payment to the
 quote is not found; the deposit is re-valued). After the unfreeze, send a second notice: service
-resumed, any re-valued deposit flagged, and events after the restore point delivered again. The runbook
+resumed, any re-valued deposit flagged, events after the restore point delivered again, and that
+its payment settings are held until it sends its complete configuration again with
+`POST /v1/payment_settings` ([Payment settings](#payment-settings)). The runbook
 [Incident communication](runbooks/incident-communication.md) has the channels.
 
 ## Local verification

@@ -112,9 +112,10 @@ class Deposit:
                 `null` until `final`.
             price_source (None | str | Unset): `quote` (the quoted price) or `spot`, once valued.
             quote (None | Quote | str | Unset):
-            rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `below_minimum`,
-                `out_of_bounds`,
-                `out_of_range`, or `sanctioned`.
+            rejection_reason (None | str | Unset): Why the deposit was rejected: `unsupported_asset`, `asset_not_accepted`
+                (a routed asset
+                the payment settings the deposit is bound to do not accept), `below_minimum`,
+                `out_of_bounds`, `out_of_range`, or `sanctioned`.
             replaced_by (None | str | Unset): The deposit that took this reversed deposit's place, `dep_…` (its `replaces`
                 is this one);
                 `null` otherwise, or when that deposit is in another account or mode.

@@ -16,6 +16,15 @@ TreasuryStatus = Literal["pending", "active", "replaced", "canceled"]
 ApiKeyStatus = Literal["active", "expiring", "expired", "revoked"]
 WebhookEndpointStatus = Literal["enabled", "disabled"]
 PaymentStatus = Literal["seen", "recorded"]
+PaymentSettingsStatus = Literal["unconfigured", "configured", "held"]
+RejectionReason = Literal[
+    "unsupported_asset",
+    "asset_not_accepted",
+    "below_minimum",
+    "out_of_bounds",
+    "out_of_range",
+    "sanctioned",
+]
 
 EventType = Literal[
     "account.updated",
@@ -26,6 +35,7 @@ EventType = Literal[
     "deposit.refunded",
     "deposit.rejected",
     "deposit.reversed",
+    "payment_settings.updated",
     "quote.canceled",
     "quote.expired",
     "refund.created",

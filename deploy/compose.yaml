@@ -58,12 +58,17 @@ services:
   migrate:
     image: phala-pay
     user: "999:999"
-    command: [topup, migrate]
+    # With the attested configuration, a migration that must bind existing rows to the routes runs
+    # its one-time backfill (docs/design/payment-settings.md §10).
+    command: [topup, migrate, --config, /etc/topup/topup.yaml]
     environment:
       DATABASE_URL: postgres://postgres@postgres:5432/topup
       PGPASSFILE: /run/db-owner/postgres.pgpass
     volumes:
       - db_owner:/run/db-owner:ro
+    configs:
+      - source: topup
+        target: /etc/topup/topup.yaml
     depends_on:
       postgres:
         condition: service_healthy

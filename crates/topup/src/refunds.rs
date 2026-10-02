@@ -27,7 +27,7 @@ use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 use topup_adapters::chain::evm::EvmClient;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
@@ -455,13 +455,19 @@ where
                 {
                     return Ok(Verification::Succeeded);
                 }
-                // Another refund took the log since it was read; the next pass sees it used.
-                persist_evidence(&self.pool, &check, &json!({"result": "transfer_claimed"}))
-                    .await?;
+                // The refund was held, changed, or another refund took the log since it was read.
+                persist_evidence(
+                    &self.pool,
+                    &check,
+                    &json!({"result": "verification_deferred"}),
+                )
+                .await?;
                 Ok(Verification::Waiting)
             }
             Err(reason) => {
-                fail(&self.pool, &self.routes, &check, reason.code(), &evidence).await?;
+                if !fail(&self.pool, &self.routes, &check, reason.code(), &evidence).await? {
+                    return Ok(Verification::Waiting);
+                }
                 tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), reason = reason.code(), "finalized refund transaction does not pay the refund");
                 Ok(Verification::Failed)
             }
@@ -484,7 +490,9 @@ where
                 "result": reason.code(),
                 "paid_at": check.paid_at.timestamp(),
             });
-            fail(&self.pool, &self.routes, check, reason.code(), &evidence).await?;
+            if !fail(&self.pool, &self.routes, check, reason.code(), &evidence).await? {
+                return Ok(Verification::Waiting);
+            }
             tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "no provider ever returned the refund transaction");
             return Ok(Verification::Failed);
         };
@@ -521,14 +529,17 @@ where
             return Ok(Verification::Waiting);
         }
         let reason = RefundFailure::TransactionDropped;
-        fail(
+        if !fail(
             &self.pool,
             &self.routes,
             check,
             reason.code(),
             &evidence(reason.code()),
         )
-        .await?;
+        .await?
+        {
+            return Ok(Verification::Waiting);
+        }
         tracing::warn!(refund_id = %crate::ids::format(crate::ids::REFUND, check.refund_id), "the refund transaction was dropped and its nonce consumed");
         Ok(Verification::Failed)
     }
@@ -665,28 +676,56 @@ impl RefundCheckRow {
     }
 }
 
+/// Locks a refund's deposit before its refund row, and reports whether it has no sanctions hit.
+/// The lock is held until the caller's transaction ends; no lock is kept across chain reads.
+pub(crate) async fn lock_refund_deposit(
+    connection: &mut PgConnection,
+    scope: Scope,
+    refund_id: Uuid,
+) -> Result<Option<bool>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT deposit.sanctions_hit_at IS NULL \
+         FROM deposits AS deposit JOIN refunds AS refund ON refund.deposit_id = deposit.id \
+         WHERE refund.id = $1 AND refund.account_id = $2 AND refund.livemode = $3 \
+         FOR UPDATE OF deposit",
+    )
+    .bind(refund_id)
+    .bind(scope.account_id())
+    .bind(scope.livemode())
+    .fetch_optional(connection)
+    .await
+}
+
 /// Claims the refund due first and pushes its next check back by `retry_seconds`. The expected
 /// sender is the treasury of the deposit's own address, fixed when the address was issued.
 async fn claim_due_refund(
     pool: &PgPool,
     retry_seconds: i32,
 ) -> Result<Option<RefundCheckRow>, sqlx::Error> {
-    sqlx::query_as::<_, RefundCheckRow>(
+    let mut transaction = pool.begin().await?;
+    // Lock the deposit first, as mark-paid and the final verification transaction do. A locked
+    // or sanctioned deposit is skipped without delaying verification of other deposits.
+    let candidate: Option<Uuid> = sqlx::query_scalar(
+        "SELECT refund.id FROM refunds AS refund \
+         JOIN deposits AS deposit ON deposit.id = refund.deposit_id \
+         WHERE refund.status = 'pending' AND refund.tx_hash IS NOT NULL \
+           AND refund.next_check_at <= now() AND deposit.sanctions_hit_at IS NULL \
+         ORDER BY refund.next_check_at, refund.id \
+         FOR UPDATE OF deposit SKIP LOCKED LIMIT 1",
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    let claimed = sqlx::query_as::<_, RefundCheckRow>(
         r#"
-        WITH candidate AS (
-            SELECT refund.id
-            FROM refunds AS refund
-            WHERE refund.status = 'pending' AND refund.tx_hash IS NOT NULL
-              AND refund.next_check_at <= now()
-            ORDER BY refund.next_check_at, refund.id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        )
         UPDATE refunds AS refund
         SET next_check_at = now() + make_interval(secs => $1), updated_at = now()
-        FROM candidate, deposits AS deposit, addresses AS address
-        WHERE refund.id = candidate.id
-          AND deposit.id = refund.deposit_id
+        FROM deposits AS deposit, addresses AS address
+        WHERE refund.id = $2 AND refund.status = 'pending' AND refund.tx_hash IS NOT NULL
+          AND refund.next_check_at <= now()
+          AND deposit.id = refund.deposit_id AND deposit.sanctions_hit_at IS NULL
           AND address.id = deposit.address_id
         RETURNING refund.id AS refund_id, refund.account_id, refund.livemode, refund.deposit_id,
                   refund.chain_id, refund.tx_hash, refund.receipt_log_index, refund.paid_at,
@@ -696,8 +735,11 @@ async fn claim_due_refund(
         "#,
     )
     .bind(retry_seconds)
-    .fetch_optional(pool)
-    .await
+    .bind(candidate)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(claimed)
 }
 
 /// Logs of the transaction that pay or are named by another live refund.
@@ -741,7 +783,8 @@ async fn persist_evidence(
 }
 
 /// Marks the refund `succeeded` with its log's receipt position and sends `refund.updated` and `deposit.refunded`;
-/// `false` when the refund is no longer pending or another refund took the log first.
+/// `false` when its deposit has a sanctions hit, the refund is no longer pending, or another
+/// refund took the log first.
 async fn succeed(
     pool: &PgPool,
     routes: &RouteSet,
@@ -751,6 +794,9 @@ async fn succeed(
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let scope = Scope::new(check.account_id, check.livemode);
+    if lock_refund_deposit(&mut transaction, scope, check.refund_id).await? != Some(true) {
+        return Ok(false);
+    }
     let object = EventObject::Refund(check.refund_id);
     let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let updated = sqlx::query(
@@ -795,16 +841,19 @@ async fn succeed(
 /// Marks the refund `failed` and sends `refund.updated` and `refund.failed` (Stripe's event for a
 /// failed refund), whose object is the refund with its `failure_reason`; the `refund.failed` id is
 /// derived from the refund, one event per refund. Nothing is sent when the refund is no longer
-/// pending.
+/// pending or its deposit has a sanctions hit.
 async fn fail(
     pool: &PgPool,
     routes: &RouteSet,
     check: &RefundCheck,
     reason: &str,
     evidence: &Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let scope = Scope::new(check.account_id, check.livemode);
+    if lock_refund_deposit(&mut transaction, scope, check.refund_id).await? != Some(true) {
+        return Ok(false);
+    }
     let object = EventObject::Refund(check.refund_id);
     let before = crate::db::render(&mut transaction, routes, scope, object).await?;
     let updated = sqlx::query(
@@ -820,7 +869,8 @@ async fn fail(
     .bind(evidence)
     .execute(&mut *transaction)
     .await?;
-    if updated.rows_affected() == 1 {
+    let changed = updated.rows_affected() == 1;
+    if changed {
         let updated = NewOutboxEvent::system(Uuid::new_v4(), "refund.updated", scope, object);
         crate::db::enqueue_in(&mut transaction, routes, &updated, Some(&before)).await?;
         let failed = NewOutboxEvent::system(
@@ -832,7 +882,7 @@ async fn fail(
         crate::db::enqueue_in(&mut transaction, routes, &failed, None).await?;
     }
     transaction.commit().await?;
-    Ok(())
+    Ok(changed)
 }
 
 fn to_i64(value: u64) -> Result<i64, sqlx::Error> {

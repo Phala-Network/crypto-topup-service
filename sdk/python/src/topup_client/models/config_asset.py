@@ -20,18 +20,22 @@ class ConfigAsset:
         asset (str): Asset code.
         chain_id (int): EVM chain identifier.
         confirmations (str): The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
-            block and one more), `"safe"`, or `"finalized"`: the stricter of the route's floor and
-            your account's `confirmation_policies`. A credit before finality can still be reversed
+            block and one more), `"safe"`, or `"finalized"`: the stricter of the chain's floor and the
+            `confirmations` of your payment settings. A credit before finality can still be reversed
             (`deposit.reversed`).
         contract (str): Token contract address.
         decimals (int): Token decimals.
         max_deposit_atomic (str): Maximum creditable deposit in base units, as a decimal string.
         min_amount (int): Minimum credit in cents, for quotes and deposits; smaller deposits are not credited.
+        min_deposit_atomic (str): Minimum creditable deposit in base units, as a decimal string.
         min_refund_atomic (str): Minimum refundable amount in base units, as a decimal string.
         pricing (str): `spot` or `stablecoin`.
+        quote_amount_decimals (int): Token decimals a quote's amount is rounded up to (the operator's).
         quote_spread_bps (int): A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no
             spread.
-        quote_tolerance_bps (int): A payment within this many basis points of the quoted amount completes the quote.
+        quote_tolerance_bps (int): A payment within this many basis points of the quoted amount, either way, completes
+            the
+            quote at its amount.
         quote_ttl_seconds (int): Payment window of a quote, in seconds.
         typical_credit_seconds (int): Typical time from payment to the `deposit.credited` event, in seconds, at
             `confirmations`.
@@ -45,8 +49,10 @@ class ConfigAsset:
     decimals: int
     max_deposit_atomic: str
     min_amount: int
+    min_deposit_atomic: str
     min_refund_atomic: str
     pricing: str
+    quote_amount_decimals: int
     quote_spread_bps: int
     quote_tolerance_bps: int
     quote_ttl_seconds: int
@@ -69,9 +75,13 @@ class ConfigAsset:
 
         min_amount = self.min_amount
 
+        min_deposit_atomic = self.min_deposit_atomic
+
         min_refund_atomic = self.min_refund_atomic
 
         pricing = self.pricing
+
+        quote_amount_decimals = self.quote_amount_decimals
 
         quote_spread_bps = self.quote_spread_bps
 
@@ -94,8 +104,10 @@ class ConfigAsset:
                 "decimals": decimals,
                 "max_deposit_atomic": max_deposit_atomic,
                 "min_amount": min_amount,
+                "min_deposit_atomic": min_deposit_atomic,
                 "min_refund_atomic": min_refund_atomic,
                 "pricing": pricing,
+                "quote_amount_decimals": quote_amount_decimals,
                 "quote_spread_bps": quote_spread_bps,
                 "quote_tolerance_bps": quote_tolerance_bps,
                 "quote_ttl_seconds": quote_ttl_seconds,
@@ -123,9 +135,13 @@ class ConfigAsset:
 
         min_amount = d.pop("min_amount")
 
+        min_deposit_atomic = d.pop("min_deposit_atomic")
+
         min_refund_atomic = d.pop("min_refund_atomic")
 
         pricing = d.pop("pricing")
+
+        quote_amount_decimals = d.pop("quote_amount_decimals")
 
         quote_spread_bps = d.pop("quote_spread_bps")
 
@@ -145,8 +161,10 @@ class ConfigAsset:
             decimals=decimals,
             max_deposit_atomic=max_deposit_atomic,
             min_amount=min_amount,
+            min_deposit_atomic=min_deposit_atomic,
             min_refund_atomic=min_refund_atomic,
             pricing=pricing,
+            quote_amount_decimals=quote_amount_decimals,
             quote_spread_bps=quote_spread_bps,
             quote_tolerance_bps=quote_tolerance_bps,
             quote_ttl_seconds=quote_ttl_seconds,

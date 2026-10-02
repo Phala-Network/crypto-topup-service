@@ -175,6 +175,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 }],
                 effects: TransitionEffects {
                     mark_final: false,
+                    sanctions_hit: false,
                     canonical_evidence: None,
                     valuation: Some(StoredValuation {
                         valuation_at: Utc::now(),
@@ -951,8 +952,8 @@ fn confirmation_route() -> RouteFile {
             .expect("route fixture");
     route.asset.contract = evm_address(200);
     route.asset.decimals = 2;
-    route.rate_lock.amount_decimals = 2;
-    route.screening.min_credit_minor = 1;
+    route.asset.quote_amount_decimals = 2;
+    route.merchant.min_amount = topup_core::route::Bounded::at(1);
     route
 }
 
@@ -989,6 +990,7 @@ async fn seed_account(pool: &PgPool, number: u8) -> Result<Seed> {
         &format!("workspace-{number}"),
     )
     .await?;
+    seed::accept_assets(pool, account.id, true, 1, &["pha"]).await?;
     let address = NewAddress {
         id: Uuid::new_v4(),
         customer_id: customer.id,

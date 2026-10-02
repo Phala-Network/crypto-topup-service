@@ -14,8 +14,10 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
-use topup_core::deposit::{DepositState, RetryError, StepOutcome};
+use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
 use topup_core::identity::{credited_event_id, event_id};
+use topup_core::money::AtomicAmount;
+use topup_core::route::RouteFile;
 use topup_core::screening::{Bounds, PauseScopes, SanctionsResult, screen};
 
 use crate::db::{Deposit, EventObject, OutboxEvent};
@@ -29,37 +31,34 @@ struct RouteKey {
     version: u64,
 }
 
-/// Screening policy and sanctions source for one immutable route version.
+/// One immutable route version and its sanctions source. A deposit's amount bounds are those of
+/// the terms that govern it (`crate::payment_config`), read when it is screened.
 #[derive(Clone)]
 pub struct ScreenRoute {
-    key: RouteKey,
-    oracle: Address,
-    bounds: Bounds,
+    route: RouteFile,
     sanctions: Arc<dyn SanctionsSource>,
 }
 
 impl ScreenRoute {
     /// Creates an injectable route configuration, including a mockable sanctions source.
     #[must_use]
-    pub fn new(
-        name: impl Into<String>,
-        version: u64,
-        oracle: Address,
-        bounds: Bounds,
-        sanctions: Arc<dyn SanctionsSource>,
-    ) -> Self {
-        Self {
-            key: RouteKey {
-                name: name.into(),
-                version,
-            },
-            oracle,
-            bounds,
-            sanctions,
+    pub fn new(route: RouteFile, sanctions: Arc<dyn SanctionsSource>) -> Self {
+        Self { route, sanctions }
+    }
+
+    fn key(&self) -> RouteKey {
+        RouteKey {
+            name: self.route.route.clone(),
+            version: self.route.version,
         }
     }
 
-    async fn evaluate(&self, deposit: &Deposit, pause_scopes: PauseScopeSources) -> StepResult {
+    async fn evaluate(
+        &self,
+        deposit: &Deposit,
+        pause_scopes: PauseScopeSources,
+        bounds: Bounds,
+    ) -> StepResult {
         let sanctions = self
             .sanctions
             .sanctions(deposit.from_address, deposit.block_number)
@@ -70,11 +69,12 @@ impl ScreenRoute {
         let outcome = screen(
             deposit.amount_atomic,
             &sanctions,
-            &self.bounds,
+            &bounds,
             &pause_scopes.effective,
             &PauseScopes::default(),
         );
-        let evidence = screening_evidence(self.oracle, sanctions, self.bounds, &pause_scopes);
+        let oracle = self.route.screening.sanctions_oracle;
+        let evidence = screening_evidence(oracle, sanctions, bounds, &pause_scopes);
         let mut result = StepResult::new(outcome, evidence);
         if let StepOutcome::Reject(_) = outcome {
             result.events.push(rejected_event(deposit));
@@ -130,7 +130,7 @@ impl ScreenStep {
     ) -> Result<Self, ScreenStepConfigError> {
         let mut by_key = BTreeMap::new();
         for route in routes {
-            let key = route.key.clone();
+            let key = route.key();
             if by_key.insert(key.clone(), route).is_some() {
                 return Err(ScreenStepConfigError::DuplicateRoute {
                     route: key.name,
@@ -165,15 +165,31 @@ impl ScreenStep {
                         version: route.version,
                         source,
                     })?;
-            screening_routes.push(ScreenRoute::new(
-                route.route.clone(),
-                route.version,
-                route.screening.sanctions_oracle,
-                Bounds::from(&route.screening),
-                Arc::new(oracle),
-            ));
+            screening_routes.push(ScreenRoute::new(route.clone(), Arc::new(oracle)));
         }
         Self::new(pool, screening_routes)
+    }
+
+    /// The amount bounds of the terms that govern `deposit` on `route`; none bound a credit the
+    /// merchant was told before a restore (docs/design/payment-settings.md §11).
+    async fn bounds(
+        &self,
+        route: &RouteFile,
+        deposit: &Deposit,
+        delivered: bool,
+    ) -> Result<Option<Bounds>, sqlx::Error> {
+        if delivered {
+            return Ok(Some(Bounds {
+                min_atomic: AtomicAmount::default(),
+                max_atomic: AtomicAmount::new(alloy_primitives::U256::MAX),
+            }));
+        }
+        let mut connection = self.pool.acquire().await?;
+        Ok(
+            crate::payment_config::deposit_terms_on(&mut connection, route, deposit.id)
+                .await?
+                .map(|terms| terms.bounds()),
+        )
     }
 
     async fn pause_scopes(
@@ -207,7 +223,27 @@ impl Step for ScreenStep {
             Ok(None) => return invariant_result("customer_not_found", deposit.block_number),
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
         };
-        let mut result = screening_route.evaluate(deposit, pause_scopes).await;
+        // A credit the merchant was told before a restore stands (design §11).
+        let delivered = match crate::restore_mode::imported_credit(&self.pool, deposit.id).await {
+            Ok(credit) => credit.is_some(),
+            Err(_) => {
+                return transient_result("delivered_credit_load_failed", deposit.block_number);
+            }
+        };
+        let bounds = match self
+            .bounds(&screening_route.route, deposit, delivered)
+            .await
+        {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) => return invariant_result("deposit_terms_missing", deposit.block_number),
+            Err(_) => return transient_result("deposit_terms_load_failed", deposit.block_number),
+        };
+        let mut result = screening_route
+            .evaluate(deposit, pause_scopes, bounds)
+            .await;
+        if delivered && result.outcome == StepOutcome::Reject(RejectReason::Sanctioned) {
+            result = delivered_credit_sanctioned(deposit, result.evidence);
+        }
         if result.outcome == StepOutcome::Advance {
             // A deposit that is not final yet is credited only within the account's cap on
             // credit a reorganization could still reverse; past it, it is credited once final.
@@ -240,6 +276,26 @@ impl Step for ScreenStep {
         }
         result
     }
+}
+
+/// A sanctions hit on a credit the merchant was told before a restore: compliance, not commercial
+/// policy, so the credit stands (no `deposit.rejected` rewrites it). The service records the hit,
+/// which keeps the forwarder from every sweep (`GET /v1/forwarders?sweepable`), and raises
+/// `TopupDeliveredCreditSanctioned` for the operator (docs/design/payment-settings.md §11).
+fn delivered_credit_sanctioned(deposit: &Deposit, mut evidence: serde_json::Value) -> StepResult {
+    tracing::error!(
+        tags.alert = "TopupDeliveredCreditSanctioned",
+        deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
+        account_id = %deposit.account_id,
+        livemode = deposit.livemode,
+        chain_id = deposit.chain_id,
+        "a sanctions list names the sender of a credit delivered before a restore: the credit \
+         stands and its forwarder is not swept (deploy/runbooks/restore.md)"
+    );
+    evidence["sanctions_hit"] = json!("delivered_credit_stands");
+    let mut result = StepResult::new(StepOutcome::Advance, evidence);
+    result.effects.sanctions_hit = true;
+    result
 }
 
 /// The fulfillment event: `deposit.credited`, whose object is the credited deposit, keyed by an
@@ -387,20 +443,27 @@ mod tests {
     }
 
     fn route(provider_a: SanctionsAnswer, provider_b: SanctionsAnswer) -> ScreenRoute {
+        let mut route: topup_core::route::RouteFile =
+            serde_saphyr::from_str(include_str!("../../tests/fixtures/phala-cloud-pha.yaml"))
+                .expect("route fixture");
+        route.route = "route".to_owned();
+        route.version = 1;
+        route.screening.sanctions_oracle = Address::repeat_byte(9);
         ScreenRoute::new(
-            "route",
-            1,
-            Address::repeat_byte(9),
-            Bounds {
-                min_atomic: amount(10),
-                max_atomic: amount(20),
-            },
+            route,
             Arc::new(FixedSanctions(SanctionsResult {
                 provider_a,
                 provider_b,
                 block_number: 123,
             })),
         )
+    }
+
+    fn bounds() -> Bounds {
+        Bounds {
+            min_atomic: amount(10),
+            max_atomic: amount(20),
+        }
     }
 
     fn pauses(customer: &[&str], account: &[&str], route: &[&str]) -> PauseScopeSources {
@@ -467,7 +530,7 @@ mod tests {
         for (provider_a, provider_b, expected) in cases {
             let deposit = deposit(amount(15));
             let result = route(provider_a, provider_b)
-                .evaluate(&deposit, pauses(&[], &[], &[]))
+                .evaluate(&deposit, pauses(&[], &[], &[]), bounds())
                 .await;
             assert_eq!(result.outcome, expected);
             assert_eq!(result.evidence["block_number"], 123);
@@ -490,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn bounds_and_pause_outcomes_preserve_evidence_and_event_rules() {
         let out_of_bounds = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(21)), pauses(&[], &[], &[]))
+            .evaluate(&deposit(amount(21)), pauses(&[], &[], &[]), bounds())
             .await;
         assert_eq!(
             out_of_bounds.outcome,
@@ -501,7 +564,11 @@ mod tests {
         assert_eq!(out_of_bounds.evidence["bounds"]["max_atomic"], "20");
 
         let waiting = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(15)), pauses(&["settlement"], &[], &[]))
+            .evaluate(
+                &deposit(amount(15)),
+                pauses(&["settlement"], &[], &[]),
+                bounds(),
+            )
             .await;
         assert_eq!(
             waiting.outcome,
@@ -516,7 +583,11 @@ mod tests {
         );
 
         let route_paused = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["settlement"]))
+            .evaluate(
+                &deposit(amount(15)),
+                pauses(&[], &[], &["settlement"]),
+                bounds(),
+            )
             .await;
         assert_eq!(
             route_paused.outcome,
@@ -530,7 +601,11 @@ mod tests {
         );
 
         let non_settlement_route_pause = route(SanctionsAnswer::Clear, SanctionsAnswer::Clear)
-            .evaluate(&deposit(amount(15)), pauses(&[], &[], &["refunds"]))
+            .evaluate(
+                &deposit(amount(15)),
+                pauses(&[], &[], &["refunds"]),
+                bounds(),
+            )
             .await;
         assert_eq!(non_settlement_route_pause.outcome, StepOutcome::Advance);
     }
@@ -544,7 +619,7 @@ mod tests {
             block_number: 124,
         }));
         let result = route
-            .evaluate(&deposit(amount(15)), pauses(&[], &[], &[]))
+            .evaluate(&deposit(amount(15)), pauses(&[], &[], &[]), bounds())
             .await;
         assert_eq!(
             result.outcome,

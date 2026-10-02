@@ -71,6 +71,7 @@ impl StepResult {
                 valuation: None,
                 lock_consumption: None,
                 mark_final: false,
+                sanctions_hit: false,
             },
         }
     }

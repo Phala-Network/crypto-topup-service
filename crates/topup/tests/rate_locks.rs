@@ -498,8 +498,8 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
         let (other, other_key) = seed_product(&database.app_pool, "builder").await?;
         let account = seed_account(&database.app_pool, product.id, "account-rl").await?;
         let other_account = seed_account(&database.app_pool, other.id, "account-rl").await?;
-        let mut route = test_route();
-        route.rate_lock.max_creations_per_minute = 1;
+        let route = test_route();
+        limit_quote_rate(&database.app_pool, product.id, 1).await?;
         let app = topup::api::router(AppState {
             pool: database.app_pool.clone(),
             routes: Arc::new(
@@ -1096,7 +1096,7 @@ async fn usd_stated_amount_rounds_token_amount_up() -> Result<()> {
         // A cent at $3 a token is 33⅓ ten-thousandths of one: the quote rounds up to 34.
         let mut route = test_route();
         route.asset.decimals = 4;
-        route.rate_lock.amount_decimals = 4;
+        route.asset.quote_amount_decimals = 4;
         let quotes: Arc<dyn QuoteProvider> = Arc::new(ThreeDollarQuote);
         let (lock, _) = locks::create(
             &database.app_pool,
@@ -1142,8 +1142,9 @@ async fn quoted_amount_rounds_up_to_the_routes_amount_decimals() -> Result<()> {
         seed_account(&database.app_pool, product.id, "short-amount").await?;
         let mut route = test_route();
         route.asset.decimals = 18;
-        route.rate_lock.amount_decimals = 4;
-        route.screening.max_deposit_atomic = AtomicAmount::new(U256::MAX);
+        route.asset.quote_amount_decimals = 4;
+        route.merchant.max_deposit_atomic =
+            topup_core::route::Bounded::at(AtomicAmount::new(U256::MAX));
         let app = topup::api::router(AppState {
             pool: database.app_pool.clone(),
             routes: Arc::new(
@@ -1231,6 +1232,18 @@ async fn caps_are_per_account_and_mode_and_expiry_releases_them() -> Result<()> 
         let route = test_route();
         let mut test_mode_route = test_route();
         test_mode_route.livemode = false;
+        seed::configure_payments(
+            &database.app_pool,
+            first.id,
+            false,
+            &topup::payment_config::Document {
+                quote_creations_per_customer_per_minute: Some(
+                    topup::payment_config::MAX_QUOTE_CREATIONS_PER_CUSTOMER_PER_MINUTE,
+                ),
+                ..topup::payment_config::Document::accepting([&test_mode_route])
+            },
+        )
+        .await?;
         let create = |customer: &Customer, route: &RouteFile, credit: u64| {
             let (pool, quotes, first, customer, route) = (
                 database.app_pool.clone(),
@@ -1510,8 +1523,8 @@ async fn rate_limited_creation_does_not_fetch_a_price() -> Result<()> {
 
         let product = seed_product_without_key(&database.app_pool, "phala-cloud").await?;
         let account = seed_account(&database.app_pool, product.id, "limited").await?;
-        let mut route = test_route();
-        route.rate_lock.max_creations_per_minute = 1;
+        let route = test_route();
+        limit_quote_rate(&database.app_pool, product.id, 1).await?;
         let counter = Arc::new(CountingQuote(AtomicUsize::new(0)));
         let quotes: Arc<dyn QuoteProvider> = counter.clone();
         create_lock(&database, &quotes, &product, &account, &route).await?;
@@ -1583,6 +1596,7 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
         let mut route = test_route();
         route.chain.chain_id = BASE;
         route.chain.confirmations = topup_core::route::ChainFamily::OpStack.default_confirmations();
+        seed::accept_routes(pool, product.id, true, &[&route]).await?;
         let admin_key = SigningKey::from_bytes(&[44; 32]);
         let app = topup::api::router(AppState {
             pool: pool.clone(),
@@ -1629,31 +1643,29 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
         let unpaid = read().await?;
         ensure!(unpaid["amount_credited"].is_null(), "{unpaid}");
         ensure!(unpaid["typical_credit_seconds"] == 7, "{unpaid}");
-        let set_policy = |confirmations: &'static str| {
+        let set_confirmations = |confirmations: &'static str| {
             let app = app.clone();
             let product_key = &product_key;
             async move {
-                let policy = serde_json::to_vec(&json!({
-                    "confirmation_policies": [{"chain_id": BASE, "confirmations": confirmations}]
-                }))?;
+                let settings = serde_json::to_vec(&json!({"chains": [{
+                    "chain_id": BASE, "confirmations": confirmations, "assets": [{"asset": "pha"}],
+                }]}))?;
                 let response = app
                     .oneshot(merchant_request(
                         Method::POST,
-                        "/v1/account",
-                        policy,
+                        "/v1/payment_settings",
+                        settings,
                         product_key,
                     ))
                     .await?;
                 anyhow::Ok(response.status())
             }
         };
-        ensure!(set_policy("2").await? == StatusCode::BAD_REQUEST);
-        ensure!(set_policy("5").await? == StatusCode::OK);
-        ensure!(read().await?["typical_credit_seconds"] == 11);
-        ensure!(set_policy("safe").await? == StatusCode::OK);
-        ensure!(read().await?["typical_credit_seconds"] == 300);
-        ensure!(set_policy("finalized").await? == StatusCode::OK);
-        ensure!(read().await?["typical_credit_seconds"] == 900);
+        // Weaker than the chain's floor is refused; a stricter requirement governs later quotes and
+        // payments, while this quote keeps the confirmation it was issued with.
+        ensure!(set_confirmations("2").await? == StatusCode::BAD_REQUEST);
+        ensure!(set_confirmations("finalized").await? == StatusCode::OK);
+        ensure!(read().await?["typical_credit_seconds"] == 7);
 
         // 40 of the quoted 100 atomic units, valued at spot: 40 cents, not the quote's 100.
         let address_id = quote_address_id(pool, quote_id).await?;
@@ -2139,12 +2151,16 @@ async fn insert_deposit_in(
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, asset_contract, from_address,
-            amount_atomic, state, reason, next_attempt_at, receipt_log_index, tx_from, tx_nonce
+            amount_atomic, state, reason, next_attempt_at, receipt_log_index, tx_from, tx_nonce,
+            settings_revision_id
         )
         SELECT $1, 1, $2, 0, 10, $3, now(), address.id, address.account_id, address.livemode,
-               quote.customer_id, $5, $6, 100, 'rejected', 'unsupported_asset', now(), 0, $6, 0
+               quote.customer_id, $5, $6, 100, 'rejected', 'unsupported_asset', now(), 0, $6, 0,
+               settings.current_revision_id
         FROM addresses AS address
         JOIN quotes AS quote ON quote.id = address.quote_id
+        JOIN payment_settings_state AS settings
+            ON settings.account_id = address.account_id AND settings.livemode = address.livemode
         WHERE address.id = $4
         "#,
     )
@@ -2310,12 +2326,14 @@ fn test_route() -> RouteFile {
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
             .expect("route fixture");
     route.asset.decimals = 2;
-    route.rate_lock.amount_decimals = 2;
-    route.rate_lock.spread_bps = topup_core::money::Bps::new(0).expect("zero bps");
-    route.rate_lock.max_creations_per_minute = 100;
-    route.screening.min_deposit_atomic = AtomicAmount::new(U256::from(1_u64));
-    route.screening.max_deposit_atomic = AtomicAmount::new(U256::from(1_000_000_u64));
-    route.screening.min_credit_minor = 1;
+    route.asset.quote_amount_decimals = 2;
+    route.merchant.quote_spread_bps =
+        topup_core::route::Bounded::at(topup_core::money::Bps::new(0).expect("zero bps"));
+    route.merchant.min_deposit_atomic =
+        topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_u64)));
+    route.merchant.max_deposit_atomic =
+        topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_000_000_u64)));
+    route.merchant.min_amount = topup_core::route::Bounded::at(1);
     route
 }
 
@@ -2331,7 +2349,28 @@ async fn seed_product(pool: &sqlx::PgPool, name: &str) -> Result<(Account, Strin
     .await?;
     let key = seed::create_api_key(pool, account.id, true).await?;
     seed::set_treasury(pool, account.id, true, 1, seed::FIXTURE_TREASURY).await?;
+    limit_quote_rate(
+        pool,
+        account.id,
+        topup::payment_config::MAX_QUOTE_CREATIONS_PER_CUSTOMER_PER_MINUTE,
+    )
+    .await?;
     Ok((account, key))
+}
+
+/// Accepts the test route's asset with one customer's quote creations per minute at `rate`.
+async fn limit_quote_rate(pool: &sqlx::PgPool, account_id: Uuid, rate: u64) -> Result<()> {
+    seed::configure_payments(
+        pool,
+        account_id,
+        true,
+        &topup::payment_config::Document {
+            quote_creations_per_customer_per_minute: Some(rate),
+            ..topup::payment_config::Document::accepting([&test_route()])
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn seed_product_without_key(pool: &sqlx::PgPool, name: &str) -> Result<Account> {

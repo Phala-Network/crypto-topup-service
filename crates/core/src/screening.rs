@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::deposit::{RejectReason, RetryError, StepOutcome, WaitReason};
 use crate::money::AtomicAmount;
-use crate::route::ScreeningConfig;
 
 /// One provider's direct sanctions-list answer.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,22 +31,13 @@ pub struct SanctionsResult {
     pub block_number: u64,
 }
 
-/// Inclusive per-deposit amount bounds derived from route screening configuration.
+/// Inclusive per-deposit amount bounds, from the terms that govern the deposit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Bounds {
     /// The minimum accepted atomic amount.
     pub min_atomic: AtomicAmount,
     /// The maximum accepted atomic amount.
     pub max_atomic: AtomicAmount,
-}
-
-impl From<&ScreeningConfig> for Bounds {
-    fn from(config: &ScreeningConfig) -> Self {
-        Self {
-            min_atomic: config.min_deposit_atomic,
-            max_atomic: config.max_deposit_atomic,
-        }
-    }
 }
 
 /// A runtime operation that can be paused independently.
@@ -190,7 +180,7 @@ pub fn screen(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, U256};
+    use alloy_primitives::U256;
 
     use super::*;
 
@@ -215,24 +205,6 @@ mod tests {
 
     fn scopes(codes: &[&str]) -> PauseScopes {
         PauseScopes::from_codes(codes.iter().copied()).expect("test scope codes must parse")
-    }
-
-    #[test]
-    fn bounds_are_derived_from_route_screening_config() {
-        let config = ScreeningConfig {
-            sanctions_oracle: Address::ZERO,
-            min_deposit_atomic: amount(10),
-            max_deposit_atomic: amount(20),
-            min_credit_minor: 1,
-        };
-
-        assert_eq!(
-            Bounds::from(&config),
-            Bounds {
-                min_atomic: amount(10),
-                max_atomic: amount(20),
-            }
-        );
     }
 
     #[test]

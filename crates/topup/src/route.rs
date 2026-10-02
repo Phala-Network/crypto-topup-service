@@ -92,7 +92,7 @@ mod tests {
             ),
             ("coinmetrics", "usdt")
         );
-        assert_eq!(usdt.rate_lock.spread_bps.value(), 0);
+        assert_eq!(usdt.merchant.quote_spread_bps.default.value(), 0);
     }
 
     #[test]
@@ -118,9 +118,9 @@ mod tests {
             (check.fx.source.as_str(), check.fx.pair.as_str()),
             ("kraken", "USDT/USD")
         );
-        assert!(route.screening.min_deposit_atomic.value().is_zero());
-        assert_eq!(route.rate_lock.window_s, 900);
-        assert_eq!(route.rate_lock.spread_bps.value(), 50);
+        assert!(route.merchant.min_deposit_atomic.default.value().is_zero());
+        assert_eq!(route.merchant.quote_ttl_seconds.default, 900);
+        assert_eq!(route.merchant.quote_spread_bps.default.value(), 50);
         assert_eq!(route.alerts.stuck_after_s.confirmed, 1_800);
     }
 
@@ -151,7 +151,7 @@ mod tests {
         );
         assert_eq!(usdc.pricing.check, None);
         assert_eq!(
-            usdc.rate_lock.spread_bps.value(),
+            usdc.merchant.quote_spread_bps.default.value(),
             0,
             "a fixed price needs no spread"
         );
@@ -193,15 +193,15 @@ mod tests {
                 ("coinmetrics", "usdt")
             );
             assert_eq!(usdt.pricing.check, None);
-            assert_eq!(usdt.rate_lock.spread_bps.value(), 0);
+            assert_eq!(usdt.merchant.quote_spread_bps.default.value(), 0);
             assert_eq!(
                 (
-                    usdt.screening.max_deposit_atomic,
-                    usdt.asset.min_refund_atomic
+                    usdt.merchant.max_deposit_atomic.default,
+                    usdt.merchant.min_refund_atomic.default
                 ),
                 (
-                    usdc.screening.max_deposit_atomic,
-                    usdc.asset.min_refund_atomic
+                    usdc.merchant.max_deposit_atomic.default,
+                    usdc.merchant.min_refund_atomic.default
                 ),
                 "a dollar stablecoin has the USDC route's limits"
             );
@@ -239,7 +239,7 @@ mod tests {
             usdc.pricing.mode,
             topup_core::route::PricingMode::Stablecoin
         );
-        assert_eq!(usdc.rate_lock.spread_bps.value(), 0);
+        assert_eq!(usdc.merchant.quote_spread_bps.default.value(), 0);
 
         // All six staging routes load together: two chains, each in address mode.
         let usdc_sepolia = staging(DEPLOY_USDC_ROUTE).expect("USDC route");
@@ -273,7 +273,10 @@ mod tests {
         let valid = parse_and_validate(VALID, false).expect("the fixture is valid");
         for route in std::iter::once(valid).chain(staging_routes) {
             let resolved = resolved_json(&route).expect("route serializes");
-            assert!(resolved.contains("\"implementation\"") && resolved.contains("\"window_s\""));
+            assert!(
+                resolved.contains("\"implementation\"")
+                    && resolved.contains("\"quote_ttl_seconds\"")
+            );
             assert_eq!(parse_and_validate(&resolved, false), Ok(route));
         }
     }
@@ -318,10 +321,23 @@ mod tests {
             ),
             (
                 VALID.replace(
-                    "  min_credit_minor: 100\n",
-                    "  min_credit_minor: 100\n  enabled: true\n",
+                    "  min_amount: { default: 100 }\n",
+                    "  min_amount: { default: 100 }\n  enabled: true\n",
                 ),
                 "enabled",
+            ),
+            // Each account's terms moved to its payment settings, within `merchant` bounds.
+            (
+                format!("{VALID}limits:\n  min_credit_minor: 100\n"),
+                "limits",
+            ),
+            (format!("{VALID}quote:\n  window_s: 900\n"), "quote"),
+            (
+                VALID.replace(
+                    "  min_amount: { default: 100 }\n",
+                    "  min_amount: { default: 100, value: 1 }\n",
+                ),
+                "value",
             ),
             // The service sends no transactions: no operator key, flush schedule, or gas policy.
             (
@@ -340,8 +356,8 @@ mod tests {
             ),
             (
                 VALID.replace(
-                    "  min_credit_minor: 100\n",
-                    "  min_credit_minor: 100\n  min_flush_atomic: \"1\"\n",
+                    "  min_amount: { default: 100 }\n",
+                    "  min_amount: { default: 100 }\n  min_flush_atomic: { default: \"1\" }\n",
                 ),
                 "min_flush_atomic",
             ),
@@ -368,12 +384,58 @@ mod tests {
                 "asset.decimals",
             ),
             (
-                format!("{VALID}quote:\n  window_s: 0\n"),
-                "quote.window_s",
+                VALID.replace(
+                    "merchant:\n",
+                    "merchant:\n  quote_ttl_seconds: { default: 10 }\n",
+                ),
+                "merchant.quote_ttl_seconds",
             ),
             (
-                format!("{VALID}quote:\n  spread_bps: 10001\n"),
-                "spread_bps",
+                VALID.replace(
+                    "merchant:\n",
+                    "merchant:\n  quote_ttl_seconds: { default: 900, max: 172800 }\n",
+                ),
+                "merchant.quote_ttl_seconds",
+            ),
+            (
+                VALID.replace(
+                    "merchant:\n",
+                    "merchant:\n  quote_spread_bps: { default: 50, max: 6000 }\n",
+                ),
+                "merchant.quote_spread_bps",
+            ),
+            // A tolerance near 100% would match a payment of nothing.
+            (
+                VALID.replace(
+                    "merchant:\n",
+                    "merchant:\n  quote_tolerance_bps: { default: 100, max: 2000 }\n",
+                ),
+                "merchant.quote_tolerance_bps",
+            ),
+            (
+                VALID.replace(
+                    "merchant:\n",
+                    "merchant:\n  quote_spread_bps: { default: 600, max: 500 }\n",
+                ),
+                "merchant.quote_spread_bps",
+            ),
+            (
+                VALID.replace(
+                    "  min_amount: { default: 100 }\n",
+                    "  min_amount: { default: 100, min: 0 }\n",
+                ),
+                "merchant.min_amount",
+            ),
+            (
+                VALID.replace(
+                    "  min_refund_atomic: { default: \"20\" }\n",
+                    "  min_refund_atomic: { default: \"20\", max: \"300000000000000000000000\" }\n",
+                ),
+                "merchant.min_refund_atomic",
+            ),
+            (
+                VALID.replace("  min_amount: { default: 100 }\n", ""),
+                "min_amount",
             ),
             (
                 VALID.replace("symbol: pha\n", "symbol: PHA\n"),

@@ -18,6 +18,7 @@ pub(crate) mod metadata;
 pub mod models;
 mod openapi;
 mod pagination;
+mod payment_settings;
 mod pending;
 mod quotes;
 mod rate_limit;
@@ -150,11 +151,17 @@ pub(crate) async fn render_object(
             })
             .map_err(|_| error::ApiError::internal()),
         crate::db::EventObject::Account(id) if id == scope.account_id() => {
-            account::find_account(connection, routes, scope)
+            account::find_account(connection, scope)
                 .await
                 .map(|account| account.map(serde_json::to_value))
         }
         crate::db::EventObject::Account(_) => Ok(None),
+        crate::db::EventObject::PaymentSettings(id) if id == scope.account_id() => {
+            payment_settings::payment_settings_object(connection, routes, scope)
+                .await
+                .map(|settings| Some(serde_json::to_value(settings)))
+        }
+        crate::db::EventObject::PaymentSettings(_) => Ok(None),
         crate::db::EventObject::WebhookEndpoint(id) => {
             crate::webhook_endpoints::find_any(connection, scope, id)
                 .await
@@ -214,7 +221,11 @@ fn merchant_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(deposits::get_refund, deposits::update_refund))
         .routes(routes!(deposits::mark_refund_paid))
         .routes(routes!(deposits::cancel_refund))
-        .routes(routes!(account::get_account, account::update_account))
+        .routes(routes!(account::get_account))
+        .routes(routes!(
+            payment_settings::get_payment_settings,
+            payment_settings::update_payment_settings
+        ))
         .routes(routes!(account::pause_account))
         .routes(routes!(account::resume_account))
         .routes(routes!(account::roll_webhook_key))
@@ -298,7 +309,8 @@ const ROUTE_PERMISSIONS: &[(&str, &str, Permission)] = &[
     ),
     ("POST", "/v1/refunds/{id}/cancel", Permission::RefundsWrite),
     ("GET", "/v1/account", Permission::AccountRead),
-    ("POST", "/v1/account", Permission::AccountWrite),
+    ("GET", "/v1/payment_settings", Permission::AccountRead),
+    ("POST", "/v1/payment_settings", Permission::AccountWrite),
     ("POST", "/v1/account/pause", Permission::AccountWrite),
     ("POST", "/v1/account/resume", Permission::AccountWrite),
     (
@@ -390,7 +402,7 @@ fn client_secret_routes() -> OpenApiRouter<AppState> {
 fn admin_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::create_account))
-        .routes(routes!(handlers::update_account))
+        .routes(routes!(handlers::get_account, handlers::update_account))
         .routes(routes!(handlers::issue_api_key))
         .routes(routes!(handlers::admin_get_deposit))
         .routes(routes!(handlers::pause_account))
@@ -416,6 +428,7 @@ fn admin_routes() -> OpenApiRouter<AppState> {
         .routes(routes!(restore::import_events))
         .routes(routes!(restore::discard_delivered_credit))
         .routes(routes!(restore::unfreeze))
+        .routes(routes!(payment_settings::resume_recording))
 }
 
 /// utoipa's merchant and admin documents, before [`openapi`] finishes them.

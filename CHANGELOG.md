@@ -13,6 +13,93 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Added
+
+- Per-account payment settings, `GET` and `POST /v1/payment_settings` (docs/integration.md §1.9,
+  docs/design/payment-settings.md): per mode, the chains and assets the account accepts, a stricter
+  `confirmations` per chain, and its terms per asset (quote window, spread, two-sided tolerance,
+  minimum credit, deposit bounds, refund floor) within the operator's bounds, plus one customer's
+  quote creations per minute. `chains`, when sent, replaces the list; writes are last-write-wins.
+  `available` lists the operator's catalog of the mode with its defaults, bounds, and each chain's
+  status. Each change has a new `revision` and is announced as `payment_settings.updated`, an
+  account event delivered to every endpoint. Reading needs `account.read`; writing needs
+  `account.write`, which a restricted key never holds.
+- `rejected` deposits carry `rejection_reason: "asset_not_accepted"` for a routed token the payment
+  settings the deposit is bound to do not accept; it is refundable like any rejected deposit.
+- Error codes `asset_not_accepted` (a quote or deposit address of an asset the account does not
+  accept) and `payment_settings_unconfirmed` (after a service restore, until the merchant
+  reconfirms its settings).
+- A quote carries `terms`, the terms it was issued with, which it keeps whatever the settings say
+  later. `GET /v1/config` adds `quote_creations_per_customer_per_minute`, and each asset
+  `min_deposit_atomic` and `quote_amount_decimals`.
+- Admin: `GET /v1/admin/accounts/{account}`, with each mode's payment settings and the `legacy`
+  revision the 0.6.0 cutover bound its earlier deposits and quotes to, and
+  `POST /v1/admin/recording/resume`, which lifts the 0.6.0 cutover's recording hold. The admin
+  deposit view names the deposit's `settings_revision` or `settings_hold`.
+
+### Changed
+
+- **Breaking:** an account accepts nothing until it configures its payment settings. A treasury no
+  longer enables a chain by itself, and a routed asset is no longer accepted by default: quotes and
+  deposit addresses answer `400 asset_not_accepted`, `GET /v1/config` lists no asset, and a
+  payment to an existing address is `rejected(asset_not_accepted)` until the merchant lists what it
+  takes. `GET /v1/config` is the account's effective payment config: the accepted assets on chains
+  with a treasury, with the account's terms.
+- **Breaking:** a deposit is governed by the payment settings current when it is recorded, or, for
+  a valid payment of a quote, by the quote's terms; a change applies to deposits recorded after it.
+  A deposit waits for the stricter of its bound confirmation and the chain's current floor; a
+  stricter confirmation no longer applies to deposits already recorded. A payment the receipt
+  corrects to the quote's asset waits for the quote's confirmation too.
+- A chain's confirmation floor is that of its current route versions: a new version may raise it,
+  and an earlier version keeps its own value only for the terms of what it governed. A quote's
+  `terms` are always the stored ones, `confirmations` included; a deposit's refund floor, when no
+  accepted terms govern it, is the default of the route version it was recorded on. An unloaded
+  bound version fails closed rather than using the current default.
+- **Breaking:** route files replace `quote:` and `limits:` with a `merchant:` section of each
+  term's operator default and bounds (`quote_ttl_seconds`, `quote_spread_bps`,
+  `quote_tolerance_bps`, `min_amount`, `min_deposit_atomic`, `max_deposit_atomic`,
+  `min_refund_atomic`), with code ceilings; quote amount decimals become
+  `asset.quote_amount_decimals`; `quote.max_creations_per_minute` is removed (now per account and
+  mode, default 10, at most 60). Every environment's route files are converted.
+- **Breaking:** after a restore from backup, every account's payment settings are `held` until the
+  merchant sends its complete configuration with `POST /v1/payment_settings` (`chains` required,
+  and nothing of the restored settings carried over); deposits recorded meanwhile wait, and the
+  reconfirmation binds them. No imported delivery lifts the hold. A delivered outcome stands once
+  the chain shows the transfer it names (account, transaction, recipient, token, sender, and
+  amount; otherwise the deposit is held for reconciliation): a rebuilt deposit with an imported
+  `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded. A
+  sanctions hit on a delivered credit keeps the credit, raises `TopupDeliveredCreditSanctioned`,
+  blocks refunds (including pending refunds from being marked paid or completing verification),
+  and keeps its forwarder out of `GET /v1/forwarders?sweepable`. Delivered rejection identity
+  contradictions also appear in `GET /v1/admin/restore` for reconciliation.
+- **Breaking (operators):** the upgrade to this release is a cutover (docs/architecture.md §14):
+  `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model in one
+  transaction with the schema change, serialized through commit by an advisory lock, after loading
+  the configuration (the compose's `migrate` service mounts it), `topup run` refuses to start before
+  it, and recording stays held until the accounts are configured and
+  `POST /v1/admin/recording/resume`.
+
+### Removed
+
+- **Breaking:** `confirmation_policies` (the `GET /v1/account` field) and `POST /v1/account`: a
+  chain's stricter confirmation is part of the payment settings.
+
+### Python SDK (`phala-pay`)
+
+#### Added
+
+- `pay.payment_settings.retrieve()` and `.update(chains=, quote_creations_per_customer_per_minute=)`
+  (`TopupClient.get_payment_settings`, `update_payment_settings`), and the generated
+  `PaymentSettingsObject`, `UpdatePaymentSettingsRequest`, `QuoteTerms`, and catalog models. The
+  account export writes `payment_settings.json`. `PaymentSettingsStatus` and `RejectionReason`
+  name the documented values.
+
+#### Removed
+
+- **Breaking:** `pay.account.update(confirmation_policies=)` and `TopupClient.update_account`,
+  the generated `ConfirmationPolicy` and `UpdateAccountObjectRequest` models, and
+  `AccountObject.confirmation_policies`.
+
 ## [0.5.0] - 2026-10-01
 
 ### Added

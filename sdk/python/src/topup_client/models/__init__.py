@@ -9,9 +9,14 @@ from .api_key_object import ApiKeyObject
 from .api_key_object_object import ApiKeyObjectObject
 from .attestation_response import AttestationResponse
 from .attestation_response_object import AttestationResponseObject
+from .available_asset import AvailableAsset
+from .available_chain import AvailableChain
+from .available_confirmations import AvailableConfirmations
 from .balance import Balance
 from .balance_amount import BalanceAmount
 from .balance_object import BalanceObject
+from .bounds_atomic import BoundsAtomic
+from .bounds_u64 import BoundsU64
 from .client_deposit_address import ClientDepositAddress
 from .client_deposit_address_network import ClientDepositAddressNetwork
 from .client_deposit_address_object import ClientDepositAddressObject
@@ -21,7 +26,6 @@ from .client_quote_object import ClientQuoteObject
 from .config import Config
 from .config_asset import ConfigAsset
 from .config_object import ConfigObject
-from .confirmation_policy import ConfirmationPolicy
 from .create_api_key_request import CreateApiKeyRequest
 from .create_deposit_address_request import CreateDepositAddressRequest
 from .create_quote_request import CreateQuoteRequest
@@ -66,11 +70,16 @@ from .mark_refund_paid_request import MarkRefundPaidRequest
 from .metadata_clear import MetadataClear
 from .metadata_param_type_0 import MetadataParamType0
 from .payment import Payment
+from .payment_settings_asset import PaymentSettingsAsset
+from .payment_settings_chain import PaymentSettingsChain
+from .payment_settings_object import PaymentSettingsObject
+from .payment_settings_object_object import PaymentSettingsObjectObject
 from .quote import Quote
 from .quote_list import QuoteList
 from .quote_list_object import QuoteListObject
 from .quote_metadata import QuoteMetadata
 from .quote_object import QuoteObject
+from .quote_terms import QuoteTerms
 from .refund import Refund
 from .refund_list import RefundList
 from .refund_list_object import RefundListObject
@@ -89,8 +98,8 @@ from .treasury_challenge_object import TreasuryChallengeObject
 from .treasury_list import TreasuryList
 from .treasury_list_object import TreasuryListObject
 from .treasury_object import TreasuryObject
-from .update_account_object_request import UpdateAccountObjectRequest
 from .update_metadata_request import UpdateMetadataRequest
+from .update_payment_settings_request import UpdatePaymentSettingsRequest
 from .update_webhook_endpoint_request import UpdateWebhookEndpointRequest
 from .webhook_endpoint_list import WebhookEndpointList
 from .webhook_endpoint_list_object import WebhookEndpointListObject
@@ -110,9 +119,14 @@ __all__ = (
     "ApiKeyObjectObject",
     "AttestationResponse",
     "AttestationResponseObject",
+    "AvailableAsset",
+    "AvailableChain",
+    "AvailableConfirmations",
     "Balance",
     "BalanceAmount",
     "BalanceObject",
+    "BoundsAtomic",
+    "BoundsU64",
     "ClientDepositAddress",
     "ClientDepositAddressNetwork",
     "ClientDepositAddressObject",
@@ -122,7 +136,6 @@ __all__ = (
     "Config",
     "ConfigAsset",
     "ConfigObject",
-    "ConfirmationPolicy",
     "CreateApiKeyRequest",
     "CreateDepositAddressRequest",
     "CreateQuoteRequest",
@@ -167,11 +180,16 @@ __all__ = (
     "MetadataClear",
     "MetadataParamType0",
     "Payment",
+    "PaymentSettingsAsset",
+    "PaymentSettingsChain",
+    "PaymentSettingsObject",
+    "PaymentSettingsObjectObject",
     "Quote",
     "QuoteList",
     "QuoteListObject",
     "QuoteMetadata",
     "QuoteObject",
+    "QuoteTerms",
     "Refund",
     "RefundList",
     "RefundListObject",
@@ -190,8 +208,8 @@ __all__ = (
     "TreasuryList",
     "TreasuryListObject",
     "TreasuryObject",
-    "UpdateAccountObjectRequest",
     "UpdateMetadataRequest",
+    "UpdatePaymentSettingsRequest",
     "UpdateWebhookEndpointRequest",
     "WebhookEndpointList",
     "WebhookEndpointListObject",

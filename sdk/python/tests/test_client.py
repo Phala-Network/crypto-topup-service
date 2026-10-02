@@ -26,6 +26,21 @@ TREASURY = "0x" + "cc" * 20
 QUOTE_ID = "qt_" + "0c" * 16
 
 
+# The terms a quote was issued with (`Quote.terms`), as the service resolves them from a route's
+# defaults.
+QUOTE_TERMS = {
+    "quote_ttl_seconds": 900,
+    "quote_spread_bps": 50,
+    "quote_tolerance_bps": 100,
+    "quote_amount_decimals": 4,
+    "min_amount": 100,
+    "min_deposit_atomic": "0",
+    "max_deposit_atomic": "1000000000000000000000000",
+    "min_refund_atomic": "1",
+    "confirmations": "2",
+}
+
+
 def _quote(**fields: object) -> dict[str, object]:
     address = quote_address(
         FACTORY,
@@ -55,6 +70,7 @@ def _quote(**fields: object) -> dict[str, object]:
         "created": NOW,
         "payment": None,
         "deposit": None,
+        "terms": QUOTE_TERMS,
         **fields,
     }
 
@@ -80,7 +96,6 @@ class FakeService:
                     "charges_enabled": False,
                     "paused_scopes": [],
                     "webhook_keys": [{"version": 1, "expires_at": None}],
-                    "confirmation_policies": [],
                     "created": NOW,
                 },
             )
@@ -570,8 +585,19 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
         "charges_enabled": False,
         "paused_scopes": ["quotes"],
         "webhook_keys": [{"version": 1, "expires_at": None}],
-        "confirmation_policies": [{"chain_id": 11155111, "confirmations": "finalized"}],
         "created": NOW,
+    }
+    settings = {
+        "object": "payment_settings",
+        "livemode": False,
+        "status": "configured",
+        "revision": "psrev_" + "04" * 16,
+        "updated": NOW,
+        "quote_creations_per_customer_per_minute": None,
+        "chains": [
+            {"chain_id": 11155111, "confirmations": "finalized", "assets": [{"asset": "usdc"}]}
+        ],
+        "available": [],
     }
     key = {
         "id": "key_" + "01" * 16,
@@ -600,6 +626,7 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
         b"/v1/account/pause": account,
         b"/v1/account/resume": account,
         b"/v1/account": account,
+        b"/v1/payment_settings": settings,
         b"/v1/api_keys": key,
         f"/v1/api_keys/{key['id']}/roll".encode(): key,
         b"/v1/account/webhook_keys/roll": account,
@@ -616,7 +643,12 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
 
     service = FakeService(respond)
     with _client(service) as client:
-        updated = client.update_account(confirmation_policies={11155111: "finalized", 1: None})
+        updated = client.update_payment_settings(
+            chains=[
+                {"chain_id": 11155111, "confirmations": "finalized", "assets": [{"asset": "usdc"}]}
+            ]
+        )
+        reset = client.update_payment_settings(quote_creations_per_customer_per_minute=None)
         client.pause_quotes()
         client.resume_quotes()
         client.create_api_key(name="ci")
@@ -624,20 +656,24 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
         client.roll_webhook_key()
         assert [e.id for e in client.list_events(type="deposit.reversed")] == [event["id"]]
         client.resend_event(str(event["id"]), webhook_endpoint="we_" + "03" * 16)
-    assert updated.confirmation_policies[0].confirmations == "finalized"
-    policies, pause, resume, created, rolled, webhook_roll, _, resent = service.requests
+    assert updated.status == reset.status == "configured"
+    assert updated.chains[0].confirmations == "finalized"
+    settings_update, rate_reset, pause, resume, created, rolled, webhook_roll, _, resent = (
+        service.requests
+    )
     # A webhook key roll keeps the old key for the 48 hours a live roll needs, by default.
     assert json.loads(webhook_roll.content) == {"expires_in": 172_800}
-    assert json.loads(policies.content) == {
-        "confirmation_policies": [
-            {"chain_id": 11155111, "confirmations": "finalized"},
-            {"chain_id": 1, "confirmations": None},
+    # `chains` replaces the list; a parameter not given is not sent, and `None` restores a default.
+    assert json.loads(settings_update.content) == {
+        "chains": [
+            {"chain_id": 11155111, "confirmations": "finalized", "assets": [{"asset": "usdc"}]}
         ]
     }
+    assert json.loads(rate_reset.content) == {"quote_creations_per_customer_per_minute": None}
     assert json.loads(pause.content) == json.loads(resume.content) == {"scopes": ["quotes"]}
     assert json.loads(created.content) == {"name": "ci"}
     assert json.loads(rolled.content) == {"expires_in": 3600}
     assert json.loads(resent.content) == {"webhook_endpoint": "we_" + "03" * 16}
-    for request in (policies, pause, resume, created, rolled, resent):
+    for request in (settings_update, rate_reset, pause, resume, created, rolled, resent):
         assert request.method == "POST"
         assert request.headers["idempotency-key"].startswith('"')

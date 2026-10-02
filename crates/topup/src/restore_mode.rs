@@ -200,6 +200,10 @@ async fn freeze_in(
     .fetch_one(&mut *connection)
     .await?
     .try_into()?;
+    // The restored payment settings may be stale, and no delivery proves the merchant's latest:
+    // every account and mode is held until the merchant reconfirms, in the transaction that
+    // records the restore, before any recorder runs (docs/design/payment-settings.md §11).
+    crate::payment_config::hold_all(&mut *connection, restore.id).await?;
     tracing::error!(
         restore_id = %restore.id,
         detected_by = detection.code(),
@@ -499,9 +503,8 @@ pub struct ImportedCredit {
 }
 
 impl ImportedCredit {
-    /// The first field in which the delivered transfer differs from the chain's: the deposit's
-    /// account, mode, chain, and transaction, and the canonical transfer's recipient, token,
-    /// sender, and amount.
+    /// The first field in which the delivered transfer differs from the chain's
+    /// ([`DeliveredTransfer::contradiction`]).
     #[must_use]
     pub fn contradiction(
         &self,
@@ -509,15 +512,62 @@ impl ImportedCredit {
         transfer: &topup_adapters::chain::evm::TransferLog,
     ) -> Option<&'static str> {
         let credit = &self.credit;
+        DeliveredTransfer {
+            account_id: self.account_id,
+            livemode: self.livemode,
+            chain_id: credit.chain_id,
+            tx_hash: credit.tx_hash,
+            address: credit.address,
+            asset_contract: credit.asset_contract,
+            from_address: credit.from_address,
+            amount_atomic: credit.amount_atomic,
+        }
+        .contradiction(deposit, transfer)
+    }
+}
+
+/// The transfer a delivered deposit event names: what the chain must show for the outcome the
+/// merchant was told to stand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveredTransfer {
+    /// The event's account.
+    pub account_id: Uuid,
+    /// The event's mode.
+    pub livemode: bool,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Transfer transaction hash.
+    pub tx_hash: B256,
+    /// The receiving forwarder.
+    pub address: Address,
+    /// Token contract.
+    pub asset_contract: Address,
+    /// Transfer sender.
+    pub from_address: Address,
+    /// Token amount.
+    pub amount_atomic: AtomicAmount,
+}
+
+impl DeliveredTransfer {
+    /// The first field in which the delivered transfer differs from the chain's: the deposit's
+    /// account, mode, chain, and transaction, and the canonical transfer's recipient, token,
+    /// sender, and amount. The deposit's id, which the event's derives from, fixes its receipt
+    /// position.
+    #[must_use]
+    pub fn contradiction(
+        &self,
+        deposit: &crate::db::Deposit,
+        transfer: &topup_adapters::chain::evm::TransferLog,
+    ) -> Option<&'static str> {
         [
             ("account", self.account_id == deposit.account_id),
             ("livemode", self.livemode == deposit.livemode),
-            ("chain_id", credit.chain_id == deposit.chain_id),
-            ("tx_hash", credit.tx_hash == deposit.tx_hash),
-            ("address", credit.address == transfer.to),
-            ("asset_contract", credit.asset_contract == transfer.token),
-            ("from_address", credit.from_address == transfer.from),
-            ("amount_atomic", credit.amount_atomic == transfer.amount),
+            ("chain_id", self.chain_id == deposit.chain_id),
+            ("tx_hash", self.tx_hash == deposit.tx_hash),
+            ("address", self.address == transfer.to),
+            ("asset_contract", self.asset_contract == transfer.token),
+            ("from_address", self.from_address == transfer.from),
+            ("amount_atomic", self.amount_atomic == transfer.amount),
         ]
         .into_iter()
         .find_map(|(field, same)| (!same).then_some(field))
@@ -781,6 +831,13 @@ async fn restore_reversed(
     if !issued {
         return Ok(ReversedDeposit::AddressUnknown);
     }
+    // The barrier every recorder takes (crate::payment_config): the insert below, a later
+    // statement, binds the deposit to the payment settings its own snapshot reads.
+    crate::payment_config::lock_scope_for_recording(
+        &mut *connection,
+        crate::tenancy::Scope::new(event.account_id, event.livemode),
+    )
+    .await?;
     let route = routes
         .routes()
         .iter()
@@ -803,13 +860,18 @@ async fn restore_reversed(
             id, chain_id, tx_hash, receipt_log_index, revision, log_index, block_number,
             block_hash, block_time, address_id, account_id, livemode, customer_id, route,
             route_version, asset_contract, from_address, amount_atomic, state, next_attempt_at,
-            metadata, replaces, valuation_at, price_scaled, price_source, credit_minor, created_at
+            metadata, replaces, valuation_at, price_scaled, price_source, credit_minor, created_at,
+            settings_revision_id, settings_hold_id
         )
         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, address.id, address.account_id,
                address.livemode, COALESCE(quote.customer_id, deposit_address.customer_id), $10,
                $11, $12, $13, $14::text::numeric, 'reversed', now(), $15, replaced.id, $16,
-               $17::text::numeric, $18, $19::text::numeric, $20
+               $17::text::numeric, $18, $19::text::numeric, $20,
+               CASE WHEN settings.status <> 'held' THEN settings.current_revision_id END,
+               settings.held_by
         FROM addresses AS address
+        JOIN payment_settings_state AS settings
+            ON settings.account_id = address.account_id AND settings.livemode = address.livemode
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id
@@ -1113,14 +1175,26 @@ pub async fn delivered_event_findings(
                event.data #>> '{object,amount}' AS delivered_amount,
                deposit.amount_atomic::text AS ledger_amount_atomic,
                deposit.credit_minor::text AS ledger_amount,
-               COALESCE(credit.account_id <> deposit.account_id
+               COALESCE(CASE WHEN event.type = 'deposit.rejected' THEN
+                        event.account_id <> deposit.account_id
+                        OR event.livemode <> deposit.livemode
+                        OR (event.data #>> '{object,chain_id}')::bigint <> deposit.chain_id
+                        OR lower(event.data #>> '{object,tx_hash}') <> deposit.tx_hash
+                        OR (event.data #>> '{object,receipt_log_index}')::bigint
+                            <> deposit.receipt_log_index
+                        OR lower(event.data #>> '{object,address}') <> address.address
+                        OR lower(event.data #>> '{object,asset_contract}') <> deposit.asset_contract
+                        OR lower(event.data #>> '{object,from_address}') <> deposit.from_address
+                        OR (event.data #>> '{object,amount_atomic}')::numeric <> deposit.amount_atomic
+                   ELSE credit.account_id <> deposit.account_id
                         OR credit.livemode <> deposit.livemode
                         OR credit.chain_id <> deposit.chain_id
                         OR credit.tx_hash <> deposit.tx_hash
                         OR credit.address <> address.address
                         OR credit.asset_contract <> deposit.asset_contract
                         OR credit.from_address <> deposit.from_address
-                        OR credit.amount_atomic <> deposit.amount_atomic, false) AS contradicted,
+                        OR credit.amount_atomic <> deposit.amount_atomic
+                   END, false) AS contradicted,
                -- ReversedDeposit::Rescanned: the rescan took the reversed deposit's position.
                event.type = 'deposit.reversed' AND EXISTS (
                    SELECT 1 FROM deposits AS holder

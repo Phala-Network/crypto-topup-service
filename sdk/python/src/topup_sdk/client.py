@@ -62,7 +62,6 @@ from topup_client.api.account import (
     pause_account,
     resume_account,
     roll_webhook_key,
-    update_account,
 )
 from topup_client.api.api_keys import (
     create_api_key,
@@ -84,6 +83,7 @@ from topup_client.api.deposit_addresses import (
 from topup_client.api.deposits import get_deposit, list_deposits, update_deposit
 from topup_client.api.events import get_event, list_events, resend_event
 from topup_client.api.forwarders import list_forwarders
+from topup_client.api.payment_settings import get_payment_settings, update_payment_settings
 from topup_client.api.quotes import (
     cancel_quote,
     create_quote,
@@ -125,7 +125,6 @@ from topup_client.models import (
     AttestationResponse,
     Balance,
     Config,
-    ConfirmationPolicy,
     CreateApiKeyRequest,
     CreateDepositAddressRequest,
     CreateQuoteRequest,
@@ -145,6 +144,8 @@ from topup_client.models import (
     MarkRefundPaidRequest,
     MetadataClear,
     MetadataParamType0,
+    PaymentSettingsChain,
+    PaymentSettingsObject,
     Quote,
     QuoteList,
     Refund,
@@ -157,8 +158,8 @@ from topup_client.models import (
     Treasury,
     TreasuryChallenge,
     TreasuryList,
-    UpdateAccountObjectRequest,
     UpdateMetadataRequest,
+    UpdatePaymentSettingsRequest,
     UpdateWebhookEndpointRequest,
     WebhookEndpointList,
     WebhookEndpointObject,
@@ -269,27 +270,40 @@ class TopupClient:
             AccountObject,
         )
 
-    def update_account(
-        self, *, confirmation_policies: Mapping[int, str | None] | None = None
-    ) -> AccountObject:
-        """Updates the account's settings in the key's mode. `confirmation_policies` maps a chain
-        id to the confirmation its payments must reach before they are credited: a depth such as
-        `"12"`, `"safe"`, or `"finalized"`, never weaker than the route's (`get_config`); `None`
-        removes a chain's policy. Chains not listed keep theirs."""
-        body = UpdateAccountObjectRequest(
-            confirmation_policies=UNSET
-            if confirmation_policies is None
-            else [
-                ConfirmationPolicy(chain_id=chain_id, confirmations=value)
-                for chain_id, value in confirmation_policies.items()
-            ]
+    def get_payment_settings(self) -> PaymentSettingsObject:
+        """The account's payment settings in the key's mode: the chains and assets it accepts and
+        its terms on each, with the operator's catalog and bounds in `available`. A new account
+        accepts nothing until it is configured."""
+        return self._call(
+            lambda: get_payment_settings.sync_detailed(client=self._client),
+            PaymentSettingsObject,
+        )
+
+    def update_payment_settings(
+        self,
+        *,
+        chains: Sequence[Mapping[str, Any]] | Unset = UNSET,
+        quote_creations_per_customer_per_minute: int | Unset | None = UNSET,
+    ) -> PaymentSettingsObject:
+        """Updates the account's payment settings in the key's mode; a parameter not given is
+        unchanged. `chains`, when given, replaces the whole list: each
+        `{"chain_id", "confirmations"?, "assets": [{"asset", <terms>?}]}`, where a term not given
+        takes the operator's default, and `[]` accepts nothing.
+        `quote_creations_per_customer_per_minute=None` restores its default. Writes are
+        last-write-wins; after a service restore, send the complete configuration to reconfirm
+        it. Retries reuse one `Idempotency-Key`."""
+        body = UpdatePaymentSettingsRequest(
+            chains=UNSET
+            if isinstance(chains, Unset)
+            else [PaymentSettingsChain.from_dict(dict(chain)) for chain in chains],
+            quote_creations_per_customer_per_minute=quote_creations_per_customer_per_minute,
         )
         key = _idempotency_key(None)
         return self._call(
-            lambda: update_account.sync_detailed(
+            lambda: update_payment_settings.sync_detailed(
                 client=self._client, body=body, idempotency_key=key
             ),
-            AccountObject,
+            PaymentSettingsObject,
         )
 
     def pause_quotes(self) -> AccountObject:

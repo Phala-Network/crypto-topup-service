@@ -496,6 +496,19 @@ assert response.json()["status"] == "active", response.text
 PY
 echo "ok: POST /v1/treasuries set the account's treasury $treasury with a signed challenge"
 
+# A new account accepts nothing until the merchant lists what it takes
+# (docs/design/payment-settings.md).
+product_python - <<'PY' || die "POST /v1/payment_settings did not accept the route"
+import httpx
+with open("/opt/product.key", encoding="ascii") as key:
+    headers = {"Authorization": f"Bearer {key.read().strip()}"}
+response = httpx.post("http://topup:8080/v1/payment_settings", headers=headers, timeout=30,
+                      json={"chains": [{"chain_id": 11155111, "assets": [{"asset": "pha"}]}]})
+assert response.status_code == 200, (response.status_code, response.text)
+assert response.json()["status"] == "configured", response.text
+PY
+echo "ok: POST /v1/payment_settings accepts the rehearsal route"
+
 # The merchant learns its webhook key only from /v1/attestation, with its API key: production has
 # no logs or SSH.
 nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')

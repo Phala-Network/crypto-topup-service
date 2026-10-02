@@ -23,7 +23,8 @@ use topup_core::identity::event_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::{ChainHeads, Confirmations, RouteFile, UNIT_DECIMALS};
 use topup_core::valuation::{
-    LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
+    LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, lock_applies,
+    value_deposit,
 };
 use uuid::Uuid;
 
@@ -32,8 +33,9 @@ use crate::db::{
     TransitionEffects,
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
+use crate::payment_config::{Binding, Resolution, Terms, required_confirmations};
 use crate::pump::{Step, StepResult};
-use crate::restore_mode::ImportedCredit;
+use crate::restore_mode::{DeliveredTransfer, ImportedCredit};
 use crate::routes::RouteSet;
 
 #[async_trait]
@@ -188,6 +190,22 @@ impl ConfirmStep {
         }
     }
 
+    /// The route of the transfer the providers agree on: the deposit's own for its recorded
+    /// token, otherwise the current route of the canonical token, if any.
+    fn selected_route<'s>(
+        &'s self,
+        deposit: &'s Deposit,
+        canonical: &TransferLog,
+    ) -> Option<(&'s String, u64)> {
+        if canonical.token == deposit.asset_contract {
+            deposit.route.as_ref().zip(deposit.route_version)
+        } else {
+            self.asset_routes
+                .get(&(deposit.chain_id, canonical.token))
+                .map(|(name, version)| (name, *version))
+        }
+    }
+
     async fn execute(&self, deposit: &Deposit) -> StepResult {
         let context = match self
             .context_lookup
@@ -212,38 +230,124 @@ impl ConfirmStep {
             );
         };
 
-        // The stricter of the route's floor and the account's policy.
-        let confirmations = context.policy.map_or(chains.confirmations, |policy| {
-            chains.confirmations.stricter(policy)
-        });
-        let (canonical, is_final) =
+        // A deposit recorded while its account's payment settings were held waits for the
+        // merchant's reconfirmation, unless the merchant was told its outcome before a restore
+        // (docs/design/payment-settings.md §11).
+        if matches!(context.binding, Binding::Pending { .. })
+            && context.delivered.is_none()
+            && context.delivered_rejection.is_none()
+        {
+            return StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::SettingsUnconfirmed,
+                },
+                json!({"stage": "payment_settings", "result": "awaiting_reconfirmation"}),
+            );
+        }
+        // The stricter of the chain's current floor, the confirmation the deposit's binding
+        // requires, and, for a payment of a quote's asset to its address, the quote's (design
+        // §7): which of the two governs is known only once the deposit is confirmed.
+        let required = |route: Option<&str>| {
+            let quoted = context
+                .lock
+                .as_ref()
+                .filter(|lock| !lock.restored && route == Some(lock.route.as_str()))
+                .map(|lock| lock.terms.confirmations);
+            required_confirmations(
+                chains.confirmations,
+                context
+                    .binding
+                    .confirmations(deposit.chain_id)
+                    .into_iter()
+                    .chain(quoted),
+            )
+        };
+        let mut confirmations = required(deposit.route.as_deref());
+        let (mut canonical, mut is_final) =
             match confirmed_evidence(chains, confirmations, deposit, context.address).await {
                 FinalityResult::Ready { log, is_final } => (log, is_final),
                 FinalityResult::Wait(evidence) => {
-                    let reason = if confirmations == Confirmations::Finalized {
-                        WaitReason::Finality
-                    } else {
-                        WaitReason::Confirmations
-                    };
-                    return StepResult::new(StepOutcome::Wait { reason }, evidence);
+                    return confirmation_wait(confirmations, evidence);
                 }
                 FinalityResult::Retry(error, evidence) => {
                     return retry(error, evidence, TransitionEffects::default());
                 }
             };
-        let selected_route = if canonical.token == deposit.asset_contract {
-            deposit.route.as_ref().zip(deposit.route_version)
-        } else {
-            self.asset_routes
-                .get(&(deposit.chain_id, canonical.token))
-                .map(|(name, version)| (name, *version))
-        };
+        let mut selected_route = self.selected_route(deposit, &canonical);
+        // The receipt corrected the token: the requirement is that of the corrected facts, so a
+        // payment now of the quote's asset is held to the quote's stricter confirmation.
+        let corrected = required(selected_route.map(|(name, _)| name.as_str()));
+        if corrected.stricter(confirmations) != confirmations {
+            confirmations = corrected;
+            (canonical, is_final) =
+                match confirmed_evidence(chains, confirmations, deposit, context.address).await {
+                    FinalityResult::Ready { log, is_final } => (log, is_final),
+                    FinalityResult::Wait(evidence) => {
+                        return confirmation_wait(confirmations, evidence);
+                    }
+                    FinalityResult::Retry(error, evidence) => {
+                        return retry(error, evidence, TransitionEffects::default());
+                    }
+                };
+            selected_route = self.selected_route(deposit, &canonical);
+        }
         let canonical_effect = canonical_effect(deposit, &canonical, selected_route);
         let mut effects = TransitionEffects {
             canonical_evidence: canonical_effect,
             mark_final: is_final,
             ..TransitionEffects::default()
         };
+        // After a restore, the credit the merchant was told for this deposit stands: a settled
+        // amount is immutable. A delivered transfer that is not the chain's holds the deposit
+        // until the operator discards the delivered credit (deploy/runbooks/restore.md).
+        if let Some(delivered) = &context.delivered {
+            if let Some(field) = delivered.contradiction(deposit, &canonical) {
+                return retry(
+                    RetryError::InvariantViolation,
+                    json!({
+                        "stage": "restore",
+                        "error": "delivered_event_contradicts_chain",
+                        "event": crate::ids::format(crate::ids::EVENT, delivered.event_id),
+                        "field": field,
+                        "providers": provider_evidence(&canonical),
+                    }),
+                    effects,
+                );
+            }
+            return carried_forward(deposit, &canonical, &context, delivered, effects);
+        }
+        // A rejection the merchant was told before a restore stands: no later policy check
+        // rewrites it (docs/design/payment-settings.md §11).
+        if let Some(rejection) = &context.delivered_rejection {
+            if let Some(field) = rejection.transfer.contradiction(deposit, &canonical) {
+                return retry(
+                    RetryError::InvariantViolation,
+                    json!({
+                        "stage": "restore",
+                        "error": "delivered_event_contradicts_chain",
+                        "event": crate::ids::format(
+                            crate::ids::EVENT,
+                            event_id("deposit.rejected", deposit.id),
+                        ),
+                        "field": field,
+                        "providers": provider_evidence(&canonical),
+                    }),
+                    effects,
+                );
+            }
+            return rejected_result(
+                deposit,
+                rejection.reason,
+                json!({
+                    "stage": "restore",
+                    "result": "delivered_rejection",
+                    "reason": rejection.reason.code(),
+                    "providers": provider_evidence(&canonical),
+                }),
+                effects,
+            );
+        }
+
         let Some((route_name, route_version)) = selected_route else {
             return rejected_result(
                 deposit,
@@ -264,25 +368,75 @@ impl ConfirmStep {
             );
         };
 
-        // After a restore, the credit the merchant was told for this deposit stands: a settled
-        // amount is immutable. A delivered transfer that is not the chain's holds the deposit
-        // until the operator discards the delivered credit (deploy/runbooks/restore.md).
-        if let Some(delivered) = &context.delivered {
-            if let Some(field) = delivered.contradiction(deposit, &canonical) {
-                return retry(
-                    RetryError::InvariantViolation,
-                    json!({
-                        "stage": "restore",
-                        "error": "delivered_event_contradicts_chain",
-                        "event": crate::ids::format(crate::ids::EVENT, delivered.event_id),
-                        "field": field,
-                        "providers": provider_evidence(&canonical),
-                    }),
-                    effects,
-                );
+        // A valid payment of the address's quote is governed by the terms the quote was issued
+        // with; every other payment by the payment settings the deposit is bound to (design §8).
+        // A quote re-issued after a restore carries the merchant's record of its terms, never
+        // applied: a payment to it follows its binding, valued at spot.
+        let quote_lock = context
+            .lock
+            .as_ref()
+            .filter(|lock| !lock.restored && lock.route == runtime.route.route)
+            .and_then(|lock| {
+                Some((
+                    LockTerms {
+                        asset: canonical.token,
+                        amount: lock.amount,
+                        price: lock.price,
+                        credit_minor: lock.credit_minor,
+                        expires_at: lock.expires_at,
+                        block_time: unix_seconds(canonical.block_time)?,
+                    },
+                    lock.terms,
+                ))
+            })
+            .filter(|(lock, terms)| {
+                lock_applies(
+                    canonical.amount,
+                    &RouteValuation {
+                        asset: &runtime.route.asset,
+                        min_credit_minor: terms.min_amount,
+                        lock_tolerance_bps: terms.quote_tolerance_bps,
+                    },
+                    lock,
+                )
+            });
+        let (terms, lock, basis) = match quote_lock {
+            Some((lock, terms)) => (terms, Some(lock), json!({"quote_terms": true})),
+            None => {
+                let revision = match &context.binding {
+                    Binding::Revision { id, .. } => *id,
+                    Binding::Pending { .. } => {
+                        return StepResult::new(
+                            StepOutcome::Wait {
+                                reason: WaitReason::SettingsUnconfirmed,
+                            },
+                            json!({"stage": "payment_settings", "result": "awaiting_reconfirmation"}),
+                        );
+                    }
+                };
+                let basis = json!({"revision": crate::ids::format("psrev_", revision)});
+                match context.binding.resolve(&runtime.route) {
+                    Some(Resolution::Accepted(terms)) => (terms, None, basis),
+                    resolution => {
+                        return rejected_result(
+                            deposit,
+                            RejectReason::AssetNotAccepted,
+                            json!({
+                                "stage": "payment_settings",
+                                "result": "asset_not_accepted",
+                                "basis": basis,
+                                "disabled": match resolution {
+                                    Some(Resolution::Disabled(reason)) => Some(reason),
+                                    _ => None,
+                                },
+                                "providers": provider_evidence(&canonical),
+                            }),
+                            effects,
+                        );
+                    }
+                }
             }
-            return carried_forward(deposit, &canonical, &context, delivered, effects);
-        }
+        };
 
         let valuation_at = Utc::now();
         let quote = match runtime.pricing.fetch(&runtime.route).await {
@@ -291,30 +445,14 @@ impl ConfirmStep {
                 return retry(RetryError::PriceUnavailable, evidence, effects);
             }
         };
-        // A quote re-issued after a restore carries the merchant's record of its terms, never
-        // applied: a payment to it is valued at spot.
-        let lock = context
-            .lock
-            .as_ref()
-            .filter(|lock| !lock.restored)
-            .and_then(|lock| {
-                if lock.route == runtime.route.route {
-                    Some(LockTerms {
-                        asset: canonical.token,
-                        amount: lock.amount,
-                        price: lock.price,
-                        credit_minor: lock.credit_minor,
-                        expires_at: lock.expires_at,
-                        block_time: unix_seconds(canonical.block_time)?,
-                    })
-                } else {
-                    None
-                }
-            });
         let valuation = value_deposit(
             canonical.amount,
             quote.price,
-            &RouteValuation::from(&runtime.route),
+            &RouteValuation {
+                asset: &runtime.route.asset,
+                min_credit_minor: terms.min_amount,
+                lock_tolerance_bps: terms.quote_tolerance_bps,
+            },
             lock.as_ref(),
         );
         let valuation = match valuation {
@@ -382,6 +520,7 @@ impl ConfirmStep {
                 "stage": "confirmed",
                 "providers": provider_evidence(&canonical),
                 "corrected": effects.canonical_evidence.is_some(),
+                "terms": basis,
                 "quote": quote.evidence,
                 "valuation": {
                     "price_scaled": valuation.price.value().to_string(),
@@ -450,10 +589,20 @@ impl Step for ConfirmStep {
 struct ConfirmationContext {
     address: Address,
     lock: Option<StoredLock>,
-    /// The account's stricter confirmation for the chain (design D1), if it set one.
-    policy: Option<Confirmations>,
+    /// The payment settings the deposit is bound to.
+    binding: Binding,
     /// The credit a delivered event imported after a restore told the merchant.
     delivered: Option<ImportedCredit>,
+    /// The rejection a delivered `deposit.rejected` imported after a restore told the merchant.
+    delivered_rejection: Option<DeliveredRejection>,
+}
+
+/// A delivered `deposit.rejected` of the deposit, imported after a restore.
+#[derive(Clone)]
+struct DeliveredRejection {
+    reason: RejectReason,
+    /// The transfer the delivery names, checked as a delivered credit's is.
+    transfer: DeliveredTransfer,
 }
 
 #[derive(Clone)]
@@ -465,6 +614,8 @@ struct StoredLock {
     price: ScaledPrice,
     credit_minor: MinorAmount,
     expires_at: UnixSeconds,
+    /// The terms the quote was issued with.
+    terms: Terms,
 }
 
 #[async_trait]
@@ -496,15 +647,13 @@ async fn load_context(
 ) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address, policy.required AS policy,
+        SELECT address.address, quote.terms,
                quote.restore_id IS NOT NULL AS restored, quote.route, quote.amount_atomic::text AS amount_atomic,
                quote.price_scaled::text AS price_scaled,
                quote.credit_minor::text AS credit_minor,
                quote.expires_at, quote.consumed_by, quote.status AS lock_status
         FROM addresses AS address
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
-        LEFT JOIN confirmation_policies AS policy
-            ON policy.account_id = address.account_id AND policy.chain_id = address.chain_id
         WHERE address.id = $1
         "#,
     )
@@ -555,24 +704,78 @@ async fn load_context(
                 expires_at.ok_or_else(|| sqlx::Error::Decode("lock expiry is missing".into()))?,
             )
             .ok_or_else(|| sqlx::Error::Decode("lock expiry is invalid".into()))?,
+            terms: row
+                .try_get::<Option<sqlx::types::Json<Terms>>, _>("terms")?
+                .ok_or_else(|| sqlx::Error::Decode("lock terms are missing".into()))?
+                .0,
         })
     } else {
         None
     };
-    let policy: Option<String> = row.try_get("policy")?;
-    let policy = policy
-        .map(|value| {
-            Confirmations::parse_policy(&value).ok_or_else(|| {
-                sqlx::Error::Decode(format!("invalid confirmation policy {value:?}").into())
-            })
-        })
-        .transpose()?;
+    let mut connection = pool.acquire().await?;
     Ok(ConfirmationContext {
         address,
         lock,
-        policy,
+        binding: crate::payment_config::deposit_binding(&mut connection, deposit_id).await?,
         delivered: crate::restore_mode::imported_credit(pool, deposit_id).await?,
+        delivered_rejection: delivered_rejection(&mut connection, deposit_id).await?,
     })
+}
+
+/// The rejection of an imported delivered `deposit.rejected` of `deposit_id`, if any.
+async fn delivered_rejection(
+    connection: &mut sqlx::PgConnection,
+    deposit_id: Uuid,
+) -> Result<Option<DeliveredRejection>, sqlx::Error> {
+    let row: Option<(Uuid, bool, Value)> = sqlx::query_as(
+        "SELECT event.account_id, event.livemode, event.data -> 'object' \
+         FROM events AS event \
+         JOIN restore_delivered_events AS delivered ON delivered.event_id = event.id \
+         WHERE event.id = $1",
+    )
+    .bind(event_id("deposit.rejected", deposit_id))
+    .fetch_optional(connection)
+    .await?;
+    let Some((account_id, livemode, object)) = row else {
+        return Ok(None);
+    };
+    let invalid = || sqlx::Error::Decode("a delivered deposit.rejected is invalid".into());
+    let text = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)
+    };
+    let address = |field: &str| Address::from_str(text(field)?).map_err(|_| invalid());
+    Ok(Some(DeliveredRejection {
+        reason: crate::db::parse_reason(object.get("rejection_reason").and_then(Value::as_str))?
+            .ok_or_else(invalid)?,
+        transfer: DeliveredTransfer {
+            account_id,
+            livemode,
+            chain_id: object
+                .get("chain_id")
+                .and_then(Value::as_u64)
+                .ok_or_else(invalid)?,
+            tx_hash: B256::from_str(text("tx_hash")?).map_err(|_| invalid())?,
+            address: address("address")?,
+            asset_contract: address("asset_contract")?,
+            from_address: address("from_address")?,
+            amount_atomic: AtomicAmount::new(
+                U256::from_str(text("amount_atomic")?).map_err(|_| invalid())?,
+            ),
+        },
+    }))
+}
+
+/// A deposit short of `confirmations`.
+fn confirmation_wait(confirmations: Confirmations, evidence: Value) -> StepResult {
+    let reason = if confirmations == Confirmations::Finalized {
+        WaitReason::Finality
+    } else {
+        WaitReason::Confirmations
+    };
+    StepResult::new(StepOutcome::Wait { reason }, evidence)
 }
 
 enum FinalityResult {
@@ -654,6 +857,7 @@ async fn confirmed_evidence(
         return FinalityResult::Wait(json!({
             "stage": "finality",
             "result": "not_confirmed",
+            "confirmations": confirmations.policy_value(),
             "required_block": required_block,
             "provider_a_horizon": confirmations.horizon(primary_heads),
             "provider_b_horizon": confirmations.horizon(secondary_heads),
@@ -1088,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_account_policy_stricter_than_the_route_holds_the_credit() {
+    async fn an_account_requirement_stricter_than_the_route_holds_the_credit() {
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
         for (policy, reason) in [
@@ -1101,7 +1305,7 @@ mod tests {
                 chain_at(4, 11, vec![log.clone()]),
                 prices(now_seconds()),
                 ConfirmationContext {
-                    policy: Some(policy),
+                    binding: accepting(Some(policy)),
                     ..context(None)
                 },
             )
@@ -1109,14 +1313,14 @@ mod tests {
             .await;
             assert_eq!(result.outcome, StepOutcome::Wait { reason }, "{policy:?}");
         }
-        // A policy weaker than the route's floor never lowers it.
+        // A requirement weaker than the route's floor never lowers it.
         let result = step(
             depth_route(),
             chain_at(4, 10, vec![log.clone()]),
             chain_at(4, 10, vec![log]),
             prices(now_seconds()),
             ConfirmationContext {
-                policy: Some(Confirmations::Depth(1)),
+                binding: accepting(Some(Confirmations::Depth(1))),
                 ..context(None)
             },
         )
@@ -1246,7 +1450,7 @@ mod tests {
         canonical_route.version = 7;
         canonical_route.asset.contract = Address::repeat_byte(9);
         canonical_route.asset.decimals = 3;
-        canonical_route.screening.min_credit_minor = 5;
+        canonical_route.merchant.min_amount.default = 5;
         let mut canonical = transfer(&deposit);
         canonical.token = canonical_route.asset.contract;
         let original_route = route(PricingMode::Spot);
@@ -1294,6 +1498,64 @@ mod tests {
         );
         // Confirmation announces nothing; the product learns of the deposit when it is credited.
         assert!(result.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_payment_corrected_to_the_quotes_asset_waits_for_the_quotes_confirmation() {
+        // Recorded as another token, the transfer is the quote's asset on both providers: the
+        // quote's stricter confirmation governs a payment of it (design §7).
+        let mut other = depth_route();
+        other.route = "other-token-route".to_owned();
+        other.asset.contract = Address::repeat_byte(9);
+        let quoted = depth_route();
+        let mut deposit = deposit(1_000);
+        deposit.route = Some(other.route.clone());
+        deposit.asset_contract = other.asset.contract;
+        let mut canonical = transfer(&deposit);
+        canonical.token = quoted.asset.contract;
+        let now = now_seconds();
+        let mut quote = lock(now);
+        quote.terms.confirmations = Confirmations::Depth(10);
+        let runtime = |route: RouteFile| RouteRuntime {
+            route,
+            pricing: PricingRuntime::injected(
+                Arc::new(MockPrice(Ok(observation("primary", 10_000_000, now)))),
+                Some(Arc::new(MockPrice(Ok(observation(
+                    "check", 10_000_000, now,
+                ))))),
+                Some(Arc::new(MockPrice(Ok(observation("fx", 100_000_000, now))))),
+            ),
+        };
+        let other_key = (other.route.clone(), other.version);
+        let quoted_key = (quoted.route.clone(), quoted.version);
+        let step = ConfirmStep {
+            context_lookup: Arc::new(MockContext(context(Some(quote)))),
+            routes: BTreeMap::from([
+                (other_key.clone(), runtime(other.clone())),
+                (quoted_key.clone(), runtime(quoted.clone())),
+            ]),
+            asset_routes: BTreeMap::from([
+                ((deposit.chain_id, other.asset.contract), other_key),
+                ((deposit.chain_id, quoted.asset.contract), quoted_key),
+            ]),
+            chains: BTreeMap::from([(
+                deposit.chain_id,
+                ChainPair {
+                    confirmations: Confirmations::Depth(2),
+                    // Block 10 with the heads at 11: two confirmations, short of the quote's ten.
+                    primary: Arc::new(chain_at(4, 11, vec![canonical.clone()])),
+                    secondary: Arc::new(chain_at(4, 11, vec![canonical])),
+                },
+            )]),
+        };
+        let result = step.run(&deposit).await;
+        assert_eq!(
+            result.outcome,
+            StepOutcome::Wait {
+                reason: WaitReason::Confirmations
+            }
+        );
+        assert!(result.effects.valuation.is_none());
     }
 
     #[tokio::test]
@@ -1597,10 +1859,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delivered_rejection_requires_the_full_transfer_identity() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let transfer = DeliveredTransfer {
+            account_id: deposit.account_id,
+            livemode: deposit.livemode,
+            chain_id: deposit.chain_id,
+            tx_hash: deposit.tx_hash,
+            address: log.to,
+            asset_contract: log.token,
+            from_address: log.from,
+            amount_atomic: log.amount,
+        };
+        for field in [
+            "account",
+            "livemode",
+            "chain_id",
+            "tx_hash",
+            "address",
+            "asset_contract",
+            "from_address",
+            "amount_atomic",
+        ] {
+            let mut contradicted = transfer.clone();
+            match field {
+                "account" => contradicted.account_id = Uuid::new_v4(),
+                "livemode" => contradicted.livemode = !deposit.livemode,
+                "chain_id" => contradicted.chain_id = 999,
+                "tx_hash" => contradicted.tx_hash = B256::repeat_byte(9),
+                "address" => contradicted.address = Address::repeat_byte(9),
+                "asset_contract" => contradicted.asset_contract = Address::repeat_byte(9),
+                "from_address" => contradicted.from_address = Address::repeat_byte(9),
+                "amount_atomic" => contradicted.amount_atomic = AtomicAmount::new(U256::from(999)),
+                _ => unreachable!(),
+            }
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![log.clone()]),
+                chain(100, vec![log.clone()]),
+                prices(now_seconds()),
+                ConfirmationContext {
+                    delivered_rejection: Some(DeliveredRejection {
+                        reason: RejectReason::BelowMinimum,
+                        transfer: contradicted,
+                    }),
+                    ..context(None)
+                },
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(
+                result.outcome,
+                StepOutcome::Retry {
+                    error: RetryError::InvariantViolation,
+                },
+                "{field}"
+            );
+            assert_eq!(
+                result.evidence["error"],
+                "delivered_event_contradicts_chain"
+            );
+            assert_eq!(result.evidence["field"], field);
+            assert!(result.events.is_empty());
+            assert!(result.effects.valuation.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_canonical_token_cannot_rewrite_a_delivered_outcome() {
+        let deposit = deposit(1_000);
+        let mut canonical = transfer(&deposit);
+        canonical.token = Address::repeat_byte(9);
+        let rejection = DeliveredRejection {
+            reason: RejectReason::BelowMinimum,
+            transfer: DeliveredTransfer {
+                account_id: deposit.account_id,
+                livemode: deposit.livemode,
+                chain_id: deposit.chain_id,
+                tx_hash: deposit.tx_hash,
+                address: recipient(),
+                asset_contract: deposit.asset_contract,
+                from_address: deposit.from_address,
+                amount_atomic: deposit.amount_atomic,
+            },
+        };
+        for restored in [
+            ConfirmationContext {
+                delivered: Some(delivered(&deposit, ValuationSource::Spot)),
+                ..context(None)
+            },
+            ConfirmationContext {
+                delivered_rejection: Some(rejection),
+                ..context(None)
+            },
+        ] {
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![canonical.clone()]),
+                chain(100, vec![canonical.clone()]),
+                prices(now_seconds()),
+                restored,
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(
+                result.outcome,
+                StepOutcome::Retry {
+                    error: RetryError::InvariantViolation,
+                }
+            );
+            assert_eq!(
+                result.evidence["error"],
+                "delivered_event_contradicts_chain"
+            );
+            assert_eq!(result.evidence["field"], "asset_contract");
+            assert!(result.events.is_empty());
+            assert!(result.effects.valuation.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn below_minimum_rejects_and_keeps_quote_fields() {
         let now = now_seconds();
         let mut route = route(PricingMode::Spot);
-        route.screening.min_credit_minor = 200;
+        route.merchant.min_amount = topup_core::route::Bounded::at(200);
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
         let context = context(None);
@@ -1698,7 +2081,11 @@ mod tests {
                 .expect("route fixture");
         route.pricing.mode = mode;
         route.asset.decimals = 2;
-        route.screening.min_credit_minor = 1;
+        route.merchant.min_amount = topup_core::route::Bounded {
+            default: 1,
+            min: 1,
+            max: u64::MAX,
+        };
         if mode == PricingMode::Stablecoin {
             route.pricing.check = None;
         }
@@ -1773,8 +2160,24 @@ mod tests {
         ConfirmationContext {
             address: recipient(),
             lock,
-            policy: None,
+            binding: accepting(None),
             delivered: None,
+            delivered_rejection: None,
+        }
+    }
+
+    /// A binding accepting the test routes' asset on chain 1, with `confirmations`.
+    fn accepting(confirmations: Option<Confirmations>) -> Binding {
+        Binding::Revision {
+            id: Uuid::nil(),
+            document: crate::payment_config::Document {
+                quote_creations_per_customer_per_minute: None,
+                chains: vec![crate::payment_config::ChainChoice {
+                    chain_id: 1,
+                    confirmations,
+                    assets: vec![crate::payment_config::AssetChoice::on_defaults("pha")],
+                }],
+            },
         }
     }
 
@@ -1786,6 +2189,7 @@ mod tests {
             price: ScaledPrice::new(9_000_000, PRICE_SCALE).expect("lock price"),
             credit_minor: MinorAmount::new(777),
             expires_at: UnixSeconds::new(now + 300),
+            terms: crate::payment_config::Terms::defaults(&route(PricingMode::Spot)),
         }
     }
 

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..models.deposit import Deposit
     from ..models.payment import Payment
     from ..models.quote_metadata import QuoteMetadata
+    from ..models.quote_terms import QuoteTerms
 
 
 T = TypeVar("T", bound="Quote")
@@ -37,7 +38,10 @@ class Quote:
             1790554572, 'matches_quote': True, 'status': 'seen', 'tx_hash':
             '0x7d3c1e5a9b2f4d6c8e0a1b3d5f7c9e2a4b6d8f0c1e3a5b7d9f1c3e5a7b9d1f3e'}, 'payment_uri': 'ethereum:0x6c5ba91642f102
             82b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000
-            000000', 'status': 'open', 'treasury': '0x936c1991f8da9a919fa11b557a3514719f5a4504'}
+            000000', 'status': 'open', 'terms': {'confirmations': '12', 'max_deposit_atomic': '1000000000000000000000000',
+            'min_amount': 100, 'min_deposit_atomic': '0', 'min_refund_atomic': '1000000000000000000',
+            'quote_amount_decimals': 4, 'quote_spread_bps': 100, 'quote_tolerance_bps': 100, 'quote_ttl_seconds': 900},
+            'treasury': '0x936c1991f8da9a919fa11b557a3514719f5a4504'}
 
     Attributes:
         address (str): Single-use forwarder address to pay.
@@ -61,6 +65,7 @@ class Quote:
         status (str): `open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays
             `open` after `expires_at` until the finalized chain passes it, so a payment mined in time
             is never reported as expired; hide the address once `expires_at` has passed.
+        terms (QuoteTerms): The terms a quote was issued with.
         treasury (str): The treasury the address pays: your treasury of the chain when the quote was created. The
             address is the factory's `CREATE2` over it and the salt.
         client_secret (None | str | Unset): Lets the payer's browser read the quote's public view, `ClientQuote`, from
@@ -88,6 +93,7 @@ class Quote:
     object_: QuoteObject
     payment_uri: str
     status: str
+    terms: QuoteTerms
     treasury: str
     client_secret: None | str | Unset = UNSET
     deposit: Deposit | None | str | Unset = UNSET
@@ -98,6 +104,7 @@ class Quote:
         from ..models.deposit import Deposit  # noqa: PLC0415
         from ..models.payment import Payment  # noqa: PLC0415
         from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
+        from ..models.quote_terms import QuoteTerms  # noqa: PLC0415
 
         address = self.address
 
@@ -130,6 +137,8 @@ class Quote:
         payment_uri = self.payment_uri
 
         status = self.status
+
+        terms = self.terms.to_dict()
 
         treasury = self.treasury
 
@@ -175,6 +184,7 @@ class Quote:
                 "object": object_,
                 "payment_uri": payment_uri,
                 "status": status,
+                "terms": terms,
                 "treasury": treasury,
             }
         )
@@ -192,6 +202,7 @@ class Quote:
         from ..models.deposit import Deposit  # noqa: PLC0415
         from ..models.payment import Payment  # noqa: PLC0415
         from ..models.quote_metadata import QuoteMetadata  # noqa: PLC0415
+        from ..models.quote_terms import QuoteTerms  # noqa: PLC0415
 
         d = dict(src_dict)
         address = d.pop("address")
@@ -225,6 +236,8 @@ class Quote:
         payment_uri = d.pop("payment_uri")
 
         status = d.pop("status")
+
+        terms = QuoteTerms.from_dict(d.pop("terms"))
 
         treasury = d.pop("treasury")
 
@@ -288,6 +301,7 @@ class Quote:
             object_=object_,
             payment_uri=payment_uri,
             status=status,
+            terms=terms,
             treasury=treasury,
             client_secret=client_secret,
             deposit=deposit,

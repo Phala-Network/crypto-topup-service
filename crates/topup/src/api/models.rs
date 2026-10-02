@@ -18,6 +18,12 @@ pub struct DepositAdmin {
     pub route: Option<String>,
     /// Selected route version.
     pub route_version: Option<u64>,
+    /// The payment settings revision the deposit is bound to (`psrev_…`): current in the snapshot
+    /// of the statement that recorded it. `null` while `settings_hold` is set.
+    pub settings_revision: Option<String>,
+    /// The restore whose hold the deposit was recorded under; it waits for the merchant's
+    /// reconfirmation, which binds it. `null` when `settings_revision` is set.
+    pub settings_hold: Option<Uuid>,
     /// Position of the transfer log in its transaction's receipt; with the chain and transaction,
     /// the deposit's identity.
     pub receipt_log_index: u64,
@@ -201,8 +207,36 @@ pub struct Quote {
     /// first response, the same secret included. Give it only to the paying customer's page, and
     /// do not log it.
     pub client_secret: Option<String>,
+    /// The terms the quote was issued with, from your payment settings then; the quote keeps
+    /// them whatever the settings say later.
+    pub terms: QuoteTerms,
     /// Your key/value pairs ([metadata](https://docs.stripe.com/api/metadata)); `{}` when none.
     pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+/// The terms a quote was issued with.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct QuoteTerms {
+    /// The payment window, in seconds.
+    pub quote_ttl_seconds: u64,
+    /// The spread below spot of the locked price, in basis points.
+    pub quote_spread_bps: u16,
+    /// A payment within this many basis points of `amount_atomic`, either way, completes the
+    /// quote at its `amount`.
+    pub quote_tolerance_bps: u16,
+    /// Token decimals `amount_atomic` was rounded up to.
+    pub quote_amount_decimals: u8,
+    /// Minimum credit in cents of a payment valued at spot.
+    pub min_amount: u64,
+    /// Minimum creditable deposit in base units, as a decimal string.
+    pub min_deposit_atomic: String,
+    /// Maximum creditable deposit in base units, as a decimal string.
+    pub max_deposit_atomic: String,
+    /// Refund dust floor in base units, as a decimal string.
+    pub min_refund_atomic: String,
+    /// The confirmation the quote required when issued: a depth, `safe`, or `finalized`. A payment
+    /// not credited yet waits for the stricter of it and the chain's current floor.
+    pub confirmations: String,
 }
 
 /// A page of quotes, newest first (<https://docs.stripe.com/api/pagination>).
@@ -389,8 +423,9 @@ pub struct Deposit {
     /// Whether a finalized `Flushed` event after the deposit moved its forwarder's balance of
     /// its token to the treasury (`GET /v1/sweeps`), whoever sent the flush.
     pub swept: bool,
-    /// Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,
-    /// `out_of_range`, or `sanctioned`.
+    /// Why the deposit was rejected: `unsupported_asset`, `asset_not_accepted` (a routed asset
+    /// the payment settings the deposit is bound to do not accept), `below_minimum`,
+    /// `out_of_bounds`, `out_of_range`, or `sanctioned`.
     pub rejection_reason: Option<String>,
     /// EVM chain identifier.
     pub chain_id: u64,
@@ -558,7 +593,7 @@ pub struct ClientDepositAddressNetwork {
     pub chain_id: u64,
     /// The forwarder address to pay on this chain.
     pub address: String,
-    /// The supported tokens on this chain.
+    /// The tokens accepted on this chain.
     pub assets: Vec<DepositAddressAsset>,
     /// Typical time from payment to credit, in seconds, at the confirmation this chain's payments
     /// are credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share
@@ -612,7 +647,8 @@ pub struct DepositAddressNetwork {
     /// The treasury the forwarder pays. The address is the same on every network whose treasury
     /// is the same address.
     pub treasury: String,
-    /// The supported tokens on this chain; any other token sent to the address is not credited.
+    /// The tokens your payment settings accept on this chain; any other token sent to the
+    /// address is not credited.
     pub assets: Vec<DepositAddressAsset>,
 }
 
@@ -746,7 +782,11 @@ pub struct Config {
     pub max_open_amount_per_account: u64,
     /// Cap on the credit of one customer's open quotes, in cents; no single quote can exceed it.
     pub max_open_amount_per_customer: u64,
-    /// One entry per payable asset.
+    /// One customer's quote creations in a rolling minute, from your payment settings.
+    pub quote_creations_per_customer_per_minute: u64,
+    /// One entry per asset your payment settings accept on a chain where you have a treasury,
+    /// with its terms: your effective payment config. Empty until you configure
+    /// `POST /v1/payment_settings`.
     pub assets: Vec<ConfigAsset>,
 }
 
@@ -765,6 +805,8 @@ pub struct ConfigAsset {
     pub pricing: String,
     /// Minimum credit in cents, for quotes and deposits; smaller deposits are not credited.
     pub min_amount: u64,
+    /// Minimum creditable deposit in base units, as a decimal string.
+    pub min_deposit_atomic: String,
     /// Maximum creditable deposit in base units, as a decimal string.
     pub max_deposit_atomic: String,
     /// Minimum refundable amount in base units, as a decimal string.
@@ -773,11 +815,14 @@ pub struct ConfigAsset {
     pub quote_ttl_seconds: u64,
     /// A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no spread.
     pub quote_spread_bps: u16,
-    /// A payment within this many basis points of the quoted amount completes the quote.
+    /// A payment within this many basis points of the quoted amount, either way, completes the
+    /// quote at its amount.
     pub quote_tolerance_bps: u16,
+    /// Token decimals a quote's amount is rounded up to (the operator's).
+    pub quote_amount_decimals: u8,
     /// The confirmation a payment's block must reach before it is credited: a depth (`"2"`: the
-    /// block and one more), `"safe"`, or `"finalized"`: the stricter of the route's floor and
-    /// your account's `confirmation_policies`. A credit before finality can still be reversed
+    /// block and one more), `"safe"`, or `"finalized"`: the stricter of the chain's floor and the
+    /// `confirmations` of your payment settings. A credit before finality can still be reversed
     /// (`deposit.reversed`).
     pub confirmations: String,
     /// Typical time from payment to the `deposit.credited` event, in seconds, at `confirmations`.
@@ -883,6 +928,40 @@ pub struct AccountLimits {
     pub test: crate::limits::Limits,
 }
 
+/// An account's payment settings in each mode, as the operator sees them.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AccountPaymentSettings {
+    /// Live mode's.
+    pub live: PaymentSettingsObject,
+    /// Test mode's.
+    pub test: PaymentSettingsObject,
+    /// The 0.5.0 model the 0.6.0 cutover bound the account's earlier deposits and quotes to, in
+    /// each mode (docs/design/payment-settings.md §10). Its chains' `confirmations` are the
+    /// account's former confirmation policies, to carry into its payment settings.
+    pub legacy: AccountLegacyPaymentSettings,
+}
+
+/// An account's `legacy` revision in each mode; `null` for an account created after the cutover.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AccountLegacyPaymentSettings {
+    /// Live mode's.
+    #[schema(required = true)]
+    pub live: Option<LegacyPaymentSettings>,
+    /// Test mode's.
+    #[schema(required = true)]
+    pub test: Option<LegacyPaymentSettings>,
+}
+
+/// A `legacy` revision: never current, it governs only what the cutover bound to it.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct LegacyPaymentSettings {
+    /// The revision, `psrev_…`.
+    pub revision: String,
+    /// Every route of the mode accepted at its 0.5.0 values, with the former confirmation
+    /// policies.
+    pub chains: Vec<PaymentSettingsChain>,
+}
+
 /// An account as the operator sees it.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct AccountResponse {
@@ -907,6 +986,8 @@ pub struct AccountResponse {
     pub max_unfinalized_credit: u64,
     /// The account's caps per mode.
     pub limits: AccountLimits,
+    /// The account's payment settings per mode, with their effective config in `available`.
+    pub payment_settings: AccountPaymentSettings,
     /// Creation time, Unix seconds.
     pub created: i64,
     /// The secret keys this request issued, each with its `secret` shown only here: at creation
@@ -951,33 +1032,204 @@ pub struct AccountObject {
     /// The keys that sign this mode's webhooks: the current one first, then any previous one
     /// still signing during a rotation. Their public keys come from `GET /v1/attestation`.
     pub webhook_keys: Vec<WebhookKeyVersion>,
-    /// The confirmations you require on chains of this mode, stricter than the routes' (design
-    /// D1); a chain not listed uses its route's (`GET /v1/config`).
-    pub confirmation_policies: Vec<ConfirmationPolicy>,
     /// Creation time, Unix seconds.
     pub created: i64,
 }
 
-/// One chain's confirmation the account requires (design D1).
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ConfirmationPolicy {
-    /// A chain of the key's mode (`GET /v1/config`).
-    pub chain_id: u64,
-    /// A depth (`"12"`: the block and eleven more), `"safe"`, or `"finalized"`: never weaker than
-    /// the route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a
-    /// depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In
-    /// a request, `null` removes the chain's policy, so its route's applies.
-    pub confirmations: Option<String>,
+/// Your payment settings in the key's mode (`GET /v1/payment_settings`): what you accept and on
+/// what terms, chosen from the operator's catalog within its bounds
+/// (docs/design/payment-settings.md).
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PaymentSettingsObject {
+    /// Always `payment_settings`.
+    pub object: String,
+    /// The mode of the key that reads it.
+    pub livemode: bool,
+    /// `unconfigured` (accepts nothing: never configured), `configured`, or `held` (after a
+    /// restore of the service, until you reconfirm with `POST /v1/payment_settings`; nothing is
+    /// accepted meanwhile, and payments recorded wait).
+    pub status: String,
+    /// The current revision, `psrev_…`: unique and never reused, with no order.
+    pub revision: String,
+    /// When the current revision was written, Unix seconds.
+    pub updated: i64,
+    /// One customer's quote creations in a rolling minute; `null` for the default.
+    #[schema(required = true)]
+    pub quote_creations_per_customer_per_minute: Option<u64>,
+    /// The chains you accept, each with its accepted assets. A chain or asset not listed is not
+    /// accepted.
+    pub chains: Vec<PaymentSettingsChain>,
+    /// The operator's catalog of the mode: every chain and asset you may accept, with its
+    /// defaults and bounds, and whether you accept it.
+    pub available: Vec<AvailableChain>,
 }
 
-/// `POST /v1/account` body; parameters not sent are left unchanged.
+/// An accepted chain of your payment settings.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentSettingsChain {
+    /// A chain of the key's mode.
+    pub chain_id: u64,
+    /// The confirmation you require on the chain: a depth (`"12"`: the block and eleven more),
+    /// `"safe"`, or `"finalized"`, never weaker than the chain's floor and of the chain's kind (a
+    /// depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain).
+    /// `null` for the floor.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub confirmations: Option<String>,
+    /// The accepted assets of the chain, at least one.
+    pub assets: Vec<PaymentSettingsAsset>,
+}
+
+/// An accepted asset and your terms on it; a term `null` or not sent takes the operator's default.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaymentSettingsAsset {
+    /// An asset code routed on the chain, such as `usdc`.
+    pub asset: String,
+    /// A quote's payment window, in seconds.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub quote_ttl_seconds: Option<u64>,
+    /// A quote's spread below spot, in basis points.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub quote_spread_bps: Option<u16>,
+    /// A quote's two-sided payment tolerance, in basis points.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub quote_tolerance_bps: Option<u16>,
+    /// The minimum credit in cents of a quote or a deposit valued at spot.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub min_amount: Option<u64>,
+    /// The minimum creditable deposit in base units, a decimal string.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub min_deposit_atomic: Option<String>,
+    /// The maximum creditable deposit in base units, a decimal string.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub max_deposit_atomic: Option<String>,
+    /// The refund dust floor in base units, a decimal string.
+    #[serde(default)]
+    #[schema(required = false)]
+    pub min_refund_atomic: Option<String>,
+}
+
+/// A chain of the operator's catalog in the key's mode.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AvailableChain {
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// `active` (accepted, with a treasury), `treasury_not_set` (accepted, without a treasury:
+    /// nothing is offered on it until you set one), or `not_configured`.
+    pub status: String,
+    /// The chain's confirmation floor, also its default.
+    pub confirmations: AvailableConfirmations,
+    /// The chain's assets.
+    pub assets: Vec<AvailableAsset>,
+}
+
+/// A chain's confirmation floor.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AvailableConfirmations {
+    /// The weakest confirmation you may require, a depth, `safe`, or `finalized`.
+    pub floor: String,
+    /// The confirmation of a chain whose `confirmations` is `null`: the floor.
+    pub default: String,
+}
+
+/// An asset of the operator's catalog and its bounds.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct AvailableAsset {
+    /// Asset code.
+    pub asset: String,
+    /// Token contract address.
+    pub contract: String,
+    /// Token decimals.
+    pub decimals: u8,
+    /// `spot` or `stablecoin`.
+    pub pricing: String,
+    /// Token decimals a quote's amount is rounded up to (the operator's).
+    pub quote_amount_decimals: u8,
+    /// Whether your settings list it.
+    pub accepted: bool,
+    /// Whether its terms, each clamped to its bounds, can be used together; an accepted asset that
+    /// is not enabled is not offered or credited until you or the operator change it.
+    pub enabled: bool,
+    /// Bounds of `quote_ttl_seconds`.
+    pub quote_ttl_seconds: BoundsU64,
+    /// Bounds of `quote_spread_bps`.
+    pub quote_spread_bps: BoundsU64,
+    /// Bounds of `quote_tolerance_bps`.
+    pub quote_tolerance_bps: BoundsU64,
+    /// Bounds of `min_amount`.
+    pub min_amount: BoundsU64,
+    /// Bounds of `min_deposit_atomic`.
+    pub min_deposit_atomic: BoundsAtomic,
+    /// Bounds of `max_deposit_atomic`.
+    pub max_deposit_atomic: BoundsAtomic,
+    /// Bounds of `min_refund_atomic`.
+    pub min_refund_atomic: BoundsAtomic,
+}
+
+/// The operator's default of an integer term and its inclusive bounds.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct BoundsU64 {
+    /// The value when you set none.
+    pub default: u64,
+    /// The lowest value you may set.
+    pub min: u64,
+    /// The highest value you may set.
+    pub max: u64,
+}
+
+/// The operator's default of a base-unit amount and its inclusive bounds, as decimal strings.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct BoundsAtomic {
+    /// The value when you set none.
+    pub default: String,
+    /// The lowest value you may set.
+    pub min: String,
+    /// The highest value you may set.
+    pub max: String,
+}
+
+/// `POST /v1/payment_settings` body. A parameter not sent is unchanged; `chains`, when sent,
+/// replaces the whole list. Writes are last-write-wins.
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct UpdateAccountObjectRequest {
-    /// The confirmations to require, per chain; chains not listed keep theirs.
+pub struct UpdatePaymentSettingsRequest {
+    /// One customer's quote creations in a rolling minute, from 1 to the operator's maximum;
+    /// `null` restores the default.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<u64>, nullable, required = false)]
+    pub quote_creations_per_customer_per_minute: Option<Option<u64>>,
+    /// The chains to accept, replacing the list: each chain and asset of the key's mode once. An
+    /// element's term not sent resets to the operator's default. `[]` accepts nothing.
     #[serde(default)]
-    pub confirmation_policies: Option<Vec<ConfirmationPolicy>>,
+    #[schema(required = false)]
+    pub chains: Option<Vec<PaymentSettingsChain>>,
+}
+
+/// Deserializes a present parameter as `Some`, including `null`, so that `null` is told apart
+/// from a parameter not sent.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// Whether recording is held for the 0.6.0 cutover.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct RecordingObject {
+    /// Always `recording`.
+    pub object: String,
+    /// Whether recording is held.
+    pub held: bool,
 }
 
 /// `POST /v1/account/pause` and `POST /v1/account/resume` body.

@@ -54,6 +54,8 @@ pub enum RejectReason {
     Sanctioned,
     /// The deposited amount is outside the configured bounds.
     OutOfBounds,
+    /// The asset has a route, but the payment settings the deposit is bound to do not accept it.
+    AssetNotAccepted,
 }
 
 impl RejectReason {
@@ -66,6 +68,7 @@ impl RejectReason {
             Self::OutOfRange => "out_of_range",
             Self::Sanctioned => "sanctioned",
             Self::OutOfBounds => "out_of_bounds",
+            Self::AssetNotAccepted => "asset_not_accepted",
         }
     }
 }
@@ -97,6 +100,9 @@ pub enum WaitReason {
     /// Crediting the deposit before it is final would take the account's credit that is not
     /// final yet past its cap; it is credited once final.
     UnfinalizedCreditCap,
+    /// The deposit was recorded while its account's payment settings were held after a restore;
+    /// it waits for the merchant to reconfirm them.
+    SettingsUnconfirmed,
 }
 
 /// The domain result returned by one processing step.
@@ -407,6 +413,7 @@ mod tests {
             (RejectReason::OutOfRange, "out_of_range"),
             (RejectReason::Sanctioned, "sanctioned"),
             (RejectReason::OutOfBounds, "out_of_bounds"),
+            (RejectReason::AssetNotAccepted, "asset_not_accepted"),
         ];
 
         for (state, encoded) in states {

@@ -11,27 +11,39 @@ from ..types import UNSET, Unset
 from ..types import UNSET, Unset
 from typing import cast
 
+if TYPE_CHECKING:
+    from ..models.payment_settings_asset import PaymentSettingsAsset
 
-T = TypeVar("T", bound="ConfirmationPolicy")
+
+T = TypeVar("T", bound="PaymentSettingsChain")
 
 
 @_attrs_define
-class ConfirmationPolicy:
-    """One chain's confirmation the account requires (design D1).
+class PaymentSettingsChain:
+    """An accepted chain of your payment settings.
 
     Attributes:
-        chain_id (int): A chain of the key's mode (`GET /v1/config`).
-        confirmations (None | str | Unset): A depth (`"12"`: the block and eleven more), `"safe"`, or `"finalized"`:
-            never weaker than
-            the route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a
-            depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In
-            a request, `null` removes the chain's policy, so its route's applies.
+        assets (list[PaymentSettingsAsset]): The accepted assets of the chain, at least one.
+        chain_id (int): A chain of the key's mode.
+        confirmations (None | str | Unset): The confirmation you require on the chain: a depth (`"12"`: the block and
+            eleven more),
+            `"safe"`, or `"finalized"`, never weaker than the chain's floor and of the chain's kind (a
+            depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain).
+            `null` for the floor.
     """
 
+    assets: list[PaymentSettingsAsset]
     chain_id: int
     confirmations: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.payment_settings_asset import PaymentSettingsAsset  # noqa: PLC0415
+
+        assets = []
+        for assets_item_data in self.assets:
+            assets_item = assets_item_data.to_dict()
+            assets.append(assets_item)
+
         chain_id = self.chain_id
 
         confirmations: None | str | Unset
@@ -44,6 +56,7 @@ class ConfirmationPolicy:
 
         field_dict.update(
             {
+                "assets": assets,
                 "chain_id": chain_id,
             }
         )
@@ -54,7 +67,16 @@ class ConfirmationPolicy:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.payment_settings_asset import PaymentSettingsAsset  # noqa: PLC0415
+
         d = dict(src_dict)
+        assets = []
+        _assets = d.pop("assets")
+        for assets_item_data in _assets:
+            assets_item = PaymentSettingsAsset.from_dict(assets_item_data)
+
+            assets.append(assets_item)
+
         chain_id = d.pop("chain_id")
 
         def _parse_confirmations(data: object) -> None | str | Unset:
@@ -66,9 +88,10 @@ class ConfirmationPolicy:
 
         confirmations = _parse_confirmations(d.pop("confirmations", UNSET))
 
-        confirmation_policy = cls(
+        payment_settings_chain = cls(
+            assets=assets,
             chain_id=chain_id,
             confirmations=confirmations,
         )
 
-        return confirmation_policy
+        return payment_settings_chain

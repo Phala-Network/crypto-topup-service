@@ -76,6 +76,21 @@ NAMESPACE = uuid.UUID("5b0c6f7e-0f3a-4c9e-9d1e-2f3a4b5c6d7e")
 DOCS = "https://phala-network.github.io/phala-pay/#section/Errors/"
 
 
+# The terms a quote was issued with (`Quote.terms`), as the service resolves them from a route's
+# defaults.
+QUOTE_TERMS = {
+    "quote_ttl_seconds": 900,
+    "quote_spread_bps": 50,
+    "quote_tolerance_bps": 100,
+    "quote_amount_decimals": 4,
+    "min_amount": 100,
+    "min_deposit_atomic": "0",
+    "max_deposit_atomic": "1000000000000000000000000",
+    "min_refund_atomic": "1",
+    "confirmations": "2",
+}
+
+
 class RefusedError(Exception):
     """A request the service answers with a documented error."""
 
@@ -527,6 +542,7 @@ class FakeTopup:
                     "expires_at": now + 900,
                     "created": now,
                     "deposit": None,
+                    "terms": QUOTE_TERMS,
                     "_contract": token["contract"].lower(),
                     "_decimals": token["decimals"],
                 }
@@ -854,10 +870,12 @@ class FakeTopup:
                 "decimals": token["decimals"],
                 "max_deposit_atomic": str(10 ** (6 + token["decimals"])),
                 "min_amount": 100,
+                "min_deposit_atomic": "0",
                 "min_refund_atomic": str(MIN_REFUND_TOKENS * 10 ** token["decimals"]),
                 "pricing": token["pricing"],
                 "quote_spread_bps": 0,
                 "quote_tolerance_bps": 0,
+                "quote_amount_decimals": 4,
                 "quote_ttl_seconds": 900,
                 "typical_credit_seconds": CREDIT_SECONDS,
                 "typical_finality_seconds": FINAL_DEPTH,
@@ -873,6 +891,7 @@ class FakeTopup:
             "max_open_amount_per_account": 1_000_000,
             "max_open_amount_per_customer": 500_000,
             "max_open_quotes": 100,
+            "quote_creations_per_customer_per_minute": 10,
         }
 
     def list_forwarders(self, query: dict[str, str]) -> list[dict[str, Any]]:

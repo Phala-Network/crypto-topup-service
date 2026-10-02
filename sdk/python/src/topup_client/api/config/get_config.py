@@ -62,8 +62,9 @@ def sync_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[Config | ErrorResponse]:
-    """The assets, limits, and quote terms of the attested routes in the credential's mode, with the
-    confirmation your account's policy requires.
+    """Your effective payment config in the key's mode: every asset your payment settings accept on a
+    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
+    open-quote caps. An account that accepts nothing yet gets no asset.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -86,8 +87,9 @@ def sync(
     *,
     client: AuthenticatedClient,
 ) -> Config | ErrorResponse | None:
-    """The assets, limits, and quote terms of the attested routes in the credential's mode, with the
-    confirmation your account's policy requires.
+    """Your effective payment config in the key's mode: every asset your payment settings accept on a
+    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
+    open-quote caps. An account that accepts nothing yet gets no asset.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -106,8 +108,9 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient,
 ) -> Response[Config | ErrorResponse]:
-    """The assets, limits, and quote terms of the attested routes in the credential's mode, with the
-    confirmation your account's policy requires.
+    """Your effective payment config in the key's mode: every asset your payment settings accept on a
+    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
+    open-quote caps. An account that accepts nothing yet gets no asset.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -128,8 +131,9 @@ async def asyncio(
     *,
     client: AuthenticatedClient,
 ) -> Config | ErrorResponse | None:
-    """The assets, limits, and quote terms of the attested routes in the credential's mode, with the
-    confirmation your account's policy requires.
+    """Your effective payment config in the key's mode: every asset your payment settings accept on a
+    chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
+    open-quote caps. An account that accepts nothing yet gets no asset.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

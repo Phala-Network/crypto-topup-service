@@ -73,6 +73,21 @@ CONFIG = ProductConfig(
 WEBSITE = {"Origin": "https://acme.example"}
 
 
+# The terms a quote was issued with (`Quote.terms`), as the service resolves them from a route's
+# defaults.
+QUOTE_TERMS = {
+    "quote_ttl_seconds": 900,
+    "quote_spread_bps": 50,
+    "quote_tolerance_bps": 100,
+    "quote_amount_decimals": 4,
+    "min_amount": 100,
+    "min_deposit_atomic": "0",
+    "max_deposit_atomic": "1000000000000000000000000",
+    "min_refund_atomic": "1",
+    "confirmations": "2",
+}
+
+
 def _quote(customer: str = "acct", **fields: Any) -> dict[str, Any]:
     address = forwarder_address(
         CONFIG.factory, CONFIG.implementation, TREASURY, quote_salt(ACCOUNT, customer, QUOTE)
@@ -97,6 +112,7 @@ def _quote(customer: str = "acct", **fields: Any) -> dict[str, Any]:
         "created": NOW,
         "payment": None,
         "deposit": None,
+        "terms": QUOTE_TERMS,
         **fields,
     }
 
@@ -192,10 +208,12 @@ def _config_asset(
         "decimals": 18,
         "max_deposit_atomic": "1" + "0" * 24,
         "min_amount": 100,
+        "min_deposit_atomic": "0",
         "min_refund_atomic": "1" + "0" * 18,
         "pricing": pricing,
         "quote_spread_bps": 50,
         "quote_tolerance_bps": 100,
+        "quote_amount_decimals": 4,
         "quote_ttl_seconds": 900,
         "typical_credit_seconds": 30,
         "typical_finality_seconds": 900,
@@ -234,6 +252,7 @@ class Service:
                 "max_open_amount_per_account": 1_000_000,
                 "max_open_amount_per_customer": 500_000,
                 "max_open_quotes": 100,
+                "quote_creations_per_customer_per_minute": 10,
             }
             return httpx.Response(200, json=config)
         if path == "/v1/quotes":

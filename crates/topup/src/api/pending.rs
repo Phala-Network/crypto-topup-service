@@ -113,7 +113,7 @@ fn terms(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Terms {
             && amount_within_tolerance(
                 observed.amount_atomic,
                 lock.amount_atomic,
-                route.rate_lock.lock_tolerance_bps,
+                lock.terms.quote_tolerance_bps,
             ),
     }
 }

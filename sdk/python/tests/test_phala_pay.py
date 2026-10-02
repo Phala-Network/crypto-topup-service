@@ -39,6 +39,21 @@ ADDRESS = "0x" + "11" * 20
 ACCOUNT = "acct_" + "a1" * 16
 
 
+# The terms a quote was issued with (`Quote.terms`), as the service resolves them from a route's
+# defaults.
+QUOTE_TERMS = {
+    "quote_ttl_seconds": 900,
+    "quote_spread_bps": 50,
+    "quote_tolerance_bps": 100,
+    "quote_amount_decimals": 4,
+    "min_amount": 100,
+    "min_deposit_atomic": "0",
+    "max_deposit_atomic": "1000000000000000000000000",
+    "min_refund_atomic": "1",
+    "confirmations": "2",
+}
+
+
 def _quote(**fields: object) -> dict[str, object]:
     address = quote_address(
         FACTORY,
@@ -68,6 +83,7 @@ def _quote(**fields: object) -> dict[str, object]:
         "created": 1_790_000_000,
         "payment": None,
         "deposit": None,
+        "terms": QUOTE_TERMS,
         **fields,
     }
 

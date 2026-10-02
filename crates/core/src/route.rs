@@ -31,8 +31,9 @@ pub struct RouteFile {
     pub pricing: PricingConfig,
     /// Deposit screening settings.
     pub screening: ScreeningConfig,
-    /// Quote-first rate-lock settings.
-    pub rate_lock: RateLockConfig,
+    /// The operator's default and bounds for each account's terms on the route
+    /// (docs/design/payment-settings.md §5).
+    pub merchant: MerchantBounds,
     /// State-age alert thresholds.
     pub alerts: AlertsConfig,
 }
@@ -86,20 +87,14 @@ impl RouteFile {
             })?;
             validate_bps("pricing.max_fx_deviation_bps", max_fx_deviation_bps)?;
         }
-        validate_bps("quote.spread_bps", self.rate_lock.spread_bps)?;
-        validate_bps("quote.tolerance_bps", self.rate_lock.lock_tolerance_bps)?;
-        if self.rate_lock.amount_decimals > self.asset.decimals {
+        if self.asset.quote_amount_decimals > self.asset.decimals {
             return Err(RouteError::validation(
-                "quote.amount_decimals",
+                "asset.quote_amount_decimals",
                 "must be at most asset.decimals",
             ));
         }
         validate_positive("pricing.max_age_s", self.pricing.max_age_s)?;
-        validate_positive("quote.window_s", self.rate_lock.window_s)?;
-        validate_positive(
-            "quote.max_creations_per_minute",
-            self.rate_lock.max_creations_per_minute,
-        )?;
+        self.merchant.validate()?;
         validate_positive(
             "alerts.stuck_after_s.detected",
             self.alerts.stuck_after_s.detected,
@@ -109,12 +104,6 @@ impl RouteFile {
             self.alerts.stuck_after_s.confirmed,
         )?;
         validate_rpc_providers(&self.chain.rpc_providers)?;
-        if self.screening.min_deposit_atomic > self.screening.max_deposit_atomic {
-            return Err(RouteError::validation(
-                "limits.min_deposit_atomic",
-                "must not exceed limits.max_deposit_atomic",
-            ));
-        }
         Ok(())
     }
 }
@@ -387,8 +376,10 @@ pub struct AssetConfig {
     pub contract: Address,
     /// ERC-20 decimal count.
     pub decimals: u8,
-    /// Minimum deposit amount eligible for a treasury refund.
-    pub min_refund_atomic: AtomicAmount,
+    /// Token decimals a quote's amount is rounded up to, at most `decimals`. The operator's alone:
+    /// rounding up at a low precision costs the payer more than any spread (design
+    /// payment-settings §3).
+    pub quote_amount_decimals: u8,
     /// How the chain's transfer logs of this token are requested.
     pub backstop: Backstop,
 }
@@ -471,27 +462,132 @@ pub struct FxPriceConfig {
 pub struct ScreeningConfig {
     /// Sanctions oracle contract address.
     pub sanctions_oracle: Address,
-    /// Minimum creditable deposit.
-    pub min_deposit_atomic: AtomicAmount,
-    /// Maximum creditable deposit.
-    pub max_deposit_atomic: AtomicAmount,
-    /// Minimum destination credit.
-    pub min_credit_minor: u64,
 }
 
-/// Quote-first rate-lock policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RateLockConfig {
-    /// Lock lifetime in seconds.
-    pub window_s: u64,
-    /// Price spread in basis points.
-    pub spread_bps: Bps,
-    /// Accepted transfer amount tolerance in basis points.
-    pub lock_tolerance_bps: Bps,
-    /// Token decimals a quote's amount is rounded up to, at most `asset.decimals`.
-    pub amount_decimals: u8,
-    /// Maximum successful lock creations per account in one rolling minute.
-    pub max_creations_per_minute: u64,
+/// An operator's default for one merchant parameter and the inclusive bounds an account's value
+/// must stay within.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounded<T> {
+    /// The value of an account that sets none.
+    pub default: T,
+    /// The lowest value an account may set.
+    pub min: T,
+    /// The highest value an account may set.
+    pub max: T,
+}
+
+impl<T: Copy + Ord> Bounded<T> {
+    /// `value` as the default and both bounds: a term no account can change.
+    #[must_use]
+    pub const fn at(value: T) -> Self {
+        Self {
+            default: value,
+            min: value,
+            max: value,
+        }
+    }
+
+    /// Whether an account may set `value`.
+    #[must_use]
+    pub fn contains(&self, value: T) -> bool {
+        self.min <= value && value <= self.max
+    }
+
+    /// `value` moved within the bounds, for a value set before the operator tightened them.
+    #[must_use]
+    pub fn clamp(&self, value: T) -> T {
+        value.clamp(self.min, self.max)
+    }
+
+    fn validate(&self, field: &'static str) -> Result<(), RouteError> {
+        if self.min > self.max || !self.contains(self.default) {
+            return Err(RouteError::validation(
+                field,
+                "must have min <= default <= max",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The operator's defaults and hard bounds for each account's terms on one route (design
+/// payment-settings §5). An account's payment settings choose within them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MerchantBounds {
+    /// A quote's payment window, in seconds.
+    pub quote_ttl_seconds: Bounded<u64>,
+    /// A quote's spread below spot, in basis points.
+    pub quote_spread_bps: Bounded<Bps>,
+    /// The two-sided tolerance of a quote's payment, in basis points.
+    pub quote_tolerance_bps: Bounded<Bps>,
+    /// The minimum credit of a quote or a deposit, in cents.
+    pub min_amount: Bounded<u64>,
+    /// The minimum creditable deposit, in base units.
+    pub min_deposit_atomic: Bounded<AtomicAmount>,
+    /// The maximum creditable deposit, in base units.
+    pub max_deposit_atomic: Bounded<AtomicAmount>,
+    /// The refund dust floor, in base units.
+    pub min_refund_atomic: Bounded<AtomicAmount>,
+}
+
+impl MerchantBounds {
+    fn validate(&self) -> Result<(), RouteError> {
+        self.quote_ttl_seconds
+            .validate("merchant.quote_ttl_seconds")?;
+        self.quote_spread_bps
+            .validate("merchant.quote_spread_bps")?;
+        self.quote_tolerance_bps
+            .validate("merchant.quote_tolerance_bps")?;
+        self.min_amount.validate("merchant.min_amount")?;
+        self.min_deposit_atomic
+            .validate("merchant.min_deposit_atomic")?;
+        self.max_deposit_atomic
+            .validate("merchant.max_deposit_atomic")?;
+        self.min_refund_atomic
+            .validate("merchant.min_refund_atomic")?;
+        if self.quote_ttl_seconds.min < QUOTE_TTL_SECONDS_FLOOR
+            || self.quote_ttl_seconds.max > QUOTE_TTL_SECONDS_CEILING
+        {
+            return Err(RouteError::validation(
+                "merchant.quote_ttl_seconds",
+                format!(
+                    "bounds must lie within {QUOTE_TTL_SECONDS_FLOOR} to \
+                     {QUOTE_TTL_SECONDS_CEILING} seconds"
+                ),
+            ));
+        }
+        if self.quote_spread_bps.max.value() > QUOTE_SPREAD_BPS_CEILING {
+            return Err(RouteError::validation(
+                "merchant.quote_spread_bps",
+                format!("max must be at most {QUOTE_SPREAD_BPS_CEILING}"),
+            ));
+        }
+        if self.quote_tolerance_bps.max.value() > QUOTE_TOLERANCE_BPS_CEILING {
+            return Err(RouteError::validation(
+                "merchant.quote_tolerance_bps",
+                format!("max must be at most {QUOTE_TOLERANCE_BPS_CEILING}"),
+            ));
+        }
+        if self.min_amount.min == 0 {
+            return Err(RouteError::validation(
+                "merchant.min_amount",
+                "min must be at least 1",
+            ));
+        }
+        if self.min_deposit_atomic.default > self.max_deposit_atomic.default {
+            return Err(RouteError::validation(
+                "merchant.min_deposit_atomic",
+                "default must not exceed merchant.max_deposit_atomic's default",
+            ));
+        }
+        if self.min_refund_atomic.max > self.max_deposit_atomic.max {
+            return Err(RouteError::validation(
+                "merchant.min_refund_atomic",
+                "max must not exceed merchant.max_deposit_atomic's max",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Operational alert thresholds.
@@ -527,11 +623,8 @@ pub struct RouteSpec {
     pub asset: AssetSpec,
     /// Price sources.
     pub pricing: PricingSpec,
-    /// Policy limits.
-    pub limits: LimitsSpec,
-    /// Quote policy overrides.
-    #[serde(default, skip_serializing_if = "QuoteSpec::is_empty")]
-    pub quote: QuoteSpec,
+    /// The default and bounds of each account's terms.
+    pub merchant: MerchantSpec,
     /// Alert threshold overrides.
     #[serde(default, skip_serializing_if = "AlertsSpec::is_empty")]
     pub alerts: AlertsSpec,
@@ -570,6 +663,10 @@ pub struct AssetSpec {
     pub contract: Address,
     /// ERC-20 decimal count, attested because credit math depends on it.
     pub decimals: u8,
+    /// Token decimals a quote's amount is rounded up to; default [`DEFAULT_QUOTE_AMOUNT_DECIMALS`]
+    /// or `decimals` if fewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_amount_decimals: Option<u8>,
     /// How transfers are requested; default [`Backstop::Token`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backstop: Option<Backstop>,
@@ -611,47 +708,77 @@ pub struct CheckPriceSpec {
     pub fx: Option<FxPriceConfig>,
 }
 
-/// Policy limits of a route file.
+/// One merchant parameter of a route file: the operator's default and bounds, each left out for
+/// its code default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundedSpec<T> {
+    /// The value of an account that sets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<T>,
+    /// The lowest value an account may set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<T>,
+    /// The highest value an account may set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<T>,
+}
+
+impl<T: Copy> BoundedSpec<T> {
+    fn resolve(
+        self,
+        field: &'static str,
+        default: Option<T>,
+        min: impl FnOnce(T) -> T,
+        max: impl FnOnce(T) -> T,
+    ) -> Result<Bounded<T>, RouteError> {
+        let default = self
+            .default
+            .or(default)
+            .ok_or_else(|| RouteError::validation(field, "default is required"))?;
+        Ok(Bounded {
+            default,
+            min: self.min.unwrap_or_else(|| min(default)),
+            max: self.max.unwrap_or_else(|| max(default)),
+        })
+    }
+}
+
+impl<T> From<Bounded<T>> for BoundedSpec<T> {
+    fn from(bounded: Bounded<T>) -> Self {
+        Self {
+            default: Some(bounded.default),
+            min: Some(bounded.min),
+            max: Some(bounded.max),
+        }
+    }
+}
+
+/// The merchant section of a route file: each account's terms on the route, as the operator's
+/// default and bounds (design payment-settings §5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LimitsSpec {
-    /// Minimum credit in USD minor units; smaller deposits are rejected `below_minimum`.
-    pub min_credit_minor: u64,
-    /// Maximum creditable deposit in token base units.
-    pub max_deposit_atomic: AtomicAmount,
-    /// Minimum refundable amount in token base units.
-    pub min_refund_atomic: AtomicAmount,
-    /// Minimum creditable deposit in token base units; default 0 (`min_credit_minor` governs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_deposit_atomic: Option<AtomicAmount>,
-}
-
-/// Quote policy overrides; each field defaults to the `DEFAULT_QUOTE_*` constant.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QuoteSpec {
-    /// Payment window in seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window_s: Option<u64>,
-    /// Spread below spot in basis points.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spread_bps: Option<Bps>,
-    /// Accepted payment tolerance in basis points.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tolerance_bps: Option<Bps>,
-    /// Token decimals the amount to pay is rounded up to; default [`DEFAULT_QUOTE_AMOUNT_DECIMALS`]
-    /// or `asset.decimals` if fewer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount_decimals: Option<u8>,
-    /// Quote creations per account in a rolling minute.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_creations_per_minute: Option<u64>,
-}
-
-impl QuoteSpec {
-    fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
+pub struct MerchantSpec {
+    /// A quote's payment window in seconds: default [`DEFAULT_QUOTE_WINDOW_S`], bounds 30 to 3600.
+    #[serde(default)]
+    pub quote_ttl_seconds: BoundedSpec<u64>,
+    /// Spread below spot: default [`DEFAULT_QUOTE_SPREAD_BPS`], bounds 0 to 500 (or the default).
+    #[serde(default)]
+    pub quote_spread_bps: BoundedSpec<Bps>,
+    /// Two-sided payment tolerance: default [`DEFAULT_QUOTE_TOLERANCE_BPS`], bounds 0 to 500 (or
+    /// the default).
+    #[serde(default)]
+    pub quote_tolerance_bps: BoundedSpec<Bps>,
+    /// Minimum credit in cents: the default is required; an account may raise it.
+    pub min_amount: BoundedSpec<u64>,
+    /// Minimum creditable deposit in base units: default 0; an account may raise it.
+    #[serde(default)]
+    pub min_deposit_atomic: BoundedSpec<AtomicAmount>,
+    /// Maximum creditable deposit in base units: the default is required; an account may lower it.
+    pub max_deposit_atomic: BoundedSpec<AtomicAmount>,
+    /// Refund dust floor in base units: the default is required, and an account keeps it unless
+    /// the operator sets bounds.
+    pub min_refund_atomic: BoundedSpec<AtomicAmount>,
 }
 
 /// Alert threshold overrides.
@@ -723,8 +850,20 @@ pub const DEFAULT_QUOTE_TOLERANCE_BPS: u16 = 100;
 /// Four token decimals keep the amount to pay readable and typeable; rounding up overpays by less
 /// than 0.0001 token.
 pub const DEFAULT_QUOTE_AMOUNT_DECIMALS: u8 = 4;
-/// Quote creations per account in a rolling minute.
-pub const DEFAULT_QUOTE_MAX_CREATIONS_PER_MINUTE: u64 = 10;
+/// The shortest payment window an operator may allow, and the default lower bound: a quote shorter
+/// than this cannot be paid.
+pub const QUOTE_TTL_SECONDS_FLOOR: u64 = 30;
+/// The longest payment window an operator may allow: a day.
+pub const QUOTE_TTL_SECONDS_CEILING: u64 = 86_400;
+/// The default upper bound of a quote's payment window: an hour.
+pub const DEFAULT_QUOTE_TTL_SECONDS_MAX: u64 = 3_600;
+/// The highest spread an operator may allow: 50%, leaving the locked price representable.
+pub const QUOTE_SPREAD_BPS_CEILING: u16 = 5_000;
+/// The highest tolerance an operator may allow: 10%, far from the 100% at which a zero payment
+/// would match a quote.
+pub const QUOTE_TOLERANCE_BPS_CEILING: u16 = 1_000;
+/// The default upper bound of a quote's spread and of its tolerance: 5%.
+pub const DEFAULT_QUOTE_BPS_MAX: u16 = 500;
 /// Detected deposits normally confirm within minutes.
 pub const DEFAULT_STUCK_AFTER_DETECTED_S: u64 = 1_800;
 /// Confirmed deposits normally credit within minutes.
@@ -834,7 +973,10 @@ impl TryFrom<RouteSpec> for RouteFile {
                 symbol: spec.asset.symbol,
                 contract: spec.asset.contract,
                 decimals: spec.asset.decimals,
-                min_refund_atomic: spec.limits.min_refund_atomic,
+                quote_amount_decimals: spec
+                    .asset
+                    .quote_amount_decimals
+                    .unwrap_or(DEFAULT_QUOTE_AMOUNT_DECIMALS.min(spec.asset.decimals)),
                 backstop: spec.asset.backstop.unwrap_or_default(),
             },
             livemode: spec.livemode,
@@ -849,31 +991,8 @@ impl TryFrom<RouteSpec> for RouteFile {
                 },
                 max_fx_deviation_bps,
             },
-            screening: ScreeningConfig {
-                sanctions_oracle,
-                min_deposit_atomic: spec.limits.min_deposit_atomic.unwrap_or_default(),
-                max_deposit_atomic: spec.limits.max_deposit_atomic,
-                min_credit_minor: spec.limits.min_credit_minor,
-            },
-            rate_lock: RateLockConfig {
-                window_s: spec.quote.window_s.unwrap_or(DEFAULT_QUOTE_WINDOW_S),
-                spread_bps: match spec.quote.spread_bps {
-                    Some(value) => value,
-                    None => bps("quote.spread_bps", DEFAULT_QUOTE_SPREAD_BPS)?,
-                },
-                lock_tolerance_bps: match spec.quote.tolerance_bps {
-                    Some(value) => value,
-                    None => bps("quote.tolerance_bps", DEFAULT_QUOTE_TOLERANCE_BPS)?,
-                },
-                amount_decimals: spec
-                    .quote
-                    .amount_decimals
-                    .unwrap_or(DEFAULT_QUOTE_AMOUNT_DECIMALS.min(spec.asset.decimals)),
-                max_creations_per_minute: spec
-                    .quote
-                    .max_creations_per_minute
-                    .unwrap_or(DEFAULT_QUOTE_MAX_CREATIONS_PER_MINUTE),
-            },
+            screening: ScreeningConfig { sanctions_oracle },
+            merchant: merchant_bounds(spec.merchant)?,
             alerts: AlertsConfig {
                 stuck_after_s: StuckAfterConfig {
                     detected: stuck.detected.unwrap_or(DEFAULT_STUCK_AFTER_DETECTED_S),
@@ -903,6 +1022,7 @@ impl From<RouteFile> for RouteSpec {
                 symbol: route.asset.symbol,
                 contract: route.asset.contract,
                 decimals: route.asset.decimals,
+                quote_amount_decimals: Some(route.asset.quote_amount_decimals),
                 backstop: Some(route.asset.backstop),
             },
             pricing: PricingSpec {
@@ -917,18 +1037,14 @@ impl From<RouteFile> for RouteSpec {
                 max_deviation_bps: Some(route.pricing.max_deviation_bps),
                 max_fx_deviation_bps: route.pricing.max_fx_deviation_bps,
             },
-            limits: LimitsSpec {
-                min_credit_minor: route.screening.min_credit_minor,
-                max_deposit_atomic: route.screening.max_deposit_atomic,
-                min_refund_atomic: route.asset.min_refund_atomic,
-                min_deposit_atomic: Some(route.screening.min_deposit_atomic),
-            },
-            quote: QuoteSpec {
-                window_s: Some(route.rate_lock.window_s),
-                spread_bps: Some(route.rate_lock.spread_bps),
-                tolerance_bps: Some(route.rate_lock.lock_tolerance_bps),
-                amount_decimals: Some(route.rate_lock.amount_decimals),
-                max_creations_per_minute: Some(route.rate_lock.max_creations_per_minute),
+            merchant: MerchantSpec {
+                quote_ttl_seconds: route.merchant.quote_ttl_seconds.into(),
+                quote_spread_bps: route.merchant.quote_spread_bps.into(),
+                quote_tolerance_bps: route.merchant.quote_tolerance_bps.into(),
+                min_amount: route.merchant.min_amount.into(),
+                min_deposit_atomic: route.merchant.min_deposit_atomic.into(),
+                max_deposit_atomic: route.merchant.max_deposit_atomic.into(),
+                min_refund_atomic: route.merchant.min_refund_atomic.into(),
             },
             alerts: AlertsSpec {
                 stuck_after_s: StuckAfterSpec {
@@ -938,6 +1054,59 @@ impl From<RouteFile> for RouteSpec {
             },
         }
     }
+}
+
+/// The merchant section with every code default filled in; [`MerchantBounds::validate`] checks
+/// the result.
+fn merchant_bounds(spec: MerchantSpec) -> Result<MerchantBounds, RouteError> {
+    let bps_max = bps("merchant", DEFAULT_QUOTE_BPS_MAX)?;
+    Ok(MerchantBounds {
+        quote_ttl_seconds: spec.quote_ttl_seconds.resolve(
+            "merchant.quote_ttl_seconds",
+            Some(DEFAULT_QUOTE_WINDOW_S),
+            |_| QUOTE_TTL_SECONDS_FLOOR,
+            |_| DEFAULT_QUOTE_TTL_SECONDS_MAX,
+        )?,
+        quote_spread_bps: spec.quote_spread_bps.resolve(
+            "merchant.quote_spread_bps",
+            Some(bps("merchant.quote_spread_bps", DEFAULT_QUOTE_SPREAD_BPS)?),
+            |_| Bps::default(),
+            |default| default.max(bps_max),
+        )?,
+        quote_tolerance_bps: spec.quote_tolerance_bps.resolve(
+            "merchant.quote_tolerance_bps",
+            Some(bps(
+                "merchant.quote_tolerance_bps",
+                DEFAULT_QUOTE_TOLERANCE_BPS,
+            )?),
+            |_| Bps::default(),
+            |default| default.max(bps_max),
+        )?,
+        min_amount: spec.min_amount.resolve(
+            "merchant.min_amount",
+            None,
+            std::convert::identity,
+            |_| u64::MAX,
+        )?,
+        min_deposit_atomic: spec.min_deposit_atomic.resolve(
+            "merchant.min_deposit_atomic",
+            Some(AtomicAmount::default()),
+            std::convert::identity,
+            |_| AtomicAmount::new(alloy_primitives::U256::MAX),
+        )?,
+        max_deposit_atomic: spec.max_deposit_atomic.resolve(
+            "merchant.max_deposit_atomic",
+            None,
+            |_| AtomicAmount::default(),
+            std::convert::identity,
+        )?,
+        min_refund_atomic: spec.min_refund_atomic.resolve(
+            "merchant.min_refund_atomic",
+            None,
+            std::convert::identity,
+            std::convert::identity,
+        )?,
+    })
 }
 
 fn bps(field: &'static str, value: u16) -> Result<Bps, RouteError> {

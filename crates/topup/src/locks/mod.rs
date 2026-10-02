@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::audit::{self, Actor};
 use crate::client_secret::ClientSecretKey;
 use crate::db::{Account, Customer};
+use crate::payment_config::{self, Resolution, Status, Terms};
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use pricing::{PricingRuntime, ValidatedQuote};
@@ -41,7 +42,8 @@ macro_rules! select_lock {
            quote.amount_atomic::text AS amount_atomic,
            quote.price_scaled::text AS price_scaled,
            quote.credit_minor::text AS credit_minor,
-           quote.expires_at, quote.status, quote.created_at, quote.consumed_by, quote.metadata
+           quote.expires_at, quote.status, quote.created_at, quote.consumed_by, quote.metadata,
+           quote.route_version, quote.terms
     FROM quotes AS quote
     JOIN addresses AS address ON address.quote_id = quote.id
     JOIN customers AS customer ON customer.id = quote.customer_id"#
@@ -121,6 +123,10 @@ pub struct RateLock {
     pub consumed_by: Option<Uuid>,
     /// The merchant's metadata (`crate::api` validates it).
     pub metadata: BTreeMap<String, String>,
+    /// The route version the quote was issued on.
+    pub route_version: u64,
+    /// The terms it was issued with, kept for good (docs/design/payment-settings.md §8).
+    pub terms: Terms,
 }
 
 /// The public id of a quote: `qt_` and the hex of its id. Quotes derive their address salt from
@@ -201,6 +207,18 @@ pub enum RateLockError {
     /// The account has no treasury on the route's chain.
     #[error("no treasury is set on the chain")]
     TreasuryNotSet,
+    /// The account's payment settings do not accept the route's asset on its chain.
+    #[error("the account does not accept the asset")]
+    AssetNotAccepted,
+    /// The account's payment settings are held after a restore until it reconfirms them.
+    #[error("the account's payment settings await reconfirmation")]
+    SettingsUnconfirmed,
+    /// Recording is held for the cutover, so a payment would not be seen.
+    #[error("recording is held")]
+    RecordingHeld,
+    /// The account's payment settings changed between pricing and creation; retry.
+    #[error("the account's payment settings changed")]
+    SettingsChanged,
     /// The per-customer rolling creation limit was reached; a creation is admitted again after
     /// `retry_after` seconds.
     #[error("rate-lock creation limit exceeded")]
@@ -276,12 +294,16 @@ pub async fn create(
     Ok(created)
 }
 
-/// A lock's price and amount, fetched and checked before the transaction that creates it.
+/// A lock's price and amount, fetched and checked before the transaction that creates it, with
+/// the terms they were resolved from.
 #[derive(Clone, Copy, Debug)]
 pub struct PricedLock {
     credit_minor: MinorAmount,
     price: ScaledPrice,
     amount_atomic: AtomicAmount,
+    revision: Uuid,
+    terms: Terms,
+    creations_per_minute: u64,
 }
 
 /// Prices a lock for `credit_minor` on `route` for `customer` of `account` with the external
@@ -307,10 +329,26 @@ pub async fn price(
         ));
     }
     let scope = Scope::new(account.id, customer.livemode);
+    let mut connection = pool.acquire().await?;
+    if payment_config::recording_held(&mut connection).await? {
+        return Err(RateLockError::RecordingHeld);
+    }
+    // The account's terms on the route (docs/design/payment-settings.md §6); `create_in` checks
+    // that the revision is still current when it creates the quote.
+    let settings = payment_config::load(&mut connection, scope).await?;
+    if settings.status == Status::Held {
+        return Err(RateLockError::SettingsUnconfirmed);
+    }
+    let Resolution::Accepted(terms) = payment_config::resolve(route, &settings.document) else {
+        return Err(RateLockError::AssetNotAccepted);
+    };
+    let creations_per_minute =
+        payment_config::quote_creations_per_customer_per_minute(&settings.document);
     // Cheap pre-checks so a rate-limited caller, or one without a treasury, never triggers an
     // external price fetch; the authoritative checks repeat in `create_in`.
-    check_creation_rate(&mut *pool.acquire().await?, customer.id, route).await?;
-    treasury(&mut *pool.acquire().await?, scope, route.chain.chain_id).await?;
+    check_creation_rate(&mut connection, customer.id, creations_per_minute).await?;
+    treasury(&mut connection, scope, route.chain.chain_id).await?;
+    drop(connection);
 
     let quote = quotes
         .quote(route)
@@ -319,14 +357,20 @@ pub async fn price(
             tracing::warn!(route = %route.route, quote = %evidence, "rate-lock price validation failed");
             RateLockError::PricingUnavailable
         })?;
-    let locked_price = lock_price(quote.price, route.rate_lock.spread_bps)
-        .map_err(|_| RateLockError::Arithmetic)?;
-    let amount_atomic = amount_for_credit(route, credit_minor, locked_price)?;
-    validate_bounds(route, amount_atomic, credit_minor)?;
+    let locked_price =
+        lock_price(quote.price, terms.quote_spread_bps).map_err(|_| RateLockError::Arithmetic)?;
+    if locked_price.value() == 0 {
+        return Err(RateLockError::PricingUnavailable);
+    }
+    let amount_atomic = amount_for_credit(route, &terms, credit_minor, locked_price)?;
+    validate_bounds(&terms, amount_atomic, credit_minor)?;
     Ok(PricedLock {
         credit_minor,
         price: locked_price,
         amount_atomic,
+        revision: settings.revision,
+        terms,
+        creations_per_minute,
     })
 }
 
@@ -349,12 +393,25 @@ pub async fn create_in(
         credit_minor,
         price: locked_price,
         amount_atomic,
+        revision,
+        terms,
+        creations_per_minute,
     } = *priced;
     let scope = Scope::new(account.id, customer.livemode);
-    let window = i64::try_from(route.rate_lock.window_s).map_err(|_| RateLockError::Arithmetic)?;
+    let window = i64::try_from(terms.quote_ttl_seconds).map_err(|_| RateLockError::Arithmetic)?;
 
+    // One consistent resolution: the revision the quote was priced under, still current and held
+    // so `FOR SHARE` until the quote commits (docs/design/payment-settings.md §7). A restore's hold
+    // keeps the revision, so it is checked on its own.
+    let current = payment_config::load_for_share(transaction, scope).await?;
+    if current.status == Status::Held {
+        return Err(RateLockError::SettingsUnconfirmed);
+    }
+    if current.revision != revision {
+        return Err(RateLockError::SettingsChanged);
+    }
     lock_customer(transaction, customer).await?;
-    check_creation_rate(transaction, customer.id, route).await?;
+    check_creation_rate(transaction, customer.id, creations_per_minute).await?;
     check_exposure(transaction, account, customer, credit_minor).await?;
     // The account's current treasury of the chain; the shared lock, held to commit, keeps a
     // treasury change from applying meanwhile. The address keeps it for good, as the forwarder
@@ -390,10 +447,10 @@ pub async fn create_in(
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
             credit_minor, expires_at, status, exposure_reserved, created_at, metadata,
-            client_secret_hash
+            client_secret_hash, route_version, settings_revision_id, terms
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', true, $10, $11, $12)
+                $9, 'open', true, $10, $11, $12, $13, $14, $15)
         "#,
     )
     .bind(id)
@@ -408,6 +465,9 @@ pub async fn create_in(
     .bind(now)
     .bind(Json(metadata))
     .bind(Sha256::digest(client_secret.as_bytes()).as_slice())
+    .bind(i64::try_from(route.version).map_err(|_| RateLockError::Arithmetic)?)
+    .bind(revision)
+    .bind(Json(terms))
     .execute(&mut **transaction)
     .await?;
     // A freshly derived single-use address cannot hold earlier payments, so the scanner only
@@ -450,6 +510,8 @@ pub async fn create_in(
         created_at: now,
         consumed_by: None,
         metadata: metadata.clone(),
+        route_version: route.version,
+        terms,
     };
     Ok((lock, client_secret))
 }
@@ -621,15 +683,22 @@ pub async fn reissue(
     )
     .await?
     .id;
+    // Re-issuing does not re-authorize acceptance: the lock never applies, and a payment follows
+    // the binding of its deposit. The terms shown are those the current settings resolve, or the
+    // route's defaults (docs/design/payment-settings.md §11).
+    let settings = payment_config::load(&mut transaction, scope).await?;
+    let shown = payment_config::resolve(route, &settings.document)
+        .terms()
+        .unwrap_or_else(|| Terms::defaults(route));
     sqlx::query(
         r#"
         INSERT INTO quotes (
             id, account_id, livemode, customer_id, route, amount_atomic, price_scaled,
             credit_minor, expires_at, status, exposure_reserved, created_at, metadata,
-            client_secret_hash, restore_id
+            client_secret_hash, restore_id, route_version, terms
         )
         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric,
-                $9, 'open', false, $10, $11, $12, $13)
+                $9, 'open', false, $10, $11, $12, $13, $14, $15)
         "#,
     )
     .bind(terms.id)
@@ -645,6 +714,8 @@ pub async fn reissue(
     .bind(Json(&terms.metadata))
     .bind(terms.client_secret_hash.as_ref().map(<[u8; 32]>::as_slice))
     .bind(restore_id)
+    .bind(i64::try_from(route.version).map_err(|_| RateLockError::Arithmetic)?)
+    .bind(Json(shown))
     .execute(&mut *transaction)
     .await?;
     let chain_id = i64::try_from(route.chain.chain_id).map_err(|_| RateLockError::Arithmetic)?;
@@ -1062,6 +1133,7 @@ fn parse_u64(value: &str) -> Result<u64, RateLockError> {
 
 fn amount_for_credit(
     route: &RouteFile,
+    terms: &Terms,
     credit_minor: MinorAmount,
     price: ScaledPrice,
 ) -> Result<AtomicAmount, RateLockError> {
@@ -1074,31 +1146,27 @@ fn amount_for_credit(
     // reads and types a short amount; the rounding overpays, never underpays, the locked credit.
     tokens_for_credit(credit_minor, price, route.asset.decimals, UNIT_DECIMALS)
         .and_then(|amount| {
-            round_up_to_decimals(
-                amount,
-                route.asset.decimals,
-                route.rate_lock.amount_decimals,
-            )
+            round_up_to_decimals(amount, route.asset.decimals, terms.quote_amount_decimals)
         })
         .map_err(|_| RateLockError::AmountTooLarge("amount is too large to quote"))
 }
 
 fn validate_bounds(
-    route: &RouteFile,
+    terms: &Terms,
     amount: AtomicAmount,
     credit: MinorAmount,
 ) -> Result<(), RateLockError> {
-    if credit.value() < route.screening.min_credit_minor {
+    if credit.value() < terms.min_amount {
         return Err(RateLockError::AmountTooSmall(
             "amount is below the minimum credit",
         ));
     }
-    if amount < route.screening.min_deposit_atomic {
+    if amount < terms.min_deposit_atomic {
         return Err(RateLockError::AmountTooSmall(
             "amount is below the minimum deposit",
         ));
     }
-    if amount > route.screening.max_deposit_atomic {
+    if amount > terms.max_deposit_atomic {
         return Err(RateLockError::AmountTooLarge(
             "amount is above the maximum deposit",
         ));
@@ -1106,10 +1174,12 @@ fn validate_bounds(
     Ok(())
 }
 
+/// One customer's quote creations in the last minute, at most `limit` (the account's
+/// `quote_creations_per_customer_per_minute`).
 async fn check_creation_rate(
     connection: &mut sqlx::PgConnection,
     customer_id: Uuid,
-    route: &RouteFile,
+    limit: u64,
 ) -> Result<(), RateLockError> {
     let recent: i64 = sqlx::query_scalar(
         r#"
@@ -1123,13 +1193,13 @@ async fn check_creation_rate(
     .fetch_one(&mut *connection)
     .await?;
     let recent = u64::try_from(recent).map_err(|_| RateLockError::DatabaseInvariant)?;
-    if recent < route.rate_lock.max_creations_per_minute {
+    if recent < limit {
         return Ok(());
     }
     // The limit admits a creation again once the newest `max` creations shrink below `max`: when
     // the `max`-th newest leaves the minute.
-    let offset = i64::try_from(route.rate_lock.max_creations_per_minute.saturating_sub(1))
-        .map_err(|_| RateLockError::DatabaseInvariant)?;
+    let offset =
+        i64::try_from(limit.saturating_sub(1)).map_err(|_| RateLockError::DatabaseInvariant)?;
     let seconds: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT GREATEST(1, ceil(extract(epoch FROM created_at + interval '1 minute' - now())))::bigint
@@ -1270,6 +1340,8 @@ struct RateLockRow {
     created_at: DateTime<Utc>,
     consumed_by: Option<Uuid>,
     metadata: Json<BTreeMap<String, String>>,
+    route_version: i64,
+    terms: Json<Terms>,
 }
 
 impl TryFrom<RateLockRow> for RateLock {
@@ -1303,6 +1375,9 @@ impl TryFrom<RateLockRow> for RateLock {
             created_at: row.created_at,
             consumed_by: row.consumed_by,
             metadata: row.metadata.0,
+            route_version: u64::try_from(row.route_version)
+                .map_err(|_| RateLockError::DatabaseInvariant)?,
+            terms: row.terms.0,
         })
     }
 }

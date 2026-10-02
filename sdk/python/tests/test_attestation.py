@@ -133,7 +133,6 @@ def test_roll_webhook_key_posts_the_overlap_once_with_an_idempotency_key() -> No
         "name": "Acme",
         "charges_enabled": False,
         "paused_scopes": [],
-        "confirmation_policies": [],
         "webhook_keys": [
             {"version": 2, "expires_at": None},
             {"version": 1, "expires_at": 1_790_003_600},

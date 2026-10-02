@@ -110,7 +110,7 @@ and the goods it sells).
    the quote at the same instant; there is never a historical price lookup.
 6. **Everything that affects money is measured.** Contracts, thresholds, and spreads live in the
    attested compose. Treasuries are proven by their owners through the API and a live change is
-   time-locked and announced (§9); accounts, keys, endpoints, confirmation policies, and pause
+   time-locked and announced (§9); accounts, keys, endpoints, payment settings, and pause
    flags are the other runtime state, and every change to them is audited and an event.
 7. **Cross-check every input, and let the merchant cap the output.** Two RPC providers, two
    price sources; the merchant may cap credits and verify chain evidence on its own node.
@@ -261,7 +261,7 @@ crates/topup/tests  integration tests on PostgreSQL and Anvil
 Amounts are `numeric(78,0) CHECK (>= 0)` mapped to `U256`; `transitions` and `audit` are
 append-only. Physical addresses belong to a quote or a deposit address, and so to an account, a
 mode, and a chain;
-routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, confirmation policies, limits, and idempotency
+routes are selected per deposit by `(chain_id, asset_contract)`. The multi-tenant tables (API keys, treasuries, payment settings, limits, and idempotency
 keys) are listed in [design §14](design/multi-tenant.md#14-data-model); the
 tables the service uses today:
 
@@ -283,9 +283,19 @@ customers     id, account_id, livemode, client_reference_id, paused_scopes text[
               UNIQUE (account_id, livemode, client_reference_id)
               -- created by the customer's first quote or deposit address
               -- (`settlement` stops crediting: deposits wait in `confirmed`)
-quotes        id (qt_ + hex), account_id, livemode, customer_id, route, amount_atomic, price_scaled,
-              credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE, client_secret_hash,
-              metadata jsonb, restore_id   -- restore_id: re-issued after a restore, lock never applied
+quotes        id (qt_ + hex), account_id, livemode, customer_id, route, route_version, amount_atomic,
+              price_scaled, credit_minor, expires_at, status, consumed_by (deposit_id) UNIQUE,
+              client_secret_hash, metadata jsonb, restore_id, settings_revision_id, terms jsonb
+              -- restore_id: re-issued after a restore, lock never applied; terms: the resolved
+              -- terms the quote was issued with, kept for good (§9, Payment settings)
+payment_settings_revisions  id (random, never reused), account_id, livemode,
+              kind (unconfigured|configured|legacy), document jsonb, created_at, created_by
+              -- immutable; the service may only insert
+payment_settings_state  account_id, livemode, status (unconfigured|configured|held),
+              current_revision_id, held_by (restore id)    PRIMARY KEY (account_id, livemode)
+              -- one per account and mode, created with the account (unconfigured)
+payment_settings_cutover  confirmation_policies jsonb, backfilled_at, recording_resumed_at, …
+              -- the 0.6.0 cutover: the backfill and the recording hold (§14)
 deposit_addresses  id (da_ + hex), account_id, livemode, customer_id, version,
               status (active|retired), created_at, retired_at, metadata jsonb
               -- one active per customer; versions count from 1 (§9)
@@ -306,14 +316,15 @@ deposits      id, account_id, livemode, customer_id, chain_id, tx_hash, receipt_
               asset_contract, from_address, amount_atomic, tx_from, tx_nonce, confirmations_at,
               final_at, state, reason, attempt, next_attempt_at, lease_token, lease_until,
               valuation_at, price_scaled, price_source (spot|lock), credit_minor, quote jsonb,
-              metadata jsonb, revision, created_at, updated_at
+              metadata jsonb, revision, settings_revision_id, settings_hold_id, created_at, updated_at
               UNIQUE (chain_id, tx_hash, receipt_log_index, revision)
               UNIQUE (chain_id, tx_hash, receipt_log_index) WHERE state <> 'reversed'
               -- revision: deposits recorded at the position before this one, each reversed (§7)
               -- account, mode, and customer are the address's; log_index and the block columns are
               -- evidence that follows re-inclusion; tx_from and tx_nonce prove a dropped
               -- transaction; swept requires final_at; metadata starts as the quote's or the
-              -- deposit address's
+              -- deposit address's; exactly one of settings_revision_id (a revision of its account
+              -- and mode) and settings_hold_id (the restore that held them): its binding (§9)
 transitions   id, deposit_id, from_state, to_state, attempt, evidence jsonb, created_at
               -- also the finality watch's `final` and `followed` records (from_state = to_state)
 flushed       chain_id, tx_hash, log_index, address_id, token, treasury, amount_atomic,
@@ -368,7 +379,8 @@ deposit), so no row joins two accounts or two modes. `flushed` and `flush_failur
 and never rewrites them.
 
 Any ERC-20 transfer to one of our addresses becomes a deposit row. The route is chosen by
-`(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`.
+`(chain_id, asset_contract)`; no route → `rejected(unsupported_asset)`. The same insert binds the
+deposit to the payment settings of its account and mode (§9).
 
 Credit: `exp = asset_decimals + price_scale − unit_decimals`, where `unit_decimals` is 2 on every
 route (credit is USD cents, the API's `amount`; a route file cannot set it),
@@ -383,7 +395,7 @@ stateDiagram-v2
     [*] --> detected: transfer of the route's token at the route's confirmation
     [*] --> rejected: transfer of another token (unsupported)
     detected --> confirmed: provider B agrees at the confirmation, valued
-    detected --> rejected: below the minimum credit
+    detected --> rejected: below the minimum credit, or an asset its settings do not accept
     confirmed --> credited: screened, deposit.credited written
     confirmed --> rejected: sanctioned or out of bounds
     credited --> swept: finalized Flushed after the final deposit
@@ -411,8 +423,8 @@ once. A step panic aborts the process; the lease expires and another pump re-cla
 
 | Step | Does |
 |---|---|
-| `detected → confirmed` | From both providers, by the transaction's receipt: the log at the deposit's receipt position, in the same block (same hash), and that block has reached the route's confirmation on each (§8, §14). Each check reads, per provider, the one head the confirmation needs and the transaction's receipt; the block time and the nonce come from the recorded deposit, which its block hash and transaction hash fix. A lagging provider is waited for every 2 s, 12 s for `finalized`. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality` until the finality watch decides; before finality it waits. For a `finalized` route, whose check reads `finalized`, the deposit is marked final (`final_at`) in the same transaction; otherwise the finality watch marks it. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below `min_credit_minor` → `rejected(below_minimum)`. |
-| `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; `min ≤ amount ≤ max` *(policy)*; account, customer, and route not paused for `settlement`, and crediting of the treasury the deposit's forwarder pays not paused by the merchant or the operator (paused → `Wait`, never a rejection); a deposit not final yet only while its credit keeps the account's unfinalized credit within `accounts.max_unfinalized_credit` (below; past it → `Wait` until final). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is owed to the merchant, whatever the merchant answers, unless the deposit is reversed before finality. |
+| `detected → confirmed` | From both providers, by the transaction's receipt: the log at the deposit's receipt position, in the same block (same hash), and that block has reached the route's confirmation on each (§8, §14). Each check reads, per provider, the one head the confirmation needs and the transaction's receipt; the block time and the nonce come from the recorded deposit, which its block hash and transaction hash fix. A lagging provider is waited for every 2 s, 12 s for `finalized`. While `detected`, evidence is provisional: if both providers agree on different canonical evidence for the same identity, the row is corrected. If both are final past the row and neither has the log, the step retries with `log_absent_at_finality` until the finality watch decides; before finality it waits. For a `finalized` route, whose check reads `finalized`, the deposit is marked final (`final_at`) in the same transaction; otherwise the finality watch marks it. The confirmation waited for is the stricter of the chain's current floor, the deposit's bound requirement, and, for a payment of a quote's asset to its address, the quote's (§9). A deposit bound while its account's settings were held waits, unless its outcome was delivered before a restore (§14). Then the terms: those of the address's quote for a valid payment of it, otherwise those its binding resolves on its route; a binding that does not accept the asset → `rejected(asset_not_accepted)`, before any price is fetched. In the same step, fetch the quote (§8) and store `valuation_at`, `price_scaled`, `credit_minor`, `quote`. Below the terms' `min_amount` → `rejected(below_minimum)`. |
+| `confirmed → credited` | `isSanctioned(from)` on both providers at a recorded block; the governing terms' `min_deposit_atomic ≤ amount ≤ max_deposit_atomic` (none for a credit delivered before a restore, §14); account, customer, and route not paused for `settlement`, and crediting of the treasury the deposit's forwarder pays not paused by the merchant or the operator (paused → `Wait`, never a rejection); a deposit not final yet only while its credit keeps the account's unfinalized credit within `accounts.max_unfinalized_credit` (below; past it → `Wait` until final). On a pass, the same transaction writes the `deposit.credited` outbox row (§11): the credit is owed to the merchant, whatever the merchant answers, unless the deposit is reversed before finality. |
 | `credited → swept` | The deposit is final and a `flushed` row (a finalized `Flushed` event for its address, token, and treasury, whoever sent it) exists at a log position `(block_number, log_index)` greater than the deposit's. Applied in SQL, with the finalized `Flushed` event as evidence, when the scanner indexes the event, when the deposit is credited or becomes final, and by the reconciler's repair pass; the pump's credited step only waits. |
 
 **Unfinalized credit cap.** Crediting before finality is the service's exposure to a
@@ -424,8 +436,8 @@ finality). The screen step checks it after screening passes, and the transition 
 a transaction-level advisory lock per account and mode, so concurrent pumps cannot both pass it; a
 deposit past the cap waits (`unfinalized_credit_cap`, retried every wait interval) and is credited
 once final, whatever the cap, or once earlier credits become final. It is still credited, only
-later; nothing is rejected. A merchant selling what it cannot take back uses the `finalized`
-confirmation policy instead (§14), which credits nothing before finality.
+later; nothing is rejected. A merchant selling what it cannot take back requires `finalized`
+confirmations in its payment settings instead (§9), which credits nothing before finality.
 
 **Finality watch.** Whenever the head loop publishes an advance of provider A's `finalized` (§8),
 and every minute besides, the deposits of the chain that are neither final nor reversed, whose
@@ -496,9 +508,11 @@ reads at the position takes the successor's id and `replaces` again (§14).
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
-reproduces crediting only final deposits. It is the chain's floor: every loaded route of a chain
-must resolve to the same value, defaults included, or the route set is refused at load
-(`topup config check` too), so the scanner, the confirm step, and the API read one floor. A
+reproduces crediting only final deposits. It is the chain's floor: every current route of a
+chain must resolve to the same value, defaults included, or the route set is refused at load
+(`topup config check` too), so the scanner, the confirm step, and the API read one floor. An
+earlier route version keeps its own value only for the terms of the deposits it governs, so a new
+version may raise the floor, and a deposit not yet credited waits for the new one. A
 stricter value is a deeper depth, then `safe`, then `finalized`: `safe` outranks every depth, since
 the sequencer can rewrite the unsafe head on its own however deep a block is in it, but not a block
 derived from data posted to L1, which only an L1 reorganization reaching that data can change. A depth credits before finality on both families,
@@ -650,28 +664,33 @@ Invoice model, with this service's exception profile:
 
 - `POST /v1/quotes {client_reference_id, amount, currency, chain_id, asset}` returns the quote `{id,
   amount, amount_atomic, exchange_rate, address, payment_uri, status, expires_at, …}`.
-  `price_lock = price_spot / (1 + spread)` with `spread = spread_bps / 10 000` *(policy)*; the
-  user states USD cents and the token amount is rounded up, then up again to
-  `quote.amount_decimals` token decimals so the payer reads and types a short amount (the
-  overpayment, below one unit of the last decimal, is the payer's; the credit is unchanged).
-  `expires_at = now + window` *(policy)*. A quote's credit is reserved atomically at creation
+  `price_lock = price_spot / (1 + spread)` with `spread = quote_spread_bps / 10 000` of the
+  account's terms on the route; the user states USD cents and the token amount is rounded up, then
+  up again to the route's `asset.quote_amount_decimals` token decimals (the operator's, since a
+  coarse rounding costs the payer more than any spread) so the payer reads and types a short amount
+  (the overpayment, below one unit of the last decimal, is the payer's; the credit is unchanged).
+  `expires_at = now + quote_ttl_seconds`. The quote stores the terms it was resolved with, and its
+  route version and settings revision, in its creation transaction, which holds the account's
+  settings state `FOR SHARE` so the revision stays current until the quote commits. A quote's credit is reserved atomically at creation
   against the account's caps in its mode (`account_limits`, design §12) *(policy)*: open quotes
   (default 1 000 live, 100 test), their credit (default $50 000 live, $10 000 test), and one
   customer's credit (default $5 000); the operator sets them per account and mode
   (`POST /v1/admin/accounts/{account}`, `limits`). There is no global cap, and a test quote never
   uses live headroom (`400 exposure_cap_exceeded`, naming what is left); a
-  customer creates at most `quote.max_creations_per_minute` quotes a minute
-  (`429 customer_rate_limit`). Repeating an `Idempotency-Key` with the same request within 24
+  customer creates at most the account's `quote_creations_per_customer_per_minute` quotes a minute
+  (default 10, at most 60; `429 customer_rate_limit`). Repeating an `Idempotency-Key` with the same request within 24
   hours returns the first response (another request is `400 idempotency_key_reused`), also while
   `quotes` is paused.
 - The lock is consumed by the first deposit to its address whose `block_time ≤ expires_at`,
-  `asset` matches, and `|amount − locked| ≤ lock_tolerance_bps` *(policy)*; consumption is a
+  `asset` matches, and `|amount − locked| × 10 000 ≤ locked × quote_tolerance_bps` of the quote's
+  own terms, two-sided (an overpayment within it is credited at the quote's credit); consumption is a
   single `UPDATE … WHERE consumed_by IS NULL`, in the confirm step. If that deposit is reversed
   (§7), the quote opens again while its window lasts (reserving its exposure again), or else
   expires with `quote.expired`. That deposit is valued at `price_lock` and the
   merchant receives exactly the `credit_minor` it showed the user.
 - Any other deposit to a quote's address (late, wrong amount, second payment) is valued at spot
-  and still credited; the merchant shows this rule before payment.
+  under the payment settings it is bound to, with no grandfathering by the quote, and credited if
+  they accept its asset; the merchant shows this rule before payment.
 - Expiry uses chain time, like eligibility. A lock expires unconsumed, releasing its exposure
   and emitting `quote.expired`, only once the chain's scanner has committed through a
   finalized block whose time is past `expires_at` (the finalized head's time, read with the
@@ -688,18 +707,52 @@ Invoice model, with this service's exception profile:
   quote by amount alone is ambiguous, and the single-use address is the processor-standard
   answer. A deposit address (below) carries no price.
 
+**Payment settings** ([design](design/payment-settings.md), owner decision of 2026-10-02,
+replacing the implicit model in which a treasury enabled a chain and every routed asset was
+accepted). The attested routes are the operator's catalog; each route's `merchant` section holds
+the default and bounds of every term an account may set (§14). Each account has, per mode, one
+payment settings object (`GET|POST /v1/payment_settings`): the chains and assets it accepts, a
+per-chain `confirmations` never weaker than the floor, and per asset its quote window, spread,
+two-sided tolerance, minimum credit, deposit bounds, and refund floor, plus one customer's quote
+creations per minute. A new account and mode is `unconfigured` and accepts nothing; `held` after a
+restore (§14). Each change appends an immutable revision with a random id (`psrev_…`) and is
+announced as `payment_settings.updated`; writes are last-write-wins under the state row's lock.
+Reading needs `account.read`, writing `account.write`, which a restricted key never holds.
+
+- **One resolver** (`crate::payment_config`): each value the account set or the route's default,
+  clamped to the route version's bounds, then the whole tuple validated (`min_deposit ≤
+  max_deposit`, `min_refund ≤ max_deposit`); a tuple a tightened bound breaks disables the pair
+  (never quoted, listed, or credited; `TopupPaymentSettingsInvalid`). The effective config, the
+  pairs of the current routes the current revision accepts and enables, with the chain's treasury,
+  feeds quotes, deposit addresses, and `GET /v1/config`; the confirm and screen steps and refunds
+  resolve a deposit's terms from its binding.
+- **Binding.** A quote stores the terms it was issued with. A deposit is bound by the statement
+  that inserts it to the revision current in that statement's snapshot (or, while held, to the
+  restore that holds it); every recorder (scanners, finality-watch successor, reconciler,
+  restore-check round) goes through one insert that first takes the account and mode's state row
+  `FOR SHARE`, and every writer of the state takes it `FOR UPDATE`, so a write waits for the
+  recorders that read the old state and later recorders read the new one. A rescan never
+  overwrites a binding. A valid payment of a quote is governed by the quote's terms; every other
+  payment by its binding, so a change applies to every deposit recorded after it and to none
+  before. A deposit waits for the stricter of its bound confirmation and the chain's current floor.
+- **Not accepted.** A routed asset the binding does not accept is `rejected(asset_not_accepted)`
+  in the confirm step, after both providers agree and before pricing; it is refundable under the
+  usual conditions (final, at or above the route's default dust floor, not sanctioned).
+
 **Deposit addresses** ([design §5a](design/multi-tenant.md#5a-deposit-addresses-d16), restored
 per the owner's 2026-09-21 requirement; one address per customer across every chain and asset
 per the owner's 2026-09-28 decision). `POST /v1/deposit_addresses {client_reference_id}` returns
 the customer's active address, issuing version 1 the first time, with its `networks`: for each
-chain of the mode with a current route, the address there, the treasury it pays, and the tokens
+chain of the mode where the account's payment settings accept an asset (below) and it has a
+treasury, the address there, the treasury it pays, and the tokens
 it takes, each with an amount-less EIP-681 `payment_uri`; the top-level `address` is set when
 every network shares one. `POST /v1/deposit_addresses/{id}/rotate` retires it and issues the next
 version on every chain. Each network is an `addresses` row owned by the deposit address, bound to
 its chain's treasury effective at issue; every transfer of a supported token to it, active or
 retired, is a deposit valued at spot and runs the same states, events, sweeps, refunds, and
-reconciliation as a quote payment, with `quote: null` and `deposit_address` set; an unsupported
-token is rejected. Creation adds a network on a chain supported since and supersedes a network
+reconciliation as a quote payment, with `quote: null` and `deposit_address` set; a routed token
+the binding does not accept is `rejected(asset_not_accepted)`, and an unsupported token is
+rejected. The networks and assets shown are read from the effective config on each read. Creation adds a network on a chain supported since and supersedes a network
 whose treasury is no longer the current one; a treasury change that applies on a chain does the
 same, in the same transaction, for that chain's network of every address of the account and mode,
 active or retired (below). Superseded networks and retired versions stay watched, are still
@@ -978,8 +1031,8 @@ POST   /v1/treasuries/challenge {chain_id, address}               EIP-4361 messa
 GET|POST /v1/treasuries {chain_id, message, signature}, GET /v1/treasuries/{id}   ?chain_id&status&limit
 POST   /v1/treasuries/{id}/cancel                                 a pending live change
 POST   /v1/treasuries/{id}/pause | resume                         the merchant's crediting pause of a treasury
-GET    /v1/config                                                 assets, limits, quote terms
-POST   /v1/account {confirmation_policies}                     stricter confirmation per chain (design D1)
+GET    /v1/config                                                 the effective payment config: accepted assets and terms
+GET|POST /v1/payment_settings {chains?, quote_creations_per_customer_per_minute?}   what the account accepts, per mode (§9)
 POST   /v1/account/pause | resume {scopes: ["quotes"]}             the merchant's own quotes pause (design §12)
 POST   /v1/quotes {client_reference_id, amount, currency, chain_id, asset, metadata?} single-use address + locked price; Idempotency-Key
 GET    /v1/quotes?client_reference_id&status&limit&starting_after&ending_before
@@ -1012,6 +1065,7 @@ GET    /v1/events/{id}
 POST   /v1/events/{id}/resend {webhook_endpoint}                  deliver it again to an enabled endpoint
 
 POST   /v1/admin/accounts {name, contact, due_diligence, charges_enabled, reason}   + first keys
+GET    /v1/admin/accounts/{acct}                               the account, its caps, and its payment settings per mode
 POST   /v1/admin/accounts/{acct} {charges_enabled?, restricted?, contact?, max_unfinalized_credit?, reason}   enabling live → first live key
 POST   /v1/admin/accounts/{acct}/api_keys {livemode, revoke_existing, reason}   recovery key
 POST   /v1/admin/accounts/{acct}/pause | resume {scopes, reason}   the operator's account pause
@@ -1034,6 +1088,7 @@ POST   /v1/admin/restore/quotes {account, livemode, id, client_reference_id, cha
 POST   /v1/admin/restore/events {deliveries, reason}   import signed deliveries of deposit events as delivered; their credit stands, a reversed deposit is rebuilt
 POST   /v1/admin/restore/delivered_credits/discard {deposit, reason}   release a deposit whose transfer contradicts its delivered event
 POST   /v1/admin/restore/unfreeze {reason, checklist}   once every chain is rescanned; audited
+POST   /v1/admin/recording/resume {reason}   lifts the 0.6.0 cutover's recording hold (§14)
 ```
 
 **Metadata.** Quotes, deposits, and refunds carry Stripe's
@@ -1057,12 +1112,14 @@ sensitive information in it.
 Admin paths take an object's prefixed id or, for ids handed out before prefixed ids, its bare
 UUID; admin responses show prefixed ids.
 
-**Config.** One `assets` entry per loaded route of the key's mode (its current version):
-chain, asset code, contract, decimals, pricing mode, `min_amount` (the route's minimum credit in
-cents), `max_deposit_atomic`, `min_refund_atomic`, the quote window, spread, and tolerance, the
-route's `confirmations` (a depth such as `"2"`, `"safe"`, or `"finalized"`), the typical credit
-time (`typical_credit_seconds`: 30 at depth 2), and the typical finality time; the confirmation
-and credit time are the stricter of the route's floor and the account's policy for the chain.
+**Config.** `GET /v1/config` is the account's effective payment config (§9, Payment settings):
+one `assets` entry per current route of the key's mode that the account's settings accept and
+enable, on a chain where it has a treasury: chain, asset code, contract, decimals, pricing mode,
+and its terms (`min_amount` in cents, `min_deposit_atomic`, `max_deposit_atomic`,
+`min_refund_atomic`, the quote window, spread, tolerance, and amount decimals), `confirmations`
+(a depth such as `"2"`, `"safe"`, or `"finalized"`: the stricter of the chain's floor and the
+account's), the typical credit time (`typical_credit_seconds`: 30 at depth 2), and the typical
+finality time; and `quote_creations_per_customer_per_minute`.
 `max_open_quotes`, `max_open_amount_per_account`, and `max_open_amount_per_customer` are the
 account's effective caps in the key's mode (§9): its open quotes, their credit, and one customer's
 (`client_reference_id`) credit, which also bounds any single quote. The remaining exposure is not
@@ -1391,8 +1448,9 @@ One route file per chain and asset pair, with its chain settings inline, in the 
 attested. The file names only what differs per route or environment: route name and version,
 `livemode` (false on a test network such as Sepolia or Anvil, true on a mainnet; startup checks it
 against a built-in list of test networks), chain id, forwarder factory, asset symbol,
-contract, and decimals, price sources, and the policy limits (minimum credit, maximum deposit,
-refund floor). Exposure caps are the accounts' (`account_limits`, §9), not the route's. A route names no product and no treasury: every account quotes on the routes of its
+contract, and decimals, price sources, and, under `merchant`, the operator's default and bounds of
+each account's terms (minimum credit, deposit bounds, refund floor, quote window, spread, and
+tolerance; §9). Exposure caps are the accounts' (`account_limits`, §9), not the route's. A route names no product and no treasury: every account quotes on the routes of its
 key's mode, paying its own treasury of the chain (§9).
 Every other value is a code default, overridable under its key in the same file, and as attested
 as the file because the image digest is part of the compose hash. `topup route show FILE` prints
@@ -1408,9 +1466,10 @@ defaulted addresses from it. The defaults and why:
 | `asset.backstop` | `token`: every transfer of the token is requested and kept locally, one request per block range whatever the address count; `addresses` for a token with many transfers per block, such as USDC (§8) |
 | `pricing.mode`, `pricing.check.fx` | `spot`; Kraken `USDT/USD` for a USDT-quoted market, required otherwise |
 | `pricing.max_age_s`, `max_deviation_bps`, `max_fx_deviation_bps` | 120 (two Coin Metrics intervals), 100, 50 |
-| `limits.min_deposit_atomic` | 0: `min_credit_minor` rejects dust *(policy: finance confirms before production)* |
-| `quote.window_s`, `spread_bps`, `tolerance_bps`, `max_creations_per_minute` | 900, 50, 100, 10 |
-| `quote.amount_decimals` | 4, or `asset.decimals` if fewer: a quote asks for, say, `273.9185` PHA rather than 18 decimals; at most `asset.decimals` |
+| `merchant.min_amount`, `max_deposit_atomic`, `min_refund_atomic` | the default is required; an account may raise the minimum credit and lower the maximum deposit, and keeps the refund floor unless the operator sets `min` and `max` |
+| `merchant.min_deposit_atomic` | 0, which an account may raise: `min_amount` rejects dust *(policy: finance confirms before production)* |
+| `merchant.quote_ttl_seconds`, `quote_spread_bps`, `quote_tolerance_bps` | defaults 900, 50, 100; bounds 30 to 3 600 seconds and 0 to 500 basis points. The code refuses an operator bound above 86 400 seconds, a spread above 5 000, or a tolerance above 1 000 basis points |
+| `asset.quote_amount_decimals` | 4, or `asset.decimals` if fewer: a quote asks for, say, `273.9185` PHA rather than 18 decimals; at most `asset.decimals` |
 | `alerts.stuck_after_s` | detected 1 800, confirmed 1 800 (a credited deposit waits for its merchant's sweep and has no threshold) |
 
 The defaults are the launch numbers *(policy)*: finance confirms each, including the zero token
@@ -1512,7 +1571,17 @@ past the restore's detection with every address backfilled, recording the reason
 `audit`. The unfinalized-credit cap and a deposit's `amount_refunded` and `amount_reversed` are
 computed from ledger rows, so they hold after a restore: a deposit credited in the window is
 credited again within the cap, and the finality watch settles every restored credited deposit that
-is not final. A deposit whose delivery is not imported is credited again with the same event id,
+is not final. Payment settings may have changed after the restore point, and no delivery proves
+the merchant's latest (it may be undelivered, and `created` has one-second precision), so the
+transaction that records the restore holds every account and mode's settings (`held`) before any
+recorder runs (the restore-check round's reconciler included): issuance answers
+`400 payment_settings_unconfirmed`, and a deposit recorded meanwhile is bound to the hold, not to a
+revision, and waits. Only the merchant's `POST /v1/payment_settings` with its complete configuration
+lifts it: in one transaction under the barrier (§9), it writes a revision and binds every held
+deposit of the account and mode to it. A delivered outcome stands whatever the settings: a rebuilt
+deposit with an imported `deposit.credited` is credited at it with no bound checked, and one with an
+imported `deposit.rejected` is rejected again with its reason; only a chain-identity contradiction
+holds it. A deposit whose delivery is not imported is credited again with the same event id,
 so the merchant ignores the repeat and keeps its first credit (§11). When the backup lacks a deposit that
 was reversed because another transfer took its position (§7), the rescan finds only the final
 transfer; so an imported `deposit.reversed` (valued or not: a rejected deposit may never have been)
@@ -1540,6 +1609,22 @@ KMS, with no on-chain compose-hash allow-list: funds go only to the immutable tr
 malicious upgrade could cause downtime, read service data, or sign credits no deposit backs, up
 to whatever caps the merchant keeps (§3, §11), but not move funds; the attested compose hash makes
 it detectable.
+
+**The 0.6.0 payment settings cutover** (design payment-settings §10). On an instance with issued
+addresses, `topup migrate --config FILE` (the compose's `migrate` service mounts the attested
+configuration, loaded and validated before anything is migrated) runs a one-time backfill in
+one transaction with the schema change, so a failure leaves the 0.5.0 schema: every account and
+mode gets a `legacy` revision that writes out the 0.5.0 model (every route of the mode accepted at
+its route values, with the account's former confirmation policies), every existing deposit is
+bound to it, and every quote, whatever its status, gets the terms it resolves on its route's
+version in the configuration; then the binding constraints are validated, and recording is held.
+`topup run` refuses to start until the backfill has run. While held, the API serves, issuance
+answers `400 paused`, and no scanner, finality watch, reconciler, or pump runs. The operator has
+each authorized account configured (`POST /v1/payment_settings`, carrying the stricter
+confirmations of its `legacy` revision, `payment_settings.legacy` in `GET
+/v1/admin/accounts/{acct}`), verifies the effective config there, and lifts the hold with `POST /v1/admin/recording/resume`; the
+recorders start from their cursors. A new instance has nothing to bind, so its cutover is complete
+at once.
 `GET /v1/attestation?nonce=`, authenticated with an API key, returns the key's account's webhook
 keys in the key's mode (current first, then any rolled key still signing; each `public_key` in
 Standard Webhooks' `whpk_` form, the base64 of the 32 raw bytes `report_data` binds) and the dstack
@@ -1560,7 +1645,7 @@ which are stable across releases; a production CVM exposes no logs or shell. `to
 |---|---|
 | Addresses | A quote's address is single-use; a later payment to it is credited at spot. A deposit address is the customer's one persistent address for every supported token on every chain (the same wherever the treasury is the same), rotatable; payments to it, active or retired, are credited at spot, and retired ones stay monitored. |
 | Dust and mistakes | Below-minimum and unsupported-asset deposits are recorded, visible, and not credited. Rejected deposits of a routed token reach the treasury with everything else when the forwarder is flushed; an unsupported token stays in its forwarder until someone flushes that token. |
-| Refunds | Only a final deposit is refunded (`400 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token; below the minimum credit but at or above `min_refund_atomic` *(policy)*; rejected for any reason other than sanctions; funds arriving after the merchant closed the customer. A credited deposit is refunded only by the merchant's decision, for a credit it did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under `min_refund_atomic`. The merchant's staff request a refund by deposit id with a destination address the payer controls (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
+| Refunds | Only a final deposit is refunded (`400 deposit_not_final` before), so nothing is paid back for a payment that could still be reversed; a reversed deposit is not refundable. Refundable: wrong token (`unsupported_asset`, `asset_not_accepted`); below the minimum credit but at or above the refund floor of the deposit's governing terms, or the route's default floor for a deposit no terms govern; rejected for any reason other than sanctions; funds arriving after the merchant closed the customer. A credited deposit is refunded only by the merchant's decision, for a credit it did not apply or has reversed; an overpayment beyond tolerance is credited at spot for the full amount (§9) like any other credit. Not refundable: sanctioned funds and dust under the refund floor. The merchant's staff request a refund by deposit id with a destination address the payer controls (never defaulted to `from_address`, which may be an exchange hot wallet), screened for sanctions; the merchant pays it from the treasury of the deposit's address and attaches the transaction; the service verifies it at finality and emits `deposit.refunded`. Refunds are in the original token. |
 | Customer closure | Unused credit and in-flight deposits follow the merchant's closure policy; the customer's addresses stay monitored, and later funds are held for refund: the merchant holds a `deposit.credited` for a closed customer instead of crediting it and refunds it (§11); the service has no closure check of its own. Account closure is an operator action at the merchant's request (design §13, PR 13). |
 | Compliance | Direct sanctions screening of payers, refund destinations, and treasuries (§8, §9); the operator screens each merchant, its owners, and its jurisdiction in offline due diligence (design D8). Phala Pay is software: each operator is responsible for its own compliance, and each merchant for its customers' (KYC, KYT, the Travel Rule, customer information requests). |
 | Fees and exposure | No fee. The merchant pays its own sweep and refund gas and the payer its payment gas; the service pays none, and credit is never reduced. The merchant bears price exposure between valuation and its sale of the tokens, open quote exposure up to the caps (§9), and credit before finality up to `max_unfinalized_credit` (§7). |
@@ -1579,7 +1664,9 @@ linked to its runbook: `TopupDepositStateAgeExceeded` (age in state past the rou
 `TopupLockExpiryFailing`, `TopupUnsupportedInflows`, `TopupDepositReversed` (a deposit's
 transaction left the chain before finality: a chain-health signal), `TopupDepositPendingAfterReorg`
 (a deposit's transaction has been out of every block for an hour with its nonce unused),
-`TopupTreasurySanctioned` (a current treasury is listed; §9). Alerts
+`TopupTreasurySanctioned` (a current treasury is listed; §9), `TopupDeliveredCreditSanctioned` (a
+credit delivered before a restore whose sender is now listed: the credit stands and its forwarder
+is never offered for a sweep; §14). Alerts
 are platform health only (design §13): an unswept balance or a `FlushFailed` target is the
 merchant's, recorded for it, not an alert. Each loop checks in to a Sentry Crons
 monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconciliation check, and

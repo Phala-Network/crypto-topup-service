@@ -20,7 +20,8 @@ use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsSource};
 use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome, WaitReason};
 use topup_core::identity::{credited_event_id, deposit_id, event_id};
 use topup_core::money::AtomicAmount;
-use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
+use topup_core::route::{Bounded, RouteFile};
+use topup_core::screening::{SanctionsAnswer, SanctionsResult};
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, forge_create};
@@ -217,7 +218,7 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
                 insert_confirmed(&context.app_pool, seed, 4, account, latest_block).await?;
             let step = ScreenStep::new(
                 context.app_pool.clone(),
-                [ScreenRoute::new("screen", 1, oracle, bounds(), source)],
+                [ScreenRoute::new(screen_route("screen", oracle), source)],
             )?;
 
             let old_deposit = db::get_deposit(&context.app_pool, old_id)
@@ -245,7 +246,7 @@ async fn anvil_oracle_uses_recorded_blocks_and_maps_live_results() -> Result<()>
             )?);
             let down_step = ScreenStep::new(
                 context.app_pool.clone(),
-                [ScreenRoute::new("down", 1, oracle, bounds(), down_source)],
+                [ScreenRoute::new(screen_route("down", oracle), down_source)],
             )?;
             let mut down_deposit = latest_deposit;
             down_deposit.route = Some("down".to_owned());
@@ -418,20 +419,27 @@ fn mock_screen_step(pool: &PgPool, sanctioned: Address) -> Result<ScreenStep> {
     Ok(ScreenStep::new(
         pool.clone(),
         [ScreenRoute::new(
-            "screen",
-            1,
-            Address::repeat_byte(9),
-            bounds(),
+            screen_route("screen", Address::repeat_byte(9)),
             Arc::new(MockSanctionsSource { sanctioned }),
         )],
     )?)
 }
 
-fn bounds() -> Bounds {
-    Bounds {
-        min_atomic: AtomicAmount::new(U256::from(10)),
-        max_atomic: AtomicAmount::new(U256::from(20)),
-    }
+/// Version 1 of route `name` on the Anvil chain, whose deposits are bounded to 10 to 20 base units
+/// on the operator's defaults, screened by `oracle`.
+fn screen_route(name: &str, oracle: Address) -> RouteFile {
+    let mut route: RouteFile =
+        serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))
+            .expect("route fixture");
+    route.route = name.to_owned();
+    route.version = 1;
+    route.chain.chain_id = 31_337;
+    route.asset.contract = Address::repeat_byte(0x55);
+    route.screening.sanctions_oracle = oracle;
+    route.merchant.min_deposit_atomic = Bounded::at(AtomicAmount::new(U256::from(10)));
+    route.merchant.max_deposit_atomic = Bounded::at(AtomicAmount::new(U256::from(20)));
+    route.merchant.min_refund_atomic = Bounded::at(AtomicAmount::new(U256::from(10)));
+    route
 }
 
 #[derive(Clone, Copy)]
@@ -459,6 +467,17 @@ async fn seed_account(pool: &PgPool) -> Result<Seed> {
         address: Address::repeat_byte(0x44),
     };
     seed::insert_address(pool, &address).await?;
+    let oracle = Address::repeat_byte(9);
+    seed::accept_routes(
+        pool,
+        account.id,
+        true,
+        &[
+            &screen_route("screen", oracle),
+            &screen_route("down", oracle),
+        ],
+    )
+    .await?;
     Ok(Seed {
         account_id: account.id,
         address_id: address.id,

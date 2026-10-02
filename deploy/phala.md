@@ -155,7 +155,8 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
    product's account ([Staging reference product](#staging-reference-product), setup steps 1–3),
    which proves the staging Safe again as the account's treasury on each chain: the owners sign
    the new instance's challenge as a Safe message, verified by EIP-1271
-   ([Treasury setup](README.md#treasury-setup)), since the new database holds no treasury.
+   ([Treasury setup](README.md#treasury-setup)), since the new database holds no treasury, and
+   configures its payment settings (setup step 3), since a new account accepts nothing.
    A pull request sets that new `acct_…` as `account` in
    [product/config.json](environments/phala-network/staging/product/config.json); merge it.
 8. **Provision, reseal, and switch the reference product** (setup step 4): dispatch with
@@ -313,7 +314,19 @@ Setup, in order, during the [staging reset](#staging-reset-human-only)'s steps 7
    ```
 
 3. **Treasury Safe owners**: set the account's treasury on each of its chains to the staging Safe
-   ([Treasury setup](README.md#treasury-setup), Safe message; in test mode it applies at once). Open a PR
+   ([Treasury setup](README.md#treasury-setup), Safe message; in test mode it applies at once).
+   Then, with the secret key, accept every chain and asset the product offers in test mode
+   ([Payment settings](README.md#payment-settings)); the product's restricted key can read them but
+   not change them:
+
+   ```sh
+   curl -fsS "https://pay-api-staging.phala.com/v1/payment_settings" \
+     -H "Authorization: Bearer $SECRET_KEY" -H 'content-type: application/json' -d '{"chains": [
+       {"chain_id": 11155111, "assets": [{"asset": "pha"}, {"asset": "usdc"}, {"asset": "usdt"}]},
+       {"chain_id": 84532, "assets": [{"asset": "pha"}, {"asset": "usdc"}, {"asset": "usdt"}]}]}'
+   ```
+
+   `GET /v1/config` with `PRODUCT_API_KEY` then lists the six assets. Open a PR
    setting the product config's `account` in
    [config.json](environments/phala-network/staging/product/config.json) to the new `acct_…` id,
    and merge it.

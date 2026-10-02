@@ -10,6 +10,7 @@ from ..types import UNSET, Unset
 
 from ..types import UNSET, Unset
 from typing import cast
+from uuid import UUID
 import datetime
 
 if TYPE_CHECKING:
@@ -40,6 +41,12 @@ class DepositAdmin:
             price_scaled (None | str | Unset): Eight-decimal scaled price as a decimal string.
             route (None | str | Unset): Selected route.
             route_version (int | None | Unset): Selected route version.
+            settings_hold (None | Unset | UUID): The restore whose hold the deposit was recorded under; it waits for the
+                merchant's
+                reconfirmation, which binds it. `null` when `settings_revision` is set.
+            settings_revision (None | str | Unset): The payment settings revision the deposit is bound to (`psrev_…`):
+                current in the snapshot
+                of the statement that recorded it. `null` while `settings_hold` is set.
     """
 
     account: str
@@ -53,6 +60,8 @@ class DepositAdmin:
     price_scaled: None | str | Unset = UNSET
     route: None | str | Unset = UNSET
     route_version: int | None | Unset = UNSET
+    settings_hold: None | Unset | UUID = UNSET
+    settings_revision: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,6 +114,20 @@ class DepositAdmin:
         else:
             route_version = self.route_version
 
+        settings_hold: None | str | Unset
+        if isinstance(self.settings_hold, Unset):
+            settings_hold = UNSET
+        elif isinstance(self.settings_hold, UUID):
+            settings_hold = str(self.settings_hold)
+        else:
+            settings_hold = self.settings_hold
+
+        settings_revision: None | str | Unset
+        if isinstance(self.settings_revision, Unset):
+            settings_revision = UNSET
+        else:
+            settings_revision = self.settings_revision
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -126,6 +149,10 @@ class DepositAdmin:
             field_dict["route"] = route
         if route_version is not UNSET:
             field_dict["route_version"] = route_version
+        if settings_hold is not UNSET:
+            field_dict["settings_hold"] = settings_hold
+        if settings_revision is not UNSET:
+            field_dict["settings_revision"] = settings_revision
 
         return field_dict
 
@@ -203,6 +230,32 @@ class DepositAdmin:
 
         route_version = _parse_route_version(d.pop("route_version", UNSET))
 
+        def _parse_settings_hold(data: object) -> None | Unset | UUID:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                settings_hold_type_0 = UUID(data)
+
+                return settings_hold_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UUID, data)
+
+        settings_hold = _parse_settings_hold(d.pop("settings_hold", UNSET))
+
+        def _parse_settings_revision(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        settings_revision = _parse_settings_revision(d.pop("settings_revision", UNSET))
+
         deposit_admin = cls(
             account=account,
             block_time=block_time,
@@ -215,6 +268,8 @@ class DepositAdmin:
             price_scaled=price_scaled,
             route=route,
             route_version=route_version,
+            settings_hold=settings_hold,
+            settings_revision=settings_revision,
         )
 
         deposit_admin.additional_properties = d

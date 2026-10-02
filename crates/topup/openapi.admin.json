@@ -1,6 +1,38 @@
 {
   "components": {
     "schemas": {
+      "AccountLegacyPaymentSettings": {
+        "description": "An account's `legacy` revision in each mode; `null` for an account created after the cutover.",
+        "properties": {
+          "live": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LegacyPaymentSettings",
+                "description": "Live mode's."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "test": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LegacyPaymentSettings",
+                "description": "Test mode's."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "live",
+          "test"
+        ],
+        "type": "object"
+      },
       "AccountLimits": {
         "description": "An account's effective caps in each mode: the operator's values over the defaults.",
         "properties": {
@@ -45,6 +77,29 @@
         "required": [
           "scopes",
           "reason"
+        ],
+        "type": "object"
+      },
+      "AccountPaymentSettings": {
+        "description": "An account's payment settings in each mode, as the operator sees them.",
+        "properties": {
+          "legacy": {
+            "$ref": "#/components/schemas/AccountLegacyPaymentSettings",
+            "description": "The 0.5.0 model the 0.6.0 cutover bound the account's earlier deposits and quotes to, in\neach mode (docs/design/payment-settings.md §10). Its chains' `confirmations` are the\naccount's former confirmation policies, to carry into its payment settings."
+          },
+          "live": {
+            "$ref": "#/components/schemas/PaymentSettingsObject",
+            "description": "Live mode's."
+          },
+          "test": {
+            "$ref": "#/components/schemas/PaymentSettingsObject",
+            "description": "Test mode's."
+          }
+        },
+        "required": [
+          "live",
+          "test",
+          "legacy"
         ],
         "type": "object"
       },
@@ -97,6 +152,244 @@
           "name": "Example Cloud",
           "object": "account",
           "paused_scopes": [],
+          "payment_settings": {
+            "legacy": {
+              "live": null,
+              "test": null
+            },
+            "live": {
+              "available": [
+                {
+                  "assets": [
+                    {
+                      "accepted": false,
+                      "asset": "PHA",
+                      "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                      "decimals": 18,
+                      "enabled": false,
+                      "max_deposit_atomic": {
+                        "default": "1000000000000000000000000",
+                        "max": "1000000000000000000000000",
+                        "min": "0"
+                      },
+                      "min_amount": {
+                        "default": 100,
+                        "max": 18446744073709551615,
+                        "min": 100
+                      },
+                      "min_deposit_atomic": {
+                        "default": "0",
+                        "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                        "min": "0"
+                      },
+                      "min_refund_atomic": {
+                        "default": "1000000000000000000",
+                        "max": "1000000000000000000",
+                        "min": "1000000000000000000"
+                      },
+                      "pricing": "spot",
+                      "quote_amount_decimals": 4,
+                      "quote_spread_bps": {
+                        "default": 50,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_tolerance_bps": {
+                        "default": 100,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_ttl_seconds": {
+                        "default": 900,
+                        "max": 3600,
+                        "min": 30
+                      }
+                    },
+                    {
+                      "accepted": false,
+                      "asset": "USDT",
+                      "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                      "decimals": 6,
+                      "enabled": false,
+                      "max_deposit_atomic": {
+                        "default": "1000000000000000000000000",
+                        "max": "1000000000000000000000000",
+                        "min": "0"
+                      },
+                      "min_amount": {
+                        "default": 100,
+                        "max": 18446744073709551615,
+                        "min": 100
+                      },
+                      "min_deposit_atomic": {
+                        "default": "0",
+                        "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                        "min": "0"
+                      },
+                      "min_refund_atomic": {
+                        "default": "1000000000000000000",
+                        "max": "1000000000000000000",
+                        "min": "1000000000000000000"
+                      },
+                      "pricing": "stablecoin",
+                      "quote_amount_decimals": 4,
+                      "quote_spread_bps": {
+                        "default": 50,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_tolerance_bps": {
+                        "default": 100,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_ttl_seconds": {
+                        "default": 900,
+                        "max": 3600,
+                        "min": 30
+                      }
+                    }
+                  ],
+                  "chain_id": 1,
+                  "confirmations": {
+                    "default": "2",
+                    "floor": "2"
+                  },
+                  "status": "not_configured"
+                }
+              ],
+              "chains": [],
+              "livemode": true,
+              "object": "payment_settings",
+              "quote_creations_per_customer_per_minute": null,
+              "revision": "psrev_0c1d2e3f4a5b4c6d8e7f9a0b1c2d3e4f",
+              "status": "unconfigured",
+              "updated": 1787961600
+            },
+            "test": {
+              "available": [
+                {
+                  "assets": [
+                    {
+                      "accepted": true,
+                      "asset": "PHA",
+                      "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                      "decimals": 18,
+                      "enabled": true,
+                      "max_deposit_atomic": {
+                        "default": "1000000000000000000000000",
+                        "max": "1000000000000000000000000",
+                        "min": "0"
+                      },
+                      "min_amount": {
+                        "default": 100,
+                        "max": 18446744073709551615,
+                        "min": 100
+                      },
+                      "min_deposit_atomic": {
+                        "default": "0",
+                        "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                        "min": "0"
+                      },
+                      "min_refund_atomic": {
+                        "default": "1000000000000000000",
+                        "max": "1000000000000000000",
+                        "min": "1000000000000000000"
+                      },
+                      "pricing": "spot",
+                      "quote_amount_decimals": 4,
+                      "quote_spread_bps": {
+                        "default": 50,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_tolerance_bps": {
+                        "default": 100,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_ttl_seconds": {
+                        "default": 900,
+                        "max": 3600,
+                        "min": 30
+                      }
+                    },
+                    {
+                      "accepted": true,
+                      "asset": "USDT",
+                      "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                      "decimals": 6,
+                      "enabled": true,
+                      "max_deposit_atomic": {
+                        "default": "1000000000000000000000000",
+                        "max": "1000000000000000000000000",
+                        "min": "0"
+                      },
+                      "min_amount": {
+                        "default": 100,
+                        "max": 18446744073709551615,
+                        "min": 100
+                      },
+                      "min_deposit_atomic": {
+                        "default": "0",
+                        "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                        "min": "0"
+                      },
+                      "min_refund_atomic": {
+                        "default": "1000000000000000000",
+                        "max": "1000000000000000000",
+                        "min": "1000000000000000000"
+                      },
+                      "pricing": "stablecoin",
+                      "quote_amount_decimals": 4,
+                      "quote_spread_bps": {
+                        "default": 50,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_tolerance_bps": {
+                        "default": 100,
+                        "max": 500,
+                        "min": 0
+                      },
+                      "quote_ttl_seconds": {
+                        "default": 900,
+                        "max": 3600,
+                        "min": 30
+                      }
+                    }
+                  ],
+                  "chain_id": 1,
+                  "confirmations": {
+                    "default": "2",
+                    "floor": "2"
+                  },
+                  "status": "active"
+                }
+              ],
+              "chains": [
+                {
+                  "assets": [
+                    {
+                      "asset": "PHA",
+                      "quote_spread_bps": 100
+                    },
+                    {
+                      "asset": "USDT"
+                    }
+                  ],
+                  "chain_id": 1,
+                  "confirmations": "12"
+                }
+              ],
+              "livemode": false,
+              "object": "payment_settings",
+              "quote_creations_per_customer_per_minute": null,
+              "revision": "psrev_5b0e4f1a9c3d4e7f8a2b6c1d0e9f8a7b",
+              "status": "configured",
+              "updated": 1790467200
+            }
+          },
           "restricted": false
         },
         "properties": {
@@ -156,6 +449,10 @@
             },
             "type": "array"
           },
+          "payment_settings": {
+            "$ref": "#/components/schemas/AccountPaymentSettings",
+            "description": "The account's payment settings per mode, with their effective config in `available`."
+          },
           "restricted": {
             "description": "Whether the account is restricted for review.",
             "type": "boolean"
@@ -172,6 +469,7 @@
           "paused_scopes",
           "max_unfinalized_credit",
           "limits",
+          "payment_settings",
           "created",
           "api_keys"
         ],
@@ -372,6 +670,191 @@
           "webhook_keys",
           "report_data",
           "tdx_quote"
+        ],
+        "type": "object"
+      },
+      "AvailableAsset": {
+        "description": "An asset of the operator's catalog and its bounds.",
+        "properties": {
+          "accepted": {
+            "description": "Whether your settings list it.",
+            "type": "boolean"
+          },
+          "asset": {
+            "description": "Asset code.",
+            "type": "string"
+          },
+          "contract": {
+            "description": "Token contract address.",
+            "type": "string"
+          },
+          "decimals": {
+            "description": "Token decimals.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "Whether its terms, each clamped to its bounds, can be used together; an accepted asset that\nis not enabled is not offered or credited until you or the operator change it.",
+            "type": "boolean"
+          },
+          "max_deposit_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `max_deposit_atomic`."
+          },
+          "min_amount": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `min_amount`."
+          },
+          "min_deposit_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `min_deposit_atomic`."
+          },
+          "min_refund_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `min_refund_atomic`."
+          },
+          "pricing": {
+            "description": "`spot` or `stablecoin`.",
+            "type": "string"
+          },
+          "quote_amount_decimals": {
+            "description": "Token decimals a quote's amount is rounded up to (the operator's).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_spread_bps": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_spread_bps`."
+          },
+          "quote_tolerance_bps": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_tolerance_bps`."
+          },
+          "quote_ttl_seconds": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_ttl_seconds`."
+          }
+        },
+        "required": [
+          "asset",
+          "contract",
+          "decimals",
+          "pricing",
+          "quote_amount_decimals",
+          "accepted",
+          "enabled",
+          "quote_ttl_seconds",
+          "quote_spread_bps",
+          "quote_tolerance_bps",
+          "min_amount",
+          "min_deposit_atomic",
+          "max_deposit_atomic",
+          "min_refund_atomic"
+        ],
+        "type": "object"
+      },
+      "AvailableChain": {
+        "description": "A chain of the operator's catalog in the key's mode.",
+        "properties": {
+          "assets": {
+            "description": "The chain's assets.",
+            "items": {
+              "$ref": "#/components/schemas/AvailableAsset"
+            },
+            "type": "array"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmations": {
+            "$ref": "#/components/schemas/AvailableConfirmations",
+            "description": "The chain's confirmation floor, also its default."
+          },
+          "status": {
+            "description": "`active` (accepted, with a treasury), `treasury_not_set` (accepted, without a treasury:\nnothing is offered on it until you set one), or `not_configured`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "status",
+          "confirmations",
+          "assets"
+        ],
+        "type": "object"
+      },
+      "AvailableConfirmations": {
+        "description": "A chain's confirmation floor.",
+        "properties": {
+          "default": {
+            "description": "The confirmation of a chain whose `confirmations` is `null`: the floor.",
+            "type": "string"
+          },
+          "floor": {
+            "description": "The weakest confirmation you may require, a depth, `safe`, or `finalized`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "floor",
+          "default"
+        ],
+        "type": "object"
+      },
+      "BoundsAtomic": {
+        "description": "The operator's default of a base-unit amount and its inclusive bounds, as decimal strings.",
+        "properties": {
+          "default": {
+            "description": "The value when you set none.",
+            "type": "string"
+          },
+          "max": {
+            "description": "The highest value you may set.",
+            "type": "string"
+          },
+          "min": {
+            "description": "The lowest value you may set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "default",
+          "min",
+          "max"
+        ],
+        "type": "object"
+      },
+      "BoundsU64": {
+        "description": "The operator's default of an integer term and its inclusive bounds.",
+        "properties": {
+          "default": {
+            "description": "The value when you set none.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max": {
+            "description": "The highest value you may set.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min": {
+            "description": "The lowest value you may set.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default",
+          "min",
+          "max"
         ],
         "type": "object"
       },
@@ -989,7 +1472,7 @@
             "type": "boolean"
           },
           "rejection_reason": {
-            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
+            "description": "Why the deposit was rejected: `unsupported_asset`, `asset_not_accepted` (a routed asset\nthe payment settings the deposit is bound to do not accept), `below_minimum`,\n`out_of_bounds`, `out_of_range`, or `sanctioned`.",
             "type": [
               "string",
               "null"
@@ -1239,7 +1722,7 @@
             "type": "string"
           },
           "assets": {
-            "description": "The supported tokens on this chain; any other token sent to the address is not credited.",
+            "description": "The tokens your payment settings accept on this chain; any other token sent to the\naddress is not credited.",
             "items": {
               "$ref": "#/components/schemas/DepositAddressAsset"
             },
@@ -1317,6 +1800,21 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "settings_hold": {
+            "description": "The restore whose hold the deposit was recorded under; it waits for the merchant's\nreconfirmation, which binds it. `null` when `settings_revision` is set.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "settings_revision": {
+            "description": "The payment settings revision the deposit is bound to (`psrev_…`): current in the snapshot\nof the statement that recorded it. `null` while `settings_hold` is set.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -1668,6 +2166,27 @@
         ],
         "type": "object"
       },
+      "LegacyPaymentSettings": {
+        "description": "A `legacy` revision: never current, it governs only what the cutover bound to it.",
+        "properties": {
+          "chains": {
+            "description": "Every route of the mode accepted at its 0.5.0 values, with the former confirmation\npolicies.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsChain"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "The revision, `psrev_…`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "chains"
+        ],
+        "type": "object"
+      },
       "Limits": {
         "description": "The caps of one account in one mode.",
         "properties": {
@@ -1836,6 +2355,294 @@
         ],
         "type": "object"
       },
+      "PaymentSettingsAsset": {
+        "additionalProperties": false,
+        "description": "An accepted asset and your terms on it; a term `null` or not sent takes the operator's default.",
+        "properties": {
+          "asset": {
+            "description": "An asset code routed on the chain, such as `usdc`.",
+            "type": "string"
+          },
+          "max_deposit_atomic": {
+            "description": "The maximum creditable deposit in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "min_amount": {
+            "description": "The minimum credit in cents of a quote or a deposit valued at spot.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "min_deposit_atomic": {
+            "description": "The minimum creditable deposit in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "min_refund_atomic": {
+            "description": "The refund dust floor in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quote_spread_bps": {
+            "description": "A quote's spread below spot, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quote_tolerance_bps": {
+            "description": "A quote's two-sided payment tolerance, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quote_ttl_seconds": {
+            "description": "A quote's payment window, in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "asset"
+        ],
+        "type": "object"
+      },
+      "PaymentSettingsChain": {
+        "additionalProperties": false,
+        "description": "An accepted chain of your payment settings.",
+        "properties": {
+          "assets": {
+            "description": "The accepted assets of the chain, at least one.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsAsset"
+            },
+            "type": "array"
+          },
+          "chain_id": {
+            "description": "A chain of the key's mode.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmations": {
+            "description": "The confirmation you require on the chain: a depth (`\"12\"`: the block and eleven more),\n`\"safe\"`, or `\"finalized\"`, never weaker than the chain's floor and of the chain's kind (a\ndepth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain).\n`null` for the floor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chain_id",
+          "assets"
+        ],
+        "type": "object"
+      },
+      "PaymentSettingsObject": {
+        "description": "Your payment settings in the key's mode (`GET /v1/payment_settings`): what you accept and on\nwhat terms, chosen from the operator's catalog within its bounds\n(docs/design/payment-settings.md).",
+        "example": {
+          "available": [
+            {
+              "assets": [
+                {
+                  "accepted": true,
+                  "asset": "PHA",
+                  "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                  "decimals": 18,
+                  "enabled": true,
+                  "max_deposit_atomic": {
+                    "default": "1000000000000000000000000",
+                    "max": "1000000000000000000000000",
+                    "min": "0"
+                  },
+                  "min_amount": {
+                    "default": 100,
+                    "max": 18446744073709551615,
+                    "min": 100
+                  },
+                  "min_deposit_atomic": {
+                    "default": "0",
+                    "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                    "min": "0"
+                  },
+                  "min_refund_atomic": {
+                    "default": "1000000000000000000",
+                    "max": "1000000000000000000",
+                    "min": "1000000000000000000"
+                  },
+                  "pricing": "spot",
+                  "quote_amount_decimals": 4,
+                  "quote_spread_bps": {
+                    "default": 50,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_tolerance_bps": {
+                    "default": 100,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_ttl_seconds": {
+                    "default": 900,
+                    "max": 3600,
+                    "min": 30
+                  }
+                },
+                {
+                  "accepted": true,
+                  "asset": "USDT",
+                  "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "decimals": 6,
+                  "enabled": true,
+                  "max_deposit_atomic": {
+                    "default": "1000000000000000000000000",
+                    "max": "1000000000000000000000000",
+                    "min": "0"
+                  },
+                  "min_amount": {
+                    "default": 100,
+                    "max": 18446744073709551615,
+                    "min": 100
+                  },
+                  "min_deposit_atomic": {
+                    "default": "0",
+                    "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                    "min": "0"
+                  },
+                  "min_refund_atomic": {
+                    "default": "1000000000000000000",
+                    "max": "1000000000000000000",
+                    "min": "1000000000000000000"
+                  },
+                  "pricing": "stablecoin",
+                  "quote_amount_decimals": 4,
+                  "quote_spread_bps": {
+                    "default": 50,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_tolerance_bps": {
+                    "default": 100,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_ttl_seconds": {
+                    "default": 900,
+                    "max": 3600,
+                    "min": 30
+                  }
+                }
+              ],
+              "chain_id": 1,
+              "confirmations": {
+                "default": "2",
+                "floor": "2"
+              },
+              "status": "active"
+            }
+          ],
+          "chains": [
+            {
+              "assets": [
+                {
+                  "asset": "PHA",
+                  "quote_spread_bps": 100
+                },
+                {
+                  "asset": "USDT"
+                }
+              ],
+              "chain_id": 1,
+              "confirmations": "12"
+            }
+          ],
+          "livemode": false,
+          "object": "payment_settings",
+          "quote_creations_per_customer_per_minute": null,
+          "revision": "psrev_5b0e4f1a9c3d4e7f8a2b6c1d0e9f8a7b",
+          "status": "configured",
+          "updated": 1790467200
+        },
+        "properties": {
+          "available": {
+            "description": "The operator's catalog of the mode: every chain and asset you may accept, with its\ndefaults and bounds, and whether you accept it.",
+            "items": {
+              "$ref": "#/components/schemas/AvailableChain"
+            },
+            "type": "array"
+          },
+          "chains": {
+            "description": "The chains you accept, each with its accepted assets. A chain or asset not listed is not\naccepted.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsChain"
+            },
+            "type": "array"
+          },
+          "livemode": {
+            "description": "The mode of the key that reads it.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `payment_settings`.",
+            "enum": [
+              "payment_settings"
+            ],
+            "type": "string"
+          },
+          "quote_creations_per_customer_per_minute": {
+            "description": "One customer's quote creations in a rolling minute; `null` for the default.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The current revision, `psrev_…`: unique and never reused, with no order.",
+            "type": "string"
+          },
+          "status": {
+            "description": "`unconfigured` (accepts nothing: never configured), `configured`, or `held` (after a\nrestore of the service, until you reconfirm with `POST /v1/payment_settings`; nothing is\naccepted meanwhile, and payments recorded wait).",
+            "type": "string"
+          },
+          "updated": {
+            "description": "When the current revision was written, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object",
+          "livemode",
+          "status",
+          "revision",
+          "updated",
+          "quote_creations_per_customer_per_minute",
+          "chains",
+          "available"
+        ],
+        "type": "object"
+      },
       "Quote": {
         "description": "A quote: a locked price, an exact token amount, and a single-use address to pay it to.",
         "example": {
@@ -1870,6 +2677,17 @@
           },
           "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
           "status": "open",
+          "terms": {
+            "confirmations": "12",
+            "max_deposit_atomic": "1000000000000000000000000",
+            "min_amount": 100,
+            "min_deposit_atomic": "0",
+            "min_refund_atomic": "1000000000000000000",
+            "quote_amount_decimals": 4,
+            "quote_spread_bps": 100,
+            "quote_tolerance_bps": 100,
+            "quote_ttl_seconds": 900
+          },
           "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
         },
         "properties": {
@@ -1981,6 +2799,10 @@
             "description": "`open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays\n`open` after `expires_at` until the finalized chain passes it, so a payment mined in time\nis never reported as expired; hide the address once `expires_at` has passed.",
             "type": "string"
           },
+          "terms": {
+            "$ref": "#/components/schemas/QuoteTerms",
+            "description": "The terms the quote was issued with, from your payment settings then; the quote keeps\nthem whatever the settings say later."
+          },
           "treasury": {
             "description": "The treasury the address pays: your treasury of the chain when the quote was created. The\naddress is the factory's `CREATE2` over it and the salt.",
             "type": "string"
@@ -2003,7 +2825,71 @@
           "status",
           "expires_at",
           "created",
+          "terms",
           "metadata"
+        ],
+        "type": "object"
+      },
+      "QuoteTerms": {
+        "description": "The terms a quote was issued with.",
+        "properties": {
+          "confirmations": {
+            "description": "The confirmation the quote required when issued: a depth, `safe`, or `finalized`. A payment\nnot credited yet waits for the stricter of it and the chain's current floor.",
+            "type": "string"
+          },
+          "max_deposit_atomic": {
+            "description": "Maximum creditable deposit in base units, as a decimal string.",
+            "type": "string"
+          },
+          "min_amount": {
+            "description": "Minimum credit in cents of a payment valued at spot.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_deposit_atomic": {
+            "description": "Minimum creditable deposit in base units, as a decimal string.",
+            "type": "string"
+          },
+          "min_refund_atomic": {
+            "description": "Refund dust floor in base units, as a decimal string.",
+            "type": "string"
+          },
+          "quote_amount_decimals": {
+            "description": "Token decimals `amount_atomic` was rounded up to.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_spread_bps": {
+            "description": "The spread below spot of the locked price, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_tolerance_bps": {
+            "description": "A payment within this many basis points of `amount_atomic`, either way, completes the\nquote at its `amount`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_ttl_seconds": {
+            "description": "The payment window, in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "quote_ttl_seconds",
+          "quote_spread_bps",
+          "quote_tolerance_bps",
+          "quote_amount_decimals",
+          "min_amount",
+          "min_deposit_atomic",
+          "max_deposit_atomic",
+          "min_refund_atomic",
+          "confirmations"
         ],
         "type": "object"
       },
@@ -2138,6 +3024,31 @@
         "required": [
           "at",
           "failed_checks"
+        ],
+        "type": "object"
+      },
+      "RecordingObject": {
+        "description": "Whether recording is held for the 0.6.0 cutover.",
+        "example": {
+          "held": false,
+          "object": "recording"
+        },
+        "properties": {
+          "held": {
+            "description": "Whether recording is held.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `recording`.",
+            "enum": [
+              "recording"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "object",
+          "held"
         ],
         "type": "object"
       },
@@ -2652,6 +3563,17 @@
             "payment": null,
             "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
             "status": "open",
+            "terms": {
+              "confirmations": "12",
+              "max_deposit_atomic": "1000000000000000000000000",
+              "min_amount": 100,
+              "min_deposit_atomic": "0",
+              "min_refund_atomic": "1000000000000000000",
+              "quote_amount_decimals": 4,
+              "quote_spread_bps": 100,
+              "quote_tolerance_bps": 100,
+              "quote_ttl_seconds": 900
+            },
             "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
           },
           "reissued": true
@@ -3519,6 +4441,85 @@
       }
     },
     "/v1/admin/accounts/{account}": {
+      "get": {
+        "operationId": "get_account",
+        "parameters": [
+          {
+            "description": "Account id, `acct_…`",
+            "in": "path",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found: no account has this id",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "An account, with its caps and its payment settings in each mode: what it accepts, on what\nterms, and its effective config (`available`). `api_keys` is empty.",
+        "tags": [
+          "admin"
+        ]
+      },
       "post": {
         "operationId": "update_account",
         "parameters": [
@@ -4930,6 +5931,104 @@
             "http_message_signature": []
           }
         ],
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/recording/resume": {
+      "post": {
+        "operationId": "resume_recording",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingObject"
+                }
+              }
+            },
+            "description": "OK: recording runs, whether it was held or not",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "http_message_signature": []
+          }
+        ],
+        "summary": "Lifts the 0.6.0 cutover's recording hold (docs/design/payment-settings.md §10), once every\nauthorized account is configured and its effective config verified: the scanners, finality\nwatch, reconciler, and pumps start within seconds, from their cursors. Audited.",
         "tags": [
           "admin"
         ]
