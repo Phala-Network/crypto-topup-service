@@ -7,6 +7,8 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{PgConnection, PgPool};
 use topup_core::money::MinorAmount;
 use topup_core::route::{PricingMode, RouteFile};
+
+use crate::payment_config::{self, Terms};
 use uuid::Uuid;
 
 use crate::db::{Account, Customer};
@@ -25,13 +27,13 @@ use super::idempotency::Idempotent;
 use super::metadata::{self, Object};
 use super::models::{
     ClientQuote, Config, ConfigAsset, CreateQuoteRequest, ExpandableDeposit, Quote, QuoteList,
-    QuoteView, UpdateMetadataRequest,
+    QuoteTerms, QuoteView, UpdateMetadataRequest,
 };
 use super::repository;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-use topup_core::route::{ChainConfig, Confirmations, TYPICAL_FINALIZED_SECONDS};
+use topup_core::route::TYPICAL_FINALIZED_SECONDS;
 
 #[utoipa::path(
     get,
@@ -43,50 +45,25 @@ use topup_core::route::{ChainConfig, Confirmations, TYPICAL_FINALIZED_SECONDS};
     security(("api_key" = [])),
     tag = "config"
 )]
-/// The assets, limits, and quote terms of the attested routes in the credential's mode, with the
-/// confirmation your account's policy requires.
+/// Your effective payment config in the key's mode: every asset your payment settings accept on a
+/// chain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your
+/// open-quote caps. An account that accepts nothing yet gets no asset.
 pub(crate) async fn get_config(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
 ) -> ApiResult<Json<Config>> {
-    let routes = state
-        .routes
-        .current_in(merchant.scope.livemode())
-        .collect::<Vec<_>>();
-    let policies =
-        super::account::confirmation_policies(&state.pool, merchant.scope.account_id()).await?;
-    let limits = crate::limits::load(&mut *state.pool.acquire().await?, merchant.scope)
+    let mut connection = state.pool.acquire().await?;
+    let effective =
+        payment_config::load_effective(&mut connection, &state.routes, merchant.scope).await?;
+    let limits = crate::limits::load(&mut connection, merchant.scope)
         .await
         .map_err(|error| {
             tracing::error!(%error, "account limits are unreadable");
             ApiError::internal()
         })?;
-    let assets = routes
-        .iter()
-        .map(|route| {
-            let confirmations =
-                credit_confirmations(&route.chain, policies.get(&route.chain.chain_id));
-            ConfigAsset {
-                chain_id: route.chain.chain_id,
-                asset: route.asset.symbol.clone(),
-                contract: format!("{:#x}", route.asset.contract),
-                decimals: route.asset.decimals,
-                pricing: match route.pricing.mode {
-                    PricingMode::Spot => "spot",
-                    PricingMode::Stablecoin => "stablecoin",
-                }
-                .to_owned(),
-                min_amount: route.screening.min_credit_minor,
-                max_deposit_atomic: route.screening.max_deposit_atomic.value().to_string(),
-                min_refund_atomic: route.asset.min_refund_atomic.value().to_string(),
-                quote_ttl_seconds: route.rate_lock.window_s,
-                quote_spread_bps: route.rate_lock.spread_bps.value(),
-                quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
-                confirmations: confirmations.policy_value(),
-                typical_credit_seconds: confirmations.typical_credit_seconds(route.chain.chain_id),
-                typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
-            }
-        })
+    let assets = effective
+        .active()
+        .map(|asset| config_asset(asset.route, &asset.terms))
         .collect();
     Ok(Json(Config {
         object: "config".to_owned(),
@@ -95,18 +72,52 @@ pub(crate) async fn get_config(
         max_open_quotes: limits.max_open_quotes,
         max_open_amount_per_account: limits.max_open_amount_per_account,
         max_open_amount_per_customer: limits.max_open_amount_per_customer,
+        quote_creations_per_customer_per_minute: effective.quote_creations_per_customer_per_minute,
         assets,
     }))
 }
 
-/// The confirmation `chain`'s payments are credited at: the stricter of the chain's floor and the
-/// account's `policy` for it.
-pub(super) fn credit_confirmations(
-    chain: &ChainConfig,
-    policy: Option<&Confirmations>,
-) -> Confirmations {
-    let floor = chain.confirmations;
-    policy.map_or(floor, |policy| floor.stricter(*policy))
+/// One payable asset of the effective config.
+fn config_asset(route: &RouteFile, terms: &Terms) -> ConfigAsset {
+    let confirmations = route.chain.confirmations.stricter(terms.confirmations);
+    ConfigAsset {
+        chain_id: route.chain.chain_id,
+        asset: route.asset.symbol.clone(),
+        contract: format!("{:#x}", route.asset.contract),
+        decimals: route.asset.decimals,
+        pricing: match route.pricing.mode {
+            PricingMode::Spot => "spot",
+            PricingMode::Stablecoin => "stablecoin",
+        }
+        .to_owned(),
+        min_amount: terms.min_amount,
+        min_deposit_atomic: terms.min_deposit_atomic.value().to_string(),
+        max_deposit_atomic: terms.max_deposit_atomic.value().to_string(),
+        min_refund_atomic: terms.min_refund_atomic.value().to_string(),
+        quote_ttl_seconds: terms.quote_ttl_seconds,
+        quote_spread_bps: terms.quote_spread_bps.value(),
+        quote_tolerance_bps: terms.quote_tolerance_bps.value(),
+        quote_amount_decimals: terms.quote_amount_decimals,
+        confirmations: confirmations.policy_value(),
+        typical_credit_seconds: confirmations.typical_credit_seconds(route.chain.chain_id),
+        typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
+    }
+}
+
+/// The terms a quote was issued with, as its object shows them.
+pub(super) fn quote_terms(route: &RouteFile, terms: &Terms) -> QuoteTerms {
+    let confirmations = route.chain.confirmations.stricter(terms.confirmations);
+    QuoteTerms {
+        quote_ttl_seconds: terms.quote_ttl_seconds,
+        quote_spread_bps: terms.quote_spread_bps.value(),
+        quote_tolerance_bps: terms.quote_tolerance_bps.value(),
+        quote_amount_decimals: terms.quote_amount_decimals,
+        min_amount: terms.min_amount,
+        min_deposit_atomic: terms.min_deposit_atomic.value().to_string(),
+        max_deposit_atomic: terms.max_deposit_atomic.value().to_string(),
+        min_refund_atomic: terms.min_refund_atomic.value().to_string(),
+        confirmations: confirmations.policy_value(),
+    }
 }
 
 #[utoipa::path(
@@ -125,9 +136,9 @@ pub(super) fn credit_confirmations(
         (status = 200, description = "OK", body = Quote),
         (
             status = 400,
-            description = "Bad Request, `amount_too_small`, `amount_too_large`, \
-                           `exposure_cap_exceeded`, `paused`, `chain_frozen`, or \
-                           `treasury_not_set`",
+            description = "Bad Request, `asset_not_accepted`, `payment_settings_unconfirmed`, \
+                           `amount_too_small`, `amount_too_large`, `exposure_cap_exceeded`, \
+                           `paused`, `chain_frozen`, or `treasury_not_set`",
             body = ErrorResponse
         ),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -143,7 +154,9 @@ pub(super) fn credit_confirmations(
     tag = "quotes"
 )]
 /// Quotes `amount` cents payable in `asset` on `chain_id`: a locked price, the exact token amount,
-/// and a single-use address, valid until `expires_at`.
+/// and a single-use address, valid until `expires_at`, on the terms your payment settings set for
+/// the asset; the quote keeps them for good. An asset your settings do not accept is
+/// `asset_not_accepted`.
 pub(crate) async fn create_quote(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
@@ -162,13 +175,23 @@ pub(crate) async fn create_quote(
         .ok_or_else(|| {
             ApiError::invalid_param("asset", "no payable asset matches chain_id and asset")
         })?;
-    if request.amount < route.screening.min_credit_minor.max(1) {
+    let effective = payment_config::load_effective(
+        &mut *state.pool.acquire().await?,
+        &state.routes,
+        merchant.scope,
+    )
+    .await?;
+    if effective.settings.status == payment_config::Status::Held {
+        return Err(ApiError::payment_settings_unconfirmed());
+    }
+    let terms = effective
+        .asset(route.chain.chain_id, &route.asset.symbol)
+        .map(|asset| asset.terms)
+        .ok_or_else(|| ApiError::asset_not_accepted(Some("asset")))?;
+    if request.amount < terms.min_amount.max(1) {
         return Err(ApiError::amount_too_small(
             "amount",
-            format!(
-                "amount must be at least {}",
-                route.screening.min_credit_minor.max(1)
-            ),
+            format!("amount must be at least {}", terms.min_amount.max(1)),
         ));
     }
     let credit = MinorAmount::new(request.amount);
@@ -512,8 +535,7 @@ async fn client_quote_view(
             }
         }
     };
-    let policies = super::account::confirmation_policies(&state.pool, scope.account_id()).await?;
-    let confirmation = credit_confirmations(&route.chain, policies.get(&route.chain.chain_id));
+    let confirmation = route.chain.confirmations.stricter(lock.terms.confirmations);
     Ok(ClientQuote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
@@ -626,8 +648,8 @@ pub(crate) async fn quote_object(
     routes: &RouteSet,
     lock: RateLock,
 ) -> ApiResult<Quote> {
-    // The quote's own route version may be retired; asset and tolerance come from the route's
-    // current version, which keeps the chain and asset.
+    // The quote's own route version may be retired; the asset comes from the route's current
+    // version, which keeps the chain and asset, and the terms from the quote.
     let route = routes
         .current()
         .find(|route| route.route == lock.route)
@@ -659,6 +681,7 @@ pub(crate) async fn quote_object(
             .consumed_by
             .map(|deposit| ExpandableDeposit::Id(ids::format(ids::DEPOSIT, deposit))),
         client_secret: None,
+        terms: quote_terms(route, &lock.terms),
         metadata: lock.metadata,
     })
 }
@@ -705,6 +728,12 @@ pub(super) fn map_error(error: RateLockError) -> ApiError {
         }
         RateLockError::RateLimited { retry_after } => ApiError::customer_quote_limit(retry_after),
         RateLockError::TreasuryNotSet => ApiError::treasury_not_set(),
+        RateLockError::AssetNotAccepted => ApiError::asset_not_accepted(Some("asset")),
+        RateLockError::SettingsUnconfirmed => ApiError::payment_settings_unconfirmed(),
+        RateLockError::RecordingHeld => {
+            ApiError::paused("recording is held for the operator's cutover; retry later")
+        }
+        RateLockError::SettingsChanged => ApiError::database_busy(),
         error @ (RateLockError::ExposureCap { .. } | RateLockError::QuoteCountCap(_)) => {
             ApiError::exposure_cap(error.to_string())
         }

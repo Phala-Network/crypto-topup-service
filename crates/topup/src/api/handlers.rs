@@ -18,10 +18,11 @@ use super::auth::AdminActor;
 use super::error::{ApiError, ErrorResponse};
 use super::extract::{ApiJson, ApiPath};
 use super::models::{
-    AccountLimits, AccountPauseRequest, AccountResponse, AdminReasonRequest,
-    AdminTreasuryPauseRequest, ApiKeyObject, Contact, CreateAccountRequest, CustomerPauseRequest,
-    DailyReportResponse, Deposit, IssueApiKeyRequest, NudgeResponse, PauseRequest, PauseResponse,
-    ReconciliationBlockLiftResponse, RoutePauseResponse, Treasury, UpdateAccountRequest,
+    AccountLimits, AccountPauseRequest, AccountPaymentSettings, AccountResponse,
+    AdminReasonRequest, AdminTreasuryPauseRequest, ApiKeyObject, Contact, CreateAccountRequest,
+    CustomerPauseRequest, DailyReportResponse, Deposit, IssueApiKeyRequest, NudgeResponse,
+    PauseRequest, PauseResponse, ReconciliationBlockLiftResponse, RoutePauseResponse, Treasury,
+    UpdateAccountRequest,
 };
 use super::repository::{self, IssuedAccount};
 
@@ -72,7 +73,30 @@ pub(crate) async fn create_account(
         &request.reason,
     )
     .await?;
-    Ok(Json(account_response(account)?))
+    Ok(Json(account_response(&state, account).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/accounts/{account}",
+    params(("account" = String, Path, description = "Account id, `acct_…`")),
+    responses(
+        (status = 200, description = "OK", body = AccountResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Not Found: no account has this id", body = ErrorResponse)
+    ),
+    security(("http_message_signature" = [])),
+    tag = "admin"
+)]
+/// An account, with its caps and its payment settings in each mode: what it accepts, on what
+/// terms, and its effective config (`available`). `api_keys` is empty.
+pub(crate) async fn get_account(
+    State(state): State<AppState>,
+    ApiPath(account): ApiPath<String>,
+) -> ApiResult<Json<AccountResponse>> {
+    let account_id = parse_account_id(&account)?;
+    let account = repository::admin_account(&state.pool, account_id).await?;
+    Ok(Json(account_response(&state, account).await?))
 }
 
 #[utoipa::path(
@@ -138,7 +162,7 @@ pub(crate) async fn update_account(
         &request.reason,
     )
     .await?;
-    Ok(Json(account_response(account)?))
+    Ok(Json(account_response(&state, account).await?))
 }
 
 #[utoipa::path(
@@ -677,8 +701,23 @@ fn validate_scopes(scopes: Vec<String>) -> ApiResult<Vec<String>> {
     Ok(validated)
 }
 
-fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {
+async fn account_response(state: &AppState, issued: IssuedAccount) -> ApiResult<AccountResponse> {
     let account = issued.account;
+    let mut connection = state.pool.acquire().await?;
+    let payment_settings = AccountPaymentSettings {
+        test: super::payment_settings::payment_settings_object(
+            &mut connection,
+            &state.routes,
+            Scope::new(account.id, false),
+        )
+        .await?,
+        live: super::payment_settings::payment_settings_object(
+            &mut connection,
+            &state.routes,
+            Scope::new(account.id, true),
+        )
+        .await?,
+    };
     Ok(AccountResponse {
         id: account.public_id,
         object: "account".to_owned(),
@@ -694,6 +733,7 @@ fn account_response(issued: IssuedAccount) -> ApiResult<AccountResponse> {
             test: issued.limits[0],
             live: issued.limits[1],
         },
+        payment_settings,
         created: account.created_at.timestamp(),
         api_keys: issued
             .api_keys

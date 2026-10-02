@@ -627,8 +627,10 @@ pub(crate) async fn reissue_deposit_address(
     .map_err(super::deposit_addresses::map_error)?;
     Ok(Json(RestoreDepositAddressResponse {
         reissued: issued,
+        // Every network the address has: re-issuing never depends on the payment settings, which
+        // are held until the merchant reconfirms them.
         deposit_address: super::deposit_addresses::deposit_address_object(
-            &state.routes,
+            state.routes.current_in(request.livemode),
             &reissued,
         )?,
     }))

@@ -85,6 +85,7 @@ pub(crate) fn parse_reason(
             "out_of_range" => Ok(RejectReason::OutOfRange),
             "sanctioned" => Ok(RejectReason::Sanctioned),
             "out_of_bounds" => Ok(RejectReason::OutOfBounds),
+            "asset_not_accepted" => Ok(RejectReason::AssetNotAccepted),
             other => Err(sqlx::Error::Decode(
                 format!("unknown rejection reason `{other}`").into(),
             )),

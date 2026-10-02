@@ -22,8 +22,8 @@ pricing:
   primary: { source: coinmetrics, asset: pha }
   check: { source: binance, symbol: PHAUSDT }
 
-limits:
-  min_credit_minor: 100
-  max_deposit_atomic: "200000000000000000000000"
-  min_refund_atomic: "20"
-  min_deposit_atomic: "20000000000000000000"
+merchant:
+  min_amount: { default: 100 }
+  min_deposit_atomic: { default: "20000000000000000000" }
+  max_deposit_atomic: { default: "200000000000000000000000" }
+  min_refund_atomic: { default: "20" }

@@ -179,12 +179,17 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "charges_enabled": true,
             "paused_scopes": [],
             "webhook_keys": [{"version": 2, "expires_at": null}, {"version": 1, "expires_at": CREATED + 86_400}],
-            "confirmation_policies": [{"chain_id": 1, "confirmations": "finalized"}],
             "created": CREATED - 2_592_000,
         }),
-        "UpdateAccountObjectRequest" => json!({
-            "confirmation_policies": [{"chain_id": 1, "confirmations": "12"}],
+        "PaymentSettingsObject" => payment_settings(),
+        "UpdatePaymentSettingsRequest" => json!({
+            "chains": [{
+                "chain_id": 1,
+                "confirmations": "12",
+                "assets": [{"asset": "PHA", "quote_spread_bps": 100}, {"asset": "USDT"}],
+            }],
         }),
+        "RecordingObject" => json!({"object": "recording", "held": false}),
         "AccountSelfPauseRequest" => json!({"scopes": ["quotes"]}),
         "RollWebhookKeyRequest" => json!({"expires_in": 172_800}),
         "AttestationResponse" => json!({
@@ -206,21 +211,24 @@ pub(super) fn schema(name: &str) -> Option<Value> {
             "max_open_quotes": 100,
             "max_open_amount_per_account": 1_000_000,
             "max_open_amount_per_customer": 500_000,
+            "quote_creations_per_customer_per_minute": 10,
             "assets": [{
                 "chain_id": 1,
                 "asset": "PHA",
                 "contract": PHA,
                 "decimals": 18,
                 "pricing": "spot",
-                "confirmations": "2",
-                "typical_credit_seconds": 30,
+                "confirmations": "12",
+                "typical_credit_seconds": 150,
                 "typical_finality_seconds": 900,
                 "min_amount": 100,
+                "min_deposit_atomic": "0",
                 "max_deposit_atomic": "1000000000000000000000000",
                 "min_refund_atomic": "1000000000000000000",
                 "quote_ttl_seconds": 900,
-                "quote_spread_bps": 50,
+                "quote_spread_bps": 100,
                 "quote_tolerance_bps": 100,
+                "quote_amount_decimals": 4,
             }],
         }),
         "ErrorResponse" => json!({
@@ -274,6 +282,10 @@ pub(super) fn schema(name: &str) -> Option<Value> {
                     "max_open_amount_per_customer": 500_000,
                     "max_active_deposit_addresses": 1_000,
                 },
+            },
+            "payment_settings": {
+                "live": unconfigured_settings(true),
+                "test": payment_settings(),
             },
             "created": CREATED - 2_592_000,
             "api_keys": [first_key()],
@@ -558,7 +570,94 @@ fn quote() -> Value {
         },
         "deposit": null,
         "client_secret": format!("{QUOTE}_secret_9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a"),
+        "terms": {
+            "quote_ttl_seconds": 900,
+            "quote_spread_bps": 100,
+            "quote_tolerance_bps": 100,
+            "quote_amount_decimals": 4,
+            "min_amount": 100,
+            "min_deposit_atomic": "0",
+            "max_deposit_atomic": "1000000000000000000000000",
+            "min_refund_atomic": "1000000000000000000",
+            "confirmations": "12",
+        },
         "metadata": {"order_id": "ord_1001"},
+    })
+}
+
+/// The catalog of the example's test mode: PHA and USDT on Ethereum, with their bounds.
+fn available(accepted: bool) -> Value {
+    let asset = |asset: &str, contract: &str, decimals: u8, pricing: &str| {
+        json!({
+            "asset": asset,
+            "contract": contract,
+            "decimals": decimals,
+            "pricing": pricing,
+            "quote_amount_decimals": 4,
+            "accepted": accepted,
+            "enabled": accepted,
+            "quote_ttl_seconds": {"default": 900, "min": 30, "max": 3600},
+            "quote_spread_bps": {"default": 50, "min": 0, "max": 500},
+            "quote_tolerance_bps": {"default": 100, "min": 0, "max": 500},
+            "min_amount": {"default": 100, "min": 100, "max": u64::MAX},
+            "min_deposit_atomic": {"default": "0", "min": "0", "max": U256_MAX},
+            "max_deposit_atomic": {
+                "default": "1000000000000000000000000",
+                "min": "0",
+                "max": "1000000000000000000000000",
+            },
+            "min_refund_atomic": {
+                "default": "1000000000000000000",
+                "min": "1000000000000000000",
+                "max": "1000000000000000000",
+            },
+        })
+    };
+    json!([{
+        "chain_id": 1,
+        "status": if accepted { "active" } else { "not_configured" },
+        "confirmations": {"floor": "2", "default": "2"},
+        "assets": [
+            asset("PHA", PHA, 18, "spot"),
+            asset("USDT", "0xdac17f958d2ee523a2206206994597c13d831ec7", 6, "stablecoin"),
+        ],
+    }])
+}
+
+/// The largest base-unit amount, as a decimal string.
+const U256_MAX: &str =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+fn payment_settings() -> Value {
+    json!({
+        "object": "payment_settings",
+        "livemode": false,
+        "status": "configured",
+        "revision": "psrev_5b0e4f1a9c3d4e7f8a2b6c1d0e9f8a7b",
+        "updated": CREATED - 86_400,
+        "quote_creations_per_customer_per_minute": null,
+        "chains": [{
+            "chain_id": 1,
+            "confirmations": "12",
+            "assets": [
+                {"asset": "PHA", "quote_spread_bps": 100},
+                {"asset": "USDT"},
+            ],
+        }],
+        "available": available(true),
+    })
+}
+
+fn unconfigured_settings(livemode: bool) -> Value {
+    json!({
+        "object": "payment_settings",
+        "livemode": livemode,
+        "status": "unconfigured",
+        "revision": "psrev_0c1d2e3f4a5b4c6d8e7f9a0b1c2d3e4f",
+        "updated": CREATED - 2_592_000,
+        "quote_creations_per_customer_per_minute": null,
+        "chains": [],
+        "available": available(false),
     })
 }
 

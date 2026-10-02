@@ -25,6 +25,8 @@ pub enum EventObject {
     Treasury(Uuid),
     /// A webhook endpoint, by its id.
     WebhookEndpoint(Uuid),
+    /// The account's payment settings in the event's mode, by the account's id.
+    PaymentSettings(Uuid),
 }
 
 impl EventObject {
@@ -39,6 +41,7 @@ impl EventObject {
             Self::Refund(_) => "refund",
             Self::Treasury(_) => "treasury",
             Self::WebhookEndpoint(_) => "webhook_endpoint",
+            Self::PaymentSettings(_) => "payment_settings",
         }
     }
 
@@ -53,6 +56,7 @@ impl EventObject {
             "refund" => Some(Self::Refund(id)),
             "treasury" => Some(Self::Treasury(id)),
             "webhook_endpoint" => Some(Self::WebhookEndpoint(id)),
+            "payment_settings" => Some(Self::PaymentSettings(id)),
             _ => None,
         }
     }
@@ -67,7 +71,8 @@ impl EventObject {
             | Self::Account(id)
             | Self::Refund(id)
             | Self::Treasury(id)
-            | Self::WebhookEndpoint(id) => id,
+            | Self::WebhookEndpoint(id)
+            | Self::PaymentSettings(id) => id,
         }
     }
 
@@ -78,7 +83,7 @@ impl EventObject {
             Self::Deposit(_) => crate::ids::DEPOSIT,
             Self::Quote(_) => crate::ids::QUOTE,
             Self::ApiKey(_) => crate::ids::API_KEY,
-            Self::Account(_) => crate::ids::ACCOUNT,
+            Self::Account(_) | Self::PaymentSettings(_) => crate::ids::ACCOUNT,
             Self::Refund(_) => crate::ids::REFUND,
             Self::Treasury(_) => crate::ids::TREASURY,
             Self::WebhookEndpoint(_) => crate::ids::WEBHOOK_ENDPOINT,
@@ -162,9 +167,15 @@ pub const SYSTEM_ACTOR: &str = "system";
 /// GitHub's `meta` event is the precedent.
 #[must_use]
 pub fn is_account_event(event_type: &str) -> bool {
-    ["account.", "api_key.", "treasury.", "webhook_endpoint."]
-        .iter()
-        .any(|prefix| event_type.starts_with(prefix))
+    [
+        "account.",
+        "api_key.",
+        "payment_settings.",
+        "treasury.",
+        "webhook_endpoint.",
+    ]
+    .iter()
+    .any(|prefix| event_type.starts_with(prefix))
 }
 
 /// The API representation of `object` as `scope` sees it now, read in the caller's transaction:
@@ -414,6 +425,7 @@ mod tests {
     fn account_events_are_the_account_key_and_endpoint_changes() {
         for event_type in [
             "account.updated",
+            "payment_settings.updated",
             "treasury.created",
             "treasury.canceled",
             "api_key.created",

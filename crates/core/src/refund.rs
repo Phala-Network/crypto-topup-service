@@ -37,7 +37,8 @@ pub enum RefundIneligible {
 /// Applies the section 15 refund policy to persisted deposit and route facts.
 ///
 /// Every refundable case is at or above the dust floor and not sanctioned: a deposit rejected for
-/// a wrong token (`unsupported_asset`), a below-minimum credit (`below_minimum`), or out-of-bounds
+/// a wrong token (`unsupported_asset`, or `asset_not_accepted` for a routed token the account's
+/// payment settings do not accept), a below-minimum credit (`below_minimum`), or out-of-bounds
 /// amounts; and a credited or swept deposit the merchant chooses to refund. The merchant pays
 /// every refund from its own treasury.
 pub fn refund_eligibility(deposit: RefundDeposit) -> Result<(), RefundIneligible> {
@@ -242,6 +243,11 @@ mod tests {
                 Ok(()),
             ),
             ("out of bounds", rejected(RejectReason::OutOfBounds), Ok(())),
+            (
+                "an asset the account does not accept",
+                rejected(RejectReason::AssetNotAccepted),
+                Ok(()),
+            ),
             (
                 "sanctioned",
                 rejected(RejectReason::Sanctioned),

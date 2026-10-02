@@ -1,19 +1,13 @@
 //! The account of the request's API key (`GET /v1/account`), its webhook keys (design D11), and
 //! the attestation that binds them (`GET /v1/attestation`).
 
-use std::collections::BTreeMap;
-
 use axum::Json;
 use axum::extract::{Extension, State};
 use axum::response::Response;
 use chrono::{DateTime, Duration, Utc};
-use sqlx::{Acquire, PgPool, Postgres};
-use topup_core::route::Confirmations;
-use uuid::Uuid;
+use sqlx::PgPool;
 
-use crate::audit::Actor;
 use crate::pause::PauseOwner;
-use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 use crate::webhook_keys::{self, WebhookKeyError, WebhookKeys};
 
@@ -25,8 +19,7 @@ use super::extract::{ApiJson, ApiQuery};
 use super::idempotency::Idempotent;
 use super::models::{
     AccountObject, AccountSelfPauseRequest, AdminAttestationQuery, AttestationQuery,
-    AttestationResponse, ConfirmationPolicy, RollWebhookKeyRequest, UpdateAccountObjectRequest,
-    WebhookKeyObject, WebhookKeyVersion,
+    AttestationResponse, RollWebhookKeyRequest, WebhookKeyObject, WebhookKeyVersion,
 };
 
 #[utoipa::path(
@@ -44,62 +37,7 @@ pub(crate) async fn get_account(
     State(state): State<AppState>,
     Extension(merchant): Extension<Merchant>,
 ) -> Result<Json<AccountObject>, ApiError> {
-    current_account(
-        &mut *state.pool.acquire().await?,
-        &state.routes,
-        merchant.scope,
-    )
-    .await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/account",
-    params(
-        (
-            "Idempotency-Key" = Option<String>, Header,
-            description = "Up to 255 characters; for 24 hours a repeat of the same request \
-                           returns the first response, and of another request is \
-                           `400 idempotency_error`."
-        )
-    ),
-    request_body = UpdateAccountObjectRequest,
-    responses(
-        (status = 200, description = "OK", body = AccountObject),
-        (status = 400, description = "Bad Request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse)
-    ),
-    security(("api_key" = [])),
-    tag = "account"
-)]
-/// Updates the account's settings in the key's mode; parameters not sent are left unchanged.
-/// `confirmation_policies` sets, per chain, the confirmation a payment must reach before it is
-/// credited (design D1): the stricter of it and the route's floor applies to every deposit not
-/// credited yet, and `GET /v1/config` reports it with its typical credit time. Announced as
-/// `account.updated`.
-pub(crate) async fn update_account(
-    State(state): State<AppState>,
-    Extension(merchant): Extension<Merchant>,
-    idempotent: Idempotent,
-    ApiJson(request): ApiJson<UpdateAccountObjectRequest>,
-) -> Result<Response, ApiError> {
-    let changes = request
-        .confirmation_policies
-        .map(|policies| validate_policies(&state.routes, merchant.scope, &policies))
-        .transpose()?;
-    let mut transaction = idempotent.begin(&state.pool).await?;
-    if let Some(changes) = changes {
-        set_policies(
-            &mut *transaction,
-            &state.routes,
-            merchant.scope,
-            &changes,
-            &merchant.actor(),
-        )
-        .await?;
-    }
-    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
-    idempotent.commit(transaction, account).await
+    current_account(&mut *state.pool.acquire().await?, merchant.scope).await
 }
 
 #[utoipa::path(
@@ -195,158 +133,8 @@ async fn self_pause(
     )
     .await?
     .ok_or_else(ApiError::internal)?;
-    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
+    let account = current_account(&mut transaction, merchant.scope).await?;
     idempotent.commit(transaction, account).await
-}
-
-/// Checks each policy against its chain's route floor: a chain of the key's mode, a value of
-/// the chain's kind, and never weaker than the route's. `None` removes a chain's policy.
-fn validate_policies(
-    routes: &RouteSet,
-    scope: Scope,
-    policies: &[ConfirmationPolicy],
-) -> Result<BTreeMap<u64, Option<Confirmations>>, ApiError> {
-    let mut changes = BTreeMap::new();
-    for (index, policy) in policies.iter().enumerate() {
-        let param = |field: &str| format!("confirmation_policies[{index}][{field}]");
-        let floor = routes
-            .current_in(scope.livemode())
-            .find(|route| route.chain.chain_id == policy.chain_id)
-            .map(|route| route.chain.confirmations)
-            .ok_or_else(|| {
-                ApiError::invalid_param(param("chain_id"), "not a chain of the key's mode")
-            })?;
-        let value = policy
-            .confirmations
-            .as_deref()
-            .map(|value| {
-                let required = Confirmations::parse_policy(value).ok_or_else(|| {
-                    ApiError::invalid_param(
-                        param("confirmations"),
-                        "confirmations must be a depth of 1 to 999999, safe, or finalized",
-                    )
-                })?;
-                if required.validate_for_chain(policy.chain_id).is_err() {
-                    return Err(ApiError::invalid_param(
-                        param("confirmations"),
-                        "the chain accepts a depth or finalized (Ethereum), or a depth, safe, or \
-                         finalized (OP-stack)",
-                    ));
-                }
-                if floor.stricter(required) == required {
-                    Ok(required)
-                } else {
-                    Err(ApiError::invalid_param(
-                        param("confirmations"),
-                        format!(
-                            "the chain's route requires {}; a policy may only be stricter: a \
-                             deeper depth, then safe (OP-stack), then finalized",
-                            floor.policy_value()
-                        ),
-                    ))
-                }
-            })
-            .transpose()?;
-        if changes.insert(policy.chain_id, value).is_some() {
-            return Err(ApiError::invalid_param(
-                param("chain_id"),
-                "each chain may be listed once",
-            ));
-        }
-    }
-    Ok(changes)
-}
-
-/// Writes the policy changes with an audit row and, when any changed, `account.updated` in the
-/// key's mode, whose chains they are.
-async fn set_policies<'c>(
-    db: impl Acquire<'c, Database = Postgres>,
-    routes: &RouteSet,
-    scope: Scope,
-    changes: &BTreeMap<u64, Option<Confirmations>>,
-    actor: &Actor,
-) -> Result<(), ApiError> {
-    let mut transaction = db.begin().await?;
-    let object = crate::db::EventObject::Account(scope.account_id());
-    let before = crate::db::render(&mut transaction, routes, scope, object).await?;
-    let mut changed = false;
-    for (&chain_id, value) in changes {
-        let chain_id = i64::try_from(chain_id).map_err(|_| ApiError::internal())?;
-        let affected = match value {
-            Some(required) => sqlx::query(
-                "INSERT INTO confirmation_policies (account_id, chain_id, required) \
-                 VALUES ($1, $2, $3) ON CONFLICT (account_id, chain_id) DO UPDATE \
-                 SET required = EXCLUDED.required \
-                 WHERE confirmation_policies.required <> EXCLUDED.required",
-            )
-            .bind(scope.account_id())
-            .bind(chain_id)
-            .bind(required.policy_value())
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected(),
-            None => sqlx::query(
-                "DELETE FROM confirmation_policies WHERE account_id = $1 AND chain_id = $2",
-            )
-            .bind(scope.account_id())
-            .bind(chain_id)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected(),
-        };
-        changed |= affected > 0;
-    }
-    if changed {
-        let public_id: String = sqlx::query_scalar("SELECT public_id FROM accounts WHERE id = $1")
-            .bind(scope.account_id())
-            .fetch_one(&mut *transaction)
-            .await?;
-        crate::audit::insert(
-            &mut *transaction,
-            &crate::audit::Entry {
-                account_id: Some(scope.account_id()),
-                actor,
-                action: "account.confirmation_policies",
-                subject: &format!("account:{public_id}"),
-                reason: &serde_json::json!(
-                    changes
-                        .iter()
-                        .map(|(chain, value)| (
-                            chain.to_string(),
-                            value.map(Confirmations::policy_value)
-                        ))
-                        .collect::<BTreeMap<_, _>>()
-                )
-                .to_string(),
-            },
-        )
-        .await?;
-        let event = crate::db::NewOutboxEvent::new("account.updated", scope, object, actor);
-        crate::db::enqueue_in(&mut transaction, routes, &event, Some(&before)).await?;
-    }
-    transaction.commit().await?;
-    Ok(())
-}
-
-/// The confirmations the account requires, by chain, across both modes.
-pub(crate) async fn confirmation_policies<'e>(
-    executor: impl sqlx::PgExecutor<'e>,
-    account_id: Uuid,
-) -> Result<BTreeMap<u64, Confirmations>, ApiError> {
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT chain_id, required FROM confirmation_policies WHERE account_id = $1",
-    )
-    .bind(account_id)
-    .fetch_all(executor)
-    .await?;
-    rows.into_iter()
-        .map(|(chain_id, required)| {
-            Ok((
-                u64::try_from(chain_id).map_err(|_| ApiError::internal())?,
-                Confirmations::parse_policy(&required).ok_or_else(ApiError::internal)?,
-            ))
-        })
-        .collect()
 }
 
 #[utoipa::path(
@@ -408,7 +196,7 @@ pub(crate) async fn roll_webhook_key(
         WebhookKeyError::NotFound | WebhookKeyError::VersionExhausted => ApiError::internal(),
         WebhookKeyError::Database(error) => error.into(),
     })?;
-    let account = current_account(&mut transaction, &state.routes, merchant.scope).await?;
+    let account = current_account(&mut transaction, merchant.scope).await?;
     idempotent.commit(transaction, account).await
 }
 
@@ -537,20 +325,18 @@ async fn active_keys(pool: &PgPool, scope: Scope) -> Result<Option<WebhookKeys>,
 /// The scope's account as `GET /v1/account` returns it.
 async fn current_account(
     connection: &mut sqlx::PgConnection,
-    routes: &RouteSet,
     scope: Scope,
 ) -> Result<Json<AccountObject>, ApiError> {
-    find_account(connection, routes, scope)
+    find_account(connection, scope)
         .await?
         .map(Json)
         .ok_or_else(ApiError::internal)
 }
 
-/// The API representation of the scope's account: its policies of the chains of the scope's
-/// mode, and the operator's and its own pauses.
+/// The API representation of the scope's account: its webhook keys, and the operator's and its
+/// own pauses.
 pub(crate) async fn find_account(
     connection: &mut sqlx::PgConnection,
-    routes: &RouteSet,
     scope: Scope,
 ) -> Result<Option<AccountObject>, ApiError> {
     let row = sqlx::query_as::<_, (String, String, bool, Vec<String>, DateTime<Utc>)>(
@@ -578,19 +364,6 @@ pub(crate) async fn find_account(
                 .collect()
         })
         .unwrap_or_default();
-    let chains = routes
-        .current_in(scope.livemode())
-        .map(|route| route.chain.chain_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    let confirmation_policies = confirmation_policies(&mut *connection, scope.account_id())
-        .await?
-        .into_iter()
-        .filter(|(chain_id, _)| chains.contains(chain_id))
-        .map(|(chain_id, required)| ConfirmationPolicy {
-            chain_id,
-            confirmations: Some(required.policy_value()),
-        })
-        .collect();
     Ok(Some(AccountObject {
         id,
         object: "account".to_owned(),
@@ -599,7 +372,6 @@ pub(crate) async fn find_account(
         charges_enabled,
         paused_scopes,
         webhook_keys,
-        confirmation_policies,
         created: created.timestamp(),
     }))
 }

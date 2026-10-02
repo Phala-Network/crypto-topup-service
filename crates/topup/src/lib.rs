@@ -31,6 +31,7 @@ pub mod locks;
 pub mod observability;
 pub mod outbox;
 mod pause;
+pub mod payment_config;
 pub mod pump;
 pub mod reconciler;
 pub mod refunds;

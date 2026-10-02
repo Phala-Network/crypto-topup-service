@@ -6,9 +6,7 @@ use std::fmt;
 use alloy_primitives::{Address, U512};
 
 use crate::money::{AtomicAmount, Bps, CreditError, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
-use crate::route::{
-    AssetConfig, PricingConfig, RateLockConfig, RouteFile, ScreeningConfig, UNIT_DECIMALS,
-};
+use crate::route::{AssetConfig, PricingConfig, UNIT_DECIMALS};
 
 const BASIS_POINTS: u128 = 10_000;
 const PRICE_SCALE_FACTOR: u64 = 100_000_000;
@@ -98,25 +96,16 @@ impl From<&PricingConfig> for ValuationPolicy {
     }
 }
 
-/// Existing route sections required to value a deposit.
+/// What values a deposit: its route's asset, and the terms that govern it (the paid quote's, or
+/// those of the payment settings the deposit is bound to; design payment-settings §6).
 #[derive(Clone, Copy, Debug)]
 pub struct RouteValuation<'route> {
     /// Deposited asset settings.
     pub asset: &'route AssetConfig,
-    /// Deposit screening thresholds.
-    pub screening: &'route ScreeningConfig,
-    /// Rate-lock tolerance settings.
-    pub rate_lock: &'route RateLockConfig,
-}
-
-impl<'route> From<&'route RouteFile> for RouteValuation<'route> {
-    fn from(route: &'route RouteFile) -> Self {
-        Self {
-            asset: &route.asset,
-            screening: &route.screening,
-            rate_lock: &route.rate_lock,
-        }
-    }
+    /// The minimum credit, in cents, of a deposit valued at spot.
+    pub min_credit_minor: u64,
+    /// The two-sided tolerance of a quote's payment.
+    pub lock_tolerance_bps: Bps,
 }
 
 /// A rate lock considered for one observed deposit.
@@ -301,7 +290,7 @@ pub fn value_deposit(
     }
 
     let credit_minor = credit(amount, spot_price, route.asset.decimals, UNIT_DECIMALS)?;
-    if credit_minor.value() < route.screening.min_credit_minor {
+    if credit_minor.value() < route.min_credit_minor {
         return Err(ValuationError::BelowMinimum);
     }
     Ok(Valuation {
@@ -393,10 +382,13 @@ fn multiply_scaled(first: ScaledPrice, second: ScaledPrice) -> Result<ScaledPric
     ScaledPrice::new(value, PRICE_SCALE).map_err(|_| ValuationError::ArithmeticOutOfRange)
 }
 
-fn lock_applies(amount: AtomicAmount, route: &RouteValuation<'_>, lock: &LockTerms) -> bool {
+/// Whether a payment of `amount` is a valid payment of `lock`: its asset, in a block at or before
+/// its expiry, and within its two-sided tolerance.
+#[must_use]
+pub fn lock_applies(amount: AtomicAmount, route: &RouteValuation<'_>, lock: &LockTerms) -> bool {
     lock.block_time <= lock.expires_at
         && lock.asset == route.asset.contract
-        && amount_within_tolerance(amount, lock.amount, route.rate_lock.lock_tolerance_bps)
+        && amount_within_tolerance(amount, lock.amount, route.lock_tolerance_bps)
 }
 
 /// Whether `actual` is within `tolerance` of `locked`: `|actual − locked| × 10 000 ≤ locked × bps`.
@@ -459,8 +451,8 @@ mod tests {
 
     struct TestRoute {
         asset: AssetConfig,
-        screening: ScreeningConfig,
-        rate_lock: RateLockConfig,
+        min_credit_minor: u64,
+        tolerance_bps: Bps,
     }
 
     impl TestRoute {
@@ -470,30 +462,19 @@ mod tests {
                     symbol: "pha".to_owned(),
                     contract: asset,
                     decimals: 18,
-                    min_refund_atomic: AtomicAmount::new(U256::ZERO),
+                    quote_amount_decimals: 4,
                     backstop: crate::route::Backstop::Token,
                 },
-                screening: ScreeningConfig {
-                    sanctions_oracle: Address::from([9_u8; 20]),
-                    min_deposit_atomic: AtomicAmount::new(U256::ZERO),
-                    max_deposit_atomic: AtomicAmount::new(U256::MAX),
-                    min_credit_minor,
-                },
-                rate_lock: RateLockConfig {
-                    window_s: 60,
-                    spread_bps: bps(100),
-                    lock_tolerance_bps: bps(tolerance_bps),
-                    amount_decimals: 4,
-                    max_creations_per_minute: 10,
-                },
+                min_credit_minor,
+                tolerance_bps: bps(tolerance_bps),
             }
         }
 
         fn valuation(&self) -> RouteValuation<'_> {
             RouteValuation {
                 asset: &self.asset,
-                screening: &self.screening,
-                rate_lock: &self.rate_lock,
+                min_credit_minor: self.min_credit_minor,
+                lock_tolerance_bps: self.tolerance_bps,
             }
         }
     }

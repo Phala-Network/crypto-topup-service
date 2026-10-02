@@ -200,6 +200,10 @@ async fn freeze_in(
     .fetch_one(&mut *connection)
     .await?
     .try_into()?;
+    // The restored payment settings may be stale, and no delivery proves the merchant's latest:
+    // every account and mode is held until the merchant reconfirms, in the transaction that
+    // records the restore, before any recorder runs (docs/design/payment-settings.md §11).
+    crate::payment_config::hold_all(&mut *connection, restore.id).await?;
     tracing::error!(
         restore_id = %restore.id,
         detected_by = detection.code(),
@@ -803,13 +807,18 @@ async fn restore_reversed(
             id, chain_id, tx_hash, receipt_log_index, revision, log_index, block_number,
             block_hash, block_time, address_id, account_id, livemode, customer_id, route,
             route_version, asset_contract, from_address, amount_atomic, state, next_attempt_at,
-            metadata, replaces, valuation_at, price_scaled, price_source, credit_minor, created_at
+            metadata, replaces, valuation_at, price_scaled, price_source, credit_minor, created_at,
+            settings_revision_id, settings_hold_id
         )
         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, address.id, address.account_id,
                address.livemode, COALESCE(quote.customer_id, deposit_address.customer_id), $10,
                $11, $12, $13, $14::text::numeric, 'reversed', now(), $15, replaced.id, $16,
-               $17::text::numeric, $18, $19::text::numeric, $20
+               $17::text::numeric, $18, $19::text::numeric, $20,
+               CASE WHEN settings.status <> 'held' THEN settings.current_revision_id END,
+               settings.held_by
         FROM addresses AS address
+        JOIN payment_settings_state AS settings
+            ON settings.account_id = address.account_id AND settings.livemode = address.livemode
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id

@@ -58,6 +58,16 @@ pub const ERROR_CODES: &[(&str, u16, &str)] = &[
         "Reconciliation froze the chain pending the operator's review; no quote is issued on it until the operator lifts the block.",
     ),
     (
+        "asset_not_accepted",
+        400,
+        "Your payment settings do not accept the asset on the chain in this mode, or accept nothing yet (`GET /v1/payment_settings`): quote an asset `GET /v1/config` lists, or accept it with `POST /v1/payment_settings`.",
+    ),
+    (
+        "payment_settings_unconfirmed",
+        400,
+        "After a restore of the service, your payment settings wait for your reconfirmation: send your complete configuration with `POST /v1/payment_settings`.",
+    ),
+    (
         "treasury_not_set",
         400,
         "The account has no treasury on the chain: `POST /v1/treasuries/challenge`, then `POST /v1/treasuries`.",
@@ -690,6 +700,32 @@ impl ApiError {
         )
     }
 
+    /// Returns a quote or an address of an asset the account's payment settings do not accept.
+    #[must_use]
+    pub fn asset_not_accepted(param: Option<&'static str>) -> Self {
+        let error = Self::new(
+            StatusCode::BAD_REQUEST,
+            "asset_not_accepted",
+            "your payment settings do not accept this asset in this mode; accept it with POST \
+             /v1/payment_settings",
+        );
+        match param {
+            Some(param) => error.with_param(param),
+            None => error,
+        }
+    }
+
+    /// Returns an issuance refused while the account's payment settings are held after a restore.
+    #[must_use]
+    pub fn payment_settings_unconfirmed() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "payment_settings_unconfirmed",
+            "your payment settings await your reconfirmation after a restore: send your complete \
+             configuration with POST /v1/payment_settings",
+        )
+    }
+
     /// Returns a treasury proof that does not prove the address (design D10).
     #[must_use]
     pub fn treasury_proof_invalid(param: &'static str, message: impl Into<String>) -> Self {
@@ -989,6 +1025,8 @@ mod tests {
             ApiError::webhook_endpoint_cap(),
             ApiError::webhook_endpoint_disabled(),
             ApiError::deposit_address_retired(),
+            ApiError::asset_not_accepted(None),
+            ApiError::payment_settings_unconfirmed(),
             ApiError::treasury_not_set(),
             ApiError::treasury_proof_invalid("signature", ""),
             ApiError::treasury_challenge_expired(),

@@ -417,7 +417,9 @@ pub async fn insert_deposit(pool: &PgPool, deposit: &NewDeposit) -> Result<bool,
 /// same revision does nothing. A successor names the deposit it replaces when both are in the same
 /// account and mode: the one the finality watch reversed, or a reversed deposit restored after a
 /// restore whose delivered `deposit.reversed` named this deposit as its successor
-/// (`crate::restore_mode`).
+/// (`crate::restore_mode`). The deposit is bound to the payment settings of its account and mode
+/// that the insert's own snapshot reads: their current revision, or, while they are held after a
+/// restore, that restore (`crate::payment_config`, design §7).
 pub(crate) async fn insert_deposit_in(
     transaction: &mut Transaction<'_, Postgres>,
     deposit: &NewDeposit,
@@ -460,21 +462,29 @@ pub(crate) async fn insert_deposit_in(
         Evidence::Finalized => (true, None),
         Evidence::Successor { replaces } => (true, Some(replaces)),
     };
+    // The barrier (crate::payment_config): the insert below, a later statement, binds the
+    // deposit to the payment settings its own snapshot reads.
+    crate::payment_config::lock_for_recording(&mut **transaction, deposit.address_id).await?;
     let result = sqlx::query!(
         r#"
         INSERT INTO deposits (
             id, chain_id, tx_hash, log_index, block_number, block_hash, block_time,
             address_id, account_id, livemode, customer_id, route, route_version, asset_contract,
             from_address, amount_atomic, state, reason, next_attempt_at, receipt_log_index,
-            tx_from, tx_nonce, final_at, metadata, revision, replaces
+            tx_from, tx_nonce, final_at, metadata, revision, replaces, settings_revision_id,
+            settings_hold_id
         )
         SELECT
             $1, $2, $3, $4, $5, $6, $7, address.id, address.account_id, address.livemode,
             COALESCE(quote.customer_id, deposit_address.customer_id), $9, $10, $11, $12,
             $13::text::numeric, $14, $15, $16, $17, $18, $19::text::numeric,
             CASE WHEN $20 THEN now() END,
-            COALESCE(quote.metadata, deposit_address.metadata), $21, replaced.id
+            COALESCE(quote.metadata, deposit_address.metadata), $21, replaced.id,
+            CASE WHEN settings.status <> 'held' THEN settings.current_revision_id END,
+            settings.held_by
         FROM addresses AS address
+        JOIN payment_settings_state AS settings
+            ON settings.account_id = address.account_id AND settings.livemode = address.livemode
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
         LEFT JOIN deposit_addresses AS deposit_address
             ON deposit_address.id = address.deposit_address_id

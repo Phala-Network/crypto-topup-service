@@ -30,10 +30,11 @@ pricing:
   mode: stablecoin                 # credited at 1.00 while Coin Metrics' USDT reference rate is within 1% of it
   primary: { source: coinmetrics, asset: usdt }
 
-quote:
-  spread_bps: 0                    # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover
-
-limits:
-  min_credit_minor: 100                              # USD 1.00; smaller deposits are rejected below_minimum
-  max_deposit_atomic: "10000000000"                  # 10,000 USDT (pilot bound; product enforces its own caps too)
-  min_refund_atomic: "1000000"                       # 1 USDT refundable dust floor
+# Each account's terms on this route: the operator's default, and the bounds an account's payment
+# settings stay within (docs/design/payment-settings.md §5). A bound left out keeps the account at
+# the default, except the quote window (30 to 3600 s) and the spread and tolerance (0 to 500 bps).
+merchant:
+  min_amount: { default: 100 } # USD 1.00; smaller deposits are rejected below_minimum
+  max_deposit_atomic: { default: "10000000000" } # 10,000 USDT (pilot bound; product enforces its own caps too)
+  min_refund_atomic: { default: "1000000" } # 1 USDT refundable dust floor
+  quote_spread_bps: { default: 0 } # valued at a fixed 1.00 USD: no price move within the quote window for a spread to cover

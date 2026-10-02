@@ -23,7 +23,8 @@ use topup_core::identity::event_id;
 use topup_core::money::{AtomicAmount, MinorAmount, PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::{ChainHeads, Confirmations, RouteFile, UNIT_DECIMALS};
 use topup_core::valuation::{
-    LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, value_deposit,
+    LockTerms, RouteValuation, UnixSeconds, ValuationError, ValuationSource, lock_applies,
+    value_deposit,
 };
 use uuid::Uuid;
 
@@ -32,6 +33,7 @@ use crate::db::{
     TransitionEffects,
 };
 use crate::locks::pricing::{PricingRuntime, ValidatedQuote, valuation_error_code};
+use crate::payment_config::{Binding, Resolution, Terms, required_confirmations};
 use crate::pump::{Step, StepResult};
 use crate::restore_mode::ImportedCredit;
 use crate::routes::RouteSet;
@@ -212,10 +214,36 @@ impl ConfirmStep {
             );
         };
 
-        // The stricter of the route's floor and the account's policy.
-        let confirmations = context.policy.map_or(chains.confirmations, |policy| {
-            chains.confirmations.stricter(policy)
-        });
+        // A deposit recorded while its account's payment settings were held waits for the
+        // merchant's reconfirmation, unless the merchant was told its outcome before a restore
+        // (docs/design/payment-settings.md §11).
+        if matches!(context.binding, Binding::Pending { .. })
+            && context.delivered.is_none()
+            && context.delivered_rejection.is_none()
+        {
+            return StepResult::new(
+                StepOutcome::Wait {
+                    reason: WaitReason::SettingsUnconfirmed,
+                },
+                json!({"stage": "payment_settings", "result": "awaiting_reconfirmation"}),
+            );
+        }
+        // The stricter of the chain's current floor, the confirmation the deposit's binding
+        // requires, and, for a payment of a quote's asset to its address, the quote's (design
+        // §7): which of the two governs is known only once the deposit is confirmed.
+        let quoted = context
+            .lock
+            .as_ref()
+            .filter(|lock| !lock.restored && deposit.route.as_deref() == Some(&lock.route))
+            .map(|lock| lock.terms.confirmations);
+        let confirmations = required_confirmations(
+            chains.confirmations,
+            context
+                .binding
+                .confirmations(deposit.chain_id)
+                .into_iter()
+                .chain(quoted),
+        );
         let (canonical, is_final) =
             match confirmed_evidence(chains, confirmations, deposit, context.address).await {
                 FinalityResult::Ready { log, is_final } => (log, is_final),
@@ -283,6 +311,102 @@ impl ConfirmStep {
             }
             return carried_forward(deposit, &canonical, &context, delivered, effects);
         }
+        // A rejection the merchant was told before a restore stands: no later policy check
+        // rewrites it (docs/design/payment-settings.md §11).
+        if let Some(rejection) = &context.delivered_rejection {
+            if rejection.asset_contract != canonical.token || rejection.amount != canonical.amount {
+                return retry(
+                    RetryError::InvariantViolation,
+                    json!({
+                        "stage": "restore",
+                        "error": "delivered_event_contradicts_chain",
+                        "providers": provider_evidence(&canonical),
+                    }),
+                    effects,
+                );
+            }
+            return rejected_result(
+                deposit,
+                rejection.reason,
+                json!({
+                    "stage": "restore",
+                    "result": "delivered_rejection",
+                    "reason": rejection.reason.code(),
+                    "providers": provider_evidence(&canonical),
+                }),
+                effects,
+            );
+        }
+
+        // A valid payment of the address's quote is governed by the terms the quote was issued
+        // with; every other payment by the payment settings the deposit is bound to (design §8).
+        // A quote re-issued after a restore carries the merchant's record of its terms, never
+        // applied: a payment to it follows its binding, valued at spot.
+        let quote_lock = context
+            .lock
+            .as_ref()
+            .filter(|lock| !lock.restored && lock.route == runtime.route.route)
+            .and_then(|lock| {
+                Some((
+                    LockTerms {
+                        asset: canonical.token,
+                        amount: lock.amount,
+                        price: lock.price,
+                        credit_minor: lock.credit_minor,
+                        expires_at: lock.expires_at,
+                        block_time: unix_seconds(canonical.block_time)?,
+                    },
+                    lock.terms,
+                ))
+            })
+            .filter(|(lock, terms)| {
+                lock_applies(
+                    canonical.amount,
+                    &RouteValuation {
+                        asset: &runtime.route.asset,
+                        min_credit_minor: terms.min_amount,
+                        lock_tolerance_bps: terms.quote_tolerance_bps,
+                    },
+                    lock,
+                )
+            });
+        let (terms, lock, basis) = match quote_lock {
+            Some((lock, terms)) => (terms, Some(lock), json!({"quote_terms": true})),
+            None => {
+                let revision = match &context.binding {
+                    Binding::Revision { id, .. } => *id,
+                    Binding::Pending { .. } => {
+                        return StepResult::new(
+                            StepOutcome::Wait {
+                                reason: WaitReason::SettingsUnconfirmed,
+                            },
+                            json!({"stage": "payment_settings", "result": "awaiting_reconfirmation"}),
+                        );
+                    }
+                };
+                let basis = json!({"revision": crate::ids::format("psrev_", revision)});
+                match context.binding.resolve(&runtime.route) {
+                    Some(Resolution::Accepted(terms)) => (terms, None, basis),
+                    resolution => {
+                        return rejected_result(
+                            deposit,
+                            RejectReason::AssetNotAccepted,
+                            json!({
+                                "stage": "payment_settings",
+                                "result": "asset_not_accepted",
+                                "basis": basis,
+                                "disabled": match resolution {
+                                    Some(Resolution::Disabled(reason)) => Some(reason),
+                                    _ => None,
+                                },
+                                "providers": provider_evidence(&canonical),
+                            }),
+                            effects,
+                        );
+                    }
+                }
+            }
+        };
 
         let valuation_at = Utc::now();
         let quote = match runtime.pricing.fetch(&runtime.route).await {
@@ -291,30 +415,14 @@ impl ConfirmStep {
                 return retry(RetryError::PriceUnavailable, evidence, effects);
             }
         };
-        // A quote re-issued after a restore carries the merchant's record of its terms, never
-        // applied: a payment to it is valued at spot.
-        let lock = context
-            .lock
-            .as_ref()
-            .filter(|lock| !lock.restored)
-            .and_then(|lock| {
-                if lock.route == runtime.route.route {
-                    Some(LockTerms {
-                        asset: canonical.token,
-                        amount: lock.amount,
-                        price: lock.price,
-                        credit_minor: lock.credit_minor,
-                        expires_at: lock.expires_at,
-                        block_time: unix_seconds(canonical.block_time)?,
-                    })
-                } else {
-                    None
-                }
-            });
         let valuation = value_deposit(
             canonical.amount,
             quote.price,
-            &RouteValuation::from(&runtime.route),
+            &RouteValuation {
+                asset: &runtime.route.asset,
+                min_credit_minor: terms.min_amount,
+                lock_tolerance_bps: terms.quote_tolerance_bps,
+            },
             lock.as_ref(),
         );
         let valuation = match valuation {
@@ -382,6 +490,7 @@ impl ConfirmStep {
                 "stage": "confirmed",
                 "providers": provider_evidence(&canonical),
                 "corrected": effects.canonical_evidence.is_some(),
+                "terms": basis,
                 "quote": quote.evidence,
                 "valuation": {
                     "price_scaled": valuation.price.value().to_string(),
@@ -450,10 +559,20 @@ impl Step for ConfirmStep {
 struct ConfirmationContext {
     address: Address,
     lock: Option<StoredLock>,
-    /// The account's stricter confirmation for the chain (design D1), if it set one.
-    policy: Option<Confirmations>,
+    /// The payment settings the deposit is bound to.
+    binding: Binding,
     /// The credit a delivered event imported after a restore told the merchant.
     delivered: Option<ImportedCredit>,
+    /// The rejection a delivered `deposit.rejected` imported after a restore told the merchant.
+    delivered_rejection: Option<DeliveredRejection>,
+}
+
+/// A delivered `deposit.rejected` of the deposit, imported after a restore.
+#[derive(Clone)]
+struct DeliveredRejection {
+    reason: RejectReason,
+    asset_contract: Address,
+    amount: AtomicAmount,
 }
 
 #[derive(Clone)]
@@ -465,6 +584,8 @@ struct StoredLock {
     price: ScaledPrice,
     credit_minor: MinorAmount,
     expires_at: UnixSeconds,
+    /// The terms the quote was issued with.
+    terms: Terms,
 }
 
 #[async_trait]
@@ -496,15 +617,13 @@ async fn load_context(
 ) -> Result<ConfirmationContext, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT address.address, policy.required AS policy,
+        SELECT address.address, quote.terms,
                quote.restore_id IS NOT NULL AS restored, quote.route, quote.amount_atomic::text AS amount_atomic,
                quote.price_scaled::text AS price_scaled,
                quote.credit_minor::text AS credit_minor,
                quote.expires_at, quote.consumed_by, quote.status AS lock_status
         FROM addresses AS address
         LEFT JOIN quotes AS quote ON quote.id = address.quote_id
-        LEFT JOIN confirmation_policies AS policy
-            ON policy.account_id = address.account_id AND policy.chain_id = address.chain_id
         WHERE address.id = $1
         "#,
     )
@@ -555,24 +674,56 @@ async fn load_context(
                 expires_at.ok_or_else(|| sqlx::Error::Decode("lock expiry is missing".into()))?,
             )
             .ok_or_else(|| sqlx::Error::Decode("lock expiry is invalid".into()))?,
+            terms: row
+                .try_get::<Option<sqlx::types::Json<Terms>>, _>("terms")?
+                .ok_or_else(|| sqlx::Error::Decode("lock terms are missing".into()))?
+                .0,
         })
     } else {
         None
     };
-    let policy: Option<String> = row.try_get("policy")?;
-    let policy = policy
-        .map(|value| {
-            Confirmations::parse_policy(&value).ok_or_else(|| {
-                sqlx::Error::Decode(format!("invalid confirmation policy {value:?}").into())
-            })
-        })
-        .transpose()?;
+    let mut connection = pool.acquire().await?;
     Ok(ConfirmationContext {
         address,
         lock,
-        policy,
+        binding: crate::payment_config::deposit_binding(&mut connection, deposit_id).await?,
         delivered: crate::restore_mode::imported_credit(pool, deposit_id).await?,
+        delivered_rejection: delivered_rejection(&mut connection, deposit_id).await?,
     })
+}
+
+/// The rejection of an imported delivered `deposit.rejected` of `deposit_id`, if any.
+async fn delivered_rejection(
+    connection: &mut sqlx::PgConnection,
+    deposit_id: Uuid,
+) -> Result<Option<DeliveredRejection>, sqlx::Error> {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT event.data #>> '{object,rejection_reason}', \
+                event.data #>> '{object,asset_contract}', \
+                event.data #>> '{object,amount_atomic}' \
+         FROM events AS event \
+         JOIN restore_delivered_events AS delivered ON delivered.event_id = event.id \
+         WHERE event.id = $1",
+    )
+    .bind(event_id("deposit.rejected", deposit_id))
+    .fetch_optional(connection)
+    .await?;
+    let Some((reason, asset_contract, amount)) = row else {
+        return Ok(None);
+    };
+    let invalid = || sqlx::Error::Decode("a delivered deposit.rejected is invalid".into());
+    Ok(Some(DeliveredRejection {
+        reason: crate::db::parse_reason(reason.as_deref())?.ok_or_else(invalid)?,
+        asset_contract: asset_contract
+            .as_deref()
+            .and_then(|contract| Address::from_str(contract).ok())
+            .ok_or_else(invalid)?,
+        amount: amount
+            .as_deref()
+            .and_then(|amount| U256::from_str(amount).ok())
+            .map(AtomicAmount::new)
+            .ok_or_else(invalid)?,
+    }))
 }
 
 enum FinalityResult {
@@ -654,6 +805,7 @@ async fn confirmed_evidence(
         return FinalityResult::Wait(json!({
             "stage": "finality",
             "result": "not_confirmed",
+            "confirmations": confirmations.policy_value(),
             "required_block": required_block,
             "provider_a_horizon": confirmations.horizon(primary_heads),
             "provider_b_horizon": confirmations.horizon(secondary_heads),
@@ -1088,7 +1240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_account_policy_stricter_than_the_route_holds_the_credit() {
+    async fn an_account_requirement_stricter_than_the_route_holds_the_credit() {
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
         for (policy, reason) in [
@@ -1101,7 +1253,7 @@ mod tests {
                 chain_at(4, 11, vec![log.clone()]),
                 prices(now_seconds()),
                 ConfirmationContext {
-                    policy: Some(policy),
+                    binding: accepting(Some(policy)),
                     ..context(None)
                 },
             )
@@ -1109,14 +1261,14 @@ mod tests {
             .await;
             assert_eq!(result.outcome, StepOutcome::Wait { reason }, "{policy:?}");
         }
-        // A policy weaker than the route's floor never lowers it.
+        // A requirement weaker than the route's floor never lowers it.
         let result = step(
             depth_route(),
             chain_at(4, 10, vec![log.clone()]),
             chain_at(4, 10, vec![log]),
             prices(now_seconds()),
             ConfirmationContext {
-                policy: Some(Confirmations::Depth(1)),
+                binding: accepting(Some(Confirmations::Depth(1))),
                 ..context(None)
             },
         )
@@ -1246,7 +1398,7 @@ mod tests {
         canonical_route.version = 7;
         canonical_route.asset.contract = Address::repeat_byte(9);
         canonical_route.asset.decimals = 3;
-        canonical_route.screening.min_credit_minor = 5;
+        canonical_route.merchant.min_amount.default = 5;
         let mut canonical = transfer(&deposit);
         canonical.token = canonical_route.asset.contract;
         let original_route = route(PricingMode::Spot);
@@ -1600,7 +1752,7 @@ mod tests {
     async fn below_minimum_rejects_and_keeps_quote_fields() {
         let now = now_seconds();
         let mut route = route(PricingMode::Spot);
-        route.screening.min_credit_minor = 200;
+        route.merchant.min_amount = topup_core::route::Bounded::at(200);
         let deposit = deposit(1_000);
         let log = transfer(&deposit);
         let context = context(None);
@@ -1698,7 +1850,11 @@ mod tests {
                 .expect("route fixture");
         route.pricing.mode = mode;
         route.asset.decimals = 2;
-        route.screening.min_credit_minor = 1;
+        route.merchant.min_amount = topup_core::route::Bounded {
+            default: 1,
+            min: 1,
+            max: u64::MAX,
+        };
         if mode == PricingMode::Stablecoin {
             route.pricing.check = None;
         }
@@ -1773,8 +1929,24 @@ mod tests {
         ConfirmationContext {
             address: recipient(),
             lock,
-            policy: None,
+            binding: accepting(None),
             delivered: None,
+            delivered_rejection: None,
+        }
+    }
+
+    /// A binding accepting the test routes' asset on chain 1, with `confirmations`.
+    fn accepting(confirmations: Option<Confirmations>) -> Binding {
+        Binding::Revision {
+            id: Uuid::nil(),
+            document: crate::payment_config::Document {
+                quote_creations_per_customer_per_minute: None,
+                chains: vec![crate::payment_config::ChainChoice {
+                    chain_id: 1,
+                    confirmations,
+                    assets: vec![crate::payment_config::AssetChoice::on_defaults("pha")],
+                }],
+            },
         }
     }
 
@@ -1786,6 +1958,7 @@ mod tests {
             price: ScaledPrice::new(9_000_000, PRICE_SCALE).expect("lock price"),
             credit_minor: MinorAmount::new(777),
             expires_at: UnixSeconds::new(now + 300),
+            terms: crate::payment_config::Terms::defaults(&route(PricingMode::Spot)),
         }
     }
 

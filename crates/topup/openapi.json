@@ -5,12 +5,6 @@
         "description": "The account of the request's API key (`GET /v1/account`), in the key's mode.",
         "example": {
           "charges_enabled": true,
-          "confirmation_policies": [
-            {
-              "chain_id": 1,
-              "confirmations": "finalized"
-            }
-          ],
           "created": 1787961600,
           "id": "acct_0c6e1d0a9b3f4c2e8d7a6b5c4d3e2f10",
           "livemode": false,
@@ -32,13 +26,6 @@
           "charges_enabled": {
             "description": "Whether the operator enabled live mode.",
             "type": "boolean"
-          },
-          "confirmation_policies": {
-            "description": "The confirmations you require on chains of this mode, stricter than the routes' (design\nD1); a chain not listed uses its route's (`GET /v1/config`).",
-            "items": {
-              "$ref": "#/components/schemas/ConfirmationPolicy"
-            },
-            "type": "array"
           },
           "created": {
             "description": "Creation time, Unix seconds.",
@@ -87,7 +74,6 @@
           "charges_enabled",
           "paused_scopes",
           "webhook_keys",
-          "confirmation_policies",
           "created"
         ],
         "type": "object"
@@ -342,6 +328,139 @@
         ],
         "type": "object"
       },
+      "AvailableAsset": {
+        "description": "An asset of the operator's catalog and its bounds.",
+        "properties": {
+          "accepted": {
+            "description": "Whether your settings list it.",
+            "type": "boolean"
+          },
+          "asset": {
+            "description": "Asset code.",
+            "type": "string"
+          },
+          "contract": {
+            "description": "Token contract address.",
+            "type": "string"
+          },
+          "decimals": {
+            "description": "Token decimals.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enabled": {
+            "description": "Whether its terms, each clamped to its bounds, can be used together; an accepted asset that\nis not enabled is not offered or credited until you or the operator change it.",
+            "type": "boolean"
+          },
+          "max_deposit_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `max_deposit_atomic`."
+          },
+          "min_amount": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `min_amount`."
+          },
+          "min_deposit_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `min_deposit_atomic`."
+          },
+          "min_refund_atomic": {
+            "$ref": "#/components/schemas/BoundsAtomic",
+            "description": "Bounds of `min_refund_atomic`."
+          },
+          "pricing": {
+            "description": "`spot` or `stablecoin`.",
+            "type": "string"
+          },
+          "quote_amount_decimals": {
+            "description": "Token decimals a quote's amount is rounded up to (the operator's).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_spread_bps": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_spread_bps`."
+          },
+          "quote_tolerance_bps": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_tolerance_bps`."
+          },
+          "quote_ttl_seconds": {
+            "$ref": "#/components/schemas/BoundsU64",
+            "description": "Bounds of `quote_ttl_seconds`."
+          }
+        },
+        "required": [
+          "asset",
+          "contract",
+          "decimals",
+          "pricing",
+          "quote_amount_decimals",
+          "accepted",
+          "enabled",
+          "quote_ttl_seconds",
+          "quote_spread_bps",
+          "quote_tolerance_bps",
+          "min_amount",
+          "min_deposit_atomic",
+          "max_deposit_atomic",
+          "min_refund_atomic"
+        ],
+        "type": "object"
+      },
+      "AvailableChain": {
+        "description": "A chain of the operator's catalog in the key's mode.",
+        "properties": {
+          "assets": {
+            "description": "The chain's assets.",
+            "items": {
+              "$ref": "#/components/schemas/AvailableAsset"
+            },
+            "type": "array"
+          },
+          "chain_id": {
+            "description": "EVM chain identifier.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmations": {
+            "$ref": "#/components/schemas/AvailableConfirmations",
+            "description": "The chain's confirmation floor, also its default."
+          },
+          "status": {
+            "description": "`active` (accepted, with a treasury), `treasury_not_set` (accepted, without a treasury:\nnothing is offered on it until you set one), or `not_configured`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "status",
+          "confirmations",
+          "assets"
+        ],
+        "type": "object"
+      },
+      "AvailableConfirmations": {
+        "description": "A chain's confirmation floor.",
+        "properties": {
+          "default": {
+            "description": "The confirmation of a chain whose `confirmations` is `null`: the floor.",
+            "type": "string"
+          },
+          "floor": {
+            "description": "The weakest confirmation you may require, a depth, `safe`, or `finalized`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "floor",
+          "default"
+        ],
+        "type": "object"
+      },
       "Balance": {
         "description": "The account's balance held in its forwarders, in the key's mode (Stripe's Balance): what\npayments put there and no finalized `Flushed` event has moved to a treasury yet.",
         "example": {
@@ -421,6 +540,58 @@
         ],
         "type": "object"
       },
+      "BoundsAtomic": {
+        "description": "The operator's default of a base-unit amount and its inclusive bounds, as decimal strings.",
+        "properties": {
+          "default": {
+            "description": "The value when you set none.",
+            "type": "string"
+          },
+          "max": {
+            "description": "The highest value you may set.",
+            "type": "string"
+          },
+          "min": {
+            "description": "The lowest value you may set.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "default",
+          "min",
+          "max"
+        ],
+        "type": "object"
+      },
+      "BoundsU64": {
+        "description": "The operator's default of an integer term and its inclusive bounds.",
+        "properties": {
+          "default": {
+            "description": "The value when you set none.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max": {
+            "description": "The highest value you may set.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min": {
+            "description": "The lowest value you may set.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default",
+          "min",
+          "max"
+        ],
+        "type": "object"
+      },
       "ClientDepositAddress": {
         "description": "The public view of a deposit address, read with its `client_secret` and without an API key,\nfor the customer's page. It has no account, customer, treasury, or metadata fields.",
         "properties": {
@@ -483,7 +654,7 @@
             "type": "string"
           },
           "assets": {
-            "description": "The supported tokens on this chain.",
+            "description": "The tokens accepted on this chain.",
             "items": {
               "$ref": "#/components/schemas/DepositAddressAsset"
             },
@@ -713,17 +884,19 @@
             {
               "asset": "PHA",
               "chain_id": 1,
-              "confirmations": "2",
+              "confirmations": "12",
               "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
               "decimals": 18,
               "max_deposit_atomic": "1000000000000000000000000",
               "min_amount": 100,
+              "min_deposit_atomic": "0",
               "min_refund_atomic": "1000000000000000000",
               "pricing": "spot",
-              "quote_spread_bps": 50,
+              "quote_amount_decimals": 4,
+              "quote_spread_bps": 100,
               "quote_tolerance_bps": 100,
               "quote_ttl_seconds": 900,
-              "typical_credit_seconds": 30,
+              "typical_credit_seconds": 150,
               "typical_finality_seconds": 900
             }
           ],
@@ -732,11 +905,12 @@
           "max_open_amount_per_account": 1000000,
           "max_open_amount_per_customer": 500000,
           "max_open_quotes": 100,
-          "object": "config"
+          "object": "config",
+          "quote_creations_per_customer_per_minute": 10
         },
         "properties": {
           "assets": {
-            "description": "One entry per payable asset.",
+            "description": "One entry per asset your payment settings accept on a chain where you have a treasury,\nwith its terms: your effective payment config. Empty until you configure\n`POST /v1/payment_settings`.",
             "items": {
               "$ref": "#/components/schemas/ConfigAsset"
             },
@@ -774,6 +948,12 @@
               "config"
             ],
             "type": "string"
+          },
+          "quote_creations_per_customer_per_minute": {
+            "description": "One customer's quote creations in a rolling minute, from your payment settings.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -783,6 +963,7 @@
           "max_open_quotes",
           "max_open_amount_per_account",
           "max_open_amount_per_customer",
+          "quote_creations_per_customer_per_minute",
           "assets"
         ],
         "type": "object"
@@ -801,7 +982,7 @@
             "type": "integer"
           },
           "confirmations": {
-            "description": "The confirmation a payment's block must reach before it is credited: a depth (`\"2\"`: the\nblock and one more), `\"safe\"`, or `\"finalized\"`: the stricter of the route's floor and\nyour account's `confirmation_policies`. A credit before finality can still be reversed\n(`deposit.reversed`).",
+            "description": "The confirmation a payment's block must reach before it is credited: a depth (`\"2\"`: the\nblock and one more), `\"safe\"`, or `\"finalized\"`: the stricter of the chain's floor and the\n`confirmations` of your payment settings. A credit before finality can still be reversed\n(`deposit.reversed`).",
             "type": "string"
           },
           "contract": {
@@ -824,6 +1005,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "min_deposit_atomic": {
+            "description": "Minimum creditable deposit in base units, as a decimal string.",
+            "type": "string"
+          },
           "min_refund_atomic": {
             "description": "Minimum refundable amount in base units, as a decimal string.",
             "type": "string"
@@ -832,6 +1017,12 @@
             "description": "`spot` or `stablecoin`.",
             "type": "string"
           },
+          "quote_amount_decimals": {
+            "description": "Token decimals a quote's amount is rounded up to (the operator's).",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "quote_spread_bps": {
             "description": "A quote's price is spot / (1 + spread_bps / 10 000); spot-valued payments carry no spread.",
             "format": "int32",
@@ -839,7 +1030,7 @@
             "type": "integer"
           },
           "quote_tolerance_bps": {
-            "description": "A payment within this many basis points of the quoted amount completes the quote.",
+            "description": "A payment within this many basis points of the quoted amount, either way, completes the\nquote at its amount.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -870,37 +1061,16 @@
           "decimals",
           "pricing",
           "min_amount",
+          "min_deposit_atomic",
           "max_deposit_atomic",
           "min_refund_atomic",
           "quote_ttl_seconds",
           "quote_spread_bps",
           "quote_tolerance_bps",
+          "quote_amount_decimals",
           "confirmations",
           "typical_credit_seconds",
           "typical_finality_seconds"
-        ],
-        "type": "object"
-      },
-      "ConfirmationPolicy": {
-        "additionalProperties": false,
-        "description": "One chain's confirmation the account requires (design D1).",
-        "properties": {
-          "chain_id": {
-            "description": "A chain of the key's mode (`GET /v1/config`).",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "confirmations": {
-            "description": "A depth (`\"12\"`: the block and eleven more), `\"safe\"`, or `\"finalized\"`: never weaker than\nthe route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a\ndepth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In\na request, `null` removes the chain's policy, so its route's applies.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "chain_id"
         ],
         "type": "object"
       },
@@ -1435,7 +1605,7 @@
             "type": "boolean"
           },
           "rejection_reason": {
-            "description": "Why the deposit was rejected: `unsupported_asset`, `below_minimum`, `out_of_bounds`,\n`out_of_range`, or `sanctioned`.",
+            "description": "Why the deposit was rejected: `unsupported_asset`, `asset_not_accepted` (a routed asset\nthe payment settings the deposit is bound to do not accept), `below_minimum`,\n`out_of_bounds`, `out_of_range`, or `sanctioned`.",
             "type": [
               "string",
               "null"
@@ -1758,7 +1928,7 @@
             "type": "string"
           },
           "assets": {
-            "description": "The supported tokens on this chain; any other token sent to the address is not credited.",
+            "description": "The tokens your payment settings accept on this chain; any other token sent to the\naddress is not credited.",
             "items": {
               "$ref": "#/components/schemas/DepositAddressAsset"
             },
@@ -1881,6 +2051,21 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "settings_hold": {
+            "description": "The restore whose hold the deposit was recorded under; it waits for the merchant's\nreconfirmation, which binds it. `null` when `settings_revision` is set.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "settings_revision": {
+            "description": "The payment settings revision the deposit is bound to (`psrev_…`): current in the snapshot\nof the statement that recorded it. `null` while `settings_hold` is set.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -2662,6 +2847,294 @@
         ],
         "type": "object"
       },
+      "PaymentSettingsAsset": {
+        "additionalProperties": false,
+        "description": "An accepted asset and your terms on it; a term `null` or not sent takes the operator's default.",
+        "properties": {
+          "asset": {
+            "description": "An asset code routed on the chain, such as `usdc`.",
+            "type": "string"
+          },
+          "max_deposit_atomic": {
+            "description": "The maximum creditable deposit in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "min_amount": {
+            "description": "The minimum credit in cents of a quote or a deposit valued at spot.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "min_deposit_atomic": {
+            "description": "The minimum creditable deposit in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "min_refund_atomic": {
+            "description": "The refund dust floor in base units, a decimal string.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quote_spread_bps": {
+            "description": "A quote's spread below spot, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quote_tolerance_bps": {
+            "description": "A quote's two-sided payment tolerance, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quote_ttl_seconds": {
+            "description": "A quote's payment window, in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "asset"
+        ],
+        "type": "object"
+      },
+      "PaymentSettingsChain": {
+        "additionalProperties": false,
+        "description": "An accepted chain of your payment settings.",
+        "properties": {
+          "assets": {
+            "description": "The accepted assets of the chain, at least one.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsAsset"
+            },
+            "type": "array"
+          },
+          "chain_id": {
+            "description": "A chain of the key's mode.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "confirmations": {
+            "description": "The confirmation you require on the chain: a depth (`\"12\"`: the block and eleven more),\n`\"safe\"`, or `\"finalized\"`, never weaker than the chain's floor and of the chain's kind (a\ndepth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain).\n`null` for the floor.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "chain_id",
+          "assets"
+        ],
+        "type": "object"
+      },
+      "PaymentSettingsObject": {
+        "description": "Your payment settings in the key's mode (`GET /v1/payment_settings`): what you accept and on\nwhat terms, chosen from the operator's catalog within its bounds\n(docs/design/payment-settings.md).",
+        "example": {
+          "available": [
+            {
+              "assets": [
+                {
+                  "accepted": true,
+                  "asset": "PHA",
+                  "contract": "0x6c5ba91642f10282b576d91922ae6448c9d52f4e",
+                  "decimals": 18,
+                  "enabled": true,
+                  "max_deposit_atomic": {
+                    "default": "1000000000000000000000000",
+                    "max": "1000000000000000000000000",
+                    "min": "0"
+                  },
+                  "min_amount": {
+                    "default": 100,
+                    "max": 18446744073709551615,
+                    "min": 100
+                  },
+                  "min_deposit_atomic": {
+                    "default": "0",
+                    "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                    "min": "0"
+                  },
+                  "min_refund_atomic": {
+                    "default": "1000000000000000000",
+                    "max": "1000000000000000000",
+                    "min": "1000000000000000000"
+                  },
+                  "pricing": "spot",
+                  "quote_amount_decimals": 4,
+                  "quote_spread_bps": {
+                    "default": 50,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_tolerance_bps": {
+                    "default": 100,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_ttl_seconds": {
+                    "default": 900,
+                    "max": 3600,
+                    "min": 30
+                  }
+                },
+                {
+                  "accepted": true,
+                  "asset": "USDT",
+                  "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "decimals": 6,
+                  "enabled": true,
+                  "max_deposit_atomic": {
+                    "default": "1000000000000000000000000",
+                    "max": "1000000000000000000000000",
+                    "min": "0"
+                  },
+                  "min_amount": {
+                    "default": 100,
+                    "max": 18446744073709551615,
+                    "min": 100
+                  },
+                  "min_deposit_atomic": {
+                    "default": "0",
+                    "max": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                    "min": "0"
+                  },
+                  "min_refund_atomic": {
+                    "default": "1000000000000000000",
+                    "max": "1000000000000000000",
+                    "min": "1000000000000000000"
+                  },
+                  "pricing": "stablecoin",
+                  "quote_amount_decimals": 4,
+                  "quote_spread_bps": {
+                    "default": 50,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_tolerance_bps": {
+                    "default": 100,
+                    "max": 500,
+                    "min": 0
+                  },
+                  "quote_ttl_seconds": {
+                    "default": 900,
+                    "max": 3600,
+                    "min": 30
+                  }
+                }
+              ],
+              "chain_id": 1,
+              "confirmations": {
+                "default": "2",
+                "floor": "2"
+              },
+              "status": "active"
+            }
+          ],
+          "chains": [
+            {
+              "assets": [
+                {
+                  "asset": "PHA",
+                  "quote_spread_bps": 100
+                },
+                {
+                  "asset": "USDT"
+                }
+              ],
+              "chain_id": 1,
+              "confirmations": "12"
+            }
+          ],
+          "livemode": false,
+          "object": "payment_settings",
+          "quote_creations_per_customer_per_minute": null,
+          "revision": "psrev_5b0e4f1a9c3d4e7f8a2b6c1d0e9f8a7b",
+          "status": "configured",
+          "updated": 1790467200
+        },
+        "properties": {
+          "available": {
+            "description": "The operator's catalog of the mode: every chain and asset you may accept, with its\ndefaults and bounds, and whether you accept it.",
+            "items": {
+              "$ref": "#/components/schemas/AvailableChain"
+            },
+            "type": "array"
+          },
+          "chains": {
+            "description": "The chains you accept, each with its accepted assets. A chain or asset not listed is not\naccepted.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsChain"
+            },
+            "type": "array"
+          },
+          "livemode": {
+            "description": "The mode of the key that reads it.",
+            "type": "boolean"
+          },
+          "object": {
+            "description": "Always `payment_settings`.",
+            "enum": [
+              "payment_settings"
+            ],
+            "type": "string"
+          },
+          "quote_creations_per_customer_per_minute": {
+            "description": "One customer's quote creations in a rolling minute; `null` for the default.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The current revision, `psrev_…`: unique and never reused, with no order.",
+            "type": "string"
+          },
+          "status": {
+            "description": "`unconfigured` (accepts nothing: never configured), `configured`, or `held` (after a\nrestore of the service, until you reconfirm with `POST /v1/payment_settings`; nothing is\naccepted meanwhile, and payments recorded wait).",
+            "type": "string"
+          },
+          "updated": {
+            "description": "When the current revision was written, Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "object",
+          "livemode",
+          "status",
+          "revision",
+          "updated",
+          "quote_creations_per_customer_per_minute",
+          "chains",
+          "available"
+        ],
+        "type": "object"
+      },
       "Quote": {
         "description": "A quote: a locked price, an exact token amount, and a single-use address to pay it to.",
         "example": {
@@ -2696,6 +3169,17 @@
           },
           "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
           "status": "open",
+          "terms": {
+            "confirmations": "12",
+            "max_deposit_atomic": "1000000000000000000000000",
+            "min_amount": 100,
+            "min_deposit_atomic": "0",
+            "min_refund_atomic": "1000000000000000000",
+            "quote_amount_decimals": 4,
+            "quote_spread_bps": 100,
+            "quote_tolerance_bps": 100,
+            "quote_ttl_seconds": 900
+          },
           "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
         },
         "properties": {
@@ -2807,6 +3291,10 @@
             "description": "`open`, `complete` (a matching payment consumed it), `expired`, or `canceled`. A quote stays\n`open` after `expires_at` until the finalized chain passes it, so a payment mined in time\nis never reported as expired; hide the address once `expires_at` has passed.",
             "type": "string"
           },
+          "terms": {
+            "$ref": "#/components/schemas/QuoteTerms",
+            "description": "The terms the quote was issued with, from your payment settings then; the quote keeps\nthem whatever the settings say later."
+          },
           "treasury": {
             "description": "The treasury the address pays: your treasury of the chain when the quote was created. The\naddress is the factory's `CREATE2` over it and the salt.",
             "type": "string"
@@ -2829,6 +3317,7 @@
           "status",
           "expires_at",
           "created",
+          "terms",
           "metadata"
         ],
         "type": "object"
@@ -2869,6 +3358,17 @@
               },
               "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
               "status": "open",
+              "terms": {
+                "confirmations": "12",
+                "max_deposit_atomic": "1000000000000000000000000",
+                "min_amount": 100,
+                "min_deposit_atomic": "0",
+                "min_refund_atomic": "1000000000000000000",
+                "quote_amount_decimals": 4,
+                "quote_spread_bps": 100,
+                "quote_tolerance_bps": 100,
+                "quote_ttl_seconds": 900
+              },
               "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
             }
           ],
@@ -2908,6 +3408,69 @@
         ],
         "type": "object"
       },
+      "QuoteTerms": {
+        "description": "The terms a quote was issued with.",
+        "properties": {
+          "confirmations": {
+            "description": "The confirmation the quote's payment is credited at: a depth, `safe`, or `finalized`; never\nweaker than the chain's current floor.",
+            "type": "string"
+          },
+          "max_deposit_atomic": {
+            "description": "Maximum creditable deposit in base units, as a decimal string.",
+            "type": "string"
+          },
+          "min_amount": {
+            "description": "Minimum credit in cents of a payment valued at spot.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_deposit_atomic": {
+            "description": "Minimum creditable deposit in base units, as a decimal string.",
+            "type": "string"
+          },
+          "min_refund_atomic": {
+            "description": "Refund dust floor in base units, as a decimal string.",
+            "type": "string"
+          },
+          "quote_amount_decimals": {
+            "description": "Token decimals `amount_atomic` was rounded up to.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_spread_bps": {
+            "description": "The spread below spot of the locked price, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_tolerance_bps": {
+            "description": "A payment within this many basis points of `amount_atomic`, either way, completes the\nquote at its `amount`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote_ttl_seconds": {
+            "description": "The payment window, in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "quote_ttl_seconds",
+          "quote_spread_bps",
+          "quote_tolerance_bps",
+          "quote_amount_decimals",
+          "min_amount",
+          "min_deposit_atomic",
+          "max_deposit_atomic",
+          "min_refund_atomic",
+          "confirmations"
+        ],
+        "type": "object"
+      },
       "QuoteView": {
         "description": "`GET /v1/quotes/{id}` returns a `Quote` to a signed request and a `ClientQuote` to a request by\n`client_secret`.",
         "example": {
@@ -2942,6 +3505,17 @@
           },
           "payment_uri": "ethereum:0x6c5ba91642f10282b576d91922ae6448c9d52f4e@1/transfer?address=0x2f3e91325b2288bce392711f85f5359661062a91&uint256=202510000000000000000",
           "status": "open",
+          "terms": {
+            "confirmations": "12",
+            "max_deposit_atomic": "1000000000000000000000000",
+            "min_amount": 100,
+            "min_deposit_atomic": "0",
+            "min_refund_atomic": "1000000000000000000",
+            "quote_amount_decimals": 4,
+            "quote_spread_bps": 100,
+            "quote_tolerance_bps": 100,
+            "quote_ttl_seconds": 900
+          },
           "treasury": "0x936c1991f8da9a919fa11b557a3514719f5a4504"
         },
         "oneOf": [
@@ -3544,31 +4118,6 @@
         ],
         "type": "object"
       },
-      "UpdateAccountObjectRequest": {
-        "additionalProperties": false,
-        "description": "`POST /v1/account` body; parameters not sent are left unchanged.",
-        "example": {
-          "confirmation_policies": [
-            {
-              "chain_id": 1,
-              "confirmations": "12"
-            }
-          ]
-        },
-        "properties": {
-          "confirmation_policies": {
-            "description": "The confirmations to require, per chain; chains not listed keep theirs.",
-            "items": {
-              "$ref": "#/components/schemas/ConfirmationPolicy"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
       "UpdateMetadataRequest": {
         "additionalProperties": false,
         "description": "`POST /v1/quotes/{id}`, `POST /v1/deposits/{id}`, `POST /v1/refunds/{id}`, and\n`POST /v1/deposit_addresses/{id}` body: the\nobject's updatable parameters, of which `metadata` is the one.",
@@ -3582,6 +4131,49 @@
           "metadata": {
             "$ref": "#/components/schemas/MetadataParam",
             "description": "Stripe's `metadata`: up to 50 string key/value pairs for your own use, keys of up to 40\ncharacters without square brackets, values of up to 500 characters.\nMerged into the object's: a key set to a value is set, a key set to `\"\"` is unset, other\nkeys are kept, and `metadata: \"\"` unsets every key.\nPhala Pay never reads it. Do not store sensitive information in it, such as personal or\npayment details."
+          }
+        },
+        "type": "object"
+      },
+      "UpdatePaymentSettingsRequest": {
+        "additionalProperties": false,
+        "description": "`POST /v1/payment_settings` body. A parameter not sent is unchanged; `chains`, when sent,\nreplaces the whole list. Writes are last-write-wins.",
+        "example": {
+          "chains": [
+            {
+              "assets": [
+                {
+                  "asset": "PHA",
+                  "quote_spread_bps": 100
+                },
+                {
+                  "asset": "USDT"
+                }
+              ],
+              "chain_id": 1,
+              "confirmations": "12"
+            }
+          ]
+        },
+        "properties": {
+          "chains": {
+            "description": "The chains to accept, replacing the list: each chain and asset of the key's mode once. An\nelement's term not sent resets to the operator's default. `[]` accepts nothing.",
+            "items": {
+              "$ref": "#/components/schemas/PaymentSettingsChain"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "quote_creations_per_customer_per_minute": {
+            "description": "One customer's quote creations in a rolling minute, from 1 to the operator's maximum;\n`null` restores the default.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "type": "object"
@@ -3891,7 +4483,7 @@
     }
   },
   "info": {
-    "description": "Phala Pay is a non-custodial crypto payments API for merchants: quotes and deposit addresses, deposits credited at a small confirmation depth and watched to finality, refunds you pay from your treasury, and webhooks signed with a key bound to a TDX attestation. The [integration guide](https://github.com/Phala-Network/phala-pay/blob/main/docs/integration.md) walks through an integration end to end.\n\n# Authentication\n\nSend an API key as `Authorization: Bearer ppay_rk_test_…` (test mode) or `ppay_rk_live_…` (live mode). A restricted key (`ppay_rk_`, [Stripe](https://docs.stripe.com/keys#limit-access)) holds only the permissions it was created with and never manages keys, treasuries, webhook endpoints, webhook keys, or account settings: run production with one. A secret key (`ppay_sk_`) holds every permission; keep it offline, for administration. The key selects the account and the mode; every object carries `livemode`, and a key never sees the other mode's objects.\n\n# Request ids\n\nEvery response carries `Request-Id: req_…` ([Stripe](https://docs.stripe.com/api/request_ids)). Quote it when you contact support. An event caused by an API request names it in `request.id`, with the `Idempotency-Key` the request sent.\n\n# Idempotent requests\n\nEvery `POST` accepts an `Idempotency-Key` of up to 255 characters ([Stripe](https://docs.stripe.com/api/idempotent_requests)). For 24 hours a repeat of the same request returns the first response, with `Idempotent-Replayed: true`, whatever it was, including a `500`, so a retry never runs a request twice; a repeat with another request is `400 idempotency_key_reused`, and one while the first still runs is `409 idempotency_key_in_use`. A request that did not execute is not saved and runs again on a retry: one that failed validation (`parameter_*`), was rate limited (`429`), or met `503 unavailable`.\n\n# Pagination\n\nLists are newest first with Stripe's cursor pagination ([Stripe](https://docs.stripe.com/api/pagination)): `limit` (1 to 100, default 10), and `starting_after` or `ending_before`, the id of an object of the list; `has_more` says whether more follow. Lists with a `created` filter take `created[gt]`, `created[gte]`, `created[lt]`, and `created[lte]` in Unix seconds.\n\n# Events\n\nEvery change is an event, delivered to your webhook endpoints and listed by `GET /v1/events` ([Stripe](https://docs.stripe.com/api/events/object)). `data.object` is the object as it was when the event happened, rendered with the change and never changed afterwards; `*.updated` events add `data.previous_attributes`. Deliveries are retried until delivered and never given up on; a webhook endpoint's `pending_deliveries`, `oldest_pending_at`, and `last_attempt` show whether it is keeping up, and `GET /v1/events?delivery_success=false` lists what it has not received.\n\n# Errors\n\nErrors are Stripe's error object ([Stripe](https://docs.stripe.com/api/errors)): `{\"error\": {\"type\", \"code\", \"message\", \"param\", \"doc_url\"}}`. `400` means the request cannot succeed as sent or in the objects' current state, `401` authentication, `403` permission, `404` a missing object, `409` only an `Idempotency-Key` still in use, `429` too many requests (with `Retry-After` in seconds), and `5xx` the service. Branch on `code`; `message` may change.\n\n## parameter_invalid\n\n`400`. A parameter is malformed or out of range; `param` names it. Fix the request.\n\n## parameter_missing\n\n`400`. A required parameter is absent; `param` names it.\n\n## parameter_unknown\n\n`400`. The operation does not take a parameter the request sent; `param` names it.\n\n## amount_too_small\n\n`400`. The amount is below the minimum of the route, or nothing is left to refund.\n\n## amount_too_large\n\n`400`. The amount is above the route's maximum deposit, or above what is left to refund.\n\n## exposure_cap_exceeded\n\n`400`. The quote would take the open quotes of your account in this mode past a cap: their number (`max_open_quotes` of `GET /v1/config`), their credit (`max_open_amount_per_account`), or one customer's credit (`max_open_amount_per_customer`). Wait for quotes to be paid, expire, or be canceled, or ask the operator to raise the cap.\n\n## paused\n\n`400`. A pause of the account, the customer, or the route blocks the operation (`quotes`, `settlement`, or `refunds`). Your own `quotes` pause lifts with `POST /v1/account/resume`; the operator lifts its own.\n\n## chain_frozen\n\n`400`. Reconciliation froze the chain pending the operator's review; no quote is issued on it until the operator lifts the block.\n\n## treasury_not_set\n\n`400`. The account has no treasury on the chain: `POST /v1/treasuries/challenge`, then `POST /v1/treasuries`.\n\n## treasury_proof_invalid\n\n`400`. The treasury proof does not prove the address: the message is not the challenge, or the signature does not verify.\n\n## treasury_challenge_expired\n\n`400`. The treasury challenge expired; request a new one.\n\n## treasury_challenge_used\n\n`400`. The treasury challenge was already used; request a new one.\n\n## treasury_not_deployed\n\n`400`. The signature does not recover to the address and no contract is deployed there at the chain's finalized block; deploy the Safe first (ERC-6492 signatures are refused).\n\n## treasury_sanctioned\n\n`400`. A sanctions list names the treasury address.\n\n## treasury_change_pending\n\n`400`. A treasury change is already pending on the chain; cancel it first.\n\n## treasury_unchanged\n\n`400`. The address is already the chain's treasury.\n\n## treasury_unexpected_state\n\n`400`. Only a `pending` treasury can be canceled.\n\n## quote_payment_received\n\n`400`. The quote's address already received a payment, so the quote cannot be canceled.\n\n## quote_window_closed\n\n`400`. The quote's payment window has closed, so it cannot be canceled; it expires on its own.\n\n## quote_unexpected_state\n\n`400`. The quote is `complete` or `expired`; only an `open` quote can be canceled.\n\n## deposit_unexpected_state\n\n`400`. Admin: only a deposit the pump processes, `detected` or `confirmed`, can be nudged; a credited deposit waits for its sweep, which only a finalized `Flushed` event records.\n\n## deposit_not_refundable\n\n`400`. The deposit cannot be refunded: it is not credited or rejected, or it was reversed.\n\n## deposit_not_final\n\n`400`. The deposit is not final yet and could still be reversed; request the refund once `final` is `true` (about 15 minutes after its block on Ethereum).\n\n## destination_sanctioned\n\n`400`. A sanctions list names the refund's destination address.\n\n## transfer_already_used\n\n`400`. The transfer log already pays another refund.\n\n## refund_unexpected_state\n\n`400`. The refund's status does not allow the action: it is not `pending`, it is already marked paid with another transaction, or, being marked paid, it cannot be canceled.\n\n## api_key_inactive\n\n`400`. The API key is revoked or already rolled.\n\n## last_api_key\n\n`400`. The account's last active key of the mode cannot be revoked; create or roll a key first.\n\n## deposit_address_cap_exceeded\n\n`400`. The account has its maximum of active deposit addresses in the mode.\n\n## deposit_address_retired\n\n`400`. The deposit address is retired; rotate the customer's active address instead.\n\n## webhook_endpoint_cap_exceeded\n\n`400`. The account has 16 webhook endpoints in the mode; delete one first.\n\n## webhook_endpoint_disabled\n\n`400`. The webhook endpoint is disabled; enable it before resending events to it.\n\n## idempotency_key_reused\n\n`400`. The `Idempotency-Key` was used with a different request (type `idempotency_error`). Use a new key for a new request.\n\n## signature_invalid\n\n`401`. Admin API only: the RFC 9421 request signature did not verify.\n\n## signature_replayed\n\n`401`. Admin API only: the request signature was already used; sign the request again.\n\n## api_key_missing\n\n`401`. No `Authorization: Bearer` header with an API key (`ppay_rk_…` or `ppay_sk_…`).\n\n## api_key_invalid\n\n`401`. The API key is malformed, unknown, or revoked.\n\n## api_key_expired\n\n`401`. The API key was rolled and its overlap has ended; use the key it was rolled to.\n\n## permission_denied\n\n`403`. The key may not make this request: a restricted key lacks the permission, or the request manages keys, treasuries, webhook endpoints, webhook keys, or account settings, which needs a secret key.\n\n## testmode_charges_only\n\n`403`. The account is not enabled for live mode; use a test key until the operator enables it.\n\n## resource_missing\n\n`404`. No such object in the key's account and mode.\n\n## idempotency_key_in_use\n\n`409`. A request with this `Idempotency-Key` is still running (type `idempotency_error`); retry shortly with the same key. The only `409`.\n\n## rate_limit\n\n`429`. Too many requests of the account and mode (100 per second live, 25 test), or reads of one quote's or deposit address's public view. Retry after `Retry-After` seconds, with exponential backoff.\n\n## customer_rate_limit\n\n`429`. The customer made too many quotes in the last minute, or rotated its deposit address too often in the last hour. Retry after `Retry-After` seconds.\n\n## internal_error\n\n`500`. The service failed. Retry with the same `Idempotency-Key`: a request that started executing replays this response, so it never runs twice; a new key runs it again.\n\n## unavailable\n\n`503`. A dependency (pricing, sanctions screening, attestation) is temporarily unavailable. Retry with backoff; the same `Idempotency-Key` runs the request again.\n\n## service_restoring\n\n`503`. The service was restored from backup and is frozen until the operator has reconciled it with you: every request with an API key is refused, reads too, and nothing is credited or delivered meanwhile. Retry after `Retry-After` seconds; the operator contacts you for your records since the restore point.\n\n## restore_not_frozen\n\n`400`. Admin API only: a restore reconciliation action needs the service frozen after a restore.\n\n## restore_rescan_incomplete\n\n`400`. Admin API only: a chain is not rescanned since the restore (`GET /v1/admin/restore`); the freeze cannot be lifted yet.\n",
+    "description": "Phala Pay is a non-custodial crypto payments API for merchants: quotes and deposit addresses, deposits credited at a small confirmation depth and watched to finality, refunds you pay from your treasury, and webhooks signed with a key bound to a TDX attestation. The [integration guide](https://github.com/Phala-Network/phala-pay/blob/main/docs/integration.md) walks through an integration end to end.\n\n# Authentication\n\nSend an API key as `Authorization: Bearer ppay_rk_test_…` (test mode) or `ppay_rk_live_…` (live mode). A restricted key (`ppay_rk_`, [Stripe](https://docs.stripe.com/keys#limit-access)) holds only the permissions it was created with and never manages keys, treasuries, webhook endpoints, webhook keys, or account settings: run production with one. A secret key (`ppay_sk_`) holds every permission; keep it offline, for administration. The key selects the account and the mode; every object carries `livemode`, and a key never sees the other mode's objects.\n\n# Request ids\n\nEvery response carries `Request-Id: req_…` ([Stripe](https://docs.stripe.com/api/request_ids)). Quote it when you contact support. An event caused by an API request names it in `request.id`, with the `Idempotency-Key` the request sent.\n\n# Idempotent requests\n\nEvery `POST` accepts an `Idempotency-Key` of up to 255 characters ([Stripe](https://docs.stripe.com/api/idempotent_requests)). For 24 hours a repeat of the same request returns the first response, with `Idempotent-Replayed: true`, whatever it was, including a `500`, so a retry never runs a request twice; a repeat with another request is `400 idempotency_key_reused`, and one while the first still runs is `409 idempotency_key_in_use`. A request that did not execute is not saved and runs again on a retry: one that failed validation (`parameter_*`), was rate limited (`429`), or met `503 unavailable`.\n\n# Pagination\n\nLists are newest first with Stripe's cursor pagination ([Stripe](https://docs.stripe.com/api/pagination)): `limit` (1 to 100, default 10), and `starting_after` or `ending_before`, the id of an object of the list; `has_more` says whether more follow. Lists with a `created` filter take `created[gt]`, `created[gte]`, `created[lt]`, and `created[lte]` in Unix seconds.\n\n# Events\n\nEvery change is an event, delivered to your webhook endpoints and listed by `GET /v1/events` ([Stripe](https://docs.stripe.com/api/events/object)). `data.object` is the object as it was when the event happened, rendered with the change and never changed afterwards; `*.updated` events add `data.previous_attributes`. Deliveries are retried until delivered and never given up on; a webhook endpoint's `pending_deliveries`, `oldest_pending_at`, and `last_attempt` show whether it is keeping up, and `GET /v1/events?delivery_success=false` lists what it has not received.\n\n# Errors\n\nErrors are Stripe's error object ([Stripe](https://docs.stripe.com/api/errors)): `{\"error\": {\"type\", \"code\", \"message\", \"param\", \"doc_url\"}}`. `400` means the request cannot succeed as sent or in the objects' current state, `401` authentication, `403` permission, `404` a missing object, `409` only an `Idempotency-Key` still in use, `429` too many requests (with `Retry-After` in seconds), and `5xx` the service. Branch on `code`; `message` may change.\n\n## parameter_invalid\n\n`400`. A parameter is malformed or out of range; `param` names it. Fix the request.\n\n## parameter_missing\n\n`400`. A required parameter is absent; `param` names it.\n\n## parameter_unknown\n\n`400`. The operation does not take a parameter the request sent; `param` names it.\n\n## amount_too_small\n\n`400`. The amount is below the minimum of the route, or nothing is left to refund.\n\n## amount_too_large\n\n`400`. The amount is above the route's maximum deposit, or above what is left to refund.\n\n## exposure_cap_exceeded\n\n`400`. The quote would take the open quotes of your account in this mode past a cap: their number (`max_open_quotes` of `GET /v1/config`), their credit (`max_open_amount_per_account`), or one customer's credit (`max_open_amount_per_customer`). Wait for quotes to be paid, expire, or be canceled, or ask the operator to raise the cap.\n\n## paused\n\n`400`. A pause of the account, the customer, or the route blocks the operation (`quotes`, `settlement`, or `refunds`). Your own `quotes` pause lifts with `POST /v1/account/resume`; the operator lifts its own.\n\n## chain_frozen\n\n`400`. Reconciliation froze the chain pending the operator's review; no quote is issued on it until the operator lifts the block.\n\n## asset_not_accepted\n\n`400`. Your payment settings do not accept the asset on the chain in this mode, or accept nothing yet (`GET /v1/payment_settings`): quote an asset `GET /v1/config` lists, or accept it with `POST /v1/payment_settings`.\n\n## payment_settings_unconfirmed\n\n`400`. After a restore of the service, your payment settings wait for your reconfirmation: send your complete configuration with `POST /v1/payment_settings`.\n\n## treasury_not_set\n\n`400`. The account has no treasury on the chain: `POST /v1/treasuries/challenge`, then `POST /v1/treasuries`.\n\n## treasury_proof_invalid\n\n`400`. The treasury proof does not prove the address: the message is not the challenge, or the signature does not verify.\n\n## treasury_challenge_expired\n\n`400`. The treasury challenge expired; request a new one.\n\n## treasury_challenge_used\n\n`400`. The treasury challenge was already used; request a new one.\n\n## treasury_not_deployed\n\n`400`. The signature does not recover to the address and no contract is deployed there at the chain's finalized block; deploy the Safe first (ERC-6492 signatures are refused).\n\n## treasury_sanctioned\n\n`400`. A sanctions list names the treasury address.\n\n## treasury_change_pending\n\n`400`. A treasury change is already pending on the chain; cancel it first.\n\n## treasury_unchanged\n\n`400`. The address is already the chain's treasury.\n\n## treasury_unexpected_state\n\n`400`. Only a `pending` treasury can be canceled.\n\n## quote_payment_received\n\n`400`. The quote's address already received a payment, so the quote cannot be canceled.\n\n## quote_window_closed\n\n`400`. The quote's payment window has closed, so it cannot be canceled; it expires on its own.\n\n## quote_unexpected_state\n\n`400`. The quote is `complete` or `expired`; only an `open` quote can be canceled.\n\n## deposit_unexpected_state\n\n`400`. Admin: only a deposit the pump processes, `detected` or `confirmed`, can be nudged; a credited deposit waits for its sweep, which only a finalized `Flushed` event records.\n\n## deposit_not_refundable\n\n`400`. The deposit cannot be refunded: it is not credited or rejected, or it was reversed.\n\n## deposit_not_final\n\n`400`. The deposit is not final yet and could still be reversed; request the refund once `final` is `true` (about 15 minutes after its block on Ethereum).\n\n## destination_sanctioned\n\n`400`. A sanctions list names the refund's destination address.\n\n## transfer_already_used\n\n`400`. The transfer log already pays another refund.\n\n## refund_unexpected_state\n\n`400`. The refund's status does not allow the action: it is not `pending`, it is already marked paid with another transaction, or, being marked paid, it cannot be canceled.\n\n## api_key_inactive\n\n`400`. The API key is revoked or already rolled.\n\n## last_api_key\n\n`400`. The account's last active key of the mode cannot be revoked; create or roll a key first.\n\n## deposit_address_cap_exceeded\n\n`400`. The account has its maximum of active deposit addresses in the mode.\n\n## deposit_address_retired\n\n`400`. The deposit address is retired; rotate the customer's active address instead.\n\n## webhook_endpoint_cap_exceeded\n\n`400`. The account has 16 webhook endpoints in the mode; delete one first.\n\n## webhook_endpoint_disabled\n\n`400`. The webhook endpoint is disabled; enable it before resending events to it.\n\n## idempotency_key_reused\n\n`400`. The `Idempotency-Key` was used with a different request (type `idempotency_error`). Use a new key for a new request.\n\n## signature_invalid\n\n`401`. Admin API only: the RFC 9421 request signature did not verify.\n\n## signature_replayed\n\n`401`. Admin API only: the request signature was already used; sign the request again.\n\n## api_key_missing\n\n`401`. No `Authorization: Bearer` header with an API key (`ppay_rk_…` or `ppay_sk_…`).\n\n## api_key_invalid\n\n`401`. The API key is malformed, unknown, or revoked.\n\n## api_key_expired\n\n`401`. The API key was rolled and its overlap has ended; use the key it was rolled to.\n\n## permission_denied\n\n`403`. The key may not make this request: a restricted key lacks the permission, or the request manages keys, treasuries, webhook endpoints, webhook keys, or account settings, which needs a secret key.\n\n## testmode_charges_only\n\n`403`. The account is not enabled for live mode; use a test key until the operator enables it.\n\n## resource_missing\n\n`404`. No such object in the key's account and mode.\n\n## idempotency_key_in_use\n\n`409`. A request with this `Idempotency-Key` is still running (type `idempotency_error`); retry shortly with the same key. The only `409`.\n\n## rate_limit\n\n`429`. Too many requests of the account and mode (100 per second live, 25 test), or reads of one quote's or deposit address's public view. Retry after `Retry-After` seconds, with exponential backoff.\n\n## customer_rate_limit\n\n`429`. The customer made too many quotes in the last minute, or rotated its deposit address too often in the last hour. Retry after `Retry-After` seconds.\n\n## internal_error\n\n`500`. The service failed. Retry with the same `Idempotency-Key`: a request that started executing replays this response, so it never runs twice; a new key runs it again.\n\n## unavailable\n\n`503`. A dependency (pricing, sanctions screening, attestation) is temporarily unavailable. Retry with backoff; the same `Idempotency-Key` runs the request again.\n\n## service_restoring\n\n`503`. The service was restored from backup and is frozen until the operator has reconciled it with you: every request with an API key is refused, reads too, and nothing is credited or delivered meanwhile. Retry after `Retry-After` seconds; the operator contacts you for your records since the restore point.\n\n## restore_not_frozen\n\n`400`. Admin API only: a restore reconciliation action needs the service frozen after a restore.\n\n## restore_rescan_incomplete\n\n`400`. Admin API only: a chain is not rescanned since the restore (`GET /v1/admin/restore`); the freeze cannot be lifted yet.\n",
     "license": {
       "identifier": "Apache-2.0",
       "name": "Apache-2.0"
@@ -3958,126 +4550,6 @@
           }
         ],
         "summary": "The account the API key belongs to, in the key's mode.",
-        "tags": [
-          "account"
-        ]
-      },
-      "post": {
-        "operationId": "update_account",
-        "parameters": [
-          {
-            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateAccountObjectRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AccountObject"
-                }
-              }
-            },
-            "description": "OK",
-            "headers": {
-              "Request-Id": {
-                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request",
-            "headers": {
-              "Request-Id": {
-                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized",
-            "headers": {
-              "Request-Id": {
-                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
-            "headers": {
-              "Request-Id": {
-                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`rate_limit`: retry after `Retry-After` seconds"
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ],
-        "summary": "Updates the account's settings in the key's mode; parameters not sent are left unchanged.\n`confirmation_policies` sets, per chain, the confirmation a payment must reach before it is\ncredited (design D1): the stricter of it and the route's floor applies to every deposit not\ncredited yet, and `GET /v1/config` reports it with its typical credit time. Announced as\n`account.updated`.",
         "tags": [
           "account"
         ]
@@ -5307,7 +5779,7 @@
             "api_key": []
           }
         ],
-        "summary": "The assets, limits, and quote terms of the attested routes in the credential's mode, with the\nconfirmation your account's policy requires.",
+        "summary": "Your effective payment config in the key's mode: every asset your payment settings accept on a\nchain where you have a treasury, with its terms (`GET /v1/payment_settings`), and your\nopen-quote caps. An account that accepts nothing yet gets no asset.",
         "tags": [
           "config"
         ]
@@ -5493,7 +5965,7 @@
                 }
               }
             },
-            "description": "Bad Request, `deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new address and every chain is frozen or paused), or `treasury_not_set` (no treasury on any chain that takes one)",
+            "description": "Bad Request, `asset_not_accepted` (your payment settings accept nothing in this mode), `payment_settings_unconfirmed`, `deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new address and every chain is frozen or paused), or `treasury_not_set` (no treasury on any chain that takes one)",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -5555,7 +6027,7 @@
             "api_key": []
           }
         ],
-        "summary": "Returns the customer's active deposit address, one address for every supported token on every\nsupported network of the key's mode where you have a treasury, issuing it if the customer has\nnone: the same request always returns the same address until it is rotated. It also adds the\naddress's network on a chain supported, or given a treasury, since it was issued, and replaces\na chain's network whose treasury changed.",
+        "summary": "Returns the customer's active deposit address, one address for every token your payment\nsettings accept on every network of the key's mode where you have a treasury (an account that\naccepts nothing gets `asset_not_accepted`), issuing it if the customer has\nnone: the same request always returns the same address until it is rotated. It also adds the\naddress's network on a chain supported, or given a treasury, since it was issued, and replaces\na chain's network whose treasury changed.",
         "tags": [
           "deposit_addresses"
         ]
@@ -5876,7 +6348,7 @@
                 }
               }
             },
-            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen` (every chain is frozen or paused), or `treasury_not_set`",
+            "description": "`deposit_address_retired`: already rotated; `paused`, `chain_frozen` (every chain is frozen or paused), `asset_not_accepted`, `payment_settings_unconfirmed`, or `treasury_not_set`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -7019,6 +7491,188 @@
         ]
       }
     },
+    "/v1/payment_settings": {
+      "get": {
+        "operationId": "get_payment_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentSettingsObject"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`rate_limit`: retry after `Retry-After` seconds"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Your payment settings in the key's mode: the chains and assets you accept and your terms on\neach, with the operator's catalog of the mode in `available`. A new account accepts nothing\nuntil you configure it.",
+        "tags": [
+          "payment_settings"
+        ]
+      },
+      "post": {
+        "operationId": "update_payment_settings",
+        "parameters": [
+          {
+            "description": "Up to 255 characters; for 24 hours a repeat of the same request returns the first response, and of another request is `400 idempotency_error`.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePaymentSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentSettingsObject"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
+            "headers": {
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`rate_limit`: retry after `Retry-After` seconds"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
+        "summary": "Updates your payment settings in the key's mode. A parameter not sent is unchanged; `chains`,\nwhen sent, replaces the whole list, and a term an element does not send takes the operator's\ndefault. Writes are last-write-wins. The settings govern quotes and deposit addresses issued\nfrom now on, and every payment recorded after the change; a quote keeps the terms it was\nissued with. After a restore of the service, a `POST` with your complete configuration, even\nunchanged, reconfirms it. Announced as `payment_settings.updated`.",
+        "tags": [
+          "payment_settings"
+        ]
+      }
+    },
     "/v1/quotes": {
       "get": {
         "operationId": "list_quotes",
@@ -7199,7 +7853,7 @@
                 }
               }
             },
-            "description": "Bad Request, `amount_too_small`, `amount_too_large`, `exposure_cap_exceeded`, `paused`, `chain_frozen`, or `treasury_not_set`",
+            "description": "Bad Request, `asset_not_accepted`, `payment_settings_unconfirmed`, `amount_too_small`, `amount_too_large`, `exposure_cap_exceeded`, `paused`, `chain_frozen`, or `treasury_not_set`",
             "headers": {
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
@@ -7293,7 +7947,7 @@
             "api_key": []
           }
         ],
-        "summary": "Quotes `amount` cents payable in `asset` on `chain_id`: a locked price, the exact token amount,\nand a single-use address, valid until `expires_at`.",
+        "summary": "Quotes `amount` cents payable in `asset` on `chain_id`: a locked price, the exact token amount,\nand a single-use address, valid until `expires_at`, on the terms your payment settings set for\nthe asset; the quote keeps them for good. An asset your settings do not accept is\n`asset_not_accepted`.",
         "tags": [
           "quotes"
         ]

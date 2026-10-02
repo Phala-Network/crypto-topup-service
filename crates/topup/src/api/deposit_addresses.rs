@@ -18,6 +18,7 @@ use crate::client_secret::ClientSecretKey;
 use crate::db::{Account, Customer};
 use crate::deposit_addresses::{self, ChainContracts, DepositAddressError, ListFilter, Status};
 use crate::ids;
+use crate::payment_config;
 use crate::routes::RouteSet;
 use crate::tenancy::Scope;
 
@@ -57,9 +58,11 @@ const MAX_LIMIT: i64 = 100;
         (status = 200, description = "OK", body = DepositAddress),
         (
             status = 400,
-            description = "Bad Request, `deposit_address_cap_exceeded`, `paused`, `chain_frozen` \
-                           (a new address and every chain is frozen or paused), or \
-                           `treasury_not_set` (no treasury on any chain that takes one)",
+            description = "Bad Request, `asset_not_accepted` (your payment settings accept \
+                           nothing in this mode), `payment_settings_unconfirmed`, \
+                           `deposit_address_cap_exceeded`, `paused`, `chain_frozen` (a new \
+                           address and every chain is frozen or paused), or `treasury_not_set` \
+                           (no treasury on any chain that takes one)",
             body = ErrorResponse
         ),
         (status = 401, description = "Unauthorized", body = ErrorResponse)
@@ -67,8 +70,9 @@ const MAX_LIMIT: i64 = 100;
     security(("api_key" = [])),
     tag = "deposit_addresses"
 )]
-/// Returns the customer's active deposit address, one address for every supported token on every
-/// supported network of the key's mode where you have a treasury, issuing it if the customer has
+/// Returns the customer's active deposit address, one address for every token your payment
+/// settings accept on every network of the key's mode where you have a treasury (an account that
+/// accepts nothing gets `asset_not_accepted`), issuing it if the customer has
 /// none: the same request always returns the same address until it is rotated. It also adds the
 /// address's network on a chain supported, or given a treasury, since it was issued, and replaces
 /// a chain's network whose treasury changed.
@@ -151,7 +155,10 @@ pub(crate) async fn list_deposit_addresses(
     let mut connection = state.pool.acquire().await?;
     let mut data = Vec::with_capacity(addresses.len());
     for address in &addresses {
-        data.push(deposit_address_response(&mut connection, &state.routes, address).await?);
+        data.push(
+            deposit_address_response(&mut connection, &state.routes, merchant.scope, address)
+                .await?,
+        );
     }
     Ok(Json(DepositAddressList {
         object: "list".to_owned(),
@@ -219,7 +226,13 @@ pub(crate) async fn get_deposit_address(
             .await
             .map_err(map_error)?
             .ok_or_else(ApiError::not_found)?;
-        deposit_address_response(&mut *state.pool.acquire().await?, &state.routes, &address).await
+        deposit_address_response(
+            &mut *state.pool.acquire().await?,
+            &state.routes,
+            merchant.scope,
+            &address,
+        )
+        .await
     };
     match address.await {
         Ok(address) => Json(DepositAddressView::DepositAddress(Box::new(address))).into_response(),
@@ -277,7 +290,8 @@ pub(crate) async fn update_deposit_address(
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    let address = deposit_address_response(&mut transaction, &state.routes, &address).await?;
+    let address =
+        deposit_address_response(&mut transaction, &state.routes, merchant.scope, &address).await?;
     idempotent.commit(transaction, Json(address)).await
 }
 
@@ -300,7 +314,8 @@ pub(crate) async fn update_deposit_address(
         (
             status = 400,
             description = "`deposit_address_retired`: already rotated; `paused`, \
-                           `chain_frozen` (every chain is frozen or paused), or \
+                           `chain_frozen` (every chain is frozen or paused), \
+                           `asset_not_accepted`, `payment_settings_unconfirmed`, or \
                            `treasury_not_set`",
             body = ErrorResponse
         ),
@@ -373,8 +388,9 @@ impl Issuable {
 
 /// New addresses and networks are issued only while `quotes` is not paused for the account or the
 /// customer (design §12: no new addresses while paused), and only on the chains of the customer's
-/// mode that are not frozen and have a current route not paused for `quotes`. A network pays the
-/// account's current treasury of its chain; a chain without one gets no network.
+/// mode that are not frozen and have a current route the account's payment settings accept that
+/// is not paused for `quotes` (docs/design/payment-settings.md §6). A network pays the account's
+/// current treasury of its chain; a chain without one gets no network.
 async fn issuable_chains(
     state: &AppState,
     account: &Account,
@@ -384,12 +400,27 @@ async fn issuable_chains(
     if paused(&account.paused_scopes) || paused(&customer.paused_scopes) {
         return Err(ApiError::paused("new addresses are paused"));
     }
+    let mut connection = state.pool.acquire().await?;
+    if payment_config::recording_held(&mut connection).await? {
+        return Err(ApiError::paused(
+            "recording is held for the operator's cutover; retry later",
+        ));
+    }
+    let scope = Scope::new(account.id, customer.livemode);
+    let effective = payment_config::load_effective(&mut connection, &state.routes, scope).await?;
+    drop(connection);
+    if effective.settings.status == payment_config::Status::Held {
+        return Err(ApiError::payment_settings_unconfirmed());
+    }
+    if effective.assets.is_empty() {
+        return Err(ApiError::asset_not_accepted(None));
+    }
     let mut by_chain = BTreeMap::<u64, Vec<&RouteFile>>::new();
-    for route in state.routes.current_in(customer.livemode) {
+    for asset in &effective.assets {
         by_chain
-            .entry(route.chain.chain_id)
+            .entry(asset.route.chain.chain_id)
             .or_default()
-            .push(route);
+            .push(asset.route);
     }
     let mut issuable = Issuable {
         chains: Vec::new(),
@@ -415,14 +446,15 @@ async fn issuable_chains(
     Ok(issuable)
 }
 
-/// The API representation of a deposit address: its networks on the chains that have a current
-/// route in its mode, each with those routes' tokens.
-pub(crate) fn deposit_address_object(
-    routes: &RouteSet,
+/// The API representation of a deposit address: its networks on the chains of `routes`, each with
+/// those routes' tokens. The merchant's and the payer's views pass the routes the account's
+/// effective config accepts.
+pub(crate) fn deposit_address_object<'r>(
+    routes: impl IntoIterator<Item = &'r RouteFile>,
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<DepositAddress> {
     let mut assets = BTreeMap::<u64, Vec<&RouteFile>>::new();
-    for route in routes.current_in(address.livemode) {
+    for route in routes {
         assets.entry(route.chain.chain_id).or_default().push(route);
     }
     let networks: Vec<DepositAddressNetwork> = address
@@ -471,13 +503,16 @@ pub(crate) fn deposit_address_object(
     })
 }
 
-/// The merchant's view of a deposit address, with its recent payments.
+/// The merchant's view of a deposit address of `scope`, with its recent payments.
 async fn deposit_address_response(
     connection: &mut PgConnection,
     routes: &RouteSet,
+    scope: Scope,
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<DepositAddress> {
-    let mut object = deposit_address_object(routes, address)?;
+    let effective = payment_config::load_effective(&mut *connection, routes, scope).await?;
+    let mut object =
+        deposit_address_object(effective.assets.iter().map(|asset| asset.route), address)?;
     object.payments = recent_payments(connection, routes, address.id, Utc::now())
         .await?
         .into_iter()
@@ -494,7 +529,8 @@ async fn respond_with_client_secret(
     account: &Account,
     address: &deposit_addresses::DepositAddress,
 ) -> ApiResult<Json<DepositAddress>> {
-    let mut object = deposit_address_response(connection, routes, address).await?;
+    let scope = Scope::new(account.id, address.livemode);
+    let mut object = deposit_address_response(connection, routes, scope, address).await?;
     object.client_secret = Some(issue_client_secret(connection, key, account, address.id).await?);
     Ok(Json(object))
 }
@@ -583,7 +619,11 @@ async fn client_deposit_address_view(
         .await
         .map_err(map_error)?
         .ok_or_else(ApiError::not_found)?;
-    let object = deposit_address_object(&state.routes, &address)?;
+    let effective =
+        payment_config::load_effective(&mut *state.pool.acquire().await?, &state.routes, scope)
+            .await?;
+    let object =
+        deposit_address_object(effective.assets.iter().map(|asset| asset.route), &address)?;
     let payments = client_payments(
         &mut *state.pool.acquire().await?,
         &state.routes,
@@ -591,29 +631,30 @@ async fn client_deposit_address_view(
         Utc::now(),
     )
     .await?;
-    let policies = super::account::confirmation_policies(&state.pool, account_id).await?;
     let networks = object
         .networks
         .into_iter()
         .map(|network| {
-            // A network is shown only with a current route, so its chain is configured, with the
-            // one floor every route of the chain shares (`RouteSet` refuses others).
-            let chain = state.routes.chain(network.chain_id).ok_or_else(|| {
-                tracing::error!(
-                    chain_id = network.chain_id,
-                    "deposit address chain is unconfigured"
-                );
-                ApiError::internal()
-            })?;
+            // The chain's confirmation: the stricter of its floor and the account's requirement,
+            // the same for every accepted asset of the chain.
+            let confirmations = effective
+                .assets
+                .iter()
+                .filter(|asset| asset.route.chain.chain_id == network.chain_id)
+                .map(|asset| {
+                    asset
+                        .route
+                        .chain
+                        .confirmations
+                        .stricter(asset.terms.confirmations)
+                })
+                .reduce(|left, right| left.stricter(right))
+                .ok_or_else(ApiError::internal)?;
             Ok(ClientDepositAddressNetwork {
                 chain_id: network.chain_id,
                 address: network.address,
                 assets: network.assets,
-                typical_credit_seconds: super::quotes::credit_confirmations(
-                    chain,
-                    policies.get(&network.chain_id),
-                )
-                .typical_credit_seconds(network.chain_id),
+                typical_credit_seconds: confirmations.typical_credit_seconds(network.chain_id),
             })
         })
         .collect::<ApiResult<_>>()?;

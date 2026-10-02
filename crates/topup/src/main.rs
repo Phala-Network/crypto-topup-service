@@ -44,10 +44,21 @@ struct Cli {
     command: TopupCommand,
 }
 
+#[derive(Args)]
+struct MigrateArgs {
+    /// The service configuration file, whose routes the cutover backfill writes the 0.5.0 model
+    /// from.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum TopupCommand {
     Run(RunArgs),
-    Migrate,
+    /// Apply the database migrations as the database owner; with `--config`, also run the 0.6.0
+    /// payment settings cutover backfill an instance with issued addresses needs once
+    /// (docs/design/payment-settings.md §10).
+    Migrate(MigrateArgs),
     Route {
         #[command(subcommand)]
         command: RouteCommand,
@@ -286,7 +297,7 @@ async fn main() -> ExitCode {
         TopupCommand::Config {
             command: ConfigCommand::Show { file },
         } => return show_config(&file),
-        TopupCommand::Migrate => migrate().await,
+        TopupCommand::Migrate(args) => migrate(&args).await,
         TopupCommand::Route {
             command: RouteCommand::Validate { template, file },
         } => return validate_route(&file, template),
@@ -639,6 +650,18 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
              (deploy/RESTORE.md)"
         );
     }
+    if !topup::payment_config::backfilled(&mut *pool.acquire().await?)
+        .await
+        .context("failed to read the payment settings cutover")?
+    {
+        anyhow::bail!(
+            "the 0.6.0 payment settings cutover backfill has not run: run `topup migrate --config \
+             FILE` (docs/design/payment-settings.md §10)"
+        );
+    }
+    topup::payment_config::report_invalid(&pool, &routes)
+        .await
+        .context("failed to check the accounts' payment settings")?;
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
@@ -750,22 +773,33 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     };
     let finalized_heads = topup::scanner::FinalizedHeads::default();
     let scanner_heads = finalized_heads.clone();
-    tasks.spawn("scanner", |cancellation| async move {
-        topup::scanner::run(
-            scanner_pool,
-            &scanner_routes,
-            scan_config,
-            scanner_heads,
-            cancellation,
-        )
-        .await
+    // Recording waits for the cutover's hold to be lifted (docs/design/payment-settings.md
+    // §10): no scanner, finality watch, reconciler, or pump runs before.
+    tasks.spawn("scanner", |cancellation| {
+        after_recording(pool.clone(), cancellation, move |cancellation| async move {
+            topup::scanner::run(
+                scanner_pool,
+                &scanner_routes,
+                scan_config,
+                scanner_heads,
+                cancellation,
+            )
+            .await
+        })
     });
     let watch_heads = finalized_heads.clone();
     // The scanner and the reconciler run while frozen after a restore: they rescan the chain from
     // the restored cursor. Every task that credits, settles, or announces waits for the unfreeze.
     tasks.spawn("finality watch", |cancellation| {
+        let pool = pool.clone();
         after_unfreeze(pool.clone(), cancellation, |cancellation| async move {
-            finality_watch.run(watch_heads, cancellation).await;
+            if let Err(error) = after_recording(pool, cancellation, |cancellation| async move {
+                finality_watch.run(watch_heads, cancellation).await;
+            })
+            .await
+            {
+                tracing::error!(%error, "finality watch stopped");
+            }
         })
     });
     tasks.spawn("refund verification worker", |cancellation| {
@@ -776,11 +810,19 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     for worker in 0..PUMPS {
         let worker_pump = pump.clone();
         tasks.spawn(format!("deposit pump {worker}"), |cancellation| {
+            let pool = pool.clone();
             after_unfreeze(pool.clone(), cancellation, move |cancellation| async move {
-                tracing::info!(worker, "deposit pump started");
-                worker_pump
-                    .run_with_instance(worker.to_string(), cancellation)
-                    .await;
+                if let Err(error) =
+                    after_recording(pool, cancellation, move |cancellation| async move {
+                        tracing::info!(worker, "deposit pump started");
+                        worker_pump
+                            .run_with_instance(worker.to_string(), cancellation)
+                            .await;
+                    })
+                    .await
+                {
+                    tracing::error!(%error, "deposit pump stopped");
+                }
             })
         });
     }
@@ -831,10 +873,12 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         })
     });
     let reconcile_interval = Duration::from_secs(args.reconcile_interval_s);
-    tasks.spawn("reconciler", |cancellation| async move {
-        reconciler
-            .run_loop(reconcile_interval, finalized_heads, cancellation)
-            .await;
+    tasks.spawn("reconciler", |cancellation| {
+        after_recording(pool.clone(), cancellation, move |cancellation| async move {
+            reconciler
+                .run_loop(reconcile_interval, finalized_heads, cancellation)
+                .await;
+        })
     });
 
     tracing::info!(
@@ -916,6 +960,45 @@ async fn after_unfreeze<F>(
     }
 }
 
+/// How often a recorder waiting for the cutover's recording hold checks whether it was lifted.
+const RECORDING_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Runs `task` once the 0.6.0 cutover's recording hold is lifted (`POST
+/// /v1/admin/recording/resume`), or not at all when cancelled first.
+async fn after_recording<F>(
+    pool: sqlx::PgPool,
+    cancellation: CancellationToken,
+    task: impl FnOnce(CancellationToken) -> F,
+) -> Result<(), String>
+where
+    F: Future,
+    F::Output: TaskOutcome,
+{
+    let mut announced = false;
+    loop {
+        let held = match pool.acquire().await {
+            Ok(mut connection) => topup::payment_config::recording_held(&mut connection).await,
+            Err(error) => Err(error),
+        };
+        match held {
+            Ok(false) => return task(cancellation).await.into_outcome(),
+            Ok(true) if !announced => {
+                announced = true;
+                tracing::warn!(
+                    "recording is held for the payment settings cutover until POST \
+                     /v1/admin/recording/resume"
+                );
+            }
+            Ok(true) => {}
+            Err(error) => tracing::warn!(%error, "failed to read the recording hold"),
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(RECORDING_POLL_INTERVAL) => {}
+        }
+    }
+}
+
 /// Serves only the read API of a database restored from backup (`deploy/RESTORE.md`), so the
 /// operator can verify it through the product-signed lookups: no lease-owner lock, scanner, pump,
 /// webhook delivery, reconciler, or signer runs, and every non-GET request is refused.
@@ -951,6 +1034,12 @@ async fn reconcile(args: &ReconcileArgs) -> anyhow::Result<ExitCode> {
     let pool = connect("reconcile", 4)
         .await
         .context("failed to connect to database")?;
+    if topup::payment_config::recording_held(&mut *pool.acquire().await?).await? {
+        anyhow::bail!(
+            "recording is held for the payment settings cutover; resume it with POST \
+             /v1/admin/recording/resume first"
+        );
+    }
     let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
         .context("failed to configure reconciler")?;
     let result = match topup::reconciler::hold_lease_owner_lock(&pool).await {
@@ -1218,7 +1307,7 @@ fn spawn_signer() -> std::io::Result<SignerHandle> {
     SignerHandle::spawn(DstackSigner::new(), SIGNER_QUEUE, SIGNER_TIMEOUT)
 }
 
-async fn migrate() -> anyhow::Result<ExitCode> {
+async fn migrate(args: &MigrateArgs) -> anyhow::Result<ExitCode> {
     let pool = connect_owner("migrate", 1)
         .await
         .context("failed to connect to database")?;
@@ -1226,6 +1315,28 @@ async fn migrate() -> anyhow::Result<ExitCode> {
         .await
         .context("failed to apply database migrations")?;
     tracing::info!("database migrations applied");
+    if topup::payment_config::backfilled(&mut *pool.acquire().await?).await? {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let config = args.config.as_deref().context(
+        "the 0.6.0 payment settings cutover must bind the existing deposits and quotes: run \
+         `topup migrate --config FILE` with the service configuration",
+    )?;
+    let routes = topup::routes::RouteSet::new(load_config(config)?.routes)
+        .map_err(anyhow::Error::msg)
+        .context("failed to load the route configuration")?;
+    let report = topup::payment_config::backfill(&pool, &routes)
+        .await
+        .context("the payment settings cutover backfill failed")?;
+    if let Some(report) = report {
+        tracing::warn!(
+            legacy_revisions = report.legacy_revisions,
+            deposits = report.deposits,
+            quotes = report.quotes,
+            "payment settings cutover backfilled: recording is held until the operator configures \
+             the accounts and resumes it with POST /v1/admin/recording/resume"
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

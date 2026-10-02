@@ -25,6 +25,8 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `restore_delivered_credits` | `SELECT`, `INSERT`; `UPDATE` of `discarded_at`, `discarded_by`, and `discard_reason` only |
 | `restore_timeline` | `SELECT`, `UPDATE` |
 | `restore_delivered_events`, `restore_deposit_tombstones` | `SELECT`, `INSERT` |
+| `payment_settings_revisions` | `SELECT`, `INSERT` (append-only) |
+| `payment_settings_cutover` | `SELECT`, `UPDATE` |
 | `_sqlx_migrations` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
@@ -37,7 +39,8 @@ list, so a new table fails it until it is listed there and, if narrowed, here.
 
 Every tenant table (`customers`, `quotes`, `deposit_addresses`, `addresses`, `deposits`,
 `refunds`, `api_keys`, `webhook_endpoints`, `events`, `idempotency_keys`, `account_limits`,
-`retiring_webhook_keys`, and the account-owned `confirmation_policies` and `treasuries`)
+`retiring_webhook_keys`, `payment_settings_revisions`, `payment_settings_state`, and the
+account-owned `treasuries`)
 carries `account_id`, and the mode-bearing ones `livemode`. Merchant queries are built from a
 server-side scope of both (`crate::tenancy::Scope`); the chain workers and the admin API act for the
 platform and read across accounts. Composite foreign keys, `(parent_id, account_id, livemode)`
