@@ -40,7 +40,8 @@ export interface ClientQuote {
   amount_credited: number | null;
   /**
    * Typical seconds from paying to the credit at the confirmation this quote's payments need:
-   * 30 on Ethereum (two blocks), about 300 at an OP-stack chain's `safe` block, 900 at finality.
+   * 30 on Ethereum (two blocks), 7 on an OP-stack chain (three blocks), about 300 under a `safe`
+   * policy, 900 at finality.
    */
   typical_credit_seconds: number;
 }

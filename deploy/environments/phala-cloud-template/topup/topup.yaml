@@ -26,10 +26,11 @@ routes:
     chain:
       chain_id: 84532
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
-      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
-      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
-      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
-      confirmations: safe
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at depth 3 on the
+      # sequencer's unsafe head, 4 s after inclusion (about 7 s after paying), and watched to
+      # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
+      # may require more, `safe`, or `finalized`, never less.
+      confirmations: 3
       rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
@@ -62,10 +63,11 @@ routes:
     chain:
       chain_id: 84532
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
-      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
-      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
-      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
-      confirmations: safe
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at depth 3 on the
+      # sequencer's unsafe head, 4 s after inclusion (about 7 s after paying), and watched to
+      # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
+      # may require more, `safe`, or `finalized`, never less.
+      confirmations: 3
       rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
@@ -105,10 +107,11 @@ routes:
     chain:
       chain_id: 84532
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
-      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at `safe`, a block
-      # derived from batch data posted to L1, about 5 minutes behind the head (TYPICAL_SAFE_SECONDS),
-      # never at a depth on the sequencer's unsafe head. `safe` is the family default, written out here.
-      confirmations: safe
+      # Base Sepolia is an OP-stack chain (design D1, architecture §8): credited at depth 3 on the
+      # sequencer's unsafe head, 4 s after inclusion (about 7 s after paying), and watched to
+      # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
+      # may require more, `safe`, or `finalized`, never less.
+      confirmations: 3
       rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 

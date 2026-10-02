@@ -1567,8 +1567,8 @@ async fn cancel_refuses_a_lock_whose_address_received_any_deposit() -> Result<()
 
 /// The payer's view reports what was credited, not what was quoted: an underpayment valued at
 /// spot is credited at its own amount. Its typical credit time is that of the confirmation the
-/// account's payments on the chain wait for: Base's `safe` block, then `finalized` once the
-/// account's policy requires it.
+/// account's payments on the chain wait for: Base's default depth 3, then a deeper depth, `safe`,
+/// and `finalized` as the account's policy requires more; a shallower depth is refused.
 #[tokio::test]
 async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -1582,7 +1582,7 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
         seed::set_treasury(pool, product.id, true, BASE, seed::FIXTURE_TREASURY).await?;
         let mut route = test_route();
         route.chain.chain_id = BASE;
-        route.chain.confirmations = topup_core::route::Confirmations::Safe;
+        route.chain.confirmations = topup_core::route::ChainFamily::OpStack.default_confirmations();
         let admin_key = SigningKey::from_bytes(&[44; 32]);
         let app = topup::api::router(AppState {
             pool: pool.clone(),
@@ -1628,20 +1628,31 @@ async fn the_client_view_reports_the_credit_of_a_spot_valued_underpayment() -> R
 
         let unpaid = read().await?;
         ensure!(unpaid["amount_credited"].is_null(), "{unpaid}");
-        ensure!(unpaid["typical_credit_seconds"] == 300, "{unpaid}");
-        let policy = serde_json::to_vec(&json!({
-            "confirmation_policies": [{"chain_id": BASE, "confirmations": "finalized"}]
-        }))?;
-        let updated = app
-            .clone()
-            .oneshot(merchant_request(
-                Method::POST,
-                "/v1/account",
-                policy,
-                &product_key,
-            ))
-            .await?;
-        ensure!(updated.status() == StatusCode::OK);
+        ensure!(unpaid["typical_credit_seconds"] == 7, "{unpaid}");
+        let set_policy = |confirmations: &'static str| {
+            let app = app.clone();
+            let product_key = &product_key;
+            async move {
+                let policy = serde_json::to_vec(&json!({
+                    "confirmation_policies": [{"chain_id": BASE, "confirmations": confirmations}]
+                }))?;
+                let response = app
+                    .oneshot(merchant_request(
+                        Method::POST,
+                        "/v1/account",
+                        policy,
+                        product_key,
+                    ))
+                    .await?;
+                anyhow::Ok(response.status())
+            }
+        };
+        ensure!(set_policy("2").await? == StatusCode::BAD_REQUEST);
+        ensure!(set_policy("5").await? == StatusCode::OK);
+        ensure!(read().await?["typical_credit_seconds"] == 11);
+        ensure!(set_policy("safe").await? == StatusCode::OK);
+        ensure!(read().await?["typical_credit_seconds"] == 300);
+        ensure!(set_policy("finalized").await? == StatusCode::OK);
         ensure!(read().await?["typical_credit_seconds"] == 900);
 
         // 40 of the quoted 100 atomic units, valued at spot: 40 cents, not the quote's 100.

@@ -212,12 +212,10 @@ impl ConfirmStep {
             );
         };
 
-        // The stricter of the route's floor and the account's policy; a policy no chain family
-        // accepts with the route's value (never written by the API) falls back to finality.
-        let confirmations = context.policy.map_or(Some(chains.confirmations), |policy| {
+        // The stricter of the route's floor and the account's policy.
+        let confirmations = context.policy.map_or(chains.confirmations, |policy| {
             chains.confirmations.stricter(policy)
         });
-        let confirmations = confirmations.unwrap_or(Confirmations::Finalized);
         let (canonical, is_final) =
             match confirmed_evidence(chains, confirmations, deposit, context.address).await {
                 FinalityResult::Ready { log, is_final } => (log, is_final),

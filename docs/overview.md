@@ -84,11 +84,13 @@ merchant backend creates a quote (or the customer's deposit address) with its AP
   → the merchant recomputes the address from its own pins before showing it
   → the per-block scan shows the payment as "seen, N confirmations" within seconds of its block
   → recorded once its block reaches the confirmation (2 blocks on Ethereum, about 30 s after
-    paying; `safe` on an OP-stack chain, about 5 minutes; or the account's stricter policy)
+    paying; 3 blocks on an OP-stack chain such as Base, about 7 s; or the account's stricter
+    policy)
   → a second RPC provider confirms block hash and log; the quote is taken at that instant
   → sanctions screening and per-deposit bounds
   → credited: a signed deposit.credited webhook, retried until the merchant fulfills it once
-  → watched to finality; a dropped transaction becomes deposit.reversed
+  → watched to finality; a payment a reorg proves replaced becomes deposit.reversed; one gone
+    with its nonce unspent stays credited, not final, within the cap, and alerts the operator
   → the merchant (or anyone) flushes forwarders to its treasury; the service marks deposits swept
     from the finalized Flushed events
   → reconciliation of chain and service ledger per forwarder

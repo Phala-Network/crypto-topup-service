@@ -23,7 +23,8 @@ pub struct RouteSet {
 
 #[derive(Debug)]
 struct ChainEntry {
-    /// Chain settings of the first loaded route; every other route on the chain agrees.
+    /// Chain settings of the first loaded route; every other route on the chain agrees on its
+    /// providers and confirmations.
     config: ChainConfig,
     /// One client per `rpc_providers` entry, or why the entry is unusable.
     providers: Vec<Result<Arc<EvmClient>, ProviderError>>,
@@ -198,6 +199,25 @@ fn index(
                 route.route, route.version
             ));
         }
+        // One floor per chain (design D1): the scanner, the confirm step, and the API all read the
+        // chain's, so a route that credits at another value, written or defaulted, is refused.
+        if chain.config.confirmations != route.chain.confirmations {
+            let first = routes
+                .iter()
+                .find(|first| first.chain.chain_id == chain_id)
+                .unwrap_or(route);
+            return Err(format!(
+                "route `{}` version {} credits chain {chain_id} at confirmations `{}`, but route \
+                 `{}` version {} at `{}`: every route of a chain must share one confirmation \
+                 floor (write the same `chain.confirmations`, defaults included)",
+                route.route,
+                route.version,
+                route.chain.confirmations.policy_value(),
+                first.route,
+                first.version,
+                first.chain.confirmations.policy_value()
+            ));
+        }
         let asset = (chain_id, route.asset.contract);
         match current
             .get(&asset)
@@ -286,6 +306,54 @@ mod tests {
         };
         assert_eq!(names(true), ["phala-cloud-ethereum-pha-usd"]);
         assert_eq!(names(false), ["sepolia-route"]);
+    }
+
+    /// A Base route of the fixture, with `confirmations` written or, for `None`, left to the
+    /// OP-stack default.
+    fn base_route(route: &str, token: u8, confirmations: Option<&str>) -> RouteFile {
+        let written =
+            confirmations.map_or_else(String::new, |value| format!("  confirmations: {value}\n"));
+        serde_saphyr::from_str(
+            &include_str!("../tests/fixtures/phala-cloud-pha.yaml")
+                .replace("chain_id: 1\n", "chain_id: 8453\n")
+                .replace("phala-cloud-ethereum-pha-usd", route)
+                .replace("  confirmations: finalized\n", &written)
+                .replace(
+                    "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
+                    &format!("{:#x}", Address::repeat_byte(token)),
+                ),
+        )
+        .expect("Base route parses")
+    }
+
+    #[test]
+    fn one_chain_has_one_confirmation_floor_whatever_the_route_order() {
+        let default = base_route("base-pha", 0x41, None);
+        assert_eq!(
+            default.chain.confirmations,
+            topup_core::route::Confirmations::Depth(3)
+        );
+        for stricter in ["safe", "finalized"] {
+            let explicit = base_route("base-usdc", 0x42, Some(stricter));
+            for routes in [
+                vec![default.clone(), explicit.clone()],
+                vec![explicit.clone(), default.clone()],
+            ] {
+                let error = RouteSet::new(routes.clone())
+                    .map(drop)
+                    .expect_err("one chain has one confirmation floor");
+                assert!(
+                    error.contains("must share one confirmation floor")
+                        && error.contains("`3`")
+                        && error.contains(&format!("`{stricter}`")),
+                    "{error}"
+                );
+                assert_eq!(RouteSet::check(&routes), Err(error));
+            }
+        }
+        // The default written out is the same floor.
+        RouteSet::new(vec![default, base_route("base-usdc", 0x42, Some("3"))])
+            .expect("routes that agree on the floor load");
     }
 
     #[test]

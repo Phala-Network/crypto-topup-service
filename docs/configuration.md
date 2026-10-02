@@ -101,7 +101,7 @@ The files it refuses include:
 | `--public-origin URL` | the file's | Replaces `public_origin`: the restore instance's own origin, or a local stack's. The attested service compose never sets it. |
 | `--public-origin-host-env NAME` | none | When the file leaves `public_origin` out: the environment variable holding the origin's host, a lowercase DNS name served as `https://HOST` (the template's `DSTACK_APP_DOMAIN`). |
 | `--admin-public-key-env NAME` | none | When the file leaves `admin_key.public_key` out: the environment variable holding the admin public key, standard base64 ed25519 (the template's `TOPUP_ADMIN_PUBLIC_KEY`). |
-| `--head-poll-interval-s` | one block time (12 s) | Delay between `eth_blockNumber` polls of provider A. Each new block's transfers to every issued address are read in one request. |
+| `--head-poll-interval-s` | one block time: 12 s, or 2 s on an OP-stack chain whose route credits at a depth | Delay between `eth_blockNumber` polls of provider A, for every chain when set. Each new block's transfers to every issued address are read in one request. |
 | `--finalized-poll-interval-s` | 60 | Least delay between reads of the `finalized` head. Its advances drive the finalized backstop, the finality watch, and reconciliation. |
 | `--reconcile-interval-s` | 600 | Least delay between reconciliation rounds; a round runs only after `finalized` advanced. |
 | `--wait-interval-s` | 60 | Delay before retrying an expected wait outcome. |

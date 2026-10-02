@@ -34,7 +34,7 @@ deterministic factory ([Contracts](README.md#contracts)); any test key quotes on
 | Chain | `confirmations` | RPC providers | Sanctions oracle (a `MockSanctionsOracle`) |
 |---|---|---|---|
 | Sepolia (11155111) | `2`, Ethereum L1's default | `provider-a`, `provider-b` | `0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6` |
-| Base Sepolia (84532) | `safe`, the OP-stack default: about 5 minutes, never the sequencer's unsafe head (architecture §8) | `base-sepolia-a` `https://base-sepolia.gateway.tenderly.co`, `base-sepolia-b` `https://base-sepolia-rpc.publicnode.com`, both keyless | `0x8A0C93d85a05aD30741C193068abF2e5E16e7b35` |
+| Base Sepolia (84532) | `3`, the OP-stack default: the payment's block and two more on the sequencer's unsafe head, credited about 7 s after paying (architecture §8) | `base-sepolia-a` `https://base-sepolia.gateway.tenderly.co`, `base-sepolia-b` `https://base-sepolia-rpc.publicnode.com`, both keyless | `0x8A0C93d85a05aD30741C193068abF2e5E16e7b35` |
 
 Tether publishes no testnet USDT, so the USDT routes take Aave's, the testnet USDT of Aave's
 markets on both chains. Aave's app no longer lists its Sepolia market, but both faucet contracts
@@ -45,8 +45,11 @@ the mainnet template, and Tether's fee switch and blacklist are handled as
 [USDT fee switch and blacklist](runbooks/usdt-issuer-controls.md) says. USDC moves one or two
 transfers a block on both chains, so its routes set `backstop: addresses`, which puts each whole chain, PHA included, on transfer requests by recipient (architecture §8); the
 RPC cost is unchanged while staging has fewer than 1 000 addresses ([Measuring RPC
-usage](README.md#measuring-rpc-usage)). The head loop polls every 12 s on both chains
-(`--head-poll-interval-s`), six Base blocks, so Base Sepolia costs about what Sepolia does.
+usage](README.md#measuring-rpc-usage)). The head loop polls once per block on both chains: every
+12 s on Sepolia, and every 2 s on Base Sepolia, whose route credits at a depth, so Base Sepolia's
+provider A takes about six times Sepolia's head polls and per-block log requests (about 47 500
+`eth_blockNumber` and 43 200 `eth_getLogs` a day, half a request a second each), and its other
+calls are unchanged. `--head-poll-interval-s` overrides the interval for every chain.
 Routes are attested config: adding or changing one is a PR and an `upgrade` of `topup` with
 Deploy Phala's instance, never a reset.
 

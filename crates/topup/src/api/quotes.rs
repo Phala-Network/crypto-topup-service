@@ -82,7 +82,7 @@ pub(crate) async fn get_config(
                 quote_spread_bps: route.rate_lock.spread_bps.value(),
                 quote_tolerance_bps: route.rate_lock.lock_tolerance_bps.value(),
                 confirmations: confirmations.policy_value(),
-                typical_credit_seconds: confirmations.typical_credit_seconds(),
+                typical_credit_seconds: confirmations.typical_credit_seconds(route.chain.chain_id),
                 typical_finality_seconds: TYPICAL_FINALIZED_SECONDS,
             }
         })
@@ -99,15 +99,13 @@ pub(crate) async fn get_config(
 }
 
 /// The confirmation `route`'s payments are credited at: the stricter of the route's floor and the
-/// account's `policy` for its chain, or finality when no chain family accepts both.
+/// account's `policy` for its chain.
 pub(super) fn credit_confirmations(
     route: &RouteFile,
     policy: Option<&Confirmations>,
 ) -> Confirmations {
     let floor = route.chain.confirmations;
-    policy
-        .map_or(Some(floor), |policy| floor.stricter(*policy))
-        .unwrap_or(Confirmations::Finalized)
+    policy.map_or(floor, |policy| floor.stricter(*policy))
 }
 
 #[utoipa::path(
@@ -532,7 +530,7 @@ async fn client_quote_view(
         payment_status: payment_status.to_owned(),
         confirmations,
         amount_credited,
-        typical_credit_seconds: confirmation.typical_credit_seconds(),
+        typical_credit_seconds: confirmation.typical_credit_seconds(lock.chain_id),
     })
 }
 

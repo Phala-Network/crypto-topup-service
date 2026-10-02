@@ -31,6 +31,15 @@ pub struct Anvil {
 impl Anvil {
     /// Starts anvil, or returns `None` after [`super::skip`] when Foundry is not on `PATH`.
     pub async fn start_if_available(extra_args: &[&str]) -> Result<Option<Self>> {
+        Self::start_on_chain_if_available(CHAIN_ID, extra_args).await
+    }
+
+    /// Starts anvil with `chain_id`, such as an OP-stack chain's, or returns `None` after
+    /// [`super::skip`] when Foundry is not on `PATH`.
+    pub async fn start_on_chain_if_available(
+        chain_id: u64,
+        extra_args: &[&str],
+    ) -> Result<Option<Self>> {
         if !command_available("anvil") {
             super::skip("anvil is not on PATH")?;
             return Ok(None);
@@ -43,14 +52,14 @@ impl Anvil {
             command_available("cast"),
             "cast is required when anvil is available"
         );
-        Self::start(extra_args).await.map(Some)
+        Self::start(chain_id, extra_args).await.map(Some)
     }
 
     /// Starts anvil on a port it picks itself (no free-port race with parallel tests) and
     /// waits until it answers JSON-RPC, so a loaded host only slows the start down.
-    pub async fn start(extra_args: &[&str]) -> Result<Self> {
+    pub async fn start(chain_id: u64, extra_args: &[&str]) -> Result<Self> {
         let mut child = Command::new("anvil")
-            .args(["--port", "0", "--chain-id", &CHAIN_ID.to_string()])
+            .args(["--port", "0", "--chain-id", &chain_id.to_string()])
             .args(extra_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -58,8 +58,9 @@ holds no funds, sends no transactions, pays no merchant gas, and charges no fee 
 payments reach only the merchant's own treasury, and the merchant sweeps and refunds with its own
 wallet or Safe. Phala Cloud is an ordinary account. A deposit is credited at
 the route's confirmation (two blocks on Ethereum, about 30 seconds after paying) and watched to
-finality; the rare deposit whose transaction leaves the chain is reversed with a signed
-`deposit.reversed`, which the merchant handles like a refund. There are two ways to deposit. A
+finality; the rare deposit a reorganization proves replaced is reversed with a signed
+`deposit.reversed`, which the merchant handles like a refund (one whose transaction leaves the
+chain with its nonce unspent stays credited and not final, with an alert, §7). There are two ways to deposit. A
 **quote** fixes a price: the user states a USD amount, receives a locked price, an exact token
 amount, a single-use address, and a countdown, then pays. This is the checkout model of Coinbase
 Commerce and BitPay. A payment that does not match its quote (late, wrong amount, second
@@ -495,22 +496,33 @@ reads at the position takes the successor's id and `replaces` again (§14).
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
-reproduces crediting only final deposits.
+reproduces crediting only final deposits. It is the chain's floor: every loaded route of a chain
+must resolve to the same value, defaults included, or the route set is refused at load
+(`topup config check` too), so the scanner, the confirm step, and the API read one floor. A
+stricter value is a deeper depth, then `safe`, then `finalized`: `safe` outranks every depth, since
+the sequencer can rewrite the unsafe head on its own however deep a block is in it, but not a block
+derived from data posted to L1, which only an L1 reorganization reaching that data can change. A depth credits before finality on both families,
+and the same code handles a reorganization on either: the finality watch (§7) follows a
+re-included transaction and reverses a proven-replaced one, a transaction gone with its nonce
+unspent stays credited and not final with an alert after an hour, and the per-account cap on
+credit not yet final (§7) bounds what is exposed meanwhile.
 
 | Chain family | Values | Default |
 |---|---|---|
 | Ethereum L1 (mainnet 1, Sepolia, Holesky, Hoodi, Anvil 31337) | a depth ≥ 1, or `finalized` | 2 (credited about 30 s after paying): depth-1 reorgs are routine, deeper ones were not observed |
-| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` (about 5 minutes) |
+| OP-stack L2 (OP 10, Base 8453, Base Sepolia, OP Sepolia) | a depth ≥ 1 on the sequencer's unsafe head, `safe` (derived from data posted to L1), or `finalized` | 3 (credited about 7 s after paying): Base reports one reorged L2 block ever and none after batching to L1 (design D1, owner decision of 2026-10-02) |
 | Any other chain | `finalized` | `finalized` |
 
 **Head loop** per chain, on provider A: the only reader of provider A's heads. It polls
-`latest` with `eth_blockNumber` once per block time (12 s by default, `--head-poll-interval-s`;
-also the rate at which an OP-stack `safe` head, which follows L1, can move) and locks onto block
-arrival: after a poll that found a new head it waits one block time; after one that did not, a
+`latest` with `eth_blockNumber` once per block time (by default the family's block time for a
+route crediting at a depth, 12 s on Ethereum and 2 s on an OP-stack chain, and 12 s otherwise,
+the rate at which an OP-stack `safe` head, which follows L1, can move; `--head-poll-interval-s`
+overrides it) and locks onto block arrival: after a poll that found a new head it waits one block time; after one that did not, a
 quarter of one (up to four times, then a block time again, for a missed slot or a stalled chain);
 and until the phase is known, and every eighth block, three quarters of one, so the next block is
-found early or missed, which fixes the phase. A block is thus seen within about 3 s of arriving,
-for about 1.1 polls per block. It reads `finalized` (`eth_getBlockByNumber`, with its time) at
+found early or missed, which fixes the phase. A block is thus seen within about a quarter block
+time of arriving (3 s on Ethereum, 0.5 s on an OP-stack chain), for about 1.1 polls per block. It
+reads `finalized` (`eth_getBlockByNumber`, with its time) at
 most once per `--finalized-poll-interval-s` (60 s by default; Ethereum finalizes once per 6.4-minute
 epoch) and publishes each advance, which wakes the finalized backstop, the finality watch, and the
 reconciler; none of them polls a head. `safe` is read on each new head only for a `safe` route.
@@ -545,8 +557,11 @@ horizon (the highest block that has reached the confirmation) become `detected` 
 same transaction, so the blocks above it are read again on the next head and a block below it is
 not read by this loop again. The pump confirms them on both providers at once, so a payment to any
 issued address (an open quote's, a closed or expired one's, a repeated or wrong amount, or a
-persistent address) is typically credited about 30 seconds after paying at depth 2 (half a slot to
-inclusion, one more slot, up to a quarter slot of polling, confirmation; `typical_credit_seconds`).
+persistent address) is typically credited about 30 seconds after paying at depth 2 on Ethereum
+(half a slot to inclusion, one more slot, up to a quarter slot of polling, confirmation;
+`typical_credit_seconds`), and about 7 seconds after paying at depth 3 on an OP-stack chain (half a
+2-second block to inclusion, two more blocks, polling, confirmation; measured on Anvil at about
+4.5 s after inclusion).
 A transfer the per-block scan does not record (in a range it skipped after downtime longer than a
 window, or introduced below its cursor by a reorg deeper than the confirmation) is recorded by the
 finalized backstop and credited at finality. In token mode, transfers of other tokens are not
@@ -802,7 +817,8 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
   the same body. `amount` is the quoted credit when `price_source`
   is `quote`, otherwise the spot credit at finality (§9). `quote` is the receiving address's
   quote, also when a late or wrong-amount payment was valued at spot.
-- A credited deposit whose transaction leaves the chain before finality (§7) is `reversed`, and
+- A credited deposit that a reorganization proves replaced before finality (its transaction's
+  nonce spent by another, or another transfer at its position at finality; §7) is `reversed`, and
   `deposit.reversed` follows, with the same derived-id rule. This is Stripe's pattern for a
   payment that fails after success (an ACH failure after `succeeded` becomes a dispute): rare,
   signed, and handled by the merchant like a refund: the snapshot's `amount_reversed` takes the
@@ -1134,8 +1150,8 @@ rotation returns a new `client_secret`, `da_…_secret_…`, built and checked a
 `GET /v1/deposit_addresses/{id}?client_secret=…` without `Authorization` returns
 `ClientDepositAddress`, `{id, object, livemode, status, address, networks, payments}`, each network
 with its `typical_credit_seconds` (at the account's confirmation on the chain, as `GET /v1/config`
-reports it; absent when the chain's tokens are credited at different confirmations, and from
-v0.3.5 and earlier, so clients do not require it), and each payment with
+reports it, one value for all its tokens since a chain has one floor (§8); absent from v0.3.5 and
+earlier, so clients do not require it), and each payment with
 its progress (`seen`, `confirming`, `credited`, `rejected`, `reversed`) and no deposit id,
 treasury, customer, or metadata, under the quote reads' CORS and rate limit.
 
@@ -1300,7 +1316,7 @@ from fetched state, never from webhook order.
   tokens." The payer picks a network and a token; the page shows that network, the token contract,
   the address with a copy button, and a QR of that token's EIP-681 URI (no amount), with "Send
   only PHA, USDC on Ethereum, Base. Any amount is credited at the market rate when it arrives,
-  usually in about 30 seconds on Ethereum and about 5 minutes on Base," each network's time from
+  usually in about 30 seconds on Ethereum and about 7 seconds on Base," each network's time from
   its `typical_credit_seconds` in the public view; without it, "once it is confirmed on its
   network". Where a network's address differs (another treasury), show each network's own
   address. After a rotation, stop showing the retired address; a payment to it is still credited.
@@ -1386,7 +1402,7 @@ defaulted addresses from it. The defaults and why:
 
 | Value | Default |
 |---|---|
-| `chain.confirmations` | per chain family (§8): 2 on Ethereum L1, `safe` on OP-stack, `finalized` elsewhere; a route may require more (for example `finalized`), and a family accepts only its values |
+| `chain.confirmations` | per chain family (§8): 2 on Ethereum L1, 3 on OP-stack, `finalized` elsewhere; a route may require more (for example `finalized`), and a family accepts only its values |
 | `chain.implementation` | the factory's first `CREATE` (nonce 1), which its constructor deploys; startup verifies `implementation()` on chain (§4) |
 | `chain.sanctions_oracle` | the Chainalysis oracle published for the chain (Ethereum and most EVM chains `0x40C5…aC8fb`, Base `0x3A91…D739B`); required on any other chain, such as Sepolia |
 | `chain.rpc_providers` | `[provider-a, provider-b]`; an id (lowercase letters, digits, `-`) names its attested URL in the configuration's `rpc_providers` and its sealed key `TOPUP_RPC_<ID>_KEY`, and serves one chain ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)) |

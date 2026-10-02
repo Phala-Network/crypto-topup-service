@@ -1,5 +1,7 @@
 //! Fast credit and reversal on Anvil and PostgreSQL (docs/design/multi-tenant.md §4, §16 PR 1):
-//! a route crediting at depth 2, reorganized with `anvil_reorg`.
+//! a route crediting at depth 2, reorganized with `anvil_reorg`; and the same on an OP-stack chain
+//! id, crediting at the family's depth on the sequencer's unsafe head while `safe` and `finalized`
+//! lag behind.
 
 mod support;
 
@@ -38,9 +40,10 @@ use topup_adapters::risk::oracle::SanctionsSource;
 use topup_core::deposit::DepositState;
 use topup_core::identity::{credited_event_id, deposit_id, reversed_event_id};
 use topup_core::money::{AtomicAmount, PRICE_SCALE, ScaledPrice};
-use topup_core::route::{ChainHeads, Confirmations, RouteFile};
+use topup_core::route::{ChainFamily, ChainHeads, Confirmations, RouteFile};
 use topup_core::screening::{Bounds, SanctionsAnswer, SanctionsResult};
 use topup_core::valuation::{SourceId, UnixSeconds};
+use tracing_test::traced_test;
 use uuid::Uuid;
 
 use support::chain::{ANVIL_PRIVATE_KEY, Anvil, CHAIN_ID, forge_create, run_checked};
@@ -57,6 +60,27 @@ const AMOUNT: u64 = 1_000;
 /// Anvil's default 32-slot epochs keep `finalized` 64 blocks and `safe` 32 blocks behind the head,
 /// so a reorg of a few blocks stays above both.
 const FINALITY_DEPTH: u64 = 64;
+/// Base Sepolia's chain id: an OP-stack chain (design D1).
+const BASE_SEPOLIA: u64 = 84_532;
+
+/// The chain a scenario runs on and the confirmation its route credits at.
+#[derive(Clone, Copy)]
+struct Network {
+    chain_id: u64,
+    confirmations: Confirmations,
+}
+
+/// Anvil's Ethereum L1 chain id at depth 2.
+const L1: Network = Network {
+    chain_id: CHAIN_ID,
+    confirmations: Confirmations::Depth(2),
+};
+
+/// An OP-stack chain id at the family's default, a depth on the sequencer's unsafe head.
+const OP_STACK: Network = Network {
+    chain_id: BASE_SEPOLIA,
+    confirmations: ChainFamily::OpStack.default_confirmations(),
+};
 
 #[tokio::test]
 async fn a_depth_one_reorg_before_credit_changes_nothing() -> Result<()> {
@@ -466,6 +490,7 @@ async fn a_lagging_provider_b_delays_the_credit_until_it_reaches_the_depth() -> 
     let lag = Arc::new(AtomicU64::new(1));
     let lagging = Arc::clone(&lag);
     run_with(
+        L1,
         &[],
         move |rpc_url| {
             Ok(LaggingReader {
@@ -513,70 +538,253 @@ async fn a_payment_is_credited_within_thirty_seconds_of_inclusion_on_twelve_seco
 -> Result<()> {
     run(&["--block-time", "12"], |chain| {
         Box::pin(async move {
-            let label = "latency-provider-a";
-            let cancellation = CancellationToken::new();
-            let pump = chain.pump.clone();
-            let pump_task = tokio::spawn({
-                let cancellation = cancellation.clone();
-                async move { pump.run(cancellation).await }
-            });
-            // The production loop at its production cadence: a head poll per block time.
-            let scanner_task = tokio::spawn(run_chain(
-                chain.pool.clone(),
-                labeled_reader(&chain.anvil.rpc_url, label)?,
-                chain.routes.clone(),
-                ScanConfig::default(),
-                FinalizedHeads::default(),
-                cancellation.clone(),
-            ));
-            let started = chain.anvil.block_number()?;
-            let tx = chain.send_payment(AMOUNT)?;
-            let result = async {
-                let mut included_at = None;
-                let deadline = Instant::now() + Duration::from_secs(90);
-                loop {
-                    ensure!(Instant::now() < deadline, "no credit within 90 s");
-                    if included_at.is_none() && chain.receipt_block(tx)?.is_some() {
-                        included_at = Some(Utc::now());
-                    }
-                    if let Some(included_at) = included_at {
-                        let created = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
-                            "SELECT created FROM events WHERE type = 'deposit.credited'",
-                        )
-                        .fetch_optional(&chain.pool)
-                        .await?;
-                        if let Some(created) = created {
-                            let elapsed = created - included_at;
-                            eprintln!("deposit.credited written {elapsed} after inclusion");
-                            ensure!(
-                                elapsed < chrono::Duration::seconds(30),
-                                "credited {elapsed} after inclusion"
-                            );
-                            return Ok(());
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-            .await;
-            cancellation.cancel();
-            pump_task.await?;
-            scanner_task.await??;
-            result?;
+            assert_credited_within(chain, "latency-provider-a", chrono::Duration::seconds(30)).await
+        })
+    })
+    .await
+}
 
-            // Provider A's calls over the run: about one head poll and one log request per block,
-            // and one receipt, block, and transaction read for the one transfer.
-            let blocks = chain.anvil.block_number()?.saturating_sub(started).max(1);
-            let calls = provider_call_counts(label);
-            eprintln!("provider A calls over {blocks} blocks: {calls:?}");
-            let count = |method| calls.get(method).copied().unwrap_or_default();
-            ensure!(count("eth_blockNumber") <= 2 * blocks + 4, "{calls:?}");
-            ensure!(count("eth_getLogs") <= blocks + 1, "{calls:?}");
-            ensure!(count("eth_getTransactionReceipt") <= 2, "{calls:?}");
+/// At an OP-stack chain's default depth on 2-second blocks, the head loop polls once per L2 block
+/// and the payment is credited within 10 seconds of inclusion.
+#[tokio::test]
+async fn an_op_stack_payment_is_credited_within_ten_seconds_of_inclusion_on_two_second_blocks()
+-> Result<()> {
+    run_on(OP_STACK, &["--block-time", "2"], |chain| {
+        Box::pin(async move {
+            assert_credited_within(
+                chain,
+                "op-latency-provider-a",
+                chrono::Duration::seconds(10),
+            )
+            .await
+        })
+    })
+    .await
+}
+
+/// An OP-stack chain credits at a depth on the sequencer's unsafe head, while `safe` and
+/// `finalized` lag behind; an unsafe-head reorg that spends the payer's nonce on another
+/// transaction is handled as on Ethereum. The deposit is reversed once at finality, and the
+/// replacement, which pays the address again in the replaced block, below the head loop's cursor,
+/// is recorded by the finalized backstop and credited.
+#[tokio::test]
+async fn an_op_stack_unsafe_head_reorg_reverses_the_credit_and_credits_the_replacement()
+-> Result<()> {
+    run_on(OP_STACK, &[], |chain| {
+        Box::pin(async move {
+            let Confirmations::Depth(depth) = OP_STACK.confirmations else {
+                bail!("the OP-stack default is a depth");
+            };
+            let nonce = chain.payer_nonce()?;
+            let tx = chain.pay(AMOUNT)?;
+            chain.anvil.mine(depth - 2)?;
+            ensure!(
+                chain.scan().await? == 0,
+                "recorded one block short of the depth"
+            );
+            chain.anvil.mine(1)?;
+            ensure!(chain.scan().await? == 1);
+            chain.settle().await?;
+            let credited = chain.deposit(tx).await?;
+            ensure!(credited.state == DepositState::Credited);
+            ensure!(credited.final_at.is_none());
+            chain
+                .assert_above_safe_and_finalized(credited.block_number)
+                .await?;
+
+            // The unsafe blocks from the payment's on are replaced: the payer's nonce now pays the
+            // address from another transaction, in the payment's block.
+            let replacement = chain.payer_replacement_to(nonce, chain.address, AMOUNT)?;
+            chain.reorg(depth, &[(&replacement, 0)])?;
+            ensure!(chain.receipt_block(tx)?.is_none());
+            let (replacement_block, _) = chain
+                .receipt_block(replacement_hash(&replacement)?)?
+                .context("replacement receipt")?;
+            ensure!(replacement_block == credited.block_number);
+            chain.anvil.mine(1)?;
+            ensure!(chain.scan().await? == 0, "below the head loop's cursor");
+            let stats = chain.watch().await?;
+            ensure!(stats.watched == 0, "{stats:?}");
+            ensure!(chain.deposit(tx).await?.state == DepositState::Credited);
+
+            chain.anvil.mine(FINALITY_DEPTH + depth)?;
+            let stats = chain.watch().await?;
+            ensure!(stats.reversed == 1, "{stats:?}");
+            ensure!(chain.deposit(tx).await?.state == DepositState::Reversed);
+            ensure!(
+                chain.events("deposit.reversed").await? == vec![reversed_event_id(credited.id)]
+            );
+
+            let stats = scan_once(&chain.pool, &chain.reader, &chain.routes).await?;
+            ensure!(stats.inserted == 1, "{stats:?}");
+            chain.settle().await?;
+            let successor = replacement_hash(&replacement)?;
+            ensure!(chain.deposit(successor).await?.state == DepositState::Credited);
+            ensure!(
+                chain.events("deposit.credited").await?.len() == 2
+                    && chain.events("deposit.reversed").await?.len() == 1
+            );
+            // Its block is already final: the next watch pass marks it so, and nothing else moves.
+            let stats = chain.watch().await?;
+            ensure!(stats.finalized == 1 && stats.reversed == 0, "{stats:?}");
+            ensure!(chain.deposit(successor).await?.final_at.is_some());
+            ensure!(chain.events("deposit.reversed").await?.len() == 1);
             Ok(())
         })
     })
     .await
+}
+
+/// The residual risk of crediting before finality, the same on both families: a reorganization
+/// that removes the payment without spending the payer's nonce (on OP-stack, verifiers replacing
+/// unsafe blocks the batcher never posted) proves nothing dropped, as the transaction could still
+/// be included again. Past finality the watch keeps the deposit credited and not final, so it holds
+/// its share of the account's cap, and alerts once the block is an hour old; it does not reverse.
+/// Anvil's clock starts two hours back, so the payment's block is past that hour.
+#[tokio::test]
+#[traced_test]
+async fn an_op_stack_payment_removed_without_its_nonce_spent_stays_pending_and_alerts() -> Result<()>
+{
+    let genesis = (Utc::now() - chrono::Duration::hours(2))
+        .timestamp()
+        .to_string();
+    run_on(OP_STACK, &["--timestamp", &genesis], |chain| {
+        Box::pin(async move {
+            let Confirmations::Depth(depth) = OP_STACK.confirmations else {
+                bail!("the OP-stack default is a depth");
+            };
+            let tx = chain.pay(AMOUNT)?;
+            chain.anvil.mine(depth - 1)?;
+            ensure!(chain.scan().await? == 1);
+            chain.settle().await?;
+            let credited = chain.deposit(tx).await?;
+            ensure!(credited.state == DepositState::Credited);
+            let credit = credited
+                .credit_minor
+                .context("a credited deposit has its credit")?
+                .value();
+            chain
+                .assert_above_safe_and_finalized(credited.block_number)
+                .await?;
+            let exposure = || async {
+                Ok::<_, anyhow::Error>(
+                    db::unfinalized_credit(
+                        &chain.pool,
+                        credited.account_id,
+                        credited.livemode,
+                        Uuid::nil(),
+                    )
+                    .await?
+                    .credited,
+                )
+            };
+            ensure!(exposure().await? == credit);
+
+            // The unsafe blocks from the payment's on are replaced by empty ones: the transaction
+            // is gone, and the payer's nonce is not spent.
+            let nonce = chain.payer_nonce()?;
+            chain.reorg(depth, &[])?;
+            ensure!(chain.receipt_block(tx)?.is_none());
+            ensure!(
+                chain.payer_nonce()? == nonce - 1,
+                "the payer's nonce is unspent"
+            );
+
+            chain.anvil.mine(FINALITY_DEPTH + depth)?;
+            let finalized = chain.reader.finalized_head().await?.number;
+            ensure!(
+                finalized > credited.block_number,
+                "past the payment's height"
+            );
+            let stats = chain.watch().await?;
+            ensure!(
+                stats.watched == 1 && stats.reversed == 0 && stats.finalized == 0,
+                "{stats:?}"
+            );
+            let pending = chain.deposit(tx).await?;
+            ensure!(pending.state == DepositState::Credited && pending.final_at.is_none());
+            ensure!(chain.events("deposit.reversed").await?.is_empty());
+            ensure!(
+                exposure().await? == credit,
+                "the credit still holds the cap"
+            );
+            ensure!(logs_contain("TopupDepositPendingAfterReorg"));
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// Runs the production head loop and pump at their production cadence (one head poll per block
+/// time of the route's chain), pays, and checks that `deposit.credited` is written within `limit`
+/// of the payment's inclusion, for about one head poll and one log request per block.
+async fn assert_credited_within(
+    chain: &FastChain,
+    label: &str,
+    limit: chrono::Duration,
+) -> Result<()> {
+    let cancellation = CancellationToken::new();
+    let pump = chain.pump.clone();
+    let pump_task = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move { pump.run(cancellation).await }
+    });
+    let scanner_task = tokio::spawn(run_chain(
+        chain.pool.clone(),
+        labeled_reader(&chain.anvil.rpc_url, label, chain.chain_id)?,
+        chain.routes.clone(),
+        ScanConfig::default(),
+        FinalizedHeads::default(),
+        cancellation.clone(),
+    ));
+    let started = chain.anvil.block_number()?;
+    let tx = chain.send_payment(AMOUNT)?;
+    let result = async {
+        let mut included_at = None;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            ensure!(Instant::now() < deadline, "no credit within 90 s");
+            if included_at.is_none() && chain.receipt_block(tx)?.is_some() {
+                included_at = Some(Utc::now());
+            }
+            if let Some(included_at) = included_at {
+                let created = sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+                    "SELECT created FROM events WHERE type = 'deposit.credited'",
+                )
+                .fetch_optional(&chain.pool)
+                .await?;
+                if let Some(created) = created {
+                    let elapsed = created - included_at;
+                    eprintln!("deposit.credited written {elapsed} after inclusion");
+                    ensure!(elapsed < limit, "credited {elapsed} after inclusion");
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    .await;
+    cancellation.cancel();
+    pump_task.await?;
+    scanner_task.await??;
+    result?;
+
+    // Provider A's calls over the run: about one head poll and one log request per block, and one
+    // receipt, block, and transaction read for the one transfer.
+    let blocks = chain.anvil.block_number()?.saturating_sub(started).max(1);
+    let calls = provider_call_counts(label);
+    eprintln!("provider A calls over {blocks} blocks: {calls:?}");
+    let count = |method| calls.get(method).copied().unwrap_or_default();
+    ensure!(count("eth_blockNumber") <= 2 * blocks + 4, "{calls:?}");
+    ensure!(count("eth_getLogs") <= blocks + 1, "{calls:?}");
+    ensure!(count("eth_getTransactionReceipt") <= 2, "{calls:?}");
+    Ok(())
+}
+
+/// The hash of a signed raw transaction.
+fn replacement_hash(raw: &str) -> Result<B256> {
+    let bytes = alloy_primitives::hex::decode(raw).context("raw transaction hex")?;
+    Ok(alloy_primitives::keccak256(bytes))
 }
 
 #[tokio::test]
@@ -591,7 +799,7 @@ async fn an_idle_chain_polls_only_the_head_and_a_new_block_costs_one_log_request
             };
             let scanner_task = tokio::spawn(run_chain(
                 chain.pool.clone(),
-                labeled_reader(&chain.anvil.rpc_url, label)?,
+                labeled_reader(&chain.anvil.rpc_url, label, chain.chain_id)?,
                 chain.routes.clone(),
                 config,
                 FinalizedHeads::default(),
@@ -660,7 +868,8 @@ async fn a_newly_issued_address_is_scanned_from_the_next_block_without_a_gap() -
             );
 
             // An address issued now, with no open quote, is paid in the next block.
-            let (address_id, address) = issue_address(&chain.pool, chain.customer_id, 0x6b).await?;
+            let (address_id, address) =
+                issue_address(&chain.pool, chain.chain_id, chain.customer_id, 0x6b).await?;
             let tx = chain.pay_to(address, AMOUNT)?;
             chain.anvil.mine(1)?;
             let third = chain.head_scan().await?;
@@ -682,10 +891,22 @@ async fn run<S>(anvil_args: &[&str], scenario: S) -> Result<()>
 where
     S: for<'a> FnOnce(&'a FastChain) -> support::TestFuture<'a>,
 {
-    run_with(anvil_args, reader, scenario).await
+    run_on(L1, anvil_args, scenario).await
 }
 
-async fn run_with<B, F, S>(anvil_args: &[&str], secondary: F, scenario: S) -> Result<()>
+async fn run_on<S>(network: Network, anvil_args: &[&str], scenario: S) -> Result<()>
+where
+    S: for<'a> FnOnce(&'a FastChain) -> support::TestFuture<'a>,
+{
+    run_with(network, anvil_args, reader, scenario).await
+}
+
+async fn run_with<B, F, S>(
+    network: Network,
+    anvil_args: &[&str],
+    secondary: F,
+    scenario: S,
+) -> Result<()>
 where
     B: ChainReader + Send + Sync + 'static,
     F: Fn(&str) -> Result<B>,
@@ -694,12 +915,13 @@ where
     let Some(database) = TestDatabase::create().await? else {
         return Ok(());
     };
-    let Some(anvil) = Anvil::start_if_available(anvil_args).await? else {
+    let Some(anvil) = Anvil::start_on_chain_if_available(network.chain_id, anvil_args).await?
+    else {
         database.cleanup().await?;
         return Ok(());
     };
     let result = async {
-        let chain = FastChain::setup(&database, anvil, secondary).await?;
+        let chain = FastChain::setup(&database, network, anvil, secondary).await?;
         scenario(&chain).await
     }
     .await;
@@ -709,6 +931,7 @@ where
 
 struct FastChain {
     anvil: Anvil,
+    chain_id: u64,
     pool: PgPool,
     token: Address,
     customer_id: Uuid,
@@ -724,7 +947,12 @@ struct FastChain {
 }
 
 impl FastChain {
-    async fn setup<B, F>(database: &TestDatabase, anvil: Anvil, secondary: F) -> Result<Self>
+    async fn setup<B, F>(
+        database: &TestDatabase,
+        network: Network,
+        anvil: Anvil,
+        secondary: F,
+    ) -> Result<Self>
     where
         B: ChainReader + Send + Sync + 'static,
         F: Fn(&str) -> Result<B>,
@@ -747,17 +975,18 @@ impl FastChain {
         }
         anvil.mine(4)?;
 
-        let (customer_id, address_id, address) = seed_address(&pool).await?;
+        let chain_id = network.chain_id;
+        let (customer_id, address_id, address) = seed_address(&pool, chain_id).await?;
         let mut route: RouteFile = serde_saphyr::from_str(
             &include_str!("fixtures/phala-cloud-pha.yaml")
-                .replace("chain_id: 1", &format!("chain_id: {CHAIN_ID}"))
+                .replace("chain_id: 1", &format!("chain_id: {chain_id}"))
                 .replace("livemode: true", "livemode: false")
                 .replace(
                     "0x6c5bA91642F10282b576d91922Ae6448C9d52f4E",
                     &format!("{token:#x}"),
                 ),
         )?;
-        route.chain.confirmations = Confirmations::Depth(2);
+        route.chain.confirmations = network.confirmations;
         route.asset.decimals = 2;
         route.rate_lock.amount_decimals = 2;
         route.screening.min_credit_minor = 1;
@@ -805,7 +1034,7 @@ impl FastChain {
         let watch = FinalityWatch::single(
             pool.clone(),
             Arc::clone(&route_set),
-            CHAIN_ID,
+            chain_id,
             reader(&anvil.rpc_url)?,
             secondary(&anvil.rpc_url)?,
         );
@@ -832,6 +1061,7 @@ impl FastChain {
         scan_once(&pool, &reader, &routes).await?;
         let chain = Self {
             anvil,
+            chain_id,
             pool,
             token,
             customer_id,
@@ -937,6 +1167,12 @@ impl FastChain {
 
     /// A payer transaction with `nonce` that pays someone else.
     fn payer_replacement(&self, nonce: u64) -> Result<String> {
+        self.payer_replacement_to(nonce, OTHER.parse()?, 1)
+    }
+
+    /// A payer transaction with `nonce` that pays `amount` to `to`. Its gas limit is fixed, not
+    /// estimated on the current state, where `to` may already hold the replaced payment.
+    fn payer_replacement_to(&self, nonce: u64, to: Address, amount: u64) -> Result<String> {
         let output = run_checked(
             "cast",
             &[
@@ -945,12 +1181,14 @@ impl FastChain {
                 &self.anvil.rpc_url,
                 "--private-key",
                 PAYER_KEY,
+                "--gas-limit",
+                "100000",
                 "--nonce",
                 &nonce.to_string(),
                 &format!("{:#x}", self.token),
                 "transfer(address,uint256)",
-                OTHER,
-                "1",
+                &format!("{to:#x}"),
+                &amount.to_string(),
             ],
             None,
         )?;
@@ -998,6 +1236,22 @@ impl FastChain {
         Ok(Some((number, hash)))
     }
 
+    /// Checks that `block` is above provider A's `safe` and `finalized` heads: on the unsafe head.
+    async fn assert_above_safe_and_finalized(&self, block: u64) -> Result<()> {
+        let safe = self
+            .reader
+            .confirmation_heads(Confirmations::Safe)
+            .await?
+            .safe
+            .context("the safe head")?;
+        let finalized = self.reader.finalized_head().await?.number;
+        ensure!(
+            safe < block && finalized < block,
+            "block {block} is not above safe {safe} and finalized {finalized}"
+        );
+        Ok(())
+    }
+
     /// One per-block scan, as the head loop runs on each new head.
     async fn head_scan(&self) -> Result<HeadScan> {
         head_scan_once(&self.pool, &self.reader, &self.routes)
@@ -1021,11 +1275,11 @@ impl FastChain {
     }
 
     async fn watch(&self) -> Result<topup::finality::WatchStats> {
-        Ok(self.watch.watch_once(CHAIN_ID).await?)
+        Ok(self.watch.watch_once(self.chain_id).await?)
     }
 
     async fn deposit(&self, tx: B256) -> Result<db::Deposit> {
-        db::get_deposit(&self.pool, deposit_id(CHAIN_ID, tx, 0))
+        db::get_deposit(&self.pool, deposit_id(self.chain_id, tx, 0))
             .await?
             .context("deposit by receipt position")
     }
@@ -1114,15 +1368,15 @@ fn reader(rpc_url: &str) -> Result<FinalizedReader> {
 }
 
 /// A reader whose calls are counted under `label`, unique to one test.
-fn labeled_reader(rpc_url: &str, label: &str) -> Result<FinalizedReader> {
+fn labeled_reader(rpc_url: &str, label: &str, chain_id: u64) -> Result<FinalizedReader> {
     Ok(FinalizedReader::new(Arc::new(
         EvmClient::new(rpc_url)?
             .with_provider(label)
-            .with_chain_id(CHAIN_ID),
+            .with_chain_id(chain_id),
     )))
 }
 
-async fn seed_address(pool: &PgPool) -> Result<(Uuid, Uuid, Address)> {
+async fn seed_address(pool: &PgPool, chain_id: u64) -> Result<(Uuid, Uuid, Address)> {
     let (_, customer) = seed::create_account_and_customer(
         pool,
         &NewAccount {
@@ -1133,12 +1387,17 @@ async fn seed_address(pool: &PgPool) -> Result<(Uuid, Uuid, Address)> {
         "workspace-fast",
     )
     .await?;
-    let (address_id, address) = issue_address(pool, customer.id, 0x5a).await?;
+    let (address_id, address) = issue_address(pool, chain_id, customer.id, 0x5a).await?;
     Ok((customer.id, address_id, address))
 }
 
 /// Issues the customer's address `0x<byte>…`, created at the current finalized cursor.
-async fn issue_address(pool: &PgPool, customer_id: Uuid, byte: u8) -> Result<(Uuid, Address)> {
+async fn issue_address(
+    pool: &PgPool,
+    chain_id: u64,
+    customer_id: Uuid,
+    byte: u8,
+) -> Result<(Uuid, Address)> {
     let address = Address::repeat_byte(byte);
     let address_id = Uuid::new_v4();
     seed::insert_address(
@@ -1146,7 +1405,7 @@ async fn issue_address(pool: &PgPool, customer_id: Uuid, byte: u8) -> Result<(Uu
         &NewAddress {
             id: address_id,
             customer_id,
-            chain_id: CHAIN_ID,
+            chain_id,
             route: "phala-cloud-ethereum-pha-usd".to_owned(),
             salt: B256::repeat_byte(byte),
             address,

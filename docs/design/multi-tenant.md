@@ -194,7 +194,7 @@ finance. Mainnet is not deployed; Phala Cloud's integration is a draft PR and is
 
 | # | Topic | Decision | Standard followed |
 |---|---|---|---|
-| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2, about 30 s after paying; OP-stack `safe`, about 5 minutes); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
+| D1 | Credit timing | Credit at the stricter of the route floor and the account policy (Ethereum depth 2, about 30 s after paying; OP-stack depth 3 on the unsafe head, about 7 s); identity by receipt log position; follow re-inclusion; `reversed` + `deposit.reversed` only for a proven-dropped transaction | Exchange confirmations (Kraken, Binance); BTCPay confirmation setting; Etherscan "Dropped & Replaced"; Stripe post-success ACH failure → dispute |
 | D2 | Custody | Non-custodial: forwarders pay only the merchant's treasury | BTCPay Server; FinCEN FIN-2019-G001 §1.1, §4.2 |
 | D3 | Contracts | One permissionless factory per chain; clones carry `treasury` as the only immutable arg; public `flush` with per-target failure isolation | OZ `Clones.cloneDeterministicWithImmutableArgs` (pinned 5.7.0); BitGo public `flush()`; Multicall3 `allowFailure` |
 | D4 | Sweeping | The merchant sweeps with its own wallet or Safe and pays gas; the SDK builds the call or a Safe Transaction Builder batch | BTCPay (merchant wallet); Safe Transaction Builder JSON |
@@ -220,7 +220,7 @@ block hash and the same log and the block has reached the **required confirmatio
 | Chain family | Confirmation values | Default |
 |---|---|---|
 | Ethereum L1 (mainnet, Sepolia) | a depth `head − block + 1 ≥ n`, or `finalized` | 2 |
-| OP-stack L2 (Base, when enabled) | `safe` (derived from data posted to L1) or `finalized`; never the sequencer's unsafe head | `safe` |
+| OP-stack L2 (Base, when enabled) | a depth on the sequencer's unsafe head, `safe` (derived from data posted to L1), or `finalized`; any depth < `safe` < `finalized` | 3 |
 
 The required confirmation is the **stricter of the route's value and the account's policy**. The
 route value is the floor and default; an account may require more for a chain (for example
@@ -240,12 +240,40 @@ finalized block costs at least one third of staked ETH
 ([ethereum.org, proof-of-stake](https://ethereum.org/developers/docs/consensus-mechanisms/pos/)).
 The owner accepts the residual risk because a reversal is recoverable (below).
 
-**Why `safe` on OP-stack.** Sequencer blocks can reorg before their data reaches L1: Base reports
-that "Only a single Base L2 block has ever reorged" at L2 inclusion and "There has never been a
-reorg of L2 blocks that were batched to Ethereum L1"
-([Base, transaction finality](https://docs.base.org/base-chain/network-information/transaction-finality));
-the OP Stack calls a block *unsafe* until verifiers derive it from posted data, then *safe*, then
+**Why 3 on OP-stack (owner decision, 2026-10-02).** This replaces the earlier rule of crediting
+an OP-stack chain only at `safe`, about 5 minutes, and never on the sequencer's unsafe head. The
+owner asked for credit as fast as is reasonable, under the protections Ethereum's depth 2 already
+has: the finality watch below and the per-account cap on credit that is not final yet
+(`max_unfinalized_credit`; a deposit past it is credited at finality). Depth 3 is a product-risk
+choice, not a proof that the unsafe head is as safe as Ethereum at depth 2. Base, sampled on
+2026-10-02, reports that "Only a single Base L2 block has ever reorged" at L2 inclusion, about 2 s
+after sending, and that "There has never been a reorg of L2 blocks that were batched to Ethereum
+L1"; its sequencer keeps a lag from the L1 tip, "so typical L1 reorgs have no effect"
+([Base, transaction finality](https://docs.base.org/base-chain/network-information/transaction-finality)).
+The OP Stack calls a block *unsafe* until verifiers derive it from posted data, then *safe*, then
 *finalized* with L1 ([OP Stack overview](https://docs.optimism.io/stack/rollup/overview)).
+Precedents, not proofs of equivalence: Circle's CCTP Fast Transfer attests a Base or OP Mainnet
+burn after 1 block confirmation, and bounds the risk with "a global allowance to mitigate
+reorganization risks"
+([Circle, required block confirmations](https://developers.circle.com/cctp/required-block-confirmations));
+Coinbase's default x402 facilitator settles a payment once it has the transaction's first receipt
+([coinbase/x402, `exact` EVM facilitator](https://github.com/coinbase/x402/blob/main/typescript/packages/mechanisms/evm/src/exact/facilitator/eip3009.ts)).
+Depth 3 is the block and two more, 4 s after inclusion, typically credited about 7 s after paying
+(`typical_credit_seconds`), twice the depth of the one reorg Base reports; the account cap plays
+the role of Circle's allowance, per account.
+
+*Residual risk.* A sequencer outage that loses unsafe blocks, or a batcher that lets the
+sequencing window lapse so that derivation replaces the unsafe chain with blocks without the
+sequencer's transactions, reorganizes more blocks than any small depth covers. When the payment's
+transaction is re-included, the watch follows it; when another transaction spends the payer's
+nonce, or another transfer holds the payment's receipt position at finality, the deposit is
+reversed with `deposit.reversed`. When the transaction is simply gone and its nonce is unspent, no
+replacement is proven, since it could still be included: the watch keeps the deposit credited and
+not final, holding its share of the cap, and alerts (`TopupDepositPendingAfterReorg`) after an hour,
+for the operator to resolve. That is the trade-off Ethereum's depth 2 already accepts, and the cap
+bounds it. `safe` and `finalized` stay available, to a route or an account, as stricter values:
+`safe` outranks every depth because the sequencer cannot rewrite a block derived from data posted
+to L1 on its own; only an L1 reorganization reaching that data can.
 
 **What others use.** Kraken lists 30 confirmations for Ethereum-network assets
 ([Kraken](https://support.kraken.com/articles/203325283-cryptocurrency-deposit-processing-times));
@@ -255,10 +283,12 @@ Exchanges credit withdrawable balances to anonymous users; a merchant crediting 
 can claw back, so a shallower default is proportionate, and the account policy raises it.
 
 **Mechanics (implemented by PR 1, specified in architecture §7, §8, §11).** One scanner per
-chain polls the head once per block time, locked onto block arrival, scans each new block for
+chain polls the head once per block time (2 s on an OP-stack chain crediting at a depth), locked
+onto block arrival, scans each new block for
 transfers to every issued address in one request, and confirms on provider B at the required
 confirmation, then
-values, screens, and credits in the same pass: **credited in about 30 seconds** at the default;
+values, screens, and credits in the same pass: **credited in about 30 seconds** at Ethereum's
+default and **about 7 seconds** at OP-stack's;
 `GET /v1/config` reports the typical credit time for the account's policy. A deposit's identity
 is its transfer's position in its transaction's receipt (`receipt_log_index`), which survives
 re-inclusion; the position holds at most one deposit that is not reversed, and a deposit recorded

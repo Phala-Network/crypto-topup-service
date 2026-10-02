@@ -126,7 +126,8 @@ struct RunArgs {
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
     wait_interval_s: u64,
     /// Delay between `eth_blockNumber` polls of each chain's provider A; defaults to one block
-    /// time (12 s).
+    /// time for a route crediting at a depth (12 s on Ethereum, 2 s on an OP-stack chain), 12 s
+    /// otherwise.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     head_poll_interval_s: Option<u64>,
     /// Least delay between reads of each chain's `finalized` head on provider A; its advances

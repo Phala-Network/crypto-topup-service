@@ -561,9 +561,9 @@ pub struct ClientDepositAddressNetwork {
     /// The supported tokens on this chain.
     pub assets: Vec<DepositAddressAsset>,
     /// Typical time from payment to credit, in seconds, at the confirmation this chain's payments
-    /// are credited at, as `GET /v1/config` reports it for each of the chain's tokens. Absent when
-    /// those tokens are credited at different confirmations, and from a service of v0.3.5 or
-    /// earlier, so a client should not require it.
+    /// are credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share
+    /// the chain's one floor. Absent from a service of v0.3.5 or earlier, so a client should not
+    /// require it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = u64, required = false)]
     pub typical_credit_seconds: Option<u64>,
@@ -968,9 +968,9 @@ pub struct ConfirmationPolicy {
     /// A chain of the key's mode (`GET /v1/config`).
     pub chain_id: u64,
     /// A depth (`"12"`: the block and eleven more), `"safe"`, or `"finalized"`: never weaker than
-    /// the route's `confirmations`, and of the chain's kind (a depth or `finalized` on Ethereum,
-    /// `safe` or `finalized` on an OP-stack chain). In a request, `null` removes the chain's
-    /// policy, so its route's applies.
+    /// the route's `confirmations` (any depth < `safe` < `finalized`), and of the chain's kind (a
+    /// depth or `finalized` on Ethereum; a depth, `safe`, or `finalized` on an OP-stack chain). In
+    /// a request, `null` removes the chain's policy, so its route's applies.
     pub confirmations: Option<String>,
 }
 

@@ -91,12 +91,13 @@ to offer your own way to fund that wallet.
 To resume after a reload, keep the client secret in the browser (for example `localStorage`, per
 signed-in account) until the status is `credited`, `expired`, `canceled`, or `error`. Tell a
 payer who is waiting that the payment is credited in about the quote's `typical_credit_seconds`
-(30 seconds on Ethereum, about 5 minutes on Base, 15 minutes under a `finalized` policy) and the
+(30 seconds on Ethereum, about 7 seconds on Base, 15 minutes under a `finalized` policy) and the
 credit arrives on its own.
 
-A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg drops
-the payment's transaction, your backend receives `deposit.reversed` and claws the credit back as
-for `deposit.refunded`; the checkout itself only reflects the quote.
+A credit is made before Ethereum finality (about 15 minutes). In the rare case that a reorg proves
+the payment replaced, your backend receives `deposit.reversed` and claws the credit back as for
+`deposit.refunded`; a payment gone with its nonce unspent instead stays credited and not final,
+and the operator is alerted. The checkout itself only reflects the quote.
 
 The payment options disappear once a payment is seen, and at `expires_at`. A payment of a different
 amount, or after expiry, is still credited, at the market price instead of the quote's: the
@@ -157,9 +158,8 @@ With `clientSecret` and `apiBase` it reads the address's public view every three
 its payments of the last 24 hours: "1.5 PHA received on Sepolia, 1 confirmation" within about a
 block of the transfer, then "credited" (or rejected or reversed). Display only. It also states each
 network's typical credit time from the view's `typical_credit_seconds` ("usually in about 30 seconds
-on Sepolia and about 5 minutes on Base Sepolia"); without the view, or when a network has none (its
-tokens are credited at different confirmations, or the service is v0.3.5 or earlier), it names no
-time.
+on Sepolia and about 7 seconds on Base Sepolia"); without the view, or when a network has none (a
+service of v0.3.5 or earlier), it names no time.
 
 `depositAddressTransfer(network, asset)` reads and checks one token's amount-less EIP-681
 `payment_uri` without React.

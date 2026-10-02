@@ -28,9 +28,8 @@ export interface ClientDepositAddressNetwork {
   address: string;
   /**
    * Typical seconds from payment to credit at the confirmation this chain's payments are credited
-   * at: about 30 on Ethereum (two blocks), 300 at an OP-stack chain's `safe` block, 900 at
-   * finality. Absent when the chain's tokens are credited at different confirmations, and from a
-   * service of v0.3.5 or earlier.
+   * at: about 30 on Ethereum (two blocks), 7 on an OP-stack chain (three blocks), 300 under a
+   * `safe` policy, 900 at finality. Absent from a service of v0.3.5 or earlier.
    */
   typical_credit_seconds?: number;
 }
