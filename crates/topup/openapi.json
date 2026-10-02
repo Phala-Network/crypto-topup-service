@@ -496,7 +496,7 @@
             "type": "integer"
           },
           "typical_credit_seconds": {
-            "description": "Typical time from payment to credit, in seconds, at the confirmation this chain's payments\nare credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share\nthe chain's one floor. Absent from a service of v0.3.5 or earlier, so a client should not\nrequire it.",
+            "description": "Typical time from payment to credit, in seconds, at the confirmation this chain's payments\nare credited at, as `GET /v1/config` reports it for each of the chain's tokens, which share\nthe chain's one floor.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -505,7 +505,8 @@
         "required": [
           "chain_id",
           "address",
-          "assets"
+          "assets",
+          "typical_credit_seconds"
         ],
         "type": "object"
       },

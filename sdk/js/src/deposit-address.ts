@@ -29,9 +29,9 @@ export interface ClientDepositAddressNetwork {
   /**
    * Typical seconds from payment to credit at the confirmation this chain's payments are credited
    * at: about 30 on Ethereum (two blocks), 7 on an OP-stack chain (three blocks), 300 under a
-   * `safe` policy, 900 at finality. Absent from a service of v0.3.5 or earlier.
+   * `safe` policy, 900 at finality.
    */
-  typical_credit_seconds?: number;
+  typical_credit_seconds: number;
 }
 
 /**
@@ -121,15 +121,16 @@ function parseNetwork(value: unknown): ClientDepositAddressNetwork {
   if (
     !Number.isSafeInteger(n["chain_id"]) ||
     typeof n["address"] !== "string" ||
-    !(seconds === undefined || (Number.isSafeInteger(seconds) && (seconds as number) >= 0))
+    !Number.isSafeInteger(seconds) ||
+    (seconds as number) < 0
   ) {
     throw new TypeError("network does not match the public deposit address view");
   }
-  const network: ClientDepositAddressNetwork = { chain_id: n["chain_id"] as number, address: n["address"] };
-  if (seconds !== undefined) {
-    network.typical_credit_seconds = seconds as number;
-  }
-  return network;
+  return {
+    chain_id: n["chain_id"] as number,
+    address: n["address"],
+    typical_credit_seconds: seconds as number,
+  };
 }
 
 function parsePayment(value: unknown): DepositAddressPayment {

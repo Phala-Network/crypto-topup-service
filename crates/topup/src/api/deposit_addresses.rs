@@ -596,24 +596,27 @@ async fn client_deposit_address_view(
         .networks
         .into_iter()
         .map(|network| {
-            // The chain's routes share one floor (`RouteSet` refuses others), so any current route
-            // of the chain gives its time.
-            let typical_credit_seconds = state
-                .routes
-                .current_in(livemode)
-                .find(|route| route.chain.chain_id == network.chain_id)
-                .map(|route| {
-                    super::quotes::credit_confirmations(route, policies.get(&network.chain_id))
-                        .typical_credit_seconds(network.chain_id)
-                });
-            ClientDepositAddressNetwork {
+            // A network is shown only with a current route, so its chain is configured, with the
+            // one floor every route of the chain shares (`RouteSet` refuses others).
+            let chain = state.routes.chain(network.chain_id).ok_or_else(|| {
+                tracing::error!(
+                    chain_id = network.chain_id,
+                    "deposit address chain is unconfigured"
+                );
+                ApiError::internal()
+            })?;
+            Ok(ClientDepositAddressNetwork {
                 chain_id: network.chain_id,
                 address: network.address,
                 assets: network.assets,
-                typical_credit_seconds,
-            }
+                typical_credit_seconds: super::quotes::credit_confirmations(
+                    chain,
+                    policies.get(&network.chain_id),
+                )
+                .typical_credit_seconds(network.chain_id),
+            })
         })
-        .collect();
+        .collect::<ApiResult<_>>()?;
     Ok(ClientDepositAddress {
         id: object.id,
         object: object.object,

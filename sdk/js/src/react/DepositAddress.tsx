@@ -196,18 +196,19 @@ function useClientView(
 
 /**
  * When a payment on each of `chainIds` is credited, from `view`'s typical credit times, for
- * example "usually in about 30 seconds on Ethereum and about 7 seconds on Base". Without the time
- * of every network (no view yet, or a service of v0.3.5 or earlier, which does not send it) it
- * names no time.
+ * example "usually in about 30 seconds on Ethereum and about 7 seconds on Base". Before the view
+ * is loaded it names no time.
  */
 function creditMessage(chainIds: number[], view: ClientDepositAddress | null): string {
   const names = new Map<number, string[]>();
-  for (const chainId of chainIds) {
-    const seconds = view?.networks.find((each) => each.chain_id === chainId)?.typical_credit_seconds;
-    if (seconds === undefined) {
-      return "Any amount is credited at the market rate once it is confirmed on its network.";
+  for (const network of view?.networks ?? []) {
+    if (chainIds.includes(network.chain_id)) {
+      const seconds = network.typical_credit_seconds;
+      names.set(seconds, [...(names.get(seconds) ?? []), networkName(network.chain_id)]);
     }
-    names.set(seconds, [...(names.get(seconds) ?? []), networkName(chainId)]);
+  }
+  if (names.size === 0) {
+    return "Any amount is credited at the market rate once it is confirmed on its network.";
   }
   const list = new Intl.ListFormat("en", { type: "conjunction" });
   const [only, ...others] = names.keys();

@@ -106,7 +106,7 @@ export function TestTokens({ network, need, className }: { network: Network; nee
         <span className="font-medium">Need test tokens?</span>
         <InfoTip label="About test tokens">
           {mintable.map((each) =>
-            (each.minter ?? null) === null
+            each.minter === null
               ? `Test ${each.symbol} is free: its contract lets anyone mint it, so your own wallet mints it. `
               : `Test ${each.symbol} is free: a public faucet contract mints it to anyone, within the faucet's limits, so your own wallet mints it. `,
           )}

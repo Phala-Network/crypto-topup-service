@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # scripts/version.sh on copies of this commit's version files:
 # - this commit passes and prints the Cargo workspace version;
-# - a drifted sdk/js/package.json, sdk/python/pyproject.toml, or sdk/python/uv.lock fails, naming it;
+# - a drifted sdk/js/package.json, sdk/python/pyproject.toml, sdk/python/uv.lock, or
+#   deploy/deploy.sh's SDK pin fails, naming it;
 # - a pre-release passes as X.Y.Z-rc.N in Cargo and npm and X.Y.ZrcN in Python, and fails as
 #   another release candidate in Python;
 # - setting a version that is not X.Y.Z or X.Y.Z-rc.N is refused before any file changes.
@@ -14,11 +15,11 @@ fail() {
     echo "version: $*" >&2
     exit 1
 }
-files=(Cargo.toml sdk/js/package.json sdk/python/pyproject.toml sdk/python/uv.lock)
+files=(Cargo.toml sdk/js/package.json sdk/python/pyproject.toml sdk/python/uv.lock deploy/deploy.sh)
 # fixture: a fresh copy of the script and the version files, in $tmp/repo.
 fixture() {
     rm -rf "$tmp/repo"
-    mkdir -p "$tmp/repo/scripts" "$tmp/repo/sdk/js" "$tmp/repo/sdk/python"
+    mkdir -p "$tmp/repo/scripts" "$tmp/repo/sdk/js" "$tmp/repo/sdk/python" "$tmp/repo/deploy"
     cp "$root/scripts/version.sh" "$tmp/repo/scripts/"
     for file in "${files[@]}"; do cp "$root/$file" "$tmp/repo/$file"; done
 }
@@ -29,6 +30,7 @@ set_version() {
         *package.json) sed -i "0,/\"version\": \".*\"/s//\"version\": \"$2\"/" "$tmp/repo/$1" ;;
         *pyproject.toml) sed -i "/^\[project\]\$/,/^\[/s/^version = \".*\"\$/version = \"$2\"/" "$tmp/repo/$1" ;;
         *uv.lock) sed -i "/^name = \"phala-pay\"\$/{n;s/^version = \".*\"\$/version = \"$2\"/}" "$tmp/repo/$1" ;;
+        *deploy.sh) sed -i "s/^sdk=phala-pay==.*\$/sdk=phala-pay==$2/" "$tmp/repo/$1" ;;
     esac
 }
 
@@ -48,6 +50,7 @@ set_version Cargo.toml 0.5.0-rc.1
 set_version sdk/js/package.json 0.5.0-rc.1
 set_version sdk/python/pyproject.toml 0.5.0rc1
 set_version sdk/python/uv.lock 0.5.0rc1
+set_version deploy/deploy.sh 0.5.0rc1
 [[ "$("$tmp/repo/scripts/version.sh")" == 0.5.0-rc.1 ]] || fail "a pre-release failed"
 set_version sdk/python/pyproject.toml 0.5.0rc2
 if "$tmp/repo/scripts/version.sh" >/dev/null 2>&1; then fail "another release candidate in Python passed"; fi

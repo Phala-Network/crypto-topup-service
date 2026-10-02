@@ -121,8 +121,8 @@ each attested, are:
 - the deploy kit `phala-pay-deploy-v<version>.tar.gz` ([build-kit.sh](build-kit.sh): `LICENSE`,
   `deploy/`, and `docs/` of the tag, a tar identical to their `git archive`);
 - `phala-cloud-template.yml` ([The Phala Cloud template variant](#the-phala-cloud-template-variant));
-- `deploy.sh`, [deploy.sh](deploy.sh) set to deploy this release (and, from v0.5.0, to generate
-  an admin key with its Python SDK), the one-command deploy that
+- `deploy.sh`, [deploy.sh](deploy.sh) set to deploy this release, which generates an admin key
+  with its Python SDK, the one-command deploy that
   `https://pay.phala.com/deploy.sh` (the latest release) and `/deploy/v<version>.sh` redirect to
   ([self-hosting, "One-command deploy"](../docs/self-hosting.md#one-command-deploy));
 - `SHA256SUMS`.

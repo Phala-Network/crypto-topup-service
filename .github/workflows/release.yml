@@ -20,8 +20,8 @@ name: Release
 # references by image name, deploy/render.sh's --images); the deploy kit
 # phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
 # Cloud template's compose, rendered from the kit with these images); deploy.sh (deploy/deploy.sh,
-# the one-command deploy, set to deploy this release and, for a stable one, to generate the admin
-# key with this release's Python SDK); and SHA256SUMS. Only then does a stable version publish the
+# the one-command deploy, set to deploy this release, whose Python SDK it generates the admin key
+# with); and SHA256SUMS. Only then does a stable version publish the
 # SDKs: sdk/js to npm as @phala/pay, and sdk/python to PyPI as phala-pay (its `project.name`).
 # Publishing uses trusted publishing (OIDC) only: no token or secret is stored anywhere. The owner
 # registers this repository, this workflow file (release.yml), and the job's environment as the
@@ -193,10 +193,6 @@ jobs:
             "$kit/deploy/environments/phala-cloud-template/topup" >"$dist/phala-cloud-template.yml"
           sed "s/^release=latest\$/release=$GITHUB_REF_NAME/" deploy/deploy.sh >"$dist/deploy.sh"
           grep -qx "release=$GITHUB_REF_NAME" "$dist/deploy.sh"
-          if [[ "$VERSION" != *-* ]]; then
-            sed -i "s/^sdk=phala-pay==.*\$/sdk=phala-pay==$VERSION/" "$dist/deploy.sh"
-            grep -qx "sdk=phala-pay==$VERSION" "$dist/deploy.sh"
-          fi
           (cd "$dist" && sha256sum images.json "phala-pay-deploy-$GITHUB_REF_NAME.tar.gz" \
             phala-cloud-template.yml deploy.sh >SHA256SUMS)
       - name: Attest the release assets
@@ -320,8 +316,7 @@ jobs:
         run: |
           dist="$RUNNER_TEMP/dist" notes="$RUNNER_TEMP/notes.md"
           # A stable release is Latest, which https://pay.phala.com/deploy.sh redirects to; a
-          # pre-release never is. The SDK releases before v0.5.0, tagged sdk-js-v* and sdk-py-v*,
-          # were published with --latest=false and never were either.
+          # pre-release never is.
           kind=(--latest)
           if [[ "$VERSION" == *-* ]]; then
             kind=(--prerelease --latest=false)
