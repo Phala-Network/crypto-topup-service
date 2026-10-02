@@ -1,8 +1,8 @@
 # Design: per-account payment settings
 
-Status: **proposed, revised after review** (2026-10-02). Astra's review approved the model with a
-change list. The owner adopted every recommendation, and this revision applies them; it awaits
-re-check before implementation. Ships in 0.6.0, breaking, with no backward compatibility. When
+Status: **accepted** (2026-10-02). Astra's review approved the model with a change list, and the
+re-check added three final fixes. The owner adopted every recommendation, and this document
+applies them. Ships in 0.6.0, breaking, with no backward compatibility. When
 accepted, it amends [multi-tenant design](multi-tenant.md) D1, D16, §12, §14, and §15, and the
 [architecture](../architecture.md) §6–§9, §12, and §14.
 
@@ -330,20 +330,36 @@ today. They are state, not configuration.
 
 **Revisions.** Each change appends an immutable revision: an opaque id, account, mode, document,
 actor, and time. The account and mode's state row (`status`, `current_revision`) points at the
-current one. Writers lock the account row (`FOR NO KEY UPDATE`), and the last write is current.
-Every reference to a revision is scoped by `(account_id, livemode)`: a composite foreign key
-ensures that a deposit or quote can name only a revision of its own account and mode.
+current one. Writers lock that row `FOR UPDATE`, and the last write is current. Every reference to
+a revision is scoped by `(account_id, livemode)`: a composite foreign key ensures that a deposit or
+quote can name only a revision of its own account and mode.
+
+**The barrier.** Every recorder of a deposit takes the account and mode's state row `FOR SHARE`, in
+its own transaction, before the insert statement. The recorders are the scanners, the
+finality-watch successor, the reconciler, and the restore-check round, all through one insert
+function. Every writer of the state takes it `FOR UPDATE`: a settings write, the hold set at a
+freeze, and the hold lift. The insert is a separate statement after the lock, so under PostgreSQL's
+`READ COMMITTED` its snapshot is established after the barrier is acquired. A writer therefore
+waits for every recorder transaction that read the old state to commit, and a recorder that starts
+after the writer waits for the writer's commit and then reads the new state.
 
 **Record time** is the snapshot of the statement that successfully inserts the record.
 
-- A deposit's insert reads its account and mode's state in that same statement, and stores the
-  binding:
-  - `settings` with the `current_revision` when the state is `unconfigured` or `configured`;
-  - `pending` when the state is `held` (§11).
+- A deposit's insert reads its account and mode's state in that statement and stores the binding:
+  - its `current_revision` when the state is `unconfigured` or `configured`;
+  - `pending`, naming the restore that holds it, when the state is `held` (§11).
 - A settings change committed after that snapshot does not govern the deposit; one committed
   before it does. Nothing is claimed about commit order beyond that.
-- `unconfigured` is itself a revision, with an empty document and status `unconfigured`. Every
-  binding therefore names a real revision.
+- `unconfigured` is itself a revision, with an empty document and status `unconfigured`, so a
+  bound deposit always names a real revision.
+
+**The database invariant.** A deposit has exactly one of:
+
+- `settings_revision_id`: a revision of its own account and mode (composite foreign key);
+- `settings_hold_id`: the restore that held its account and mode (foreign key to `restores`).
+
+A `CHECK` requires exactly one. A `pending` deposit never borrows an old revision; the lift
+replaces its hold with the revision that ends it (§11).
 
 **A rescan never overwrites a binding.** Inserts are `ON CONFLICT DO NOTHING` on the receipt
 position, so a transfer seen again keeps the deposit, and the deposit keeps its binding.
@@ -521,28 +537,20 @@ From then on:
   (below);
 - issuance answers `payment_settings_unconfirmed`.
 
-**Ending the hold**, per account and mode:
+**Ending the hold requires the merchant.** After the unfreeze, the merchant sends its complete
+chosen configuration with `POST /v1/payment_settings`, its explicit confirmation, which always
+writes a new revision, even with an unchanged document. No signed event lifts a hold. A merchant's
+`payment_settings.updated` deliveries are history it holds, and cannot prove that no later update
+exists: one may be undelivered, for example an asset removed, and an event's `created` has
+one-second precision. The service imports none and adds no ordered-version mechanism: the restored
+revisions are its history, and each id is random and never reused, so an id never names two
+documents across a restore.
 
-1. **The merchant reconfirms.** After the unfreeze, any `POST /v1/payment_settings`, even with an
-   unchanged document, writes a revision and ends the hold.
-2. **The operator applies evidence** while frozen, with `POST
-   /v1/admin/restore/payment_settings {account, livemode, deliveries | confirm_restored, reason}`,
-   signed and audited:
-   - `deliveries`: signed `payment_settings.updated` deliveries, verified with the account's
-     webhook keys as `treasuries/apply` does. The newest by event `created` becomes current.
-   - `confirm_restored`: the merchant's written statement, recorded in `reason`, that the
-     restored revision is its latest.
-
-Without one of these, the account and mode stays `held`. In the same transaction that ends the
-hold, every `pending` deposit of the account and mode is bound to the revision that ends it.
-
-**Ordering, duplicates, and conflicts.**
-
-- Imported revisions keep their original id and document.
-- A delivery whose revision id exists with the same document is a duplicate, and a no-op.
-- A delivery whose id exists with a different document is refused as a conflict and reported.
-- A delivery older than the current revision is recorded as history, not made current.
-- Revision ids are random and never reused, so an id never names two documents across a restore.
+The lift is one transaction under the barrier (§7). It takes the state row `FOR UPDATE`, writes
+the revision, sets the state `configured`, and binds every `pending` deposit of the account and
+mode to that revision. Since recorders hold the row `FOR SHARE` from before their insert to their
+commit, the lift sees every deposit recorded as `pending`. A recorder that starts after the lift
+reads `configured`.
 
 **Delivered outcomes stand.** A rebuilt deposit whose `deposit.credited` or `deposit.rejected`
 was imported keeps that outcome. No later commercial-policy check rewrites it: not acceptance,
@@ -576,6 +584,10 @@ given out is never blocked by settings.
 | Operator tightens a floor | A new route version raises `chain.confirmations`. Uncredited deposits wait for the stricter of the new floor and their bound requirement; credited ones are unaffected. A tightened bound that invalidates a merchant's tuple disables that pair, which raises `TopupPaymentSettingsInvalid`. |
 | Lost webhook | A settings change whose `payment_settings.updated` was never delivered is lost in a restore. Every account is `held`, so nothing is decided on stale settings. The merchant re-POSTs after the unfreeze, and the pending deposits bind to the new revision. |
 | Delivered-outcome restore | A rebuilt deposit with an imported `deposit.credited` is credited at the delivered credit, even if the restored settings no longer accept its asset or its amount is now out of bounds. One with an imported `deposit.rejected` stays rejected with the delivered reason, even if the settings would now accept it. |
+| Restore: an undelivered later update | The merchant removed an asset after the restore point, and that `payment_settings.updated` was never delivered. The account is `held`, and its signed deliveries show the asset still accepted. No delivery lifts the hold, so payments of the removed asset stay `pending` until the merchant re-POSTs its configuration without it; they are then rejected. |
+| Restore: a recorder racing the lift | A rescan holds the state row `FOR SHARE`, reads `held`, and records a `pending` deposit. The merchant's re-POST waits for that transaction, then binds the deposit with every other `pending` one. A rescan that starts during the lift waits for it and binds to the new revision. No deposit stays `pending` after the lift. |
+| Restore: two updates in one second | Two deliveries carry the same `created`. Neither is used to order or choose a configuration; the merchant's re-POST decides. |
+| Restore: no endpoint | The merchant had no webhook endpoint and holds no event. The account stays `held` until the merchant re-POSTs; nothing about its configuration is inferred. |
 
 ## 13. What is removed or cut
 
