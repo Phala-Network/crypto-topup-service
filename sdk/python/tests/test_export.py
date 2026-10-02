@@ -53,6 +53,20 @@ def _service(request: httpx.Request) -> httpx.Response:
                 "created": NOW,
             },
         )
+    if path == "/v1/payment_settings":
+        return httpx.Response(
+            200,
+            json={
+                "object": "payment_settings",
+                "livemode": False,
+                "status": "unconfigured",
+                "revision": "psrev_" + "05" * 16,
+                "updated": NOW,
+                "quote_creations_per_customer_per_minute": None,
+                "chains": [],
+                "available": [],
+            },
+        )
     if path == "/v1/config":
         return httpx.Response(
             200,
@@ -91,6 +105,7 @@ def test_every_resource_is_written_and_paged_through(tmp_path: Path) -> None:
     client = TopupClient("http://service.test", API_KEY, transport=httpx.MockTransport(_service))
     counts = export_account(client, tmp_path / "export")
     assert (counts["deposits"], counts["forwarders"], counts["account"]) == (2, 1, 1)
+    assert counts["payment_settings"] == 1
     written = {path.name for path in (tmp_path / "export").iterdir()}
     assert written == {f"{name}.json" for name in counts}
     forwarders = json.loads((tmp_path / "export" / "forwarders.json").read_text())

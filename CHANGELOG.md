@@ -13,6 +13,75 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Added
+
+- Per-account payment settings, `GET` and `POST /v1/payment_settings` (docs/integration.md §1.9,
+  docs/design/payment-settings.md): per mode, the chains and assets the account accepts, a stricter
+  `confirmations` per chain, and its terms per asset (quote window, spread, two-sided tolerance,
+  minimum credit, deposit bounds, refund floor) within the operator's bounds, plus one customer's
+  quote creations per minute. `chains`, when sent, replaces the list; writes are last-write-wins.
+  `available` lists the operator's catalog of the mode with its defaults, bounds, and each chain's
+  status. Each change has a new `revision` and is announced as `payment_settings.updated`, an
+  account event delivered to every endpoint. Reading needs `account.read`; writing needs
+  `account.write`, which a restricted key never holds.
+- `rejected` deposits carry `rejection_reason: "asset_not_accepted"` for a routed token the payment
+  settings the deposit is bound to do not accept; it is refundable like any rejected deposit.
+- Error codes `asset_not_accepted` (a quote or deposit address of an asset the account does not
+  accept) and `payment_settings_unconfirmed` (after a service restore, until the merchant
+  reconfirms its settings).
+- A quote carries `terms`, the terms it was issued with, which it keeps whatever the settings say
+  later. `GET /v1/config` adds `quote_creations_per_customer_per_minute`, and each asset
+  `min_deposit_atomic` and `quote_amount_decimals`.
+- Admin: `GET /v1/admin/accounts/{account}`, with each mode's payment settings, and
+  `POST /v1/admin/recording/resume`, which lifts the 0.6.0 cutover's recording hold. The admin
+  deposit view names the deposit's `settings_revision` or `settings_hold`.
+
+### Changed
+
+- **Breaking:** an account accepts nothing until it configures its payment settings. A treasury no
+  longer enables a chain by itself, and a routed asset is no longer accepted by default: quotes and
+  deposit addresses answer `400 asset_not_accepted`, `GET /v1/config` lists no asset, and a
+  payment to an existing address is `rejected(asset_not_accepted)` until the merchant lists what it
+  takes. `GET /v1/config` is the account's effective payment config: the accepted assets on chains
+  with a treasury, with the account's terms.
+- **Breaking:** a deposit is governed by the payment settings current when it is recorded, or, for
+  a valid payment of a quote, by the quote's terms; a change applies to deposits recorded after it.
+  A deposit waits for the stricter of its bound confirmation and the chain's current floor; a
+  stricter confirmation no longer applies to deposits already recorded.
+- **Breaking:** route files replace `quote:` and `limits:` with a `merchant:` section of each
+  term's operator default and bounds (`quote_ttl_seconds`, `quote_spread_bps`,
+  `quote_tolerance_bps`, `min_amount`, `min_deposit_atomic`, `max_deposit_atomic`,
+  `min_refund_atomic`), with code ceilings; quote amount decimals become
+  `asset.quote_amount_decimals`; `quote.max_creations_per_minute` is removed (now per account and
+  mode, default 10, at most 60). Every environment's route files are converted.
+- **Breaking:** after a restore from backup, every account's payment settings are `held` until the
+  merchant sends its complete configuration with `POST /v1/payment_settings`; deposits recorded
+  meanwhile wait. A delivered outcome stands: a rebuilt deposit with an imported
+  `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded.
+- **Breaking (operators):** the upgrade to this release is a cutover (docs/architecture.md §14):
+  `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model (the
+  compose's `migrate` service mounts the configuration), `topup run` refuses to start before it,
+  and recording stays held until the accounts are configured and `POST /v1/admin/recording/resume`.
+
+### Removed
+
+- **Breaking:** `confirmation_policies` (the `GET /v1/account` field) and `POST /v1/account`: a
+  chain's stricter confirmation is part of the payment settings.
+
+### Python SDK (`phala-pay`)
+
+#### Added
+
+- `pay.payment_settings.retrieve()` and `.update(chains=, quote_creations_per_customer_per_minute=)`
+  (`TopupClient.get_payment_settings`, `update_payment_settings`), and the generated
+  `PaymentSettingsObject`, `UpdatePaymentSettingsRequest`, `QuoteTerms`, and catalog models. The
+  account export writes `payment_settings.json`. `PaymentSettingsStatus` and `RejectionReason`
+  name the documented values.
+
+#### Removed
+
+- **Breaking:** `pay.account.update(confirmation_policies=)` and `TopupClient.update_account`.
+
 ## [0.5.0] - 2026-10-01
 
 ### Added
