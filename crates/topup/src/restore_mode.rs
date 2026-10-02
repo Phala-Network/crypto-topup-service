@@ -1175,14 +1175,26 @@ pub async fn delivered_event_findings(
                event.data #>> '{object,amount}' AS delivered_amount,
                deposit.amount_atomic::text AS ledger_amount_atomic,
                deposit.credit_minor::text AS ledger_amount,
-               COALESCE(credit.account_id <> deposit.account_id
+               COALESCE(CASE WHEN event.type = 'deposit.rejected' THEN
+                        event.account_id <> deposit.account_id
+                        OR event.livemode <> deposit.livemode
+                        OR (event.data #>> '{object,chain_id}')::bigint <> deposit.chain_id
+                        OR lower(event.data #>> '{object,tx_hash}') <> deposit.tx_hash
+                        OR (event.data #>> '{object,receipt_log_index}')::bigint
+                            <> deposit.receipt_log_index
+                        OR lower(event.data #>> '{object,address}') <> address.address
+                        OR lower(event.data #>> '{object,asset_contract}') <> deposit.asset_contract
+                        OR lower(event.data #>> '{object,from_address}') <> deposit.from_address
+                        OR (event.data #>> '{object,amount_atomic}')::numeric <> deposit.amount_atomic
+                   ELSE credit.account_id <> deposit.account_id
                         OR credit.livemode <> deposit.livemode
                         OR credit.chain_id <> deposit.chain_id
                         OR credit.tx_hash <> deposit.tx_hash
                         OR credit.address <> address.address
                         OR credit.asset_contract <> deposit.asset_contract
                         OR credit.from_address <> deposit.from_address
-                        OR credit.amount_atomic <> deposit.amount_atomic, false) AS contradicted,
+                        OR credit.amount_atomic <> deposit.amount_atomic
+                   END, false) AS contradicted,
                -- ReversedDeposit::Rescanned: the rescan took the reversed deposit's position.
                event.type = 'deposit.reversed' AND EXISTS (
                    SELECT 1 FROM deposits AS holder

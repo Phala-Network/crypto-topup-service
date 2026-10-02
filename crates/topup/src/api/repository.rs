@@ -453,6 +453,7 @@ async fn request_refund_in(
         r#"
         SELECT deposit.amount_atomic::text AS amount_atomic, deposit.state, deposit.reason,
                deposit.chain_id, deposit.final_at IS NOT NULL AS is_final,
+               deposit.sanctions_hit_at IS NOT NULL AS sanctions_hit,
                customer.paused_scopes AS customer_scopes,
                account.paused_scopes AS account_scopes,
                COALESCE(route_pause.paused_scopes, '{}') AS route_scopes
@@ -480,6 +481,11 @@ async fn request_refund_in(
         .any(|scopes| scopes.iter().any(|scope| scope == "refunds"))
     {
         return Err(ApiError::paused("refund requests are paused"));
+    }
+
+    // A sanctions hit on a delivered credit preserves its outcome, but not refund eligibility.
+    if row.try_get::<bool, _>("sanctions_hit")? {
+        return Err(ApiError::deposit_not_refundable());
     }
 
     let deposit_amount = parse_atomic(row.try_get::<String, _>("amount_atomic")?)?;

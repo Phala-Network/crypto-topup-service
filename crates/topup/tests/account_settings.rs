@@ -413,7 +413,7 @@ async fn the_cutover_binds_the_0_5_0_rows_and_holds_recording_until_resumed() ->
             ensure!(!topup::payment_config::backfilled(&mut connection).await?);
             ensure!(topup::payment_config::recording_held(&mut connection).await?);
 
-            let report = topup::payment_config::backfill(owner, &fixture.routes)
+            let report = topup::payment_config::migrate(owner, Some(&fixture.routes))
                 .await?
                 .context("the backfill runs once")?;
             ensure!(
@@ -425,7 +425,7 @@ async fn the_cutover_binds_the_0_5_0_rows_and_holds_recording_until_resumed() ->
                     },
                 "{report:?}"
             );
-            ensure!(topup::payment_config::backfill(owner, &fixture.routes).await?.is_none());
+            ensure!(topup::payment_config::migrate(owner, Some(&fixture.routes)).await?.is_none());
             let validated: bool = sqlx::query_scalar(
                 "SELECT bool_and(convalidated) FROM pg_constraint WHERE conname IN \
                  ('deposits_settings_binding_check', 'quotes_terms_check')",
@@ -511,48 +511,53 @@ async fn concurrent_payment_settings_writes_apply_one_after_the_other() -> Resul
             let pool = &database.app_pool;
             let fixture = Fixture::new(pool).await?;
             let scope = topup::tenancy::Scope::new(fixture.account.id, true);
-            let route = fixture
-                .routes
-                .current_in(true)
-                .next()
-                .context("live route")?;
-            // A first POST holds the state row, not committed yet.
-            let mut first = pool.begin().await?;
-            topup::payment_config::write(
-                &mut first,
-                scope,
-                &topup::payment_config::Document::accepting([route]),
-                "first",
-            )
-            .await?;
-            let second = tokio::spawn({
+            // Queue two real POSTs behind a recorder's state lock, in a known order.
+            let mut recorder = pool.begin().await?;
+            topup::payment_config::load_for_share(&mut recorder, scope).await?;
+            let post = |document: Value| {
                 let app = fixture.app.clone();
                 let key = fixture.live_key.clone();
-                async move {
-                    let body = serde_json::to_vec(&json!({"chains": []}))?;
+                tokio::spawn(async move {
                     let response = app
                         .oneshot(merchant_request(
                             Method::POST,
                             "/v1/payment_settings",
-                            body,
+                            serde_json::to_vec(&document)?,
                             &key,
                         ))
                         .await?;
                     let status = response.status();
                     let bytes = to_bytes(response.into_body(), 1_048_576).await?;
                     anyhow::Ok((status, serde_json::from_slice::<Value>(&bytes)?))
-                }
-            });
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            ensure!(
-                !second.is_finished(),
-                "the second write did not wait for the first"
-            );
-            first.commit().await?;
+                })
+            };
+            let first = post(json!({"chains": [{"chain_id": 1,
+                                                 "assets": [{"asset": "pha"}]}]}));
+            wait_for_settings_writers(&database.owner_pool, 1).await?;
+            let second = post(json!({"chains": []}));
+            wait_for_settings_writers(&database.owner_pool, 2).await?;
+            recorder.commit().await?;
+            let (status, settings) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), first).await???;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(settings["chains"][0]["chain_id"] == 1, "{settings}");
             let (status, settings) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), second).await???;
             ensure!(status == StatusCode::OK, "{settings}");
             ensure!(settings["chains"] == json!([]), "{settings}");
+            let (_, current) = fixture
+                .request(Method::GET, "/v1/payment_settings", Value::Null)
+                .await?;
+            ensure!(current["revision"] == settings["revision"], "{current}");
+            ensure!(current["chains"] == json!([]), "{current}");
+            let events: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM events WHERE account_id = $1 AND livemode \
+                 AND type = 'payment_settings.updated'",
+            )
+            .bind(fixture.account.id)
+            .fetch_one(pool)
+            .await?;
+            ensure!(events == 2);
             let written: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM payment_settings_revisions \
                  WHERE account_id = $1 AND livemode AND kind = 'configured'",
@@ -565,6 +570,26 @@ async fn concurrent_payment_settings_writes_apply_one_after_the_other() -> Resul
         })
     })
     .await
+}
+
+async fn wait_for_settings_writers(pool: &sqlx::PgPool, count: i64) -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                 AND query LIKE '%FROM payment_settings_state AS state%'",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting == count {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("settings POSTs did not reach the state lock")?
 }
 
 /// A quote shows the terms it was issued with, confirmation included, whatever the catalog says
@@ -763,6 +788,17 @@ async fn a_failed_cutover_backfill_leaves_the_schema_unmigrated() -> Result<()> 
                     .env("DATABASE_URL", &database.owner_url)
                     .output()
             };
+            // Invalid configuration must fail before the schema changes at all.
+            let valid_config = std::fs::read_to_string(&config)?;
+            std::fs::write(&config, "environment: invalid\n")?;
+            let invalid = migrate()?;
+            std::fs::write(&config, valid_config)?;
+            ensure!(!invalid.status.success());
+            let policies: bool =
+                sqlx::query_scalar("SELECT to_regclass('confirmation_policies') IS NOT NULL")
+                    .fetch_one(owner)
+                    .await?;
+            ensure!(policies, "invalid configuration changed the schema");
             let output = migrate()?;
             let text = format!(
                 "{}{}",

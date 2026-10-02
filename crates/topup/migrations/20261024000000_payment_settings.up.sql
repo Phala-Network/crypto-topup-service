@@ -104,7 +104,7 @@ ALTER TABLE events ADD CONSTRAINT events_object_type_check
     ));
 
 -- The 0.6.0 cutover (design §10). An instance with issued addresses has deposits or quotes to
--- bind: `topup migrate --config` runs the backfill (`topup::payment_config::backfill`), which reads
+-- bind: `topup migrate --config` runs the backfill in the migration transaction, which reads
 -- the confirmation policies kept here, and recording stays held until the operator resumes it
 -- with POST /v1/admin/recording/resume once the accounts are configured. A new instance has
 -- nothing to bind, so its cutover is complete at once.

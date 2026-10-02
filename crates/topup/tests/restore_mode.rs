@@ -4684,6 +4684,7 @@ impl topup_adapters::risk::oracle::SanctionsSource for NamesSender {
 /// A sanctions hit on a delivered credit is compliance, not commercial policy (design §11): the
 /// credit stands, the alert is raised, and its forwarder is never offered for a sweep.
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn a_sanctions_hit_keeps_a_delivered_credit_and_blocks_its_sweep() -> Result<()> {
     support::with_database(|database| {
         Box::pin(async move {
@@ -4736,6 +4737,7 @@ async fn a_sanctions_hit_keeps_a_delivered_credit_and_blocks_its_sweep() -> Resu
             )
             .await?;
             ensure!(outcome(&harness, deposit).await? == ("credited".to_owned(), None));
+            ensure!(logs_contain("TopupDeliveredCreditSanctioned"));
             let rejected: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM events WHERE type = 'deposit.rejected' AND object_id = $1",
             )
@@ -4753,6 +4755,23 @@ async fn a_sanctions_hit_keeps_a_delivered_credit_and_blocks_its_sweep() -> Resu
 
             harness.unfreeze(&restore).await?;
             harness.screening.answer(Some(false));
+            let refund = json!({
+                "deposit": topup::ids::format(topup::ids::DEPOSIT, deposit),
+                "destination_address": format!("{:#x}", Address::repeat_byte(0x75)),
+            });
+            let refused = harness
+                .merchant(Method::POST, "/v1/refunds", &refund)
+                .await?;
+            ensure!(
+                refused.status == StatusCode::BAD_REQUEST,
+                "{}",
+                refused.body
+            );
+            ensure!(
+                refused.body["error"]["code"] == "deposit_not_refundable",
+                "{}",
+                refused.body
+            );
             let sweepable = harness
                 .merchant(
                     Method::GET,
@@ -4785,6 +4804,10 @@ async fn a_sanctions_hit_keeps_a_delivered_credit_and_blocks_its_sweep() -> Resu
                 "{}",
                 offered.body
             );
+            let allowed = harness
+                .merchant(Method::POST, "/v1/refunds", &refund)
+                .await?;
+            ensure!(allowed.status == StatusCode::OK, "{}", allowed.body);
             Ok(())
         })
     })
@@ -4851,6 +4874,14 @@ async fn a_delivered_rejection_the_chain_contradicts_holds_the_deposit() -> Resu
                 "{evidence}"
             );
             ensure!(evidence["field"] == "from_address", "{evidence}");
+            let (_, findings) =
+                restore_mode::delivered_event_findings(&harness.pool, &restore).await?;
+            ensure!(
+                findings.iter().any(
+                    |finding| finding.deposit_id == deposit && finding.status == "contradicted"
+                ),
+                "{findings:?}"
+            );
             Ok(())
         })
     })

@@ -1859,6 +1859,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delivered_rejection_requires_the_full_transfer_identity() {
+        let deposit = deposit(1_000);
+        let log = transfer(&deposit);
+        let transfer = DeliveredTransfer {
+            account_id: deposit.account_id,
+            livemode: deposit.livemode,
+            chain_id: deposit.chain_id,
+            tx_hash: deposit.tx_hash,
+            address: log.to,
+            asset_contract: log.token,
+            from_address: log.from,
+            amount_atomic: log.amount,
+        };
+        for field in [
+            "account",
+            "livemode",
+            "chain_id",
+            "tx_hash",
+            "address",
+            "asset_contract",
+            "from_address",
+            "amount_atomic",
+        ] {
+            let mut contradicted = transfer.clone();
+            match field {
+                "account" => contradicted.account_id = Uuid::new_v4(),
+                "livemode" => contradicted.livemode = !deposit.livemode,
+                "chain_id" => contradicted.chain_id = 999,
+                "tx_hash" => contradicted.tx_hash = B256::repeat_byte(9),
+                "address" => contradicted.address = Address::repeat_byte(9),
+                "asset_contract" => contradicted.asset_contract = Address::repeat_byte(9),
+                "from_address" => contradicted.from_address = Address::repeat_byte(9),
+                "amount_atomic" => contradicted.amount_atomic = AtomicAmount::new(U256::from(999)),
+                _ => unreachable!(),
+            }
+            let result = step(
+                route(PricingMode::Spot),
+                chain(100, vec![log.clone()]),
+                chain(100, vec![log.clone()]),
+                prices(now_seconds()),
+                ConfirmationContext {
+                    delivered_rejection: Some(DeliveredRejection {
+                        reason: RejectReason::BelowMinimum,
+                        transfer: contradicted,
+                    }),
+                    ..context(None)
+                },
+            )
+            .run(&deposit)
+            .await;
+            assert_eq!(
+                result.outcome,
+                StepOutcome::Retry {
+                    error: RetryError::InvariantViolation,
+                },
+                "{field}"
+            );
+            assert_eq!(
+                result.evidence["error"],
+                "delivered_event_contradicts_chain"
+            );
+            assert_eq!(result.evidence["field"], field);
+            assert!(result.events.is_empty());
+            assert!(result.effects.valuation.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn below_minimum_rejects_and_keeps_quote_fields() {
         let now = now_seconds();
         let mut route = route(PricingMode::Spot);

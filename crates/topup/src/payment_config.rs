@@ -966,7 +966,7 @@ pub struct Backfill {
 }
 
 /// Applies every pending migration and, on an instance the 0.6.0 cutover has not bound yet, its
-/// backfill ([`backfill`]) with `routes`, all in one transaction as the database owner (`topup
+/// backfill with `routes`, all in one transaction as the database owner (`topup
 /// migrate`): each migration runs in a savepoint of it, so a backfill that fails leaves the schema
 /// as it was. `None` when there was nothing to backfill.
 pub async fn migrate(
@@ -985,19 +985,8 @@ pub async fn migrate(
     Ok(report)
 }
 
-/// The one-time 0.6.0 cutover backfill (design §10), in one transaction: every account and mode
-/// gets a `legacy` revision that writes out the 0.5.0 model (every route of the mode in `routes`
-/// accepted at its route values, with the account's confirmation policies), every deposit is
-/// bound to it, every quote gets the terms it resolves on its route's current version, and the
-/// binding constraints are validated. `None` when the backfill has run already. `topup migrate`
-/// runs it in the transaction of the schema change ([`migrate`]).
-pub async fn backfill(pool: &PgPool, routes: &RouteSet) -> Result<Option<Backfill>, BackfillError> {
-    let mut transaction = pool.begin().await?;
-    let report = backfill_in(&mut transaction, routes).await?;
-    transaction.commit().await?;
-    Ok(report)
-}
-
+/// The one-time cutover backfill within the migration transaction (design §10): legacy revisions,
+/// deposit bindings, quote terms, and constraint validation. `None` if already backfilled.
 async fn backfill_in(
     transaction: &mut PgConnection,
     routes: &RouteSet,
