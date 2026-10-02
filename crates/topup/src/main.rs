@@ -1308,26 +1308,24 @@ fn spawn_signer() -> std::io::Result<SignerHandle> {
 }
 
 async fn migrate(args: &MigrateArgs) -> anyhow::Result<ExitCode> {
+    // The configuration is loaded and validated before anything is migrated: the schema, the
+    // cutover backfill, and its validation commit together or not at all.
+    let routes = args
+        .config
+        .as_deref()
+        .map(|config| {
+            topup::routes::RouteSet::new(load_config(config)?.routes)
+                .map_err(anyhow::Error::msg)
+                .context("failed to load the route configuration")
+        })
+        .transpose()?;
     let pool = connect_owner("migrate", 1)
         .await
         .context("failed to connect to database")?;
-    topup::db::migrate(&pool)
+    let report = topup::payment_config::migrate(&pool, routes.as_ref())
         .await
         .context("failed to apply database migrations")?;
     tracing::info!("database migrations applied");
-    if topup::payment_config::backfilled(&mut *pool.acquire().await?).await? {
-        return Ok(ExitCode::SUCCESS);
-    }
-    let config = args.config.as_deref().context(
-        "the 0.6.0 payment settings cutover must bind the existing deposits and quotes: run \
-         `topup migrate --config FILE` with the service configuration",
-    )?;
-    let routes = topup::routes::RouteSet::new(load_config(config)?.routes)
-        .map_err(anyhow::Error::msg)
-        .context("failed to load the route configuration")?;
-    let report = topup::payment_config::backfill(&pool, &routes)
-        .await
-        .context("the payment settings cutover backfill failed")?;
     if let Some(report) = report {
         tracing::warn!(
             legacy_revisions = report.legacy_revisions,

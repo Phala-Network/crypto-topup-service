@@ -104,9 +104,9 @@ fn config_asset(route: &RouteFile, terms: &Terms) -> ConfigAsset {
     }
 }
 
-/// The terms a quote was issued with, as its object shows them.
-pub(super) fn quote_terms(route: &RouteFile, terms: &Terms) -> QuoteTerms {
-    let confirmations = route.chain.confirmations.stricter(terms.confirmations);
+/// The terms a quote was issued with, exactly as stored: a later catalog never changes them. A
+/// payment's current wait is the payer's view's `typical_credit_seconds`.
+pub(super) fn quote_terms(terms: &Terms) -> QuoteTerms {
     QuoteTerms {
         quote_ttl_seconds: terms.quote_ttl_seconds,
         quote_spread_bps: terms.quote_spread_bps.value(),
@@ -116,7 +116,7 @@ pub(super) fn quote_terms(route: &RouteFile, terms: &Terms) -> QuoteTerms {
         min_deposit_atomic: terms.min_deposit_atomic.value().to_string(),
         max_deposit_atomic: terms.max_deposit_atomic.value().to_string(),
         min_refund_atomic: terms.min_refund_atomic.value().to_string(),
-        confirmations: confirmations.policy_value(),
+        confirmations: terms.confirmations.policy_value(),
     }
 }
 
@@ -681,7 +681,7 @@ pub(crate) async fn quote_object(
             .consumed_by
             .map(|deposit| ExpandableDeposit::Id(ids::format(ids::DEPOSIT, deposit))),
         client_secret: None,
-        terms: quote_terms(route, &lock.terms),
+        terms: quote_terms(&lock.terms),
         metadata: lock.metadata,
     })
 }

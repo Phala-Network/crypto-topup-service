@@ -175,6 +175,7 @@ async fn step_evidence_and_events_commit_with_the_transition() -> Result<()> {
                 }],
                 effects: TransitionEffects {
                     mark_final: false,
+                    sanctions_hit: false,
                     canonical_evidence: None,
                     valuation: Some(StoredValuation {
                         valuation_at: Utc::now(),

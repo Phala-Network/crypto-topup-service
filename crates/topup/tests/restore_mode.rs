@@ -4657,3 +4657,202 @@ async fn delivered_outcomes_stand_whatever_the_reconfirmed_settings_accept() -> 
     })
     .await
 }
+
+/// Sanctions screening that names one sender.
+struct NamesSender(Address);
+
+#[async_trait]
+impl topup_adapters::risk::oracle::SanctionsSource for NamesSender {
+    async fn sanctions(
+        &self,
+        address: Address,
+        block_number: u64,
+    ) -> topup_core::screening::SanctionsResult {
+        let answer = if address == self.0 {
+            topup_core::screening::SanctionsAnswer::Sanctioned
+        } else {
+            topup_core::screening::SanctionsAnswer::Clear
+        };
+        topup_core::screening::SanctionsResult {
+            provider_a: answer,
+            provider_b: answer,
+            block_number,
+        }
+    }
+}
+
+/// A sanctions hit on a delivered credit is compliance, not commercial policy (design §11): the
+/// credit stands, the alert is raised, and its forwarder is never offered for a sweep.
+#[tokio::test]
+async fn a_sanctions_hit_keeps_a_delivered_credit_and_blocks_its_sweep() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-listed").await?;
+            let restore = harness.restore().await?;
+            let tx_hash = B256::repeat_byte(0x63);
+            let deposit = deposit_id(1, tx_hash, 0);
+            let delivered = credited_event(
+                &harness,
+                deposit,
+                tx_hash,
+                &format!("{forwarder:#x}"),
+                "100000000000000000000",
+                (2_500, "0.25000000", "spot"),
+            );
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [harness.delivered(&delivered)], "reason": "log"}),
+                )
+                .await?;
+            ensure!(imported.status == StatusCode::OK, "{}", imported.body);
+            record_deposit(
+                &harness,
+                tx_hash,
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            confirm(&harness, deposit, forwarder, 20_000_000).await?;
+            sqlx::query("UPDATE deposits SET final_at = now() WHERE id = $1")
+                .bind(deposit)
+                .execute(&harness.pool)
+                .await?;
+
+            // The list now names the sender.
+            let screen = topup::steps::screen::ScreenStep::new(
+                harness.pool.clone(),
+                [topup::steps::screen::ScreenRoute::new(
+                    harness.route.clone(),
+                    Arc::new(NamesSender(Address::repeat_byte(0x74))),
+                )],
+            )?;
+            run_pump(
+                &harness,
+                deposit,
+                StepSet::new(Box::new(Unreached), Box::new(screen)),
+            )
+            .await?;
+            ensure!(outcome(&harness, deposit).await? == ("credited".to_owned(), None));
+            let rejected: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM events WHERE type = 'deposit.rejected' AND object_id = $1",
+            )
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(rejected == 0);
+            let sanctioned: bool = sqlx::query_scalar(
+                "SELECT sanctions_hit_at IS NOT NULL FROM deposits WHERE id = $1",
+            )
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(sanctioned);
+
+            harness.unfreeze(&restore).await?;
+            harness.screening.answer(Some(false));
+            let sweepable = harness
+                .merchant(
+                    Method::GET,
+                    &format!(
+                        "/v1/forwarders?sweepable={:#x}",
+                        harness.route.asset.contract
+                    ),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(sweepable.status == StatusCode::OK, "{}", sweepable.body);
+            ensure!(sweepable.body["data"] == json!([]), "{}", sweepable.body);
+            // The recorded hit is what keeps it: without it, the forwarder is offered.
+            sqlx::query("UPDATE deposits SET sanctions_hit_at = NULL WHERE id = $1")
+                .bind(deposit)
+                .execute(&harness.owner)
+                .await?;
+            let offered = harness
+                .merchant(
+                    Method::GET,
+                    &format!(
+                        "/v1/forwarders?sweepable={:#x}",
+                        harness.route.asset.contract
+                    ),
+                    &Value::Null,
+                )
+                .await?;
+            ensure!(
+                offered.body["data"][0]["address"] == format!("{forwarder:#x}"),
+                "{}",
+                offered.body
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A delivered rejection the chain contradicts holds the deposit, as a delivered credit does: the
+/// whole transfer identity is checked, not only its token and amount.
+#[tokio::test]
+async fn a_delivered_rejection_the_chain_contradicts_holds_the_deposit() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+            let harness = Harness::new(database).await?;
+            let (forwarder, address_id) = harness.deposit_address("team-other-sender").await?;
+            let restore = harness.restore().await?;
+            let tx_hash = B256::repeat_byte(0x64);
+            let deposit = deposit_id(1, tx_hash, 0);
+            let mut rejection = credited_event(
+                &harness,
+                deposit,
+                tx_hash,
+                &format!("{forwarder:#x}"),
+                "100000000000000000000",
+                (2_500, "0.25000000", "spot"),
+            );
+            rejection["id"] = json!(topup::ids::format(
+                topup::ids::EVENT,
+                topup_core::identity::event_id("deposit.rejected", deposit)
+            ));
+            rejection["type"] = json!("deposit.rejected");
+            rejection["data"]["object"]["status"] = json!("rejected");
+            rejection["data"]["object"]["rejection_reason"] = json!("below_minimum");
+            // The delivery names another sender than the chain's.
+            rejection["data"]["object"]["from_address"] =
+                json!(format!("{:#x}", Address::repeat_byte(0x99)));
+            let imported = harness
+                .admin(
+                    Method::POST,
+                    "/v1/admin/restore/events",
+                    &json!({"deliveries": [harness.delivered(&rejection)], "reason": "log"}),
+                )
+                .await?;
+            ensure!(imported.status == StatusCode::OK, "{}", imported.body);
+            record_deposit(
+                &harness,
+                tx_hash,
+                address_id,
+                U256::from(10_u64).pow(U256::from(20)),
+            )
+            .await?;
+            harness.unfreeze(&restore).await?;
+            reconfirm(&harness).await?;
+            confirm(&harness, deposit, forwarder, 20_000_000).await?;
+            ensure!(outcome(&harness, deposit).await? == ("detected".to_owned(), None));
+            let evidence: Value = sqlx::query_scalar(
+                "SELECT evidence FROM transitions WHERE deposit_id = $1 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(deposit)
+            .fetch_one(&harness.pool)
+            .await?;
+            ensure!(
+                evidence["error"] == "delivered_event_contradicts_chain",
+                "{evidence}"
+            );
+            ensure!(evidence["field"] == "from_address", "{evidence}");
+            Ok(())
+        })
+    })
+    .await
+}

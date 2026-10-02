@@ -508,9 +508,11 @@ reads at the position takes the successor's id and `replaces` again (§14).
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
-reproduces crediting only final deposits. It is the chain's floor: every loaded route of a chain
-must resolve to the same value, defaults included, or the route set is refused at load
-(`topup config check` too), so the scanner, the confirm step, and the API read one floor. A
+reproduces crediting only final deposits. It is the chain's floor: every current route of a
+chain must resolve to the same value, defaults included, or the route set is refused at load
+(`topup config check` too), so the scanner, the confirm step, and the API read one floor. An
+earlier route version keeps its own value only for the terms of the deposits it governs, so a new
+version may raise the floor, and a deposit not yet credited waits for the new one. A
 stricter value is a deeper depth, then `safe`, then `finalized`: `safe` outranks every depth, since
 the sequencer can rewrite the unsafe head on its own however deep a block is in it, but not a block
 derived from data posted to L1, which only an L1 reorganization reaching that data can change. A depth credits before finality on both families,
@@ -1610,8 +1612,8 @@ it detectable.
 
 **The 0.6.0 payment settings cutover** (design payment-settings §10). On an instance with issued
 addresses, `topup migrate --config FILE` (the compose's `migrate` service mounts the attested
-configuration) runs a one-time backfill, in its own transaction right after the schema
-migration (until it commits, `topup run` refuses to start and a rerun resumes it): every account and
+configuration, loaded and validated before anything is migrated) runs a one-time backfill in
+one transaction with the schema change, so a failure leaves the 0.5.0 schema: every account and
 mode gets a `legacy` revision that writes out the 0.5.0 model (every route of the mode accepted at
 its route values, with the account's former confirmation policies), every existing deposit is
 bound to it, and every quote, whatever its status, gets the terms it resolves on its route's
@@ -1662,7 +1664,9 @@ linked to its runbook: `TopupDepositStateAgeExceeded` (age in state past the rou
 `TopupLockExpiryFailing`, `TopupUnsupportedInflows`, `TopupDepositReversed` (a deposit's
 transaction left the chain before finality: a chain-health signal), `TopupDepositPendingAfterReorg`
 (a deposit's transaction has been out of every block for an hour with its nonce unused),
-`TopupTreasurySanctioned` (a current treasury is listed; §9). Alerts
+`TopupTreasurySanctioned` (a current treasury is listed; §9), `TopupDeliveredCreditSanctioned` (a
+credit delivered before a restore whose sender is now listed: the credit stands and its forwarder
+is never offered for a sweep; §14). Alerts
 are platform health only (design §13): an unswept balance or a `FlushFailed` target is the
 merchant's, recorded for it, not an alert. Each loop checks in to a Sentry Crons
 monitor, which pages on scanner lag, backup age over 2 minutes, a failed reconciliation check, and

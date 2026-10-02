@@ -502,6 +502,311 @@ async fn the_cutover_binds_the_0_5_0_rows_and_holds_recording_until_resumed() ->
     .await
 }
 
+/// Two writes of one account and mode apply one after the other: the second waits for the
+/// first's commit and then reads the revision it wrote (design §4, §7).
+#[tokio::test]
+async fn concurrent_payment_settings_writes_apply_one_after_the_other() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let fixture = Fixture::new(pool).await?;
+            let scope = topup::tenancy::Scope::new(fixture.account.id, true);
+            let route = fixture
+                .routes
+                .current_in(true)
+                .next()
+                .context("live route")?;
+            // A first POST holds the state row, not committed yet.
+            let mut first = pool.begin().await?;
+            topup::payment_config::write(
+                &mut first,
+                scope,
+                &topup::payment_config::Document::accepting([route]),
+                "first",
+            )
+            .await?;
+            let second = tokio::spawn({
+                let app = fixture.app.clone();
+                let key = fixture.live_key.clone();
+                async move {
+                    let body = serde_json::to_vec(&json!({"chains": []}))?;
+                    let response = app
+                        .oneshot(merchant_request(
+                            Method::POST,
+                            "/v1/payment_settings",
+                            body,
+                            &key,
+                        ))
+                        .await?;
+                    let status = response.status();
+                    let bytes = to_bytes(response.into_body(), 1_048_576).await?;
+                    anyhow::Ok((status, serde_json::from_slice::<Value>(&bytes)?))
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            ensure!(
+                !second.is_finished(),
+                "the second write did not wait for the first"
+            );
+            first.commit().await?;
+            let (status, settings) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), second).await???;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(settings["chains"] == json!([]), "{settings}");
+            let written: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM payment_settings_revisions \
+                 WHERE account_id = $1 AND livemode AND kind = 'configured'",
+            )
+            .bind(fixture.account.id)
+            .fetch_one(pool)
+            .await?;
+            ensure!(written == 2);
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// A quote shows the terms it was issued with, confirmation included, whatever the catalog says
+/// now (design §8).
+#[tokio::test]
+async fn a_quote_shows_the_terms_it_was_issued_with_after_the_floor_rises() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let (account, live_key) = Fixture::seed_account(pool).await?;
+            let issued = live_route(1, "2", "")?;
+            let (address_id, _) = seed_payment(pool, account.id, &issued, 0x31).await?;
+            let quote: uuid::Uuid =
+                sqlx::query_scalar("SELECT quote_id FROM addresses WHERE id = $1")
+                    .bind(address_id)
+                    .fetch_one(pool)
+                    .await?;
+            sqlx::query("UPDATE quotes SET terms = $2 WHERE id = $1")
+                .bind(quote)
+                .bind(serde_json::to_value(
+                    topup::payment_config::Terms::defaults(&issued),
+                )?)
+                .execute(&database.owner_pool)
+                .await?;
+            // The operator now credits the chain at five confirmations.
+            let fixture = Fixture::for_account(
+                pool,
+                account,
+                live_key,
+                Fixture::catalog(vec![live_route(1, "5", "")?])?,
+            )?;
+            let (status, object) = fixture
+                .request(
+                    Method::GET,
+                    &format!("/v1/quotes/{}", topup::locks::quote_id(quote)),
+                    Value::Null,
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{object}");
+            ensure!(object["terms"]["confirmations"] == "2", "{object}");
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// The design's floor-tightening scenario (§12): a new route version raises the chain's floor and
+/// tightens a bound. The historical version keeps its terms; the chain's floor is the current
+/// version's; a deposit not credited yet waits for the stricter of it and its bound requirement;
+/// and the pair whose terms the new bound breaks is disabled and reported.
+#[tokio::test]
+async fn the_operator_tightens_the_floor_and_a_bound_in_a_new_route_version() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let pool = &database.app_pool;
+            let (account, live_key) = Fixture::seed_account(pool).await?;
+            let v1 = live_route(
+                1,
+                "2",
+                "merchant:\n  min_amount: { default: 100 }\n  \
+                 min_deposit_atomic: { default: \"20000000000000000000\", \
+                 max: \"1000000000000000000000\" }\n  \
+                 max_deposit_atomic: { default: \"200000000000000000000000\" }\n  \
+                 min_refund_atomic: { default: \"20\" }\n",
+            )?;
+            let v2 = live_route(
+                2,
+                "5",
+                "merchant:\n  min_amount: { default: 100 }\n  \
+                 min_deposit_atomic: { default: \"20000000000000000000\", \
+                 max: \"1000000000000000000000\" }\n  \
+                 max_deposit_atomic: { default: \"100000000000000000000\", \
+                 max: \"100000000000000000000\" }\n  \
+                 min_refund_atomic: { default: \"20\" }\n",
+            )?;
+            let before = Fixture::for_account(
+                pool,
+                account.clone(),
+                live_key.clone(),
+                Fixture::catalog(vec![v1.clone()])?,
+            )?;
+            let (status, settings) = before
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "confirmations": "3", "assets": [
+                        {"asset": "pha", "min_deposit_atomic": "500000000000000000000"}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::OK, "{settings}");
+            let (_, deposit) = seed_payment(pool, account.id, &v1, 0x32).await?;
+
+            let after = Fixture::for_account(
+                pool,
+                account.clone(),
+                live_key,
+                Fixture::catalog(vec![v1.clone(), v2.clone()])?,
+            )?;
+            let floor = after.routes.chain(1).context("chain 1")?.confirmations;
+            ensure!(floor == topup_core::route::Confirmations::Depth(5));
+            let mut connection = pool.acquire().await?;
+            let binding = topup::payment_config::deposit_binding(&mut connection, deposit).await?;
+            ensure!(binding.confirmations(1) == Some(topup_core::route::Confirmations::Depth(3)));
+            ensure!(
+                topup::payment_config::required_confirmations(floor, binding.confirmations(1))
+                    == topup_core::route::Confirmations::Depth(5)
+            );
+            // The deposit keeps its version's terms: v1 accepts its merchant's minimum.
+            let terms =
+                topup::payment_config::deposit_terms(&mut connection, &after.routes, deposit)
+                    .await?
+                    .context("the deposit's version accepts it")?;
+            ensure!(terms.max_deposit_atomic == v1.merchant.max_deposit_atomic.default);
+
+            let (status, settings) = after
+                .request(Method::GET, "/v1/payment_settings", Value::Null)
+                .await?;
+            ensure!(status == StatusCode::OK, "{settings}");
+            ensure!(
+                settings["available"][0]["confirmations"]["floor"] == "5",
+                "{settings}"
+            );
+            ensure!(
+                settings["available"][0]["assets"][0]["enabled"] == false,
+                "{settings}"
+            );
+            ensure!(after.config_assets().await?.is_empty());
+            let invalid = topup::payment_config::invalid_pairs(pool, &after.routes).await?;
+            ensure!(
+                invalid
+                    .iter()
+                    .any(|(id, livemode, route, _)| *id == account.id
+                        && *livemode
+                        && *route == v2.route),
+                "{invalid:?}"
+            );
+            // A requirement below the new floor is refused.
+            let (status, refused) = after
+                .post(
+                    "/v1/payment_settings",
+                    json!({"chains": [{"chain_id": 1, "confirmations": "3",
+                                       "assets": [{"asset": "pha"}]}]}),
+                )
+                .await?;
+            ensure!(status == StatusCode::BAD_REQUEST, "{refused}");
+            ensure!(
+                refused["error"]["param"] == "chains[0][confirmations]",
+                "{refused}"
+            );
+            Ok(())
+        })
+    })
+    .await
+}
+
+/// `topup migrate --config` applies the schema, the cutover backfill, and its validation in one
+/// transaction: a backfill that fails leaves the database as 0.5.0 left it (design §10).
+#[tokio::test]
+async fn a_failed_cutover_backfill_leaves_the_schema_unmigrated() -> Result<()> {
+    with_database(|database| {
+        Box::pin(async move {
+            let owner = &database.owner_pool;
+            let (account, _) = Fixture::seed_account(owner).await?;
+            let route = live_route(1, "2", "")?;
+            let (address_id, _) = seed_payment(owner, account.id, &route, 0x33).await?;
+            topup::db::MIGRATOR.undo(owner, 20_261_023_000_000).await?;
+            // A quote of a route the 0.6.0 configuration no longer loads.
+            sqlx::query(
+                "UPDATE quotes SET route = 'retired-route' \
+                 WHERE id = (SELECT quote_id FROM addresses WHERE id = $1)",
+            )
+            .bind(address_id)
+            .execute(owner)
+            .await?;
+            let config = std::env::temp_dir().join(format!(
+                "topup-cutover-{}.yaml",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let routes = include_str!("fixtures/phala-cloud-pha.yaml")
+                .lines()
+                .map(|line| format!("    {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(
+                &config,
+                format!(
+                    "environment: test\npublic_origin: https://topup.example\nadmin_key:\n  \
+                     id: admin/v1\n  public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n\
+                     rpc_providers:\n  alchemy: https://eth-mainnet.g.alchemy.com/v2/{{key}}\n  \
+                     quicknode: https://rpc.example/eth\nroutes:\n  -\n{routes}\n"
+                ),
+            )?;
+            let migrate = || {
+                std::process::Command::new(env!("CARGO_BIN_EXE_topup"))
+                    .args(["migrate", "--config"])
+                    .arg(&config)
+                    .env("DATABASE_URL", &database.owner_url)
+                    .output()
+            };
+            let output = migrate()?;
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            ensure!(!output.status.success(), "{text}");
+            ensure!(text.contains("retired-route"), "{text}");
+            let (policies, migrated): (bool, i64) = sqlx::query_as(
+                "SELECT to_regclass('confirmation_policies') IS NOT NULL, \
+                        (SELECT count(*) FROM _sqlx_migrations WHERE version = 20261024000000)",
+            )
+            .fetch_one(owner)
+            .await?;
+            ensure!(
+                policies && migrated == 0,
+                "the failed cutover left a migrated schema"
+            );
+
+            // With the route kept, the cutover completes.
+            sqlx::query("UPDATE quotes SET route = $1 WHERE route = 'retired-route'")
+                .bind(&route.route)
+                .execute(owner)
+                .await?;
+            let output = migrate()?;
+            std::fs::remove_file(&config)?;
+            ensure!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let backfilled: bool = sqlx::query_scalar(
+                "SELECT backfilled_at IS NOT NULL FROM payment_settings_cutover",
+            )
+            .fetch_one(owner)
+            .await?;
+            ensure!(backfilled);
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[tokio::test]
 async fn a_merchant_pauses_its_own_quotes_and_never_lifts_the_operators_pause() -> Result<()> {
     with_database(|database| {
@@ -584,10 +889,11 @@ impl Fixture {
 
     /// The catalog: the fixture's PHA route on chain 1 (live) and on Sepolia (test).
     fn routes() -> Result<Arc<topup::routes::RouteSet>> {
-        let live_route: RouteFile = serde_saphyr::from_str(
-            &include_str!("fixtures/phala-cloud-pha.yaml")
-                .replace("confirmations: finalized", "confirmations: 2"),
-        )?;
+        Self::catalog(vec![live_route(1, "2", "")?])
+    }
+
+    /// `live` and the test route on Sepolia.
+    fn catalog(live: Vec<RouteFile>) -> Result<Arc<topup::routes::RouteSet>> {
         let test_route: RouteFile = serde_saphyr::from_str(
             &include_str!("fixtures/phala-cloud-pha.yaml")
                 .replace(
@@ -598,7 +904,7 @@ impl Fixture {
                 .replace("livemode: true", "livemode: false"),
         )?;
         Ok(Arc::new(
-            topup::routes::RouteSet::new(vec![live_route, test_route])
+            topup::routes::RouteSet::new(live.into_iter().chain([test_route]).collect())
                 .map_err(anyhow::Error::msg)?,
         ))
     }
@@ -724,4 +1030,85 @@ impl Fixture {
             .map(str::to_owned)
             .context("error code")
     }
+}
+
+/// Version `version` of the fixture's live PHA route, crediting at `confirmations`, with
+/// `merchant` replacing its merchant section when not empty.
+fn live_route(version: u64, confirmations: &str, merchant: &str) -> Result<RouteFile> {
+    let mut yaml = include_str!("fixtures/phala-cloud-pha.yaml")
+        .replace("version: 1", &format!("version: {version}"))
+        .replace(
+            "confirmations: finalized",
+            &format!("confirmations: {confirmations}"),
+        );
+    if !merchant.is_empty() {
+        let start = yaml.find("merchant:").context("merchant section")?;
+        yaml.truncate(start);
+        yaml.push_str(merchant);
+    }
+    Ok(serde_saphyr::from_str(&yaml)?)
+}
+
+/// A customer's forwarder on `route` (with a canceled quote, as `seed::insert_address` gives it)
+/// and a detected deposit to it; returns their ids.
+async fn seed_payment(
+    pool: &sqlx::PgPool,
+    account_id: uuid::Uuid,
+    route: &RouteFile,
+    byte: u8,
+) -> Result<(uuid::Uuid, uuid::Uuid)> {
+    let customer = seed::create_customer(
+        pool,
+        &seed::NewCustomer {
+            id: uuid::Uuid::new_v4(),
+            account_id,
+            livemode: true,
+            client_reference_id: format!("team-{byte}"),
+            paused_scopes: Vec::new(),
+        },
+    )
+    .await?;
+    let address = seed::insert_address(
+        pool,
+        &seed::NewAddress {
+            id: uuid::Uuid::new_v4(),
+            customer_id: customer.id,
+            chain_id: 1,
+            route: route.route.clone(),
+            salt: alloy_primitives::B256::repeat_byte(byte),
+            address: alloy_primitives::Address::repeat_byte(byte),
+        },
+    )
+    .await?;
+    let tx_hash = alloy_primitives::B256::repeat_byte(byte.wrapping_add(1));
+    ensure!(
+        topup::db::insert_deposit(
+            pool,
+            &topup::db::NewDeposit {
+                chain_id: 1,
+                tx_hash,
+                receipt_log_index: 0,
+                log_index: 0,
+                block_number: 100,
+                block_hash: alloy_primitives::B256::repeat_byte(9),
+                block_time: chrono::Utc::now(),
+                address_id: address.id,
+                route: Some(route.route.clone()),
+                route_version: Some(route.version),
+                asset_contract: route.asset.contract,
+                from_address: alloy_primitives::Address::repeat_byte(10),
+                amount_atomic: topup_core::money::AtomicAmount::new(alloy_primitives::U256::from(
+                    1_000_u64
+                ),),
+                state: topup_core::deposit::DepositState::Detected,
+                reason: None,
+                next_attempt_at: chrono::Utc::now(),
+                tx_from: alloy_primitives::Address::repeat_byte(10),
+                tx_nonce: 0,
+                is_final: false,
+            },
+        )
+        .await?
+    );
+    Ok((address.id, topup_core::identity::deposit_id(1, tx_hash, 0)))
 }

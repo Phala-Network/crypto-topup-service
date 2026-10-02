@@ -12,7 +12,7 @@ use crate::rpc_provider::{ProviderUrl, environment_key, provider_label};
 /// Every loaded route version with one shared RPC client per chain provider.
 ///
 /// Construction checks everything that must agree across routes: unique versions, one finality
-/// rule and provider list per chain, one route name per chain asset, and one destination unit
+/// rule across a chain's current routes, one provider list per chain, one route name per chain asset, and one destination unit
 /// across rate-lock routes.
 #[derive(Debug, Default)]
 pub struct RouteSet {
@@ -23,8 +23,8 @@ pub struct RouteSet {
 
 #[derive(Debug)]
 struct ChainEntry {
-    /// Chain settings of the first loaded route; every other route on the chain agrees on its
-    /// providers and confirmations.
+    /// Chain settings of the first loaded route, with the confirmation floor of the chain's current
+    /// routes; every route on the chain agrees on its providers.
     config: ChainConfig,
     /// One client per `rpc_providers` entry, or why the entry is unusable.
     providers: Vec<Result<Arc<EvmClient>, ProviderError>>,
@@ -199,25 +199,6 @@ fn index(
                 route.route, route.version
             ));
         }
-        // One floor per chain (design D1): the scanner, the confirm step, and the API all read the
-        // chain's, so a route that credits at another value, written or defaulted, is refused.
-        if chain.config.confirmations != route.chain.confirmations {
-            let first = routes
-                .iter()
-                .find(|first| first.chain.chain_id == chain_id)
-                .unwrap_or(route);
-            return Err(format!(
-                "route `{}` version {} credits chain {chain_id} at confirmations `{}`, but route \
-                 `{}` version {} at `{}`: every route of a chain must share one confirmation \
-                 floor (write the same `chain.confirmations`, defaults included)",
-                route.route,
-                route.version,
-                route.chain.confirmations.policy_value(),
-                first.route,
-                first.version,
-                first.chain.confirmations.policy_value()
-            ));
-        }
         let asset = (chain_id, route.asset.contract);
         match current
             .get(&asset)
@@ -234,6 +215,35 @@ fn index(
                 current.insert(asset, index);
             }
         }
+    }
+    // One floor per chain (design D1), its current versions': the scanner, the confirm step, and
+    // the API all read the chain's, so a current route that credits at another value, written or
+    // defaulted, is refused. An earlier version keeps its own value only for the terms of what it
+    // governed, so a new version may raise the floor (docs/design/payment-settings.md §12).
+    for (chain_id, chain) in &mut chains {
+        let mut on_chain = current
+            .values()
+            .filter_map(|index| routes.get(*index))
+            .filter(|route| route.chain.chain_id == *chain_id);
+        let Some(first) = on_chain.next() else {
+            continue;
+        };
+        if let Some(other) =
+            on_chain.find(|route| route.chain.confirmations != first.chain.confirmations)
+        {
+            return Err(format!(
+                "route `{}` version {} credits chain {chain_id} at confirmations `{}`, but route \
+                 `{}` version {} at `{}`: the current routes of a chain must share one \
+                 confirmation floor (write the same `chain.confirmations`, defaults included)",
+                other.route,
+                other.version,
+                other.chain.confirmations.policy_value(),
+                first.route,
+                first.version,
+                first.chain.confirmations.policy_value()
+            ));
+        }
+        chain.config.confirmations = first.chain.confirmations;
     }
     Ok((current, chains))
 }

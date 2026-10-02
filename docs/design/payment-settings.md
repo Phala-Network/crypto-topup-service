@@ -261,8 +261,9 @@ refuse a catalog that does.
 
 **Other catalog rules.**
 
-- `chain.confirmations` is the chain's floor and default. Every route of a chain must agree, as
-  today.
+- `chain.confirmations` is the chain's floor and default. Every current route of a chain must
+  agree. An earlier version keeps its own value only for the terms of what it governed, so a new
+  version may raise the floor.
 - `quote_creations_per_customer_per_minute` is not per route. Its default (10) and maximum (60)
   are code constants (`crate::payment_config`), as the API's rate limits are.
 - Every bound left out has a code default, printed by `topup config show`. A default outside its
@@ -462,10 +463,10 @@ default; that is a known defect and out of this design's scope.
 - `confirmation_policies` dropped, after the backfill has read it.
 
 **One-time backfill.** It runs in `topup migrate` with the attested config (the compose `migrate`
-service mounts it), as the database owner, in one transaction right after the schema change;
-`topup run` refuses to start until it commits, and a rerun of `topup migrate` resumes it.
-Afterwards every deposit has its binding and every quote its terms (validated constraints), so no
-runtime rule reads a missing binding.
+service mounts it), as the database owner, in one transaction with the schema change and the
+validation of the binding constraints. The config is loaded and validated before anything is
+migrated, so a failure leaves the database as 0.5.0 left it. Afterwards every deposit has its
+binding and every quote its terms, so no runtime rule reads a missing binding.
 
 1. Every account and mode gets a state row, `unconfigured`, and an `unconfigured` revision as
    current.

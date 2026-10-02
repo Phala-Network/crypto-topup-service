@@ -234,8 +234,8 @@ pub struct QuoteTerms {
     pub max_deposit_atomic: String,
     /// Refund dust floor in base units, as a decimal string.
     pub min_refund_atomic: String,
-    /// The confirmation the quote's payment is credited at: a depth, `safe`, or `finalized`; never
-    /// weaker than the chain's current floor.
+    /// The confirmation the quote required when issued: a depth, `safe`, or `finalized`. A payment
+    /// not credited yet waits for the stricter of it and the chain's current floor.
     pub confirmations: String,
 }
 

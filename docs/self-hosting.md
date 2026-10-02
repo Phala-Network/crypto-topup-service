@@ -475,7 +475,7 @@ read the old app's backups, so never delete the app, and give a new app a new pr
   [design §10](design/payment-settings.md#10-migration-and-cutover)). First move every route
   file's `quote:` and `limits:` to `merchant:`, keeping every quoted route. Deploy `upgrade` stops
   the 0.5.0 recorders, and the `migrate` service binds every existing deposit and quote to each
-  account's `legacy` revision, the 0.5.0 model. The service then starts with recording held:
+  account's `legacy` revision, the 0.5.0 model, in the transaction of the schema change. The service then starts with recording held:
   issuance answers `400 paused`. Have each account send `POST /v1/payment_settings` per mode it
   uses, with its secret key and the stricter `confirmations` its `legacy` revision shows
   (`payment_settings.legacy` in `GET /v1/admin/accounts/{acct}`). Verify each account's settings

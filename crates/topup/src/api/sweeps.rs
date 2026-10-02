@@ -39,8 +39,8 @@ fn with_held(scope: Scope) -> QueryBuilder<Postgres> {
                     SUM(deposit.amount_atomic) AS total, \
                     COALESCE(SUM(deposit.amount_atomic) \
                         FILTER (WHERE deposit.final_at IS NOT NULL), 0) AS final_total, \
-                    bool_or(deposit.state = 'rejected' AND deposit.reason = 'sanctioned') \
-                        AS sanctioned \
+                    bool_or((deposit.state = 'rejected' AND deposit.reason = 'sanctioned') \
+                            OR deposit.sanctions_hit_at IS NOT NULL) AS sanctioned \
              FROM deposits AS deposit \
              WHERE deposit.state <> 'reversed' AND deposit.account_id = ",
     );

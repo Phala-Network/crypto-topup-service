@@ -207,6 +207,9 @@ pub struct TransitionEffects {
     pub lock_consumption: Option<LockConsumption>,
     /// Marks the deposit final: both providers showed its transfer at or below `finalized`.
     pub mark_final: bool,
+    /// Records that screening named the sender of a deposit whose delivered credit stands, which
+    /// keeps its forwarder from every sweep.
+    pub sanctions_hit: bool,
 }
 
 /// Timeline and side effects written by one transition application.
@@ -698,6 +701,16 @@ pub async fn apply_transition(
                 .transpose()?,
         )
         .bind(to_i64(canonical.log_index, "deposits.log_index")?)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    if writes.effects.sanctions_hit {
+        sqlx::query(
+            "UPDATE deposits SET sanctions_hit_at = now(), updated_at = now() \
+             WHERE id = $1 AND sanctions_hit_at IS NULL",
+        )
+        .bind(deposit_id)
         .execute(&mut **transaction)
         .await?;
     }

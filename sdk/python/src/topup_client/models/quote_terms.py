@@ -17,8 +17,8 @@ class QuoteTerms:
     """The terms a quote was issued with.
 
     Attributes:
-        confirmations (str): The confirmation the quote's payment is credited at: a depth, `safe`, or `finalized`; never
-            weaker than the chain's current floor.
+        confirmations (str): The confirmation the quote required when issued: a depth, `safe`, or `finalized`. A payment
+            not credited yet waits for the stricter of it and the chain's current floor.
         max_deposit_atomic (str): Maximum creditable deposit in base units, as a decimal string.
         min_amount (int): Minimum credit in cents of a payment valued at spot.
         min_deposit_atomic (str): Minimum creditable deposit in base units, as a decimal string.

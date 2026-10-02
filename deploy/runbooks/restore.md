@@ -388,6 +388,16 @@ the operator cannot lift the hold: each merchant sends its complete configuratio
 `POST /v1/payment_settings`, even unchanged, which binds its waiting payments. Ask each in the
 second notice; `admin GET "/v1/admin/accounts/$ACCOUNT"` shows `status: held` until it does.
 
+### Sanctioned delivered credit
+
+`TopupDeliveredCreditSanctioned` names a deposit whose credit was delivered before the restore and
+whose sender a sanctions list now names. That is compliance, not commercial policy
+(docs/design/payment-settings.md §11): the delivered credit stands, so no `deposit.rejected`
+rewrites what the merchant applied. The service records the hit, and `GET
+/v1/forwarders?sweepable` never offers that forwarder, so the funds stay in it. Escalate to
+compliance with the deposit id, tell the merchant which credit is affected and why its forwarder is
+excluded, and record the decision. The service never sweeps or refunds it.
+
 ## Done when
 
 `frozen` is `false`, every chain was `complete` at the unfreeze, no `delivered_events` finding is

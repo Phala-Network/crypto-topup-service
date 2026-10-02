@@ -503,9 +503,8 @@ pub struct ImportedCredit {
 }
 
 impl ImportedCredit {
-    /// The first field in which the delivered transfer differs from the chain's: the deposit's
-    /// account, mode, chain, and transaction, and the canonical transfer's recipient, token,
-    /// sender, and amount.
+    /// The first field in which the delivered transfer differs from the chain's
+    /// ([`DeliveredTransfer::contradiction`]).
     #[must_use]
     pub fn contradiction(
         &self,
@@ -513,15 +512,62 @@ impl ImportedCredit {
         transfer: &topup_adapters::chain::evm::TransferLog,
     ) -> Option<&'static str> {
         let credit = &self.credit;
+        DeliveredTransfer {
+            account_id: self.account_id,
+            livemode: self.livemode,
+            chain_id: credit.chain_id,
+            tx_hash: credit.tx_hash,
+            address: credit.address,
+            asset_contract: credit.asset_contract,
+            from_address: credit.from_address,
+            amount_atomic: credit.amount_atomic,
+        }
+        .contradiction(deposit, transfer)
+    }
+}
+
+/// The transfer a delivered deposit event names: what the chain must show for the outcome the
+/// merchant was told to stand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveredTransfer {
+    /// The event's account.
+    pub account_id: Uuid,
+    /// The event's mode.
+    pub livemode: bool,
+    /// EVM chain identifier.
+    pub chain_id: u64,
+    /// Transfer transaction hash.
+    pub tx_hash: B256,
+    /// The receiving forwarder.
+    pub address: Address,
+    /// Token contract.
+    pub asset_contract: Address,
+    /// Transfer sender.
+    pub from_address: Address,
+    /// Token amount.
+    pub amount_atomic: AtomicAmount,
+}
+
+impl DeliveredTransfer {
+    /// The first field in which the delivered transfer differs from the chain's: the deposit's
+    /// account, mode, chain, and transaction, and the canonical transfer's recipient, token,
+    /// sender, and amount. The deposit's id, which the event's derives from, fixes its receipt
+    /// position.
+    #[must_use]
+    pub fn contradiction(
+        &self,
+        deposit: &crate::db::Deposit,
+        transfer: &topup_adapters::chain::evm::TransferLog,
+    ) -> Option<&'static str> {
         [
             ("account", self.account_id == deposit.account_id),
             ("livemode", self.livemode == deposit.livemode),
-            ("chain_id", credit.chain_id == deposit.chain_id),
-            ("tx_hash", credit.tx_hash == deposit.tx_hash),
-            ("address", credit.address == transfer.to),
-            ("asset_contract", credit.asset_contract == transfer.token),
-            ("from_address", credit.from_address == transfer.from),
-            ("amount_atomic", credit.amount_atomic == transfer.amount),
+            ("chain_id", self.chain_id == deposit.chain_id),
+            ("tx_hash", self.tx_hash == deposit.tx_hash),
+            ("address", self.address == transfer.to),
+            ("asset_contract", self.asset_contract == transfer.token),
+            ("from_address", self.from_address == transfer.from),
+            ("amount_atomic", self.amount_atomic == transfer.amount),
         ]
         .into_iter()
         .find_map(|(field, same)| (!same).then_some(field))

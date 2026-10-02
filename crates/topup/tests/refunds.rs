@@ -1099,6 +1099,51 @@ async fn only_a_refundable_deposit_to_a_screened_destination_is_refunded() -> Re
     result.and(cleanup)
 }
 
+/// The dust floor of a deposit its binding does not accept is the default of the route version
+/// it was recorded on, so raising the default later never strands it (design §9).
+#[tokio::test]
+async fn a_raised_refund_floor_does_not_strand_a_deposit_recorded_before() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        let admin_key = SigningKey::from_bytes(&[62; 32]);
+        // The account accepts nothing: the deposit is `asset_not_accepted` on version 1, whose
+        // floor of 20 its 100 clears.
+        let merchant = Merchant::seed(pool, &test_router(pool, &admin_key), "phala-cloud").await?;
+        let deposit = seed_deposit(
+            pool,
+            merchant.account.id,
+            "not-accepted",
+            100,
+            DepositState::Rejected,
+            Some(RejectReason::AssetNotAccepted),
+        )
+        .await?;
+        // Version 2 raises the default floor past the deposit.
+        let mut raised = route_fixture();
+        raised.version = 2;
+        raised.merchant.min_refund_atomic =
+            topup_core::route::Bounded::at(AtomicAmount::new(U256::from(1_000_u64)));
+        let merchant = Merchant {
+            app: test_router_on(
+                pool,
+                &admin_key,
+                Arc::new(StaticScreener::Listing),
+                Arc::default(),
+                vec![route_fixture(), raised],
+            ),
+            ..merchant
+        };
+        merchant.refund(deposit, "100").await?;
+        Ok(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}
+
 #[tokio::test]
 async fn a_deposit_that_could_still_be_reversed_is_not_refunded() -> Result<()> {
     let Some(database) = TestDatabase::create().await? else {
@@ -2011,9 +2056,25 @@ fn test_router_with(
     screening: Arc<dyn DestinationScreener>,
     client_reads: Arc<ClientReadLimiter>,
 ) -> Router {
+    test_router_on(
+        pool,
+        admin_key,
+        screening,
+        client_reads,
+        vec![route_fixture()],
+    )
+}
+
+fn test_router_on(
+    pool: &sqlx::PgPool,
+    admin_key: &SigningKey,
+    screening: Arc<dyn DestinationScreener>,
+    client_reads: Arc<ClientReadLimiter>,
+    routes: Vec<RouteFile>,
+) -> Router {
     let state = AppState {
         pool: pool.clone(),
-        routes: Arc::new(topup::routes::RouteSet::new(vec![route_fixture()]).expect("route loads")),
+        routes: Arc::new(topup::routes::RouteSet::new(routes).expect("routes load")),
         admin_key: VerificationKey::from_base64(
             ADMIN_KID.to_owned(),
             &public_key_base64(admin_key),

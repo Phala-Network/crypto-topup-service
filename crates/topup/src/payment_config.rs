@@ -382,12 +382,26 @@ async fn read_settings(
     scope: Scope,
     lock: &str,
 ) -> Result<Settings, sqlx::Error> {
-    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+    // The state row is locked by its own statement, then read with the revision by the next one:
+    // a statement that waited for another writer's commit locks the state row that writer left,
+    // but its snapshot predates the revision that writer added, so a single statement joining
+    // the two would find no row (READ COMMITTED takes a snapshot per statement).
+    if !lock.is_empty() {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT 1 FROM payment_settings_state AS state \
+             WHERE state.account_id = $1 AND state.livemode = $2 {lock}"
+        )))
+        .bind(scope.account_id())
+        .bind(scope.livemode())
+        .fetch_one(&mut *connection)
+        .await?;
+    }
+    let row = sqlx::query(
         "SELECT state.status, state.current_revision_id, revision.document, revision.created_at \
          FROM payment_settings_state AS state \
          JOIN payment_settings_revisions AS revision ON revision.id = state.current_revision_id \
-         WHERE state.account_id = $1 AND state.livemode = $2 {lock}"
-    )))
+         WHERE state.account_id = $1 AND state.livemode = $2",
+    )
     .bind(scope.account_id())
     .bind(scope.livemode())
     .fetch_one(connection)
@@ -411,7 +425,7 @@ pub async fn load_for_update(
     connection: &mut PgConnection,
     scope: Scope,
 ) -> Result<Settings, sqlx::Error> {
-    read_settings(connection, scope, "FOR UPDATE OF state").await
+    read_settings(connection, scope, "FOR UPDATE").await
 }
 
 /// The scope's current settings, with its state row locked `FOR SHARE` to the end of the
@@ -421,7 +435,7 @@ pub async fn load_for_share(
     connection: &mut PgConnection,
     scope: Scope,
 ) -> Result<Settings, sqlx::Error> {
-    read_settings(connection, scope, "FOR SHARE OF state").await
+    read_settings(connection, scope, "FOR SHARE").await
 }
 
 /// The scope's `legacy` revision, the 0.5.0 model the cutover bound its earlier deposits and
@@ -650,6 +664,18 @@ pub async fn deposit_terms(
     routes: &RouteSet,
     deposit_id: Uuid,
 ) -> Result<Option<Terms>, sqlx::Error> {
+    match recorded_route(connection, routes, deposit_id).await? {
+        Some(route) => deposit_terms_on(connection, route, deposit_id).await,
+        None => Ok(None),
+    }
+}
+
+/// The route version in `routes` a deposit was recorded on, if it has one that is loaded.
+async fn recorded_route<'r>(
+    connection: &mut PgConnection,
+    routes: &'r RouteSet,
+    deposit_id: Uuid,
+) -> Result<Option<&'r RouteFile>, sqlx::Error> {
     let (route, version): (Option<String>, Option<i64>) =
         sqlx::query_as("SELECT route, route_version FROM deposits WHERE id = $1")
             .bind(deposit_id)
@@ -659,14 +685,10 @@ pub async fn deposit_terms(
         return Ok(None);
     };
     let version = u64::try_from(version).map_err(|_| decode("route_version".to_owned()))?;
-    match routes
+    Ok(routes
         .routes()
         .iter()
-        .find(|candidate| candidate.route == route && candidate.version == version)
-    {
-        Some(route) => deposit_terms_on(connection, route, deposit_id).await,
-        None => Ok(None),
-    }
+        .find(|candidate| candidate.route == route && candidate.version == version))
 }
 
 /// [`deposit_terms`] of a deposit recorded on `route`.
@@ -693,16 +715,21 @@ pub async fn deposit_terms_on(
 }
 
 /// A deposit's refund dust floor (design §9): its governing terms' floor, or, for a deposit no
-/// terms govern (not accepted, or still pending), the operator's default of its route.
+/// terms govern (not accepted, or still pending), the operator's default of the route version it
+/// was recorded on, so a later default never strands it. `route` (the token's current route)
+/// stands in only for a deposit without a loaded route version.
 pub async fn refund_floor(
     connection: &mut PgConnection,
     routes: &RouteSet,
     deposit_id: Uuid,
     route: &RouteFile,
 ) -> Result<AtomicAmount, sqlx::Error> {
-    Ok(deposit_terms(connection, routes, deposit_id)
+    let Some(recorded) = recorded_route(connection, routes, deposit_id).await? else {
+        return Ok(route.merchant.min_refund_atomic.default);
+    };
+    Ok(deposit_terms_on(connection, recorded, deposit_id)
         .await?
-        .map_or(route.merchant.min_refund_atomic.default, |terms| {
+        .map_or(recorded.merchant.min_refund_atomic.default, |terms| {
             terms.min_refund_atomic
         }))
 }
@@ -913,6 +940,15 @@ pub enum BackfillError {
     /// A stored row is invalid.
     #[error("{0}")]
     Invalid(String),
+    /// The instance has rows to bind, and no configuration was given to bind them with.
+    #[error(
+        "the 0.6.0 payment settings cutover must bind the existing deposits and quotes: run \
+         `topup migrate --config FILE` with the service configuration"
+    )]
+    ConfigRequired,
+    /// A migration failed.
+    #[error("{0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
     /// PostgreSQL failed.
     #[error("{0}")]
     Database(#[from] sqlx::Error),
@@ -929,14 +965,43 @@ pub struct Backfill {
     pub quotes: u64,
 }
 
-/// The one-time 0.6.0 cutover backfill (design §10), run by `topup migrate --config` as the
-/// database owner, in one transaction: every account and mode gets a `legacy` revision that writes
-/// out the 0.5.0 model (every route of the mode in `routes` accepted at its route values, with the
-/// account's confirmation policies), every deposit is bound to it, every quote gets the terms it
-/// resolves on its route's current version, and the binding constraints are validated. `None` when
-/// the backfill has run already.
+/// Applies every pending migration and, on an instance the 0.6.0 cutover has not bound yet, its
+/// backfill ([`backfill`]) with `routes`, all in one transaction as the database owner (`topup
+/// migrate`): each migration runs in a savepoint of it, so a backfill that fails leaves the schema
+/// as it was. `None` when there was nothing to backfill.
+pub async fn migrate(
+    pool: &PgPool,
+    routes: Option<&RouteSet>,
+) -> Result<Option<Backfill>, BackfillError> {
+    let mut transaction = pool.begin().await?;
+    crate::db::MIGRATOR.run(&mut *transaction).await?;
+    let report = if backfilled(&mut transaction).await? {
+        None
+    } else {
+        let routes = routes.ok_or(BackfillError::ConfigRequired)?;
+        backfill_in(&mut transaction, routes).await?
+    };
+    transaction.commit().await?;
+    Ok(report)
+}
+
+/// The one-time 0.6.0 cutover backfill (design §10), in one transaction: every account and mode
+/// gets a `legacy` revision that writes out the 0.5.0 model (every route of the mode in `routes`
+/// accepted at its route values, with the account's confirmation policies), every deposit is
+/// bound to it, every quote gets the terms it resolves on its route's current version, and the
+/// binding constraints are validated. `None` when the backfill has run already. `topup migrate`
+/// runs it in the transaction of the schema change ([`migrate`]).
 pub async fn backfill(pool: &PgPool, routes: &RouteSet) -> Result<Option<Backfill>, BackfillError> {
     let mut transaction = pool.begin().await?;
+    let report = backfill_in(&mut transaction, routes).await?;
+    transaction.commit().await?;
+    Ok(report)
+}
+
+async fn backfill_in(
+    transaction: &mut PgConnection,
+    routes: &RouteSet,
+) -> Result<Option<Backfill>, BackfillError> {
     let (policies, done): (serde_json::Value, bool) = sqlx::query_as(
         "SELECT confirmation_policies, backfilled_at IS NOT NULL \
          FROM payment_settings_cutover FOR UPDATE",
@@ -1046,7 +1111,6 @@ pub async fn backfill(pool: &PgPool, routes: &RouteSet) -> Result<Option<Backfil
     sqlx::query("UPDATE payment_settings_cutover SET backfilled_at = now()")
         .execute(&mut *transaction)
         .await?;
-    transaction.commit().await?;
     Ok(Some(report))
 }
 

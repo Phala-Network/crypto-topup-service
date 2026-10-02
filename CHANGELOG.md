@@ -48,7 +48,12 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - **Breaking:** a deposit is governed by the payment settings current when it is recorded, or, for
   a valid payment of a quote, by the quote's terms; a change applies to deposits recorded after it.
   A deposit waits for the stricter of its bound confirmation and the chain's current floor; a
-  stricter confirmation no longer applies to deposits already recorded.
+  stricter confirmation no longer applies to deposits already recorded. A payment the receipt
+  corrects to the quote's asset waits for the quote's confirmation too.
+- A chain's confirmation floor is that of its current route versions: a new version may raise it,
+  and an earlier version keeps its own value only for the terms of what it governed. A quote's
+  `terms` are always the stored ones, `confirmations` included; a deposit's refund floor, when no
+  accepted terms govern it, is the default of the route version it was recorded on.
 - **Breaking:** route files replace `quote:` and `limits:` with a `merchant:` section of each
   term's operator default and bounds (`quote_ttl_seconds`, `quote_spread_bps`,
   `quote_tolerance_bps`, `min_amount`, `min_deposit_atomic`, `max_deposit_atomic`,
@@ -58,11 +63,16 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - **Breaking:** after a restore from backup, every account's payment settings are `held` until the
   merchant sends its complete configuration with `POST /v1/payment_settings` (`chains` required,
   and nothing of the restored settings carried over); deposits recorded meanwhile wait, and the
-  reconfirmation binds them. No imported delivery lifts the hold. A delivered outcome stands: a rebuilt deposit with an imported
-  `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded.
+  reconfirmation binds them. No imported delivery lifts the hold. A delivered outcome stands once
+  the chain shows the transfer it names (account, transaction, recipient, token, sender, and
+  amount; otherwise the deposit is held for reconciliation): a rebuilt deposit with an imported
+  `deposit.rejected` stays rejected, and a delivered credit is never rejected or bounded. A
+  sanctions hit on a delivered credit keeps the credit, raises `TopupDeliveredCreditSanctioned`,
+  and keeps its forwarder out of `GET /v1/forwarders?sweepable`.
 - **Breaking (operators):** the upgrade to this release is a cutover (docs/architecture.md §14):
-  `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model (the
-  compose's `migrate` service mounts the configuration), `topup run` refuses to start before it,
+  `topup migrate --config FILE` binds every existing deposit and quote to the 0.5.0 model in one
+  transaction with the schema change, after loading the configuration (the compose's `migrate`
+  service mounts it), `topup run` refuses to start before it,
   and recording stays held until the accounts are configured and `POST /v1/admin/recording/resume`.
 
 ### Removed

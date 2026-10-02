@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::PgPool;
 use topup_adapters::risk::oracle::{SanctionsOracle, SanctionsOracleConfigError, SanctionsSource};
-use topup_core::deposit::{DepositState, RetryError, StepOutcome};
+use topup_core::deposit::{DepositState, RejectReason, RetryError, StepOutcome};
 use topup_core::identity::{credited_event_id, event_id};
 use topup_core::money::AtomicAmount;
 use topup_core::route::RouteFile;
@@ -170,17 +170,15 @@ impl ScreenStep {
         Self::new(pool, screening_routes)
     }
 
-    /// The amount bounds of the terms that govern `deposit` on `route`. A credit the merchant was
-    /// told before a restore is never rewritten by a bound (docs/design/payment-settings.md §11).
+    /// The amount bounds of the terms that govern `deposit` on `route`; none bound a credit the
+    /// merchant was told before a restore (docs/design/payment-settings.md §11).
     async fn bounds(
         &self,
         route: &RouteFile,
         deposit: &Deposit,
+        delivered: bool,
     ) -> Result<Option<Bounds>, sqlx::Error> {
-        if crate::restore_mode::imported_credit(&self.pool, deposit.id)
-            .await?
-            .is_some()
-        {
+        if delivered {
             return Ok(Some(Bounds {
                 min_atomic: AtomicAmount::default(),
                 max_atomic: AtomicAmount::new(alloy_primitives::U256::MAX),
@@ -225,7 +223,17 @@ impl Step for ScreenStep {
             Ok(None) => return invariant_result("customer_not_found", deposit.block_number),
             Err(_) => return transient_result("pause_scope_load_failed", deposit.block_number),
         };
-        let bounds = match self.bounds(&screening_route.route, deposit).await {
+        // A credit the merchant was told before a restore stands (design §11).
+        let delivered = match crate::restore_mode::imported_credit(&self.pool, deposit.id).await {
+            Ok(credit) => credit.is_some(),
+            Err(_) => {
+                return transient_result("delivered_credit_load_failed", deposit.block_number);
+            }
+        };
+        let bounds = match self
+            .bounds(&screening_route.route, deposit, delivered)
+            .await
+        {
             Ok(Some(bounds)) => bounds,
             Ok(None) => return invariant_result("deposit_terms_missing", deposit.block_number),
             Err(_) => return transient_result("deposit_terms_load_failed", deposit.block_number),
@@ -233,6 +241,9 @@ impl Step for ScreenStep {
         let mut result = screening_route
             .evaluate(deposit, pause_scopes, bounds)
             .await;
+        if delivered && result.outcome == StepOutcome::Reject(RejectReason::Sanctioned) {
+            result = delivered_credit_sanctioned(deposit, result.evidence);
+        }
         if result.outcome == StepOutcome::Advance {
             // A deposit that is not final yet is credited only within the account's cap on
             // credit a reorganization could still reverse; past it, it is credited once final.
@@ -265,6 +276,26 @@ impl Step for ScreenStep {
         }
         result
     }
+}
+
+/// A sanctions hit on a credit the merchant was told before a restore: compliance, not commercial
+/// policy, so the credit stands (no `deposit.rejected` rewrites it). The service records the hit,
+/// which keeps the forwarder from every sweep (`GET /v1/forwarders?sweepable`), and raises
+/// `TopupDeliveredCreditSanctioned` for the operator (docs/design/payment-settings.md §11).
+fn delivered_credit_sanctioned(deposit: &Deposit, mut evidence: serde_json::Value) -> StepResult {
+    tracing::error!(
+        tags.alert = "TopupDeliveredCreditSanctioned",
+        deposit_id = %crate::ids::format(crate::ids::DEPOSIT, deposit.id),
+        account_id = %deposit.account_id,
+        livemode = deposit.livemode,
+        chain_id = deposit.chain_id,
+        "a sanctions list names the sender of a credit delivered before a restore: the credit \
+         stands and its forwarder is not swept (deploy/runbooks/restore.md)"
+    );
+    evidence["sanctions_hit"] = json!("delivered_credit_stands");
+    let mut result = StepResult::new(StepOutcome::Advance, evidence);
+    result.effects.sanctions_hit = true;
+    result
 }
 
 /// The fulfillment event: `deposit.credited`, whose object is the credited deposit, keyed by an

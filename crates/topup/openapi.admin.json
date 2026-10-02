@@ -2830,7 +2830,7 @@
         "description": "The terms a quote was issued with.",
         "properties": {
           "confirmations": {
-            "description": "The confirmation the quote's payment is credited at: a depth, `safe`, or `finalized`; never\nweaker than the chain's current floor.",
+            "description": "The confirmation the quote required when issued: a depth, `safe`, or `finalized`. A payment\nnot credited yet waits for the stricter of it and the chain's current floor.",
             "type": "string"
           },
           "max_deposit_atomic": {
