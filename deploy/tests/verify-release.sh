@@ -19,7 +19,7 @@ case "$1 $2" in
     "api repos/Phala-Network/phala-pay/git/tags/$STUB_TAG") echo "commit $STUB_COMMIT" ;;
     "api repos/Phala-Network/phala-pay/compare/$STUB_COMMIT...main") echo "$STUB_COMPARE" ;;
     "release download") cp "$STUB_ASSETS"/* "${@: -2:1}" ;;
-    "attestation verify") [[ "$3" != *"$STUB_REFUSE"* ]] ;;
+    "attestation verify") [[ "$3" != *"$STUB_REFUSE"* && "$*" != *"$STUB_PREDICATE_REFUSE"* ]] ;;
     *) exit 1 ;;
 esac
 STUB
@@ -47,7 +47,7 @@ run() {
     local name=$1
     shift
     : >"$STUB_LOG"
-    env STUB_COMPARE=ahead STUB_REFUSE=never STUB_REF="tag $tag" "$@" \
+    env STUB_PREDICATE_REFUSE=never STUB_COMPARE=ahead STUB_REFUSE=never STUB_REF="tag $tag" "$@" \
         "$root/deploy/verify-release.sh" v9.9.9 "$tmp/$name" ${called_at:+"$called_at"} \
         >"$tmp/$name.out" 2>"$tmp/$name.err"
 }
@@ -59,7 +59,7 @@ fail() {
 assets "$good"
 run good || { cat "$tmp/good.err" >&2; fail "refused a good release"; }
 [[ "$(cat "$tmp/good.out")" == "$commit" ]] || fail "did not print the release's commit"
-[[ "$(grep -c '^attestation verify' "$STUB_LOG")" == 8 ]] || fail "did not verify 5 assets and 3 images"
+[[ "$(grep -c '^attestation verify' "$STUB_LOG")" == 11 ]] || fail "did not verify 5 assets and provenance plus SBOM for 3 images"
 grep -q "^attestation verify $tmp/good/SHA256SUMS .*--source-digest $commit" "$STUB_LOG" ||
     fail "did not verify SHA256SUMS for the release's commit"
 
@@ -79,6 +79,7 @@ called_at=$commit run lightweight STUB_REF="commit $commit" ||
 ! run outside STUB_COMPARE=diverged || fail "accepted a commit outside main"
 ! grep -q '^release download' "$STUB_LOG" || fail "downloaded a release whose commit is outside main"
 ! run unattested STUB_REFUSE=SHA256SUMS || fail "accepted an unattested SHA256SUMS"
+! run no-sbom STUB_PREDICATE_REFUSE=https://spdx.dev/Document/v2.3 || fail "accepted missing SBOM attestation"
 echo tampered >"$tmp/assets/phala-cloud-template.yml"
 ! run tampered || fail "accepted an asset that does not match SHA256SUMS"
 echo "release verifier test passed"

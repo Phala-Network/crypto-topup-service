@@ -75,6 +75,23 @@ expect default 'SHOW archive_mode' on
 expect default 'SHOW archive_command' 'walg-cron wal-push %p'
 expect default 'SHOW restore_command' 'walg-restore-command %f %p'
 
+# The rebuilt binary must retain the upstream encrypted backup formats, not just --version.
+wal=$(sql default 'SELECT pg_walfile_name(pg_current_wal_lsn())')
+sql default 'SELECT pg_switch_wal()' >/dev/null
+docker exec -i "$prefix-default" sh -eu -s -- "$wal" <<'ROUNDTRIP'
+wal=$1
+export WALG_LIBSODIUM_KEY=0000000000000000000000000000000000000000000000000000000000000000
+export WALG_LIBSODIUM_KEY_TRANSFORM=hex
+for compression in lz4 zstd brotli; do
+    export WALG_COMPRESSION_METHOD=$compression WALG_FILE_PREFIX=/tmp/roundtrip-$compression
+    mkdir -p "$WALG_FILE_PREFIX"
+    wal-g wal-push "$PGDATA/pg_wal/$wal"
+    wal-g wal-fetch "$wal" "/tmp/restored-$compression"
+    cmp "$PGDATA/pg_wal/$wal" "/tmp/restored-$compression"
+done
+ROUNDTRIP
+
+
 # expect_exit STATUS MESSAGE ARGS...: the container exits with STATUS and logs MESSAGE.
 expect_exit() {
     expected=$1

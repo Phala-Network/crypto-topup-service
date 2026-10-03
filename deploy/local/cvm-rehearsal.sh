@@ -126,8 +126,8 @@ cleanup() {
     status=$?
     set +e
     if ((status != 0)); then
-        echo "--- topup logs (last 60 lines) ---" >&2
-        dc logs --no-color --tail 60 topup >&2
+        echo "--- workload logs (last 60 lines per service) ---" >&2
+        dc logs --no-color --tail 60 keys postgres migrate topup backup >&2
     fi
     docker rm -f "$client" >/dev/null 2>&1
     if ((status != 0)) && [[ -f "$tmp/product.yml" ]]; then
@@ -177,11 +177,14 @@ wait_for "the registry" 30 curl -fsS "http://127.0.0.1:$registry_port/v2/"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 # publish NAME VARIABLE BUILD_ARGS...: builds, pushes, and sets VARIABLE to repository@sha256.
 publish() {
-    local tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
+    local name=$1 tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
     shift 2
-    docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-        --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" \
-        >/dev/null
+    if [[ "${REHEARSAL_PREBUILT:-0}" == 1 ]]; then
+        docker tag "$name:rehearsal" "$tag"
+    else
+        docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+            --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" >/dev/null
+    fi
     local_images+=("$tag")
     docker push --quiet "$tag" >/dev/null
     digest=$(docker image inspect --format '{{json .RepoDigests}}' "$tag" |
@@ -194,8 +197,12 @@ publish phala-pay TOPUP_IMAGE "$root"
 publish postgres-walg POSTGRES_WALG_IMAGE -f "$root/deploy/Dockerfile.postgres-walg" "$root"
 publish phala-pay-reference-product PRODUCT_IMAGE \
     -f "$root/deploy/Dockerfile.reference-product" "$root"
-docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
-    -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
+if [[ "${REHEARSAL_PREBUILT:-0}" == 1 ]]; then
+    docker tag phala-pay-dstack-simulator:rehearsal "$TOPUP_LOCAL_DSTACK_IMAGE"
+else
+    docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
+        -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
+fi
 jq -n --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" --arg product "$PRODUCT_IMAGE" \
     '{"phala-pay": $topup, "postgres-walg": $postgres, "phala-pay-reference-product": $product}' \
     >"$tmp/images.json"
@@ -271,25 +278,25 @@ PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
 "$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" --rpc-url "$base_rpc_url" \
     >"$tmp/base-test-contracts.json"
 base_token=$(jq -er .test_token "$tmp/base-test-contracts.json")
-base_second_token=$(jq -er .unsupported_token "$tmp/base-test-contracts.json")
 base_oracle=$(jq -er .sanctions_oracle "$tmp/base-test-contracts.json")
-# usdt_token RPC_URL: deploys a USDT-like token, whose `transfer` returns nothing.
-usdt_token() {
-    (cd "$CONTRACTS_DIR" && forge create test/mocks/MockTokens.sol:UsdtLikeToken --rpc-url "$1" \
+# rehearsal_token CONTRACT RPC_URL: deploys six-decimal USDC/USDT fixtures matching the routes.
+rehearsal_token() {
+    (cd "$CONTRACTS_DIR" && forge create "test/mocks/MockTokens.sol:$1" --rpc-url "$2" \
         --unlocked --from "$owner" --broadcast --json) | jq -er .deployedTo
 }
-base_third_token=$(usdt_token "$base_rpc_url")
+base_second_token=$(rehearsal_token UsdcLikeToken "$base_rpc_url")
+base_third_token=$(rehearsal_token UsdtLikeToken "$base_rpc_url")
 printf 'base-sepolia: token=%s second_token=%s third_token=%s sanctions_oracle=%s\n' \
     "$base_token" "$base_second_token" "$base_third_token" "$base_oracle"
 
 echo "== writing the configuration and rendering the staging compose"
 # Phala's staging configuration with this network's addresses: on each chain the test token stands
-# in for PHA, the reference product's asset, the second mock token for USDC, and a USDT-like one
+# in for PHA, the reference product's asset, a six-decimal mock token for USDC, and a USDT-like one
 # for USDT. Provider A is keyless, as staging's; provider B is attested with a `{key}`, as a paid
 # provider is, and Anvil ignores the query that carries the key. Base Sepolia's two providers are
 # keyless, at two URLs of its Anvil.
-second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
-third_token=$(usdt_token "$rpc_url")
+second_token=$(rehearsal_token UsdcLikeToken "$rpc_url")
+third_token=$(rehearsal_token UsdtLikeToken "$rpc_url")
 # The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
 admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
@@ -310,13 +317,13 @@ write_config() {
                     "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle],
                     "phala-cloud-base-sepolia-usdt-usd": [$base_usdt, $base_oracle]}')" '
             .admin_key = {id: $id, public_key: $key}
-            | .rpc_companies.tenderly.domains = ["anvil", "anvil-base-sepolia"]
-            | .rpc_companies.publicnode.domains = ["anvil-b", "anvil-base-sepolia-b"]
-            | .rpc_groups["provider-a"].members[0].url = "http://anvil:8545"
-            | .rpc_groups["provider-b"].members[0].url = "http://anvil-b:8545/?key={key}"
+            | .rpc_companies.tenderly.domains = ["rehearsal-a.test"]
+            | .rpc_companies.publicnode.domains = ["rehearsal-b.test"]
+            | .rpc_groups["provider-a"].members[0].url = "http://anvil.rehearsal-a.test:8545"
+            | .rpc_groups["provider-b"].members[0].url = "http://anvil.rehearsal-b.test:8545/?key={key}"
             | .rpc_groups["provider-b"].members[0].sealed_key = "TOPUP_RPC_PROVIDER_B_KEY"
-            | .rpc_groups["base-sepolia-a"].members[0].url = "http://anvil-base-sepolia:8545"
-            | .rpc_groups["base-sepolia-b"].members[0].url = "http://anvil-base-sepolia-b:8545"
+            | .rpc_groups["base-sepolia-a"].members[0].url = "http://base.rehearsal-a.test:8545"
+            | .rpc_groups["base-sepolia-b"].members[0].url = "http://base.rehearsal-b.test:8545"
             | .routes |= map(($assets[.route] // error("no rehearsal token for \(.route)")) as $asset
                 | .chain.forwarder_factory = $factory | .chain.implementation = $implementation
                 | .asset.contract = $asset[0] | .chain.sanctions_oracle = $asset[1])' \
@@ -354,14 +361,14 @@ printf '%s=\n' "${env_names[@]}" >"$cvm/.env"
 grep -qx 'AWS_SECRET_ACCESS_KEY=' "$cvm/.env" || die "the unsealed .env carries the S3 secret"
 
 echo "== docker compose up unsealed (the CVM's app-compose command)"
-# Without credentials the backup prefix cannot be listed, so PostgreSQL refuses to initialize
-# and never becomes healthy: `up` fails like dstack's boot, and nothing after it starts.
+# The entrypoint rejects missing S3 credentials before attempting the backup listing, so
+# PostgreSQL never initializes or becomes healthy: `up` fails like dstack's boot.
 if dc up -d --remove-orphans >/dev/null 2>&1; then
     die "the unsealed stack started"
 fi
 refused() {
     dc logs --no-color postgres 2>&1 |
-        grep -F 'the backup prefix could not be listed; refusing to initialize an empty data directory' \
+        grep -F 'AWS_ACCESS_KEY_ID must be set: S3 storage needs both credentials' \
             >/dev/null
 }
 wait_for "PostgreSQL to refuse initialization" 90 refused
@@ -622,6 +629,56 @@ jq -n --arg factory "$factory" --arg implementation "$implementation" --arg toke
 product_python -m reference_product deposit --config /opt/driver.json \
     --driver-seed-file /opt/driver.seed --amount-minor 2500 --timeout 420
 echo "ok: the deposit driver's quote-first deposit is credited once in the product's ledger"
+# Capture the actual receiver ledger, resend through the service's signed delivery worker,
+# wait for acknowledgement, then compare the same rows. A queued event alone is not proof.
+ledger_credits() {
+    pc exec -T product /opt/venv/bin/python - <<'PYTHON'
+import json, sqlite3
+with sqlite3.connect("file:/data/ledger.sqlite3?mode=ro", uri=True) as db:
+    rows = db.execute("SELECT id, team_id, order_id, amount_minor FROM credit_transactions ORDER BY id").fetchall()
+    assert len(rows) == 1 and rows[0][3] == 2500, rows
+    bonuses = db.execute("SELECT id, team_id, order_id, amount_minor, reason FROM bonus_credits ORDER BY id").fetchall()
+    adjustments = db.execute("SELECT id, team_id, order_id, amount_minor, reason FROM credit_adjustments ORDER BY id").fetchall()
+    orders = db.execute("SELECT id, team_id, provider_order_id, credit_transaction_id, status FROM orders ORDER BY id").fetchall()
+    assert len(orders) == 1, orders
+    balance = sum(row[3] for row in rows + bonuses + adjustments)
+    print(json.dumps({"credits": rows, "bonuses": bonuses, "adjustments": adjustments,
+                      "orders": orders, "balance_minor": balance}))
+PYTHON
+}
+credits_before=$(ledger_credits)
+product_python - <<'PYTHON'
+import time
+from pathlib import Path
+import httpx
+
+with httpx.Client(base_url="http://topup:8080", timeout=30,
+                  headers={"Authorization": "Bearer " + Path("/opt/product.key").read_text()}) as api:
+    response = api.get("/v1/events", params={"type": "deposit.credited", "limit": 100})
+    response.raise_for_status()
+    events = [event for event in response.json()["data"] if event["type"] == "deposit.credited"]
+    assert len(events) == 1, events
+    event_id = events[0]["id"]
+    response = api.get("/v1/webhook_endpoints")
+    response.raise_for_status()
+    endpoints = response.json()["data"]
+    assert len(endpoints) == 1, endpoints
+    response = api.post(f"/v1/events/{event_id}/resend",
+                        json={"webhook_endpoint": endpoints[0]["id"]})
+    response.raise_for_status()
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        response = api.get(f"/v1/events/{event_id}")
+        response.raise_for_status()
+        if response.json()["pending_webhooks"] == 0:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("signed webhook redelivery was not acknowledged")
+PYTHON
+[[ "$(ledger_credits)" == "$credits_before" ]] || die "redelivery changed the receiver's credit"
+echo "ok: a signed deposit.credited redelivery was acknowledged without a second credit"
+
 # The route prices only from Coin Metrics, Binance, and Kraken over HTTPS, so a priced lock proves
 # the distroless service image verified those servers with its system CA bundle.
 priced_locks=$(dc exec -T postgres psql -U postgres -d topup -XAtq -c \

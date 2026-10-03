@@ -253,7 +253,7 @@ deploys() {
 # caller's directory that would make the CLI update another CVM with another env is never read.
 printf '%s\n' 'id = "another-cvm"' 'env_file = "other.env"' >"$tmp/phala.toml"
 succeeds quick TOPUP_ADMIN_PUBLIC_KEY=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo= AWS_REGION=auto
-[[ "$(grep -c '^gh attestation verify' "$tmp/log")" == 8 ]] || fail "quick did not verify 5 assets and 3 images"
+[[ "$(grep -c '^gh attestation verify' "$tmp/log")" == 11 ]] || fail "quick did not verify 5 assets and provenance plus SBOM for 3 images"
 [[ "$(deploys | wc -l)" == 1 ]] || fail "quick did not deploy exactly once"
 for argument in "--name quick " "--image dstack-0.5.9 " "--no-dev-os" "--kms phala " "--instance-type tdx.medium " \
     "/kit/deploy/phala-cloud-pre-launch.sh " "-e $tmp/runtime/"; do

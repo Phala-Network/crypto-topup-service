@@ -3,3 +3,7 @@
 allowBuilds:
   esbuild: false
   workerd: false
+
+# miniflare's 7.29.0 has published advisories; keep its transitive Undici on a fixed release.
+overrides:
+  undici@7.29.0: 7.30.0

@@ -1,0 +1,63 @@
+name: Vulnerability scan
+description: Scan lockfiles or a final image with reviewed, expiring exceptions
+inputs:
+  scan-type:
+    default: fs
+    description: Trivy scan type
+  scan-ref:
+    default: .
+    description: Lockfile directory
+  severity:
+    default: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+    description: Severity levels to gate
+  image-ref:
+    default: ""
+    description: Final image reference
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: python3 .github/security/check-exceptions.py
+    - shell: bash
+      id: report
+      env:
+        SCAN_REF: ${{ inputs.scan-ref }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        name=$(printf '%s' "${IMAGE_REF:-$SCAN_REF}" | tr -cs 'a-zA-Z0-9._-' '-' | cut -c1-120)
+        echo "name=$name" >>"$GITHUB_OUTPUT"
+    - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_INCLUDE_DEV_DEPS: "true"
+      with:
+        version: v0.75.0
+        scan-type: ${{ inputs.scan-type }}
+        scan-ref: ${{ inputs.scan-ref }}
+        image-ref: ${{ inputs.image-ref }}
+        scanners: vuln
+        format: json
+        output: ${{ runner.temp }}/trivy-report.json
+        cache-dir: ${{ runner.temp }}/trivy-cache
+        timeout: 15m
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: trivy-${{ github.job }}-${{ strategy.job-index }}-${{ steps.report.outputs.name }}
+        path: ${{ runner.temp }}/trivy-report.json
+        retention-days: 7
+        if-no-files-found: error
+    - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_INCLUDE_DEV_DEPS: "true"
+      with:
+        version: v0.75.0
+        scan-type: ${{ inputs.scan-type }}
+        scan-ref: ${{ inputs.scan-ref }}
+        image-ref: ${{ inputs.image-ref }}
+        scanners: vuln
+        severity: ${{ inputs.severity }}
+        skip-setup-trivy: true
+        ignore-unfixed: true
+        exit-code: "1"
+        trivyignores: .github/security/trivy-ignore.yaml
+        cache-dir: ${{ runner.temp }}/trivy-cache
+        timeout: 15m

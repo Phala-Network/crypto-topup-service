@@ -1,31 +1,57 @@
-FROM postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae AS wal-g-download
-
+# Rebuild both Go binaries instead of inheriting old toolchains in upstream release binaries.
+FROM golang:1.27.1-trixie@sha256:3b77fc618ec235a1ab412de7737f120dd507c57e8d87de4cbb7994fb94275ed5 AS go-build
 ARG TARGETARCH
-ARG WAL_G_VERSION=3.0.9
-ARG WAL_G_AMD64_SHA256=8015836f246a978f27b31a2462eac7765312558ae5b11ac033322b555abf9e22
-ARG WAL_G_ARM64_SHA256=1edd72c3387bfc3a1c19acad9daa36709dbb7cff0642f7044e175d5f8b555d64
+ARG SOURCE_DATE_EPOCH=0
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOEXPERIMENT=jsonv2
 
-# ca-certificates: WAL-G verifies the object store's TLS certificate (R2/S3 over HTTPS).
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates curl && \
-    set -eu; \
-    case "$TARGETARCH" in \
-        amd64) wal_g_arch=amd64; wal_g_sha256="$WAL_G_AMD64_SHA256" ;; \
-        arm64) wal_g_arch=aarch64; wal_g_sha256="$WAL_G_ARM64_SHA256" ;; \
-        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac; \
-    url="https://github.com/wal-g/wal-g/releases/download/v${WAL_G_VERSION}/wal-g-pg-24.04-${wal_g_arch}"; \
-    curl -fsSL "$url" -o /wal-g; \
-    echo "$wal_g_sha256  /wal-g" | sha256sum -c -; \
-    chmod 0755 /wal-g
+WORKDIR /src/gosu
+RUN git init -q . && \
+    git fetch -q --depth 1 https://github.com/tianon/gosu.git 6456aaa0f3c854d199d0f037f068eb97515b7513 && \
+    git checkout -q FETCH_HEAD && \
+    go get golang.org/x/sys@v0.47.0 && \
+    GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false \
+        -ldflags='-s -w -buildid=' -o /out/gosu .
 
-FROM postgres:18.6-trixie@sha256:86c951e05bf56c93d95d397747fb8820ac76cc3bedb78f43abd83eedbe3666ae
+# Keep the upstream release's encryption and compression support, using signed Debian packages.
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && \
+    printf '%s\n' 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261003T000000Z/ trixie main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261003T000000Z/ trixie-security main' \
+        >/etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        libsodium-dev=1.0.18-1+deb13u1 libbrotli-dev=1.1.0-2+b7 liblzo2-dev=2.10-3+b1
+
+WORKDIR /src/wal-g
+# WAL-G v3.0.9, with only the security updates required by the final-image scan.
+# Go's checksum database authenticates module downloads; the source commit pins the rest.
+RUN git init -q . && \
+    git fetch -q --depth 1 https://github.com/wal-g/wal-g.git 3e493188db28335fb93a45bd680c6ff8fc3028c1 && \
+    git checkout -q FETCH_HEAD && \
+    go get google.golang.org/grpc@v1.83.2 golang.org/x/crypto@v0.56.0 go.opentelemetry.io/otel/sdk@v1.45.0 && \
+    CGO_ENABLED=1 GOARCH="$TARGETARCH" go build -tags libsodium,brotli,lzo -mod=readonly -trimpath -buildvcs=false \
+        -ldflags="-s -w -buildid= -extldflags=-Wl,--build-id=none -X github.com/wal-g/wal-g/cmd/pg.walgVersion=v3.0.9 -X github.com/wal-g/wal-g/cmd/pg.gitRevision=3e493188db28335fb93a45bd680c6ff8fc3028c1" \
+        -o /out/wal-g ./main/pg
+
+FROM postgres:18.6-trixie@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+
+ARG SOURCE_DATE_EPOCH=0
+# Debian signatures authenticate the HTTP snapshot, including its pinned package indexes.
+RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && \
+    printf '%s\n' 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261003T000000Z/ trixie main' \
+        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261003T000000Z/ trixie-security main' \
+        >/etc/apt/sources.list
 
 # ca-certificates: WAL-G verifies the object store's TLS certificate (R2/S3 over HTTPS).
 # liburi-perl: the entrypoint parses AWS_ENDPOINT with Perl's standard URI module (RFC 3986).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates jq liburi-perl && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends libsodium23=1.0.18-1+deb13u1 libbrotli1=1.1.0-2+b7 liblzo2-2=2.10-3+b1 \
+        ca-certificates=20250419 jq=1.7.1-6+deb13u4 libjq1=1.7.1-6+deb13u4 liburi-perl=5.30-1 \
+        libpcre2-8-0=10.46-1~deb13u3 libssl3t64=3.5.7-1~deb13u3 \
+        openssl=3.5.7-1~deb13u3 openssl-provider-legacy=3.5.7-1~deb13u3 && \
+    rm -rf /var/lib/apt/lists/* /var/cache/ldconfig/aux-cache && \
+    rm -f /var/log/dpkg.log /var/log/alternatives.log /var/log/apt/*
+
+# BuildKit's rewrite-timestamp normalizes filesystem mtimes. dpkg/apt logs above contain
+# wall-clock times in their contents, and ldconfig's auxiliary cache contains inode/mtime data.
 
 # PostgreSQL 18 images declare VOLUME /var/lib/postgresql and default PGDATA to a major-version
 # subdirectory. The compose mounts the volume there and keeps the cluster at a fixed path, which the
@@ -33,7 +59,8 @@ RUN apt-get update && \
 ENV PGDATA=/var/lib/postgresql/data
 RUN install -d -o postgres -g postgres -m 0700 "$PGDATA"
 
-COPY --from=wal-g-download /wal-g /usr/local/bin/wal-g
+COPY --from=go-build /out/wal-g /usr/local/bin/wal-g
+COPY --from=go-build /out/gosu /usr/local/bin/gosu
 COPY deploy/scripts/postgres-walg-entrypoint.sh /usr/local/bin/postgres-walg-entrypoint
 COPY deploy/scripts/walg-cron /usr/local/bin/walg-cron
 COPY deploy/scripts/walg-timeline-backup /usr/local/bin/walg-timeline-backup

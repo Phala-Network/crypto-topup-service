@@ -46,10 +46,14 @@ contract Forwarder {
         address destination = treasury();
         if (token == address(0)) {
             amount = address(this).balance;
+            // Zero is deliberately skipped; any positive balance is flushed, with no target equality.
+            // slither-disable-next-line incorrect-equality
             if (amount == 0) return 0;
 
             // Assembly so no return data is copied: the send's gas and memory cost stay bounded.
             bool success;
+            // Native send copies no return data and caps gas at NATIVE_SEND_GAS.
+            // slither-disable-next-line assembly
             assembly ("memory-safe") {
                 success := call(NATIVE_SEND_GAS, destination, amount, 0, 0, 0, 0)
             }
@@ -58,6 +62,8 @@ contract Forwarder {
         }
 
         amount = IERC20(token).balanceOf(address(this));
+        // Zero is deliberately skipped; any positive balance is flushed, with no target equality.
+        // slither-disable-next-line incorrect-equality
         if (amount == 0) return 0;
         IERC20(token).safeTransfer(destination, amount);
     }

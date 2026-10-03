@@ -394,7 +394,7 @@ def _create_quote(console: DemoConsole, cookie: str) -> dict[str, Any]:
     assert body["api"][0]["request"]["body"]["metadata"]["order_id"] == body["order_id"]
     # The developer view shows only the key's prefix and masks the client secret.
     assert body["api"][0]["request"]["headers"]["authorization"] == "Bearer ppay_rk_test_…"
-    assert "AAAA" not in json.dumps(body["api"])
+    assert ("A" * 43 + "000000") not in json.dumps(body["api"])
     assert f"{QUOTE}_secret_" not in json.dumps(body["api"])
     return dict(body)
 

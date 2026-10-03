@@ -38,11 +38,6 @@ name: Deploy
 # - `--pre-launch-script` sends the kit's deploy/phala-cloud-pre-launch.sh on provision and
 #   upgrade alike (cli/src/commands/deploy/handler.ts), which verify-attestation.sh then requires.
 # - `deploy --json` ignores `--wait` on a new CVM; this workflow waits by polling `cvms get`.
-#
-# Runner constraints (Phala's org self-hosted runner): a container that drives the host Docker
-# daemon through its socket, so nothing bind-mounts a workspace path (preflight and the dstack
-# verifier take their input on stdin, or files are parsed client-side); `ss` and `envsubst` are not
-# installed.
 
 on:
   workflow_call:
@@ -85,7 +80,7 @@ defaults:
 jobs:
   deploy:
     if: github.ref == 'refs/heads/main'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     # One deployment per CVM at a time; a queued run never cancels one in progress.
     concurrency:
