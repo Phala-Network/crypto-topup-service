@@ -1,3 +1,5 @@
+import axe from "axe-core";
+import { userEvent } from "@testing-library/user-event";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -71,6 +73,25 @@ describe("depositAddressTransfer", () => {
 });
 
 describe("DepositAddress", () => {
+  it("supports native radio keyboard selection and has no accessibility violations", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<DepositAddress depositAddress={details()} />);
+    const first = screen.getByRole("radio", { name: "Sepolia" });
+    first.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("radio", { name: "Base Sepolia" })).toBe(document.activeElement);
+    expect(screen.getByRole("img").getAttribute("aria-label")).toBe("Deposit address for USDC on Base Sepolia");
+    await user.keyboard("{ArrowRight}");
+    expect(first).toBe(document.activeElement);
+    await user.tab();
+    expect(screen.getByRole("radio", { name: "PHA" })).toBe(document.activeElement);
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("radio", { name: "USDC" })).toBe(document.activeElement);
+    const result = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+    expect(result.violations).toEqual([]);
+    expect(container.querySelector("style, [style]")).toBeNull();
+  });
+
   it("shows one address for every network and token, with a QR code per network and token", () => {
     render(<DepositAddress depositAddress={details()} />);
     expect(screen.getByText("One address for all supported tokens and networks")).toBeDefined();
@@ -86,15 +107,15 @@ describe("DepositAddress", () => {
     expect(screen.getByText(/credited at the market rate once it is confirmed on its network\./)).toBeDefined();
     expect(screen.queryByText(/seconds|minutes/)).toBeNull();
 
-    fireEvent.click(screen.getByRole("tab", { name: "USDC" }));
+    fireEvent.click(screen.getByRole("radio", { name: "USDC" }));
     expect(qr().getAttribute("aria-label")).toBe("Deposit address for USDC on Sepolia");
     expect(screen.getByText(USDC)).toBeDefined();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Base Sepolia" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Base Sepolia" }));
     expect(qr().getAttribute("aria-label")).toBe("Deposit address for USDC on Base Sepolia");
     expect(screen.getByText("Base Sepolia (chain ID 84532)")).toBeDefined();
     // One token on this network: no token tabs.
-    expect(screen.queryByRole("tablist", { name: "Token" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Token" })).toBeNull();
   });
 
   it("shows each network's own address when they differ", () => {
@@ -126,6 +147,17 @@ describe("DepositAddress", () => {
 });
 
 describe("DepositAddress payments", () => {
+  it("aborts a hung payment read on unmount", () => {
+    let signal: AbortSignal | null | undefined;
+    vi.stubGlobal("fetch", (_: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal;
+      return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("unmounted", "AbortError"))));
+    });
+    const { unmount } = render(<DepositAddress depositAddress={details()} clientSecret={`da_${"0d".repeat(16)}_secret_${"ab".repeat(24)}`} apiBase="https://pay.example" />);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
   const SECRET = `da_${"0d".repeat(16)}_secret_${"ab".repeat(24)}`;
 
   function view(payments: unknown[], networks: unknown[] = []) {

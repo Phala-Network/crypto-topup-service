@@ -31,6 +31,7 @@ connects a wallet with wagmi, RainbowKit, ConnectKit, or AppKit, pass it in inst
    ```tsx
    "use client";
    import { Checkout } from "@phala/pay/react";
+   import "@phala/pay/styles.css";
 
    export function TopUp(props: {
      clientSecret: string;
@@ -172,32 +173,52 @@ on Sepolia and about 7 seconds on Base Sepolia"); until the view is loaded it na
   apiBase={apiBase}
   appearance={{
     theme: "dark",
-    variables: {
-      colorPrimary: "#cdfa50",
-      accessibleColorOnColorPrimary: "#161616",
-      borderRadius: "12px",
-      fontFamily: "Inter, sans-serif",
-    },
   }}
 />
 ```
 
-| Variable                        | CSS custom property                      | Light default | Dark default | Use                                          |
-| ------------------------------- | ---------------------------------------- | ------------- | ------------ | -------------------------------------------- |
-| `colorPrimary`                  | `--pp-color-primary`                     | `#0f62fe`     | `#78a9ff`    | Pay button, selected tab, links, focus ring  |
-| `accessibleColorOnColorPrimary` | `--pp-accessible-color-on-color-primary` | `#ffffff`     | `#ffffff`    | Text on a `colorPrimary` background (button) |
-| `colorBackground`               | `--pp-color-background`                  | `#ffffff`     | `#161616`    | Background                                   |
-| `colorText`                     | `--pp-color-text`                        | `#1a1a1a`     | `#f4f4f4`    | Text                                         |
-| `colorTextSecondary`            | `--pp-color-text-secondary`              | `#5c5f66`     | `#a8a8a8`    | Labels and hints                             |
-| `colorBorder`                   | `--pp-color-border`                      | `#d9dce1`     | `#393939`    | Borders                                      |
-| `colorDanger`                   | `--pp-color-danger`                      | `#c62828`     | `#ff8389`    | Errors, expired and rejected states          |
-| `colorSuccess`                  | `--pp-color-success`                     | `#1b7f3b`     | `#42be65`    | Credited state                               |
-| `fontFamily`                    | `--pp-font-family`                       | system UI     | system UI    | Font                                         |
-| `borderRadius`                  | `--pp-border-radius`                     | `8px`         | `8px`        | Corner radius                                |
+| CSS custom property                      | Light default | Dark default | Use                                          |
+| ---------------------------------------- | ------------- | ------------ | -------------------------------------------- |
+| `--pp-color-primary`                     | `#0f62fe`     | `#78a9ff`    | Pay button, selected tab, links, focus ring  |
+| `--pp-accessible-color-on-color-primary` | `#ffffff`     | `#ffffff`    | Text on the primary background (button)      |
+| `--pp-color-background`                  | `#ffffff`     | `#161616`    | Background                                   |
+| `--pp-color-text`                        | `#1a1a1a`     | `#f4f4f4`    | Text                                         |
+| `--pp-color-text-secondary`              | `#5c5f66`     | `#a8a8a8`    | Labels and hints                             |
+| `--pp-color-border`                      | `#d9dce1`     | `#393939`    | Borders                                      |
+| `--pp-color-danger`                      | `#c62828`     | `#ff8389`    | Errors, expired and rejected states          |
+| `--pp-color-success`                     | `#1b7f3b`     | `#42be65`    | Credited state                               |
+| `--pp-font-family`                       | system UI     | system UI    | Font                                         |
+| `--pp-border-radius`                     | `8px`         | `8px`        | Corner radius                                |
 
-Each variable is also a CSS custom property on `.pp-root`, so a stylesheet can set it too. With a
-light `colorPrimary`, set a dark `accessibleColorOnColorPrimary` so the button label stays
-readable.
+Import the static stylesheet once in your application entry point:
+
+```ts
+import "@phala/pay/styles.css";
+```
+
+Set these CSS custom properties in your own stylesheet, after the SDK stylesheet, using a
+selector such as `.pp-root[data-theme]`. For a light primary color, set a dark
+`--pp-accessible-color-on-color-primary` so the button label stays readable.
+
+```css
+.pp-root[data-theme] {
+  --pp-color-primary: #cdfa50;
+  --pp-accessible-color-on-color-primary: #161616;
+  --pp-border-radius: 12px;
+}
+```
+
+### Content Security Policy
+
+The components inject no style elements or style attributes. Serve the bundled CSS from your
+own origin with `style-src 'self'`; no `unsafe-inline` style permission is needed. Allow the
+payment service origin in `connect-src` for public status reads and `img-src data:` for browser
+wallet icons. Configure script and font sources for your application's own bundles.
+
+Public SDK reads accept `signal` and `requestTimeout` (milliseconds, default 10000). Each request
+combines caller cancellation with `AbortSignal.timeout` through `AbortSignal.any`, including the
+response body. Use a browser supporting these standard APIs. `destroy()` and React unmount
+abort active status reads; a request timeout permits polling to retry with the usual backoff.
 
 ## Without React
 

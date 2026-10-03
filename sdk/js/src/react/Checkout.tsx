@@ -21,7 +21,7 @@ import {
   type EthereumProvider,
   type Wallet,
 } from "../wallet.js";
-import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
+import type { Appearance } from "./appearance.js";
 import { Field } from "./Field.js";
 import { QrCode } from "./QrCode.js";
 import { useCheckout } from "./useCheckout.js";
@@ -104,17 +104,23 @@ export function Checkout({
   useEffect(() => {
     callbacks.current.onChange?.(state.current);
   }, [status]);
-  const notified = useRef<string | null>(null);
+  const notified = useRef(new Set<string>());
   useEffect(() => {
-    if (quote === null || notified.current === quote.id) {
+    if (quote === null) {
       return;
     }
     if (status === "credited") {
-      notified.current = quote.id;
-      callbacks.current.onSuccess?.(quote);
+      const key = `${quote.id}:success`;
+      if (!notified.current.has(key)) {
+        notified.current.add(key);
+        callbacks.current.onSuccess?.(quote);
+      }
     } else if (status === "expired" || status === "canceled") {
-      notified.current = quote.id;
-      callbacks.current.onExpire?.(quote);
+      const key = `${quote.id}:expire`;
+      if (!notified.current.has(key)) {
+        notified.current.add(key);
+        callbacks.current.onExpire?.(quote);
+      }
     }
   }, [status, quote]);
 
@@ -122,9 +128,7 @@ export function Checkout({
     <div
       className={className === undefined ? "pp-root" : `pp-root ${className}`}
       data-theme={appearance?.theme ?? "light"}
-      style={appearanceStyle(appearance)}
     >
-      <style>{STYLES}</style>
       {quote !== null && (
         <>
           <p className="pp-amount">

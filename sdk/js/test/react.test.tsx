@@ -63,6 +63,17 @@ async function poll() {
 }
 
 describe("Checkout", () => {
+  it("aborts a hung status read on unmount", () => {
+    let signal: AbortSignal | null | undefined;
+    vi.stubGlobal("fetch", (_: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal;
+      return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("unmounted", "AbortError"))));
+    });
+    const { unmount } = render(<Checkout clientSecret={CLIENT_SECRET} expectedAddress={ADDRESS} apiBase={API_BASE} />);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+
   it("states the exact amount, the network, and the time left", async () => {
     await renderCheckout();
     expect(screen.getByText("100.502512562814070352 PHA")).toBeDefined();
@@ -174,22 +185,28 @@ describe("Checkout", () => {
     expect(onExpire).toHaveBeenCalledTimes(1);
   });
 
-  it("applies appearance variables", async () => {
-    const { container } = await renderCheckout({
-      appearance: {
-        theme: "dark",
-        variables: {
-          colorPrimary: "#cdfa50",
-          accessibleColorOnColorPrimary: "#161616",
-          borderRadius: "2px",
-        },
-      },
-    });
-    const root = container.querySelector<HTMLElement>(".pp-root");
-    expect(root?.dataset["theme"]).toBe("dark");
-    expect(root?.style.getPropertyValue("--pp-color-primary")).toBe("#cdfa50");
-    expect(root?.style.getPropertyValue("--pp-accessible-color-on-color-primary")).toBe("#161616");
-    expect(root?.style.getPropertyValue("--pp-border-radius")).toBe("2px");
+  it("sets the theme without inline styles", async () => {
+    const { container } = await renderCheckout({ appearance: { theme: "dark" } });
+    expect(container.querySelector(".pp-root")?.getAttribute("data-theme")).toBe("dark");
+    expect(container.querySelector("style, [style]")).toBeNull();
+  });
+
+  it("notifies expiry and later credit once each for the same quote", async () => {
+    const onExpire = vi.fn();
+    const onSuccess = vi.fn();
+    await renderCheckout({ onExpire, onSuccess });
+    vi.setSystemTime(served.expires_at * 1000);
+    await poll();
+    expect(screen.getByRole("status").textContent).toMatch(/expired/);
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    await poll();
+    served = quote({ payment_status: "credited", amount_credited: 2500 });
+    await poll();
+    expect(screen.getByRole("status").textContent).toMatch(/Payment credited/);
+    expect(onSuccess).toHaveBeenCalledExactlyOnceWith(served);
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    await poll();
+    expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
   it("shows the full transaction hash after a wallet payment, linked to the explorer", async () => {

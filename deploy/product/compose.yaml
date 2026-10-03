@@ -19,6 +19,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    stop_grace_period: 45s
     restart: unless-stopped
 
   # The single public ingress, as in topup's compose (deploy/README.md, "Custom domain").

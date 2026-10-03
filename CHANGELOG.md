@@ -13,6 +13,24 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### JS SDK
+
+- **Breaking:** React components require an explicit `@phala/pay/styles.css` import. Removed
+  `appearance.variables`; set the `--pp-*` custom properties in your stylesheet. Components no
+  longer inject inline styles, allowing `style-src 'self'` in integrations. The demo permits
+  only its own CSS and the exact hash of Radix's fixed scrollbar stylesheet.
+- Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
+  Sessions and React components abort active reads on destruction or unmount.
+- Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
+  notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
+
+### Reference product
+
+- Replace the HTTP development server with pinned Starlette and uvicorn, bounded connections
+  and workers, streamed body limits, request deadlines, uniform application transport errors,
+  and graceful shutdown. The demo forwards TanStack Query cancellation to deadline-bound fetches
+  and uses a native network select to avoid dynamic inline scrollbar styles.
+
 ## [0.7.0] - 2026-10-02
 
 ### Changed

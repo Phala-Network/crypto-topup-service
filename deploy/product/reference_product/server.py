@@ -8,6 +8,7 @@ the service on the user's behalf, as Phala Cloud's backend does.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,14 +17,20 @@ import signal
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from starlette.applications import Starlette
+from starlette.requests import ClientDisconnect, Request
+from starlette.responses import JSONResponse
+from starlette.responses import Response as HttpResponse
+from starlette.routing import Route
 
 from topup_client.models import AttestationResponse, Quote
 from topup_sdk import (
@@ -44,7 +51,7 @@ from .config import (
     MissingProductKeyError,
     ProductConfig,
 )
-from .demo import DemoConsole, Response
+from .demo import DemoConsole
 from .fulfillment import Answer, Fulfillment, PinnedKeys, TransientError, parse_decimal
 from .ledger import ProductLedger
 from .restore_records import export_restore_records
@@ -52,6 +59,7 @@ from .restore_records import export_restore_records
 LOG = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = 30
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # The account API's path of the restore records, reserved among workspace ids.
@@ -73,84 +81,115 @@ class ProductServer:
         self.demo = demo
         config = fulfillment.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
-        server = self
+        self._workers = ThreadPoolExecutor(max_workers=16, thread_name_prefix="product")
+        # Keep timed-out synchronous work admitted until it actually finishes. A client timeout
+        # cannot stop a Python thread or undo a mutation, and must not admit unlimited new work.
+        self._capacity = threading.BoundedSemaphore(16)
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = self._body()
-                if body is None:
-                    return
-                headers = dict(self.headers.items())
-                if self.path == base_path + "/webhooks":
-                    self._send(server.fulfillment.handle(headers, body))
-                elif server.accounts is not None and server.accounts.handles(self.path):
-                    self._send(server.accounts.handle("POST", self.path, headers, body))
-                elif server.demo is not None and server.demo.handles(self.path):
-                    self._send_raw(server.demo.handle("POST", self.path, headers, body))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        def dispatch(
+            method: str, target: str, headers: dict[str, str], body: bytes
+        ) -> HttpResponse:
+            if method == "POST" and urlsplit(target).path == base_path + "/webhooks":
+                answer = self.fulfillment.handle(headers, body)
+            elif method == "GET" and urlsplit(target).path == base_path + "/healthz":
+                answer = Answer(HTTPStatus.OK, {"status": "ok"})
+            elif (
+                self.accounts is not None and self.accounts.handles(target) and method != "OPTIONS"
+            ):
+                answer = self.accounts.handle(method, target, headers, body)
+            elif self.demo is not None and self.demo.handles(target):
+                response = self.demo.handle(method, target, headers, body)
+                return HttpResponse(response.body, response.status, headers=response.headers)
+            else:
+                answer = Answer(HTTPStatus.NOT_FOUND)
+            if answer.body is None:
+                return HttpResponse(status_code=answer.status)
+            return JSONResponse(answer.body, status_code=answer.status)
 
-            def do_GET(self) -> None:
-                headers = dict(self.headers.items())
-                if self.path == base_path + "/healthz":
-                    self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
-                elif server.accounts is not None and server.accounts.handles(self.path):
-                    self._send(server.accounts.handle("GET", self.path, headers, b""))
-                elif server.demo is not None and server.demo.handles(self.path):
-                    self._send_raw(server.demo.handle("GET", self.path, headers, b""))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        def error(request: Request, status: HTTPStatus) -> HttpResponse:
+            headers = self.demo.cors(request.headers.get("origin")) if self.demo is not None else {}
+            return JSONResponse({"code": status.name.lower()}, status_code=status, headers=headers)
 
-            def do_OPTIONS(self) -> None:
-                # CORS preflights, for the demo's API only.
-                if server.demo is not None and server.demo.handles(self.path):
-                    headers = dict(self.headers.items())
-                    self._send_raw(server.demo.handle("OPTIONS", self.path, headers, b""))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        async def endpoint(request: Request) -> HttpResponse:
+            try:
+                async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                    # h11 rejects malformed framing on the wire. Also validate ASGI requests,
+                    # and bound streamed/chunked bodies regardless of Content-Length.
+                    lengths = request.headers.getlist("content-length")
+                    if lengths and (
+                        len(lengths) != 1
+                        or len(lengths[0]) > 20
+                        or not re.fullmatch(r"[0-9]+", lengths[0])
+                    ):
+                        return error(request, HTTPStatus.BAD_REQUEST)
+                    if lengths and int(lengths[0]) > MAX_BODY_BYTES:
+                        return error(request, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                    body = bytearray()
+                    async for chunk in request.stream():
+                        if len(body) + len(chunk) > MAX_BODY_BYTES:
+                            return error(request, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                        body.extend(chunk)
+                    if lengths and len(body) != int(lengths[0]):
+                        return error(request, HTTPStatus.BAD_REQUEST)
+                    target = request.scope["raw_path"].decode("ascii")
+                    if request.url.query:
+                        target += "?" + request.url.query
+                    if not self._capacity.acquire(blocking=False):
+                        return error(request, HTTPStatus.SERVICE_UNAVAILABLE)
+                    try:
+                        future = self._workers.submit(
+                            dispatch,
+                            request.method,
+                            target,
+                            dict(request.headers),
+                            bytes(body),
+                        )
+                    except RuntimeError:
+                        self._capacity.release()
+                        raise
+                    future.add_done_callback(lambda _: self._capacity.release())
+                    return await asyncio.wrap_future(future)
+            except TimeoutError:
+                return error(request, HTTPStatus.REQUEST_TIMEOUT)
+            except ClientDisconnect:
+                return error(request, HTTPStatus.BAD_REQUEST)
+            except Exception:
+                LOG.exception("product request failed")
+                return error(request, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-            def _body(self) -> bytes | None:
-                length = int(self.headers.get("content-length") or 0)
-                if length > MAX_BODY_BYTES:
-                    if server.demo is not None and server.demo.handles(self.path):
-                        cors = server.demo.cors(self.headers.get("origin"))
-                        self._send_raw(Response(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, headers=cors))
-                    else:
-                        self._send(Answer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
-                    return None
-                return self.rfile.read(length)
-
-            def _send(self, answer: Answer) -> None:
-                payload = b"" if answer.body is None else json.dumps(answer.body).encode()
-                self.send_response(answer.status)
-                if answer.body is not None:
-                    self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def _send_raw(self, response: Response) -> None:
-                self.send_response(response.status)
-                for name, value in response.headers.items():
-                    self.send_header(name, value)
-                self.send_header("content-length", str(len(response.body)))
-                self.end_headers()
-                self.wfile.write(response.body)
-
-            def log_message(self, format: str, *args: Any) -> None:
-                LOG.debug("%s %s", self.address_string(), format % args)
-
-        self._httpd = ThreadingHTTPServer((config.listen_host, config.listen_port), Handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self.app = Starlette(
+            routes=[Route("/{path:path}", endpoint, methods=["GET", "POST", "OPTIONS"])]
+        )
+        self._server = uvicorn.Server(
+            uvicorn.Config(
+                self.app,
+                host=config.listen_host,
+                port=config.listen_port,
+                http="h11",
+                ws="none",
+                limit_concurrency=32,
+                backlog=64,
+                timeout_keep_alive=5,
+                timeout_graceful_shutdown=35,
+                access_log=False,
+            )
+        )
+        self._thread = threading.Thread(target=self._server.run, name="product-server")
 
     def __enter__(self) -> ProductServer:
         self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if not self._thread.is_alive() or time.monotonic() >= deadline:
+                self.__exit__()
+                raise RuntimeError("product server did not start")
+            time.sleep(0.01)
         return self
 
     def __exit__(self, *_: object) -> None:
-        self._httpd.shutdown()
-        self._httpd.server_close()
+        self._server.should_exit = True
         self._thread.join()
+        self._workers.shutdown(wait=True, cancel_futures=True)
 
 
 class AccountApi:

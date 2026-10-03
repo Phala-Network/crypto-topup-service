@@ -320,7 +320,9 @@ const API = `${import.meta.env.VITE_DEMO_API_ORIGIN}/api/`;
 
 // Cross-origin with the visitor's demo account cookie, which the API allows only for the website.
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${API}${path}`, { credentials: "include", ...init });
+  const deadline = AbortSignal.timeout(10_000);
+  const signal = init?.signal == null ? deadline : AbortSignal.any([init.signal, deadline]);
+  const response = await fetch(`${API}${path}`, { credentials: "include", ...init, signal });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const code = isRecord(body) && typeof body["code"] === "string" ? body["code"] : "error";
@@ -340,13 +342,13 @@ function post(path: string, body: unknown): Promise<unknown> {
   });
 }
 
-export async function getAccount(): Promise<Account> {
-  const body = await request("account");
+export async function getAccount(signal?: AbortSignal): Promise<Account> {
+  const body = await request("account", { signal: signal ?? null });
   return expect<Account>(body, ["account_id", "balance", "ledger", "payments"]);
 }
 
-export async function getNetworks(): Promise<Network[]> {
-  const body = await request("assets");
+export async function getNetworks(signal?: AbortSignal): Promise<Network[]> {
+  const body = await request("assets", { signal: signal ?? null });
   return expect<{ networks: Network[] }>(body, ["networks"]).networks;
 }
 
@@ -368,14 +370,14 @@ export async function createDepositAddress(): Promise<DepositAddressResponse> {
   return expect<DepositAddressResponse>(body, ["deposit_address", "client_secret", "verified"]);
 }
 
-export async function getDepositAddress(): Promise<DepositAddressResponse> {
-  const body = await request("deposit_address");
+export async function getDepositAddress(signal?: AbortSignal): Promise<DepositAddressResponse> {
+  const body = await request("deposit_address", { signal: signal ?? null });
   return expect<DepositAddressResponse>(body, ["deposit_address", "verified"]);
 }
 
-export async function getTimeline(selection: Selection): Promise<Timeline> {
+export async function getTimeline(selection: Selection, signal?: AbortSignal): Promise<Timeline> {
   const path = selection.kind === "quote" ? "quotes" : "deposits";
-  const body = await request(`${path}/${encodeURIComponent(selection.id)}`);
+  const body = await request(`${path}/${encodeURIComponent(selection.id)}`, { signal: signal ?? null });
   return expect<Timeline>(body, ["steps", "refunds", "events", "api"]);
 }
 
@@ -417,13 +419,13 @@ export async function cancelRefund(refund: string): Promise<Refund> {
   return expect<{ refund: Refund }>(body, ["refund"]).refund;
 }
 
-export async function getSweeps(): Promise<Sweeps> {
-  const body = await request("sweeps");
+export async function getSweeps(signal?: AbortSignal): Promise<Sweeps> {
+  const body = await request("sweeps", { signal: signal ?? null });
   return expect<Sweeps>(body, ["groups", "api"]);
 }
 
-export async function getTrust(): Promise<Trust> {
-  const body = await request("trust");
+export async function getTrust(signal?: AbortSignal): Promise<Trust> {
+  const body = await request("trust", { signal: signal ?? null });
   return expect<Trust>(body, ["attestation", "verify_docs"]);
 }
 
