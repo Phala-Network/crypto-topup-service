@@ -543,7 +543,10 @@ mod tests {
             "key-secret",
             "rpc.invalid",
         ] {
-            assert!(!serialized.contains(secret), "leaked {secret}");
+            assert!(
+                !serialized.contains(secret),
+                "sensitive fixture appeared in captured events"
+            );
         }
     }
 
