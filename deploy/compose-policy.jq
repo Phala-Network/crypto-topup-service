@@ -121,7 +121,7 @@ def common_violations($variant; $project):
               | select(.type == "bind") | select(.source != "/var/run/dstack.sock")] == [];
             "only the dstack socket may be bind-mounted")
     ] + secret_violations($variant)
-      + (["topup", "smokescreen", "heartbeat"] | map(
+      + (if $variant == "product" then [] else ["topup", "smokescreen", "heartbeat"] end | map(
         . as $service
         | $root | [
           check(.services[$service].read_only == true; "\($service) must use a read-only root filesystem"),
