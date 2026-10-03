@@ -250,7 +250,7 @@ are four kinds of input, each with one home ([design](../docs/design/deploy-conf
 | Kind | Home |
 |---|---|
 | Topology: the services, their mounts, ports, and flags | [compose.yaml](compose.yaml), [compose.service.yaml](compose.service.yaml), [compose.restore-check.yaml](compose.restore-check.yaml) (and [product/compose.yaml](product/compose.yaml)) |
-| The Environment's public settings | its directory in the environment repository, for example `production/topup/`: `topup.yaml` ([the configuration file](../docs/configuration.md#the-configuration-file): `public_origin`, `admin_key`, `rpc_providers`, `routes`) and a `compose.yaml` overlay with the env interfaces of third-party images: WAL-G's `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN`, and the keyed providers' sealed key names |
+| The Environment's public settings | its directory in the environment repository, for example `production/topup/`: `topup.yaml` ([the configuration file](../docs/configuration.md#the-configuration-file): `public_origin`, `admin_key`, `rpc_groups`, `rpc_companies`, `rpc_budgets`, `routes`) and a `compose.yaml` overlay with the env interfaces of third-party images: WAL-G's `WALG_S3_PREFIX`, `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN`, and the keyed providers' sealed key names |
 | Deploy-time facts | [render.sh](render.sh)'s three inputs: `--images` (the release's `images.json`), `--gateway-domain` (the CVM node's gateway, dstack-ingress's `GATEWAY_DOMAIN`), and, for the restore-check variant only, `--origin` (the restore instance's own origin) |
 | Secrets | the CVM's sealed env ([Sealing the secrets](#sealing-the-secrets)) |
 
@@ -337,49 +337,31 @@ a testnet quick start and is why an instance with merchants uses the service pat
 
 ### RPC providers
 
-Every route names its chain's RPC providers by id in `chain.rpc_providers`, at least two different
-providers, and a route that names none uses `provider-a` and `provider-b` (the committed Sepolia
-routes do). An id is lowercase letters, digits, and `-`:
+Every route explicitly names `chain.rpc_groups: { a: ..., b: ... }`. A scans logs and
+reconciles; B independently confirms receipts, heads and calls. Credit still requires both.
+Top-level `rpc_groups` defines 1–8 upstream URL/credential pairs and a bounded failover or
+weighted round robin policy per group. `rpc_companies` records reviewed company ownership;
+the company sets of A and B must be disjoint. Domains support that review, and aliases/resellers
+must not create artificial independence.
 
-| Setting | What | Where |
-|---|---|---|
-| `rpc_providers.<id>` | the provider's HTTPS URL for its chain. A provider that puts its API key in the URL has `{key}` in the key's place, as a whole path segment or query value: `https://eth-mainnet.g.alchemy.com/v2/{key}`, `https://mainnet.infura.io/v3/{key}`, `https://NAME.quiknode.pro/{key}/`. The key can never change the URL's host. | `topup.yaml`, [attested](#attested-settings) |
-| `TOPUP_RPC_<ID>_KEY` | the key that fills `{key}` (the id upper-cased, `-` as `_`); only for a keyed provider | [sealed](#sealing-the-secrets); declared in the environment's `compose.yaml` overlay for `topup` and `restore-check` |
+Each member's `url` is attested with `{key}` as a whole path segment or query value; its explicit
+`sealed_key` names the sealed `TOPUP_RPC_*_KEY`, declared for topup and restore-check in the
+compose overlay. The same URL template can use several credentials within one group. Explicit
+account/key budgets are shared across methods and chains; keyless members get synthetic scopes.
+All redirects are refused, and the in-process clients use no response cache or RPC sidecar.
 
-A provider serves one chain: routes of the same chain name the same providers, and a route of
-another chain names providers of its own, even from the same company (`alchemy-base-sepolia` beside
-`alchemy-sepolia`). The chain must carry the canonical Multicall3
-([contracts/multicall3.json](contracts/multicall3.json)).
+`topup config check --secrets FILE` validates identities, bounds, quota references and keys
+without network access. `topup rpc check --config FILE` performs counted per-member probes;
+first acceptance needs one verified serving member in each group, while offline backups may
+remain configured. Recovery requires full identity/capability/head probes after cooldown.
+A member must support the complete numeric log range and recipient-only filters before serving A.
+An empty eligible group waits; no fallback crosses A/B or bypasses the agreement gate.
 
-The order matters. The first provider, A, makes every `eth_getLogs` ([Measuring RPC
-usage](#measuring-rpc-usage)): windows of up to 2 000 blocks, and in address mode and the
-reconciler's missing-deposit check, transfers by recipient with no contract address. Some public
-endpoints refuse one or the other (a 1 000-block range cap; a required `address`), so check both
-before naming one first. Provider B never reads logs, only receipts, heads (`latest`, `safe`,
-`finalized`), nonces, and calls.
-
-`topup config check` requires:
-
-- every provider a route names in `rpc_providers`, and no other;
-- each provider on one chain;
-- each route's providers at different URLs;
-- every `{key}` a whole path segment or query value.
-
-With `--secrets`, it also requires a key where the URL has `{key}` and none where it has not.
-[Preflight](preflight.sh) adds an `https` URL that does not embed a key. Online, it requires each
-provider to report the chain of every route that names it, with the route's contracts and asset
-on it.
-
-**Adding a chain** is configuration, in one PR and one Deploy `upgrade`:
-
-1. Add its routes to `topup.yaml`
-   ([self-hosting, "Routes and contracts"](../docs/self-hosting.md#3-routes-and-contracts)), with
-   `chain.rpc_providers` naming two new ids and those ids in `rpc_providers`.
-2. For a keyed provider, add its `TOPUP_RPC_<ID>_KEY` to the environment's overlay, and re-seal
-   with it before the upgrade ([Sealing the secrets](#sealing-the-secrets)).
-3. If [check-route-modes.sh](check-route-modes.sh) and
-   [contracts/networks.json](contracts/networks.json) lack the chain, add it there by a pull
-   request to Phala Pay; it ships in the next release.
+See [configuration](../docs/configuration.md#the-configuration-file),
+[the design](../docs/design/rpc-failover.md) and [the runbook](RPC.md) for the policy table,
+staging singleton migration, historical review, alerts and owner-only recovery. Adding a chain
+requires explicit A/B groups and its normal reviewed route/contracts deployment; route versions
+are not changed just to migrate RPC configuration.
 
 ### Custom domain
 

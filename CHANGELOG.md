@@ -13,6 +13,31 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Breaking (0.7.0)
+
+- RPC configuration now requires explicit `chain.rpc_groups: { a: ..., b: ... }` and the
+  `rpc_groups`, `rpc_companies` and `rpc_budgets` registries. The old provider list/flat registry
+  is rejected, including a third id that 0.6.0 silently ignored. Reviewed provider companies
+  must be disjoint between A and B; repeated URL templates with different sealed credentials
+  are allowed within a group.
+- RPC groups select in-process with bounded failover or weighted round robin, shared account/key
+  admission, refused redirects and no cache. Every real member send retains the existing usage
+  counter. Fixed numeric log windows commit evidence, review coverage and progress atomically.
+- Migrate the database before starting 0.7.0: persisted hash watermarks, configuration acceptance,
+  historical review coverage and audited recovery are required. Legacy height-only cursors need
+  an A/B-agreed hash anchor. Rollback requires the stopped-service recovery procedure in
+  [the RPC runbook](deploy/RPC.md); configuration rollback never lowers a watermark.
+- RPC company aliases additionally use pinned PSL registrable-domain evidence; accepted A/B
+  role/group ids cannot be renamed or swapped. Receipt/head/nonce evidence is member-pinned,
+  and typed decoding participates in failover. Dense-window deadlines account for real
+  verification work, recursive log splits, factory checks and shared quotas; pinned sends
+  retain the operation deadline. Same-height latest/safe reorgs replay through the production
+  poll, recording deposits below prior confirmation progress without skipping unread ranges.
+  Recovery probes isolate member heads and validate existing deposit and flush ledgers.
+  Singleton historical replay and nonfinal reorg replay
+  retain durable progress; authorized numeric-watermark recovery isolates old branch evidence
+  in its audit epoch.
+
 ## [0.6.0] - 2026-10-02
 
 ### Added

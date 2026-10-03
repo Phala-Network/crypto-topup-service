@@ -10,7 +10,7 @@
 //! forwarders that hold unswept funds by the ledger.
 
 mod chain;
-mod store;
+pub(crate) mod store;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +22,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
+use topup_adapters::chain::evm::FinalizedReader;
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::{RouteFile, UNIT_DECIMALS};
 use uuid::Uuid;
@@ -163,6 +163,9 @@ impl Reconciler {
     /// Check failures are reported in [`ReconciliationReport::failed_checks`]; the other checks
     /// still run. The `Result` is kept for callers of the library entry point.
     pub async fn run_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
+        crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+            .await
+            .map_err(ReconciliationError::Chain)?;
         Ok(self.run_checks(false).await)
     }
 
@@ -173,11 +176,17 @@ impl Reconciler {
     /// the restored ledger meanwhile.
     pub async fn post_restore_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
         let lock = store::exclusive_lease_owner_lock(&self.pool).await?;
-        let report = self.run_checks(true).await;
+        let result = async {
+            crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+                .await
+                .map_err(ReconciliationError::Chain)?;
+            Ok(self.run_checks(true).await)
+        }
+        .await;
         if let Err(error) = lock.release().await {
             tracing::warn!(%error, "failed to release the post-restore lease-owner lock");
         }
-        Ok(report)
+        result
     }
 
     /// Runs one check without persisting its findings.
@@ -186,6 +195,9 @@ impl Reconciler {
     /// ledger, and `address_derivation` and `custody_balance` freeze a chain, exactly as a full
     /// round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
+        crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+            .await
+            .map_err(ReconciliationError::Chain)?;
         let mut findings = Vec::new();
         self.run_check(check, &mut RoundHeads::new(), &mut findings)
             .await?;
@@ -458,24 +470,38 @@ impl Reconciler {
             .map(|address| address.address)
             .collect::<Vec<_>>();
         for (from_block, to_block) in bounded_windows(start, through)? {
-            let mut logs = Vec::new();
-            for batch in physical.chunks(MAX_ADDRESSES_PER_REQUEST) {
-                logs.extend(chain.transfer_logs_to(batch, from_block, to_block).await?);
-            }
-            for deposit in resolve_logs_for_reconciliation(logs, &addresses, routes)? {
-                let committed = db::commit_scan(
-                    &self.pool,
-                    chain_id,
-                    std::slice::from_ref(&deposit),
-                    &[],
-                    None,
-                    None,
-                )
-                .await?;
-                if committed.inserted == 0 {
+            let request = topup_adapters::chain::evm::window::WindowRequest {
+                from: from_block,
+                to: to_block,
+                recipients: physical.clone(),
+                tokens: Vec::new(),
+                factory: None,
+                finalized: true,
+                exclude_member: None,
+            };
+            let window = chain.read_window(&request).await?;
+            let deposits = resolve_logs_for_reconciliation(window.transfers, &addresses, routes)?;
+            let next_block = next_block(to_block)?;
+            let (committed, _) = db::rpc::commit_window(
+                &self.pool,
+                chain_id,
+                &deposits,
+                &[],
+                window.proof.as_ref(),
+                db::rpc::WindowProgress {
+                    reconciliation: Some((cursor, next_block)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            report_unsupported_inflows(chain_id, committed.unsupported_inserted);
+            for deposit in deposits {
+                if !committed
+                    .inserted_positions
+                    .contains(&(deposit.tx_hash, deposit.receipt_log_index))
+                {
                     continue;
                 }
-                report_unsupported_inflows(chain_id, committed.unsupported_inserted);
                 findings.push(Finding::new(
                     CheckName::MissingDeposit,
                     subjects([
@@ -488,11 +514,6 @@ impl Reconciler {
                     true,
                     false,
                 )?);
-            }
-            let next_block = next_block(to_block)?;
-            if !store::advance_deposit_cursor(&self.pool, chain_id, cursor, next_block).await? {
-                tracing::debug!(chain_id, "missing-deposit cursor advanced concurrently");
-                return Ok(());
             }
             cursor = Some(next_block);
         }

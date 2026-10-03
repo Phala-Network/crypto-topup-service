@@ -1,0 +1,53 @@
+# Import into the operator's Prometheus rule_files. Scrape the admin-signed metrics exporter.
+groups:
+  - name: phala-pay-rpc
+    rules:
+      - alert: RpcGroupUnavailable
+        expr: topup_rpc_group_eligible_members == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "RPC group {{ $labels.group }} unavailable; credit waits for A and B"
+          runbook: "deploy/RPC.md"
+      - alert: RpcFinalizedFork
+        expr: topup_rpc_chain_frozen == 1
+        labels: { severity: critical }
+        annotations:
+          summary: "Chain {{ $labels.chain_id }} is durably frozen"
+          runbook: "deploy/RPC.md"
+      - alert: RpcCursorAnchorUnavailable
+        expr: topup_rpc_chain_awaiting_anchor == 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Chain {{ $labels.chain_id }} waits for an agreed cursor anchor"
+          runbook: "deploy/RPC.md"
+      - alert: RpcMemberQuarantined
+        expr: topup_rpc_member_quarantined == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "RPC member {{ $labels.member }} requires credential or redirect review"
+          runbook: "deploy/RPC.md"
+      - alert: RpcClassificationRequired
+        expr: increase(topup_rpc_member_failures_total{class="unclassified"}[5m]) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "RPC member {{ $labels.member }} returned an unmapped error; review classification"
+          runbook: "deploy/RPC.md"
+      - alert: RpcHistoricalReviewBacklog
+        expr: topup_rpc_review_pending_windows > 0
+        for: 24h
+        labels: { severity: warning }
+        annotations:
+          summary: "Historical coverage still needs a different answering member"
+          runbook: "deploy/RPC.md"
+      - alert: TopupRpcReorgReplayStalled
+        expr: topup_rpc_reorg_pending_ranges > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nonfinal RPC reorg replay is stalled
+          description: Inspect group eligibility and complete-window replay before resuming chain progress.

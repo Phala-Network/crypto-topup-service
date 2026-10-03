@@ -27,6 +27,14 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `restore_delivered_events`, `restore_deposit_tombstones` | `SELECT`, `INSERT` |
 | `payment_settings_revisions` | `SELECT`, `INSERT` (append-only) |
 | `payment_settings_cutover` | `SELECT`, `UPDATE` |
+| `rpc_config_acceptances` | `SELECT`, `INSERT` (public digests) |
+| `rpc_member_validations` | `SELECT`, `INSERT`; `UPDATE` of `validated_at` only |
+| `rpc_chain_state` | `SELECT`, `INSERT`; `UPDATE` of `frozen`, `reason`, `awaiting_anchor` only |
+| `rpc_watermarks` | `SELECT`, `INSERT`, `UPDATE`; epoch lowering is owner recovery only |
+| `rpc_window_reviews` | `SELECT`, `INSERT`; `UPDATE` of `reviewed_at`, `reviewed_by`, `replayed_at` only |
+| `rpc_role_bindings` | `SELECT`, `INSERT`; accepted chain roles are immutable |
+| `rpc_reorg_ranges` | `SELECT`, `INSERT`; `UPDATE` of `replayed_through` only |
+| `rpc_recoveries` | `SELECT`; recovery audit writes require the owner |
 | `_sqlx_migrations` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |
 
@@ -258,3 +266,10 @@ constraints, so a row that breaks one fails the migration instead of a worker: a
 its transaction's `tx_from` and `tx_nonce` unless it is a reversed deposit restored from a delivered
 event, every event's `data` holds its `object`, and a deposit's snapshot carries its
 `receipt_log_index`, `revision`, `block_hash`, and `block_time`. Its down migration drops them.
+
+`20261026000000_rpc_groups` adds accepted public configurations, reviewed member genesis
+evidence, persistent head/cursor anchors, chain freeze/recovery epochs, immutable numeric
+window selectors with independent review markers, and owner-written recovery audits. Existing
+0.6 height-only cursors require A/B hash agreement before runtime progress. Recovery preserves
+old evidence and repairs derived address/backfill progress under the exclusive writer lock; see
+[the RPC runbook](../../../deploy/RPC.md).

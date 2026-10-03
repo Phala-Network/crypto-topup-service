@@ -34,12 +34,22 @@ pub async fn commit_factory_logs(
     chain_id: u64,
     logs: &[FactoryLog],
 ) -> Result<FactoryCommit, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let result = commit_factory_logs_in(&mut transaction, chain_id, logs).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn commit_factory_logs_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: u64,
+    logs: &[FactoryLog],
+) -> Result<FactoryCommit, sqlx::Error> {
     let mut commit = FactoryCommit::default();
     if logs.is_empty() {
         return Ok(commit);
     }
     let chain_id = to_i64(chain_id, "flushed.chain_id")?;
-    let mut transaction = pool.begin().await?;
     let mut flushed_addresses = Vec::new();
     for log in logs {
         let tx_hash = b256_hex(log.tx_hash);
@@ -59,7 +69,7 @@ pub async fn commit_factory_logs(
                 .bind(address_hex(event.forwarder))
                 .bind(address_hex(event.treasury))
                 .bind(block_number)
-                .execute(&mut *transaction)
+                .execute(&mut **transaction)
                 .await?;
                 commit.created += updated.rows_affected();
             }
@@ -85,7 +95,7 @@ pub async fn commit_factory_logs(
                 .bind(event.amount.to_string())
                 .bind(block_number)
                 .bind(&block_hash)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
                 if let Some(address_id) = address_id {
                     commit.flushed += 1;
@@ -113,7 +123,7 @@ pub async fn commit_factory_logs(
                 .bind(format!("0x{}", hex::encode(&event.reason)))
                 .bind(block_number)
                 .bind(&block_hash)
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&mut **transaction)
                 .await?;
                 if let Some(address_id) = address_id {
                     commit.failed += 1;
@@ -131,13 +141,12 @@ pub async fn commit_factory_logs(
         }
     }
     if !flushed_addresses.is_empty() {
-        commit.swept = mark_swept(&mut transaction, None, &flushed_addresses)
+        commit.swept = mark_swept(transaction, None, &flushed_addresses)
             .await?
             .len()
             .try_into()
             .unwrap_or(u64::MAX);
     }
-    transaction.commit().await?;
     Ok(commit)
 }
 

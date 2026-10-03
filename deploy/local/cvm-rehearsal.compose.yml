@@ -38,6 +38,8 @@ services:
 
   # Base Sepolia's chain id, an OP-stack one: its routes credit at depth 3 on Anvil's head.
   anvil-base-sepolia:
+    networks: !override
+      default: { aliases: [anvil-base-sepolia-b] }
     extends: { file: ../sandbox/docker-compose.local.yml, service: anvil }
     command: !override
       - --host

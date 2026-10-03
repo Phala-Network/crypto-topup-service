@@ -100,7 +100,7 @@ fn bounded_method(method: &str) -> &'static str {
         .unwrap_or("other")
 }
 
-fn record(labels: &CallLabels, method: &str) {
+pub(super) fn record(labels: &CallLabels, method: &str) {
     COUNTING_SINCE.get_or_init(SystemTime::now);
     let key = (
         labels.provider.clone(),

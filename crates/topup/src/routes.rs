@@ -91,6 +91,30 @@ impl RouteSet {
         })
     }
 
+    /// Constructs A/B clients resolved from the attested typed group configuration.
+    pub fn with_groups(
+        routes: Vec<RouteFile>,
+        clients: BTreeMap<String, Arc<EvmClient>>,
+    ) -> Result<Self, String> {
+        let (current, chains) = index(&routes, |chain| {
+            chain
+                .rpc_providers
+                .iter()
+                .map(|id| {
+                    clients
+                        .get(id)
+                        .cloned()
+                        .ok_or_else(|| ProviderError::MissingUrl { label: id.clone() })
+                })
+                .collect()
+        })?;
+        Ok(Self {
+            routes,
+            current,
+            chains,
+        })
+    }
+
     /// Checks everything that must agree across routes, without creating a client or reading a
     /// secret: the validation `topup config check` shares with the service.
     pub fn check(routes: &[RouteFile]) -> Result<(), String> {
@@ -150,6 +174,15 @@ impl RouteSet {
             .ok_or(ProviderError::Unconfigured { chain_id, index })?
             .as_ref()
             .map_err(Clone::clone)
+    }
+
+    /// Typed production groups need durable cursor anchoring; legacy test dependencies do not.
+    pub(crate) fn has_rpc_groups(&self) -> bool {
+        self.chains
+            .values()
+            .flat_map(|chain| &chain.providers)
+            .filter_map(|client| client.as_ref().ok())
+            .any(|client| client.group().is_some())
     }
 
     /// Returns the current routes of one mode: a test-mode key quotes only on test routes, a

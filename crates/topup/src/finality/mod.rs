@@ -81,13 +81,14 @@ pub enum FinalityError {
 #[async_trait]
 trait WatchReader: Send + Sync {
     async fn finalized(&self) -> Result<u64, ChainError>;
-    async fn receipt_transfer(
+    async fn evidence(
         &self,
-        tx_hash: B256,
-        receipt_log_index: u64,
+        tx: B256,
+        position: u64,
         known: KnownTransfer,
-    ) -> Result<ReceiptLookup, ChainError>;
-    async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError>;
+        from: Address,
+        needed: u64,
+    ) -> Result<topup_adapters::chain::evm::FinalityEvidence, ChainError>;
 }
 
 #[async_trait]
@@ -96,17 +97,15 @@ impl<R: ChainReader + Send + Sync> WatchReader for R {
         Ok(ChainReader::finalized_head(self).await?.number)
     }
 
-    async fn receipt_transfer(
+    async fn evidence(
         &self,
-        tx_hash: B256,
-        receipt_log_index: u64,
+        tx: B256,
+        position: u64,
         known: KnownTransfer,
-    ) -> Result<ReceiptLookup, ChainError> {
-        ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
-    }
-
-    async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {
-        ChainReader::nonce_at(self, account, block).await
+        from: Address,
+        needed: u64,
+    ) -> Result<topup_adapters::chain::evm::FinalityEvidence, ChainError> {
+        ChainReader::finality_evidence(self, tx, position, known, from, needed).await
     }
 }
 
@@ -280,21 +279,27 @@ impl FinalityWatch {
             block_time: deposit.block_time,
             tx_nonce,
         };
-        let (primary, secondary) = tokio::try_join!(
-            chain
-                .primary
-                .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
-            chain
-                .secondary
-                .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
+        let (primary_evidence, secondary_evidence) = tokio::try_join!(
+            chain.primary.evidence(
+                deposit.tx_hash,
+                deposit.receipt_log_index,
+                known,
+                from,
+                primary_finalized
+            ),
+            chain.secondary.evidence(
+                deposit.tx_hash,
+                deposit.receipt_log_index,
+                known,
+                from,
+                secondary_finalized
+            ),
         )?;
-        let nonces = match (&primary, &secondary) {
-            (ReceiptLookup::Missing, ReceiptLookup::Missing) => Some(tokio::try_join!(
-                chain.primary.nonce_at(from, primary_finalized),
-                chain.secondary.nonce_at(from, secondary_finalized),
-            )?),
-            _ => None,
-        };
+        let nonces = primary_evidence.nonce.zip(secondary_evidence.nonce);
+        let primary_finalized = primary_evidence.finalized;
+        let secondary_finalized = secondary_evidence.finalized;
+        let primary = primary_evidence.receipt;
+        let secondary = secondary_evidence.receipt;
         let verdict = decide(
             deposit,
             Observed {

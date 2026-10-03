@@ -62,12 +62,14 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
 }
 
 /// Scanner writes committed atomically for one block range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanCommit {
     /// Number of newly inserted deposits; duplicates are excluded.
     pub inserted: u64,
     /// Newly inserted deposits rejected as unsupported assets.
     pub unsupported_inserted: u64,
+    /// Transaction and receipt positions inserted by this transaction, excluding duplicates.
+    pub inserted_positions: Vec<(alloy_primitives::B256, u64)>,
 }
 
 async fn insert_rejected_event(
@@ -187,7 +189,19 @@ pub async fn commit_confirmed_scan(
     confirmed_block: u64,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Confirmed).await?;
+    super::rpc::guard_in(&mut transaction, chain_id).await?;
+    let result =
+        commit_confirmed_scan_in(&mut transaction, chain_id, deposits, confirmed_block).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+pub(crate) async fn commit_confirmed_scan_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: u64,
+    deposits: &[NewDeposit],
+    confirmed_block: u64,
+) -> Result<ScanCommit, sqlx::Error> {
+    let commit = insert_deposits_in(transaction, deposits, Evidence::Confirmed).await?;
     sqlx::query(
         r#"
         UPDATE cursors
@@ -197,9 +211,8 @@ pub async fn commit_confirmed_scan(
     )
     .bind(to_i64(chain_id, "cursors.chain_id")?)
     .bind(to_i64(confirmed_block, "cursors.confirmed_block")?)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
-    transaction.commit().await?;
     Ok(commit)
 }
 
@@ -227,11 +240,13 @@ async fn insert_deposits_in(
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut inserted = 0_u64;
     let mut unsupported_inserted = 0_u64;
+    let mut inserted_positions = Vec::new();
     for deposit in deposits {
         if insert_scanned_deposit_in(transaction, deposit, evidence)
             .await?
             .is_some()
         {
+            inserted_positions.push((deposit.tx_hash, deposit.receipt_log_index));
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
@@ -245,6 +260,7 @@ async fn insert_deposits_in(
     Ok(ScanCommit {
         inserted,
         unsupported_inserted,
+        inserted_positions,
     })
 }
 
@@ -311,12 +327,33 @@ pub async fn commit_scan(
     scanned_block_time: Option<DateTime<Utc>>,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Finalized).await?;
+    let result = commit_scan_in(
+        &mut transaction,
+        chain_id,
+        deposits,
+        backfilled_address_ids,
+        scanned_block,
+        scanned_block_time,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn commit_scan_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: u64,
+    deposits: &[NewDeposit],
+    backfilled_address_ids: &[Uuid],
+    scanned_block: Option<u64>,
+    scanned_block_time: Option<DateTime<Utc>>,
+) -> Result<ScanCommit, sqlx::Error> {
+    let commit = insert_deposits_in(transaction, deposits, Evidence::Finalized).await?;
 
     if !backfilled_address_ids.is_empty() {
         sqlx::query("UPDATE addresses SET backfilled = true WHERE id = ANY($1)")
             .bind(backfilled_address_ids)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
     }
 
@@ -338,11 +375,10 @@ pub async fn commit_scan(
         .bind(chain_id)
         .bind(scanned_block)
         .bind(scanned_block_time)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        super::pending::delete_finalized_in(&mut transaction, chain_id, scanned_block).await?;
+        super::pending::delete_finalized_in(transaction, chain_id, scanned_block).await?;
     }
 
-    transaction.commit().await?;
     Ok(commit)
 }

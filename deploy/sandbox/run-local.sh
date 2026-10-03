@@ -104,9 +104,21 @@ public_origin: https://topup.localhost
 admin_key:
   id: $admin_key_id
   public_key: $admin_public_key
-rpc_providers:
-  provider-a: http://anvil:8545
-  provider-b: http://anvil:8545/?provider=b
+rpc_companies:
+  simulated-a: { domains: [anvil] }
+  simulated-b: { domains: [anvil-b] }
+rpc_budgets:
+  account-a: { requests_per_second: 100, burst: 100 }
+  key-a: { requests_per_second: 100, burst: 100 }
+  account-b: { requests_per_second: 100, burst: 100 }
+  key-b: { requests_per_second: 100, burst: 100 }
+rpc_groups:
+  provider-a:
+    chain_id: 11155111
+    members: [{ id: provider-a, company: simulated-a, url: 'http://anvil:8545', account_budget: account-a, key_budget: key-a }]
+  provider-b:
+    chain_id: 11155111
+    members: [{ id: provider-b, company: simulated-b, url: 'http://anvil-b:8545', account_budget: account-b, key_budget: key-b }]
 routes:
 YAML
     awk 'NR == 1 { print "  - " $0; next } { print ($0 == "" ? "" : "    " $0) }' \

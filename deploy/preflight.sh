@@ -106,7 +106,8 @@ jq -j --arg target /etc/topup/topup.yaml \
 # topup ARGS...: the pinned image's topup, offline, with topup.yaml on stdin. Only the RPC keys
 # reach it, by name; nothing secret is printed.
 topup() {
-    local name keys=() values=()
+    local name keys=() values=() rpc_network_args=(--network none)
+    [[ "$1" == rpc ]] && rpc_network_args=()
     for name in "${!env[@]}"; do
         [[ "$name" == TOPUP_RPC_*_KEY ]] || continue
         keys+=(-e "$name")
@@ -115,7 +116,7 @@ topup() {
     if [[ -n "${TOPUP:-}" ]]; then
         env -i PATH="$PATH" "${values[@]}" "$TOPUP" "$@" /dev/stdin <"$tmp/topup.yaml"
     else
-        env "${values[@]}" docker run --rm -i --pull never --network none "${keys[@]}" \
+        env "${values[@]}" docker run --rm -i --pull never "${rpc_network_args[@]}" "${keys[@]}" \
             "$topup_image" topup "$@" /dev/stdin <"$tmp/topup.yaml"
     fi
 }
@@ -136,16 +137,17 @@ fi
 
 # Every RPC URL is published with the compose: https, and a key only in its `{key}`.
 declare -A provider_url=()
-while IFS=$'\t' read -r id url; do
+while IFS=$'\t' read -r id url configured_key; do
     [[ "$url" == https://* ]] || fail "RPC provider $id must use https"
     embeds_key "${url//\{key\}/}" &&
         fail "RPC provider $id's URL seems to embed an API key, which the compose publishes;" \
             "attest it with {key} in the key's place and seal the key"
     key_name=$(jq -rn --arg id "$id" '"TOPUP_RPC_\($id | ascii_upcase | gsub("[^A-Z0-9]"; "_"))_KEY"')
+    [[ -z "$configured_key" ]] || key_name=$configured_key
     key=${env[$key_name]-}
     [[ -z "$key" ]] || url=${url//"{key}"/"$key"}
     provider_url[$id]=$url
-done < <(jq -r '.rpc_providers | to_entries[] | [.key, .value] | @tsv' "$tmp/config.json")
+done < <(jq -r '.rpc_groups[].members[] | [.id, .url, (.sealed_key // "")] | @tsv' "$tmp/config.json")
 while IFS=$'\t' read -r route factory implementation; do
     for key in "$factory" "$implementation"; do
         if ! is_address "$key" || grep -Eiq '^0x([0-9a-f])\1{39}$' <<<"$key"; then
@@ -189,9 +191,22 @@ else
         ETH_RPC_URL=$url cast "$@" 2>"$tmp/cast.err" ||
             printf 'error: %s' "$(redact "$(tool_error "$tmp/cast.err")")"
     }
-    # Each route on each provider it names: the chain, the contracts, and the asset.
+    if topup rpc check --config >"$tmp/healthy.json" 2>"$tmp/probe.err"; then
+        ok "RPC groups have a fully validated serving member each"
+    else
+        fail "RPC group preflight failed: $(redact "$(tool_error "$tmp/probe.err")")"
+        printf '[]' >"$tmp/healthy.json"
+    fi
+    # Manifest checks only use fully validated members; failing backups do not block startup.
     while IFS=$'\t' read -r name chain_id factory implementation contract oracle decimals providers; do
-        read -ra ids <<<"$providers"
+        read -ra configured_ids <<<"$providers"
+        ids=()
+        for id in "${configured_ids[@]}"; do
+            if jq -e --arg id "$id" 'index($id) != null' "$tmp/healthy.json" >/dev/null; then
+                ids+=("$id")
+            fi
+        done
+        ((${#ids[@]})) || continue
         chain_ok=1
         for id in "${ids[@]}"; do
             reported=$(rpc "${provider_url[$id]}" chain-id)
@@ -244,9 +259,9 @@ else
         reported=$(rpc "${provider_url[${ids[0]}]}" call "$contract" 'decimals()(uint8)')
         [[ "$reported" == "$decimals" ]] ||
             fail "route $name: asset decimals() is $reported, the route says $decimals"
-    done < <(jq -r '.routes[] | [.route, .chain.chain_id, .chain.forwarder_factory,
+    done < <(jq -r '. as $config | .routes[] | [.route, .chain.chain_id, .chain.forwarder_factory,
         .chain.implementation, .asset.contract, .chain.sanctions_oracle, .asset.decimals,
-        (.chain.rpc_providers | join(" "))] | @tsv' "$tmp/config.json")
+        ([.chain.rpc_groups.a, .chain.rpc_groups.b] | map($config.rpc_groups[.].members[].id) | join(" "))] | @tsv' "$tmp/config.json")
 fi
 
 check_phala_cloud "$workspace" "$os_image"

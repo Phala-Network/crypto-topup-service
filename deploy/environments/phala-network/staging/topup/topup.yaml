@@ -8,11 +8,65 @@ admin_key:
   public_key: 23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo=
 # Each chain's own two providers (deploy/phala.md, "RPC providers"); all four are keyless. The
 # first a route names is provider A, which makes every log request.
-rpc_providers:
-  provider-a: https://sepolia.gateway.tenderly.co
-  provider-b: https://ethereum-sepolia-rpc.publicnode.com
-  base-sepolia-a: https://base-sepolia.gateway.tenderly.co
-  base-sepolia-b: https://base-sepolia-rpc.publicnode.com
+rpc_companies:
+  tenderly:
+    domains:
+    - tenderly.co
+  publicnode:
+    domains:
+    - publicnode.com
+rpc_budgets:
+  tenderly-account:
+    requests_per_second: 10
+    burst: 10
+  provider-a-key:
+    requests_per_second: 10
+    burst: 5
+  publicnode-account:
+    requests_per_second: 10
+    burst: 10
+  provider-b-key:
+    requests_per_second: 10
+    burst: 5
+  base-sepolia-a-key:
+    requests_per_second: 10
+    burst: 5
+  base-sepolia-b-key:
+    requests_per_second: 10
+    burst: 5
+rpc_groups:
+  provider-a:
+    chain_id: 11155111
+    members:
+    - id: provider-a
+      company: tenderly
+      url: https://sepolia.gateway.tenderly.co
+      account_budget: tenderly-account
+      key_budget: provider-a-key
+  provider-b:
+    chain_id: 11155111
+    members:
+    - id: provider-b
+      company: publicnode
+      url: https://ethereum-sepolia-rpc.publicnode.com
+      account_budget: publicnode-account
+      key_budget: provider-b-key
+  base-sepolia-a:
+    chain_id: 84532
+    members:
+    - id: base-sepolia-a
+      company: tenderly
+      url: https://base-sepolia.gateway.tenderly.co
+      account_budget: tenderly-account
+      key_budget: base-sepolia-a-key
+  base-sepolia-b:
+    chain_id: 84532
+    members:
+    - id: base-sepolia-b
+      company: publicnode
+      url: https://base-sepolia-rpc.publicnode.com
+      account_budget: publicnode-account
+      key_budget: base-sepolia-b-key
 # Every value a route does not write is a code default (docs/architecture.md §14);
 # `topup config show` prints the resolved routes.
 routes:
@@ -33,7 +87,7 @@ routes:
       # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
       # may require more, `safe`, or `finalized`, never less.
       confirmations: 3
-      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      rpc_groups: { a: base-sepolia-a, b: base-sepolia-b } # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
     asset:
@@ -70,7 +124,7 @@ routes:
       # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
       # may require more, `safe`, or `finalized`, never less.
       confirmations: 3
-      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      rpc_groups: { a: base-sepolia-a, b: base-sepolia-b } # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
     asset:
@@ -112,7 +166,7 @@ routes:
       # finality like Sepolia's depth 2. `3` is the family default, written out here; an account
       # may require more, `safe`, or `finalized`, never less.
       confirmations: 3
-      rpc_providers: [base-sepolia-a, base-sepolia-b] # this chain's own (deploy/phala.md, "Staging routes")
+      rpc_groups: { a: base-sepolia-a, b: base-sepolia-b } # this chain's own (deploy/phala.md, "Staging routes")
       sanctions_oracle: "0x8A0C93d85a05aD30741C193068abF2e5E16e7b35" # no Chainalysis oracle on Base Sepolia
 
     asset:
@@ -143,6 +197,7 @@ routes:
 
     chain:
       chain_id: 11155111
+      rpc_groups: { a: provider-a, b: provider-b }
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
       confirmations: 2 # the floor and default (design D1); an account may require more, never less
       sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
@@ -173,6 +228,7 @@ routes:
 
     chain:
       chain_id: 11155111
+      rpc_groups: { a: provider-a, b: provider-b }
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
       confirmations: 2 # the floor and default (design D1); an account may require more, never less
       sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
@@ -209,6 +265,7 @@ routes:
 
     chain:
       chain_id: 11155111
+      rpc_groups: { a: provider-a, b: provider-b }
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
       confirmations: 2 # the floor and default (design D1); an account may require more, never less
       sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia

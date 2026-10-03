@@ -759,8 +759,8 @@ fn cutover_test_config() -> Result<std::path::PathBuf> {
         format!(
             "environment: test\npublic_origin: https://topup.example\nadmin_key:\n  \
              id: admin/v1\n  public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n\
-             rpc_providers:\n  alchemy: https://eth-mainnet.g.alchemy.com/v2/{{key}}\n  \
-             quicknode: https://rpc.example/eth\nroutes:\n  -\n{routes}\n"
+{rpc}\nroutes:\n  -\n{routes}\n",
+            rpc = include_str!("fixtures/rpc-groups.yaml")
         ),
     )?;
     Ok(config)

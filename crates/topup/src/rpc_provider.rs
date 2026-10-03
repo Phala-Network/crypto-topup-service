@@ -1,10 +1,7 @@
-//! RPC provider URLs of the service configuration (`rpc_providers`, docs/configuration.md).
+//! RPC member URL templates (`rpc_groups`, docs/configuration.md).
 //!
-//! Routes name their chain's providers by id (`chain.rpc_providers`). Each id's URL is a public,
-//! attested setting. A provider that authenticates with an API key in the URL (Alchemy, Infura,
-//! QuickNode, ...) has the placeholder `{key}` where its documentation puts the key, and the key
-//! itself is the owner-sealed secret `TOPUP_RPC_<ID>_KEY`, so the attested URL fixes the endpoint
-//! without publishing the key.
+//! Each public, attested template names an endpoint and optionally `{key}`. The typed member
+//! names its sealed `TOPUP_RPC_*_KEY` explicitly, so credentials never enter public config.
 //!
 //! The placeholder may only be a whole path segment or a whole query value, and substituting the
 //! key must leave the scheme, user information, host, and port as the template has them: a sealed

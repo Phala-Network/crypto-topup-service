@@ -648,8 +648,13 @@ pub struct ChainSpec {
     /// Sanctions oracle; default [`default_sanctions_oracle`] for the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanctions_oracle: Option<Address>,
-    /// RPC provider ids; default [`DEFAULT_RPC_PROVIDERS`].
+    /// Explicit independent A/B group ids; no implicit defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "rpc_groups",
+        deserialize_with = "deserialize_groups",
+        serialize_with = "serialize_groups"
+    )]
     pub rpc_providers: Option<Vec<String>>,
 }
 
@@ -953,12 +958,9 @@ impl TryFrom<RouteSpec> for RouteFile {
             chain: ChainConfig {
                 chain_id,
                 confirmations,
-                rpc_providers: spec.chain.rpc_providers.unwrap_or_else(|| {
-                    DEFAULT_RPC_PROVIDERS
-                        .iter()
-                        .map(|&id| id.to_owned())
-                        .collect()
-                }),
+                rpc_providers: spec.chain.rpc_providers.ok_or_else(|| {
+                    RouteError::validation("chain.rpc_groups", "explicit A/B groups are required")
+                })?,
                 contracts: ChainContracts {
                     forwarder_factory: spec.chain.forwarder_factory,
                     implementation: spec
@@ -1214,10 +1216,10 @@ fn validate_positive(field: &'static str, value: u64) -> Result<(), RouteError> 
 /// local development and tests, an inline URL. Ids are lowercase letters, digits, and `-`, so distinct ids never share
 /// a variable.
 fn validate_rpc_providers(providers: &[String]) -> Result<(), RouteError> {
-    if providers.len() < 2 {
+    if providers.len() != 2 {
         return Err(RouteError::validation(
-            "chain.rpc_providers",
-            "must contain at least two providers",
+            "chain.rpc_groups",
+            "must contain exactly two groups",
         ));
     }
 
@@ -1226,7 +1228,7 @@ fn validate_rpc_providers(providers: &[String]) -> Result<(), RouteError> {
         let provider = provider.trim();
         if provider.is_empty() {
             return Err(RouteError::validation(
-                "chain.rpc_providers",
+                "chain.rpc_groups",
                 "provider ids must not be empty",
             ));
         }
@@ -1236,13 +1238,13 @@ fn validate_rpc_providers(providers: &[String]) -> Result<(), RouteError> {
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         {
             return Err(RouteError::validation(
-                "chain.rpc_providers",
+                "chain.rpc_groups",
                 "provider ids must be lowercase letters, digits, and -",
             ));
         }
         if !unique.insert(provider) {
             return Err(RouteError::validation(
-                "chain.rpc_providers",
+                "chain.rpc_groups",
                 "provider ids must be unique",
             ));
         }
@@ -1303,7 +1305,7 @@ mod tests {
             validate_rpc_providers(&["alchemy".to_owned()])
                 .expect_err("one provider must fail")
                 .to_string()
-                .contains("at least two")
+                .contains("exactly two")
         );
         assert!(
             validate_rpc_providers(&["alchemy".to_owned(), "alchemy".to_owned()])
@@ -1435,4 +1437,37 @@ mod tests {
             }
         }
     }
+}
+
+/// Explicit A/B roles in the public route configuration.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcGroups {
+    a: String,
+    b: String,
+}
+fn deserialize_groups<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<String>>, D::Error> {
+    let refs = RpcGroups::deserialize(d)?;
+    Ok(Some(vec![refs.a, refs.b]))
+}
+fn serialize_groups<S: serde::Serializer>(
+    groups: &Option<Vec<String>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    let groups = groups
+        .as_ref()
+        .ok_or_else(|| serde::ser::Error::custom("A/B groups required"))?;
+    let a = groups
+        .first()
+        .ok_or_else(|| serde::ser::Error::custom("A required"))?;
+    let b = groups
+        .get(1)
+        .ok_or_else(|| serde::ser::Error::custom("B required"))?;
+    RpcGroups {
+        a: a.clone(),
+        b: b.clone(),
+    }
+    .serialize(s)
 }
