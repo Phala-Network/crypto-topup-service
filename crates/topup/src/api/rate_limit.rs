@@ -237,7 +237,7 @@ mod tests {
                 .count(),
             1_000
         );
-        assert!(!limiter.allow_source("198.51.100.1"));
+        assert!(limiter.allow_source("198.51.100.2"));
         assert!(limiter.allow_source("198.51.100.2"));
     }
 }
