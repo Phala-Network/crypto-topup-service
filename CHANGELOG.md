@@ -13,6 +13,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-03
+
 ### Fixed
 
 - RPC acceptance and readmission now retry only transient failures within explicit probe attempt
@@ -31,18 +33,6 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   Owner recovery uses fresh full-probe deadlines for each member and an independent full
   operation deadline for anchor agreement, allowing healthy low-rate providers to complete
   route verification.
-
-### JS SDK
-
-- **Breaking:** React components require an explicit `@phala/pay/styles.css` import. Removed
-  `appearance.variables`; set the `--pp-*` custom properties in your stylesheet. Components no
-  longer inject inline styles, allowing `style-src 'self'` in integrations. The demo permits
-  only its own CSS and the exact hash of Radix's fixed scrollbar stylesheet.
-- Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
-  **Breaking:** Node.js 20.3 or later is required for the standard `AbortSignal.any` API.
-  Sessions and React components abort active reads on destruction or unmount.
-- Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
-  notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
 
 ### Reference product
 
@@ -63,6 +53,23 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   have bounded resource and privilege exposure.
 - Database sessions use role-specific time budgets; service shutdown bounds task draining,
   advisory-lock cleanup, and pool closure, including read-only restore instances.
+
+### JS SDK (`@phala/pay`)
+
+#### Changed
+
+- **Breaking:** React components require an explicit `@phala/pay/styles.css` import. Removed
+  `appearance.variables`; set the `--pp-*` custom properties in your stylesheet. Components no
+  longer inject inline styles, allowing `style-src 'self'` in integrations. The demo permits
+  only its own CSS and the exact hash of Radix's fixed scrollbar stylesheet.
+- Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
+  **Breaking:** Node.js 20.3 or later is required for the standard `AbortSignal.any` API.
+  Sessions and React components abort active reads on destruction or unmount.
+
+#### Fixed
+
+- Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
+  notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
 
 ## [0.7.0] - 2026-10-02
 
@@ -1231,7 +1238,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.7.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...v0.5.0
