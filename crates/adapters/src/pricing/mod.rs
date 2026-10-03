@@ -27,7 +27,7 @@ async fn response_bytes(
 ) -> Result<Vec<u8>, PriceError> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|size| size > u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX))
     {
         return Err(PriceError::MalformedResponse("body too large"));
     }
