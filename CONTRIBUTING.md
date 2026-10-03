@@ -123,6 +123,40 @@ after an intentional change to the signing profile, then rerun the Rust test:
 cargo test -p topup --lib api::auth
 ```
 
+### Supply-chain checks
+
+Dependabot checks Cargo, npm, uv, Actions, and Docker weekly. Minor and patch updates are grouped
+per ecosystem and project; major updates stay separate. Review lockfile and digest changes.
+CI scans the JavaScript and Python lockfiles, including development dependencies, and all three
+final images with Trivy. Lockfiles fail on every fixable vulnerability; images fail on fixable
+HIGH/CRITICAL vulnerabilities. Unfixed findings are reported for review. Release repeats the scans against the published final digests after the
+reproducibility comparison, then signs SPDX SBOM attestations. A scan failure blocks the release.
+
+Vulnerability exceptions belong only in
+[.github/security/trivy-ignore.yaml](.github/security/trivy-ignore.yaml), written as JSON (valid
+YAML). Each entry needs an advisory `id`, a specific `statement` explaining exposure and mitigation,
+and an `expired_at` UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`). Prefer a `paths` restriction where possible. CI rejects
+missing reasons, expired exceptions, and expiries over 30 days; do not use blanket exclusions.
+
+Slither 0.11.6 analyzes production contracts with every finding level enforced. Suppress only an
+individual finding using `slither-disable-next-line <detector>` and an adjacent reason; dependency,
+test, and deployment-script findings are outside this production-contract check. CodeQL analyzes
+Actions, JavaScript/TypeScript, Python, and Rust on pull requests, main, and weekly.
+
+The payment gate runs `make cvm-rehearsal` with the real Rust service, PostgreSQL, Anvil, the dstack
+simulator and signed receiver. It checks a 2,500-cent credit, redelivers the actual event through
+the service, waits for acknowledgement, and compares the receiver's credit rows.
+
+Repository owners must enable **Settings > Advanced Security > Dependabot > Dependabot alerts**
+and **Dependabot security updates**. Under **Settings > Rules > Rulesets**, add the following CI
+checks to main's required status checks, alongside the existing checks:
+`dependencies (sdk/js)`, `dependencies (deploy/product/web)`, `dependencies (sdk/python)`,
+`slither`, `cvm-rehearsal`, and CodeQL's `analyze (actions)`, `analyze (javascript-typescript)`,
+`analyze (python)`, `analyze (rust)`. Keep `image` and `deployment` required: they now scan final
+images. Use CodeQL **advanced setup** (this versioned workflow); disable default setup if it is
+already enabled to avoid conflicting analyses. Security updates and branch rules are owner
+settings, not changed by this pull request.
+
 ### Documentation
 
 CI lints every Markdown file with [markdownlint](https://github.com/DavidAnson/markdownlint-cli2)
@@ -278,7 +312,7 @@ v0.5.0, versioned on their own, stay in their frozen `sdk/js/CHANGELOG.md` and
    and that a stable version has its dated changelog section, and runs the whole CI workflow on
    the commit, the SDKs' checks and end-to-end tests included. Then, on GitHub-hosted runners, it
    builds each image with `deploy/verify-image.sh` (`phala-pay` and the reference product must
-   build to the same digest twice; `postgres-walg` is built once), pushes it tagged `v<version>`,
+   build to the same digest twice, including `postgres-walg`), pushes it tagged `v<version>`,
    and attests it. It builds the deploy kit with `deploy/build-kit.sh`, renders every environment
    with it and the Phala Cloud template's compose from it, and attests `images.json`, the kit,
    `phala-cloud-template.yml`, `deploy.sh` (whose admin key generation uses this version's Python

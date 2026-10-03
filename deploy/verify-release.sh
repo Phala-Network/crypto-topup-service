@@ -57,6 +57,8 @@ jq -e 'type == "object" and keys == ["phala-pay", "phala-pay-reference-product",
 images=$(jq -r '.[]' "$dir/images.json")
 for image in $images; do
     gh attestation verify "oci://$image" "${provenance[@]}" >/dev/null
-    echo "verified $image" >&2
+    gh attestation verify "oci://$image" "${provenance[@]}" \
+        --predicate-type https://spdx.dev/Document >/dev/null
+    echo "verified provenance and SPDX SBOM for $image" >&2
 done
 echo "$commit"

@@ -7,11 +7,10 @@
 # `containerimage.digest` and `containerimage.config.digest`), never a tag read back. By default the
 # image must be reproducible: build 1 goes to an OCI archive, build 2 to another archive or, with
 # PUBLISH_IMAGE (a repository:tag), to the registry, and both must have the same manifest and config
-# digests. --once builds once and publishes: postgres-walg, which is not reproducible (apt and dpkg
-# record wall-clock times) and so has provenance only. IMAGE_REF_FILE receives
+# digests. IMAGE_REF_FILE receives
 # repository@<the pushed build's digest>, which the Release workflow smoke-tests and attests.
 #
-# Usage: deploy/verify-image.sh [--once]
+# Usage: deploy/verify-image.sh
 set -eu
 
 buildx=v0.37.1
@@ -23,14 +22,9 @@ source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 source_commit=${SOURCE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
 platform=${PLATFORM:-linux/amd64}
 dockerfile="$root/${DOCKERFILE:-Dockerfile}"
-once=0
-case "${1:-}" in
-    --once) once=1 ;;
-    '') ;;
-    *) echo "usage: $0 [--once]" >&2; exit 64 ;;
-esac
+[ "$#" -eq 0 ] || { echo "usage: $0" >&2; exit 64; }
 case "${PUBLISH_IMAGE:-}" in
-    '') [ "$once" -eq 0 ] || { echo "--once publishes: set PUBLISH_IMAGE" >&2; exit 64; } ;;
+    '') ;;
     *@sha256:*) echo "PUBLISH_IMAGE must be a repository:tag, not a digest" >&2; exit 64 ;;
     *) case "${PUBLISH_IMAGE##*/}" in
         *:*) ;;
@@ -50,6 +44,8 @@ trap cleanup EXIT INT TERM
 docker buildx create --name "$builder" --driver docker-container --driver-opt "image=$buildkit" \
     >/dev/null
 
+# SBOM and provenance are signed separately for the final digest after comparison; embedding
+# build-time attestations here would make the comparison nondeterministic.
 # build N OUTPUT: clean build N to OUTPUT (a Buildx --output); prints the manifest and config
 # digests BuildKit reports for it.
 build() {
@@ -74,18 +70,13 @@ published() {
     build "$1" "type=image,name=$PUBLISH_IMAGE,push=true,unpack=false"
 }
 
-if [ "$once" -eq 1 ]; then
-    built=$(published 1)
-    echo "published (not reproducible): manifest=${built% *} config=${built#* }"
-else
-    first=$(archived 1)
-    if [ -n "${PUBLISH_IMAGE:-}" ]; then second=$(published 2); else second=$(archived 2); fi
-    printf 'build 1: manifest=%s config=%s\nbuild 2: manifest=%s config=%s\n' \
-        "${first% *}" "${first#* }" "${second% *}" "${second#* }"
-    [ "$first" = "$second" ] || { echo "image reproducibility check failed" >&2; exit 1; }
-    echo "image reproducibility check passed"
-    built=$second
-fi
+first=$(archived 1)
+if [ -n "${PUBLISH_IMAGE:-}" ]; then second=$(published 2); else second=$(archived 2); fi
+printf 'build 1: manifest=%s config=%s\nbuild 2: manifest=%s config=%s\n' \
+    "${first% *}" "${first#* }" "${second% *}" "${second#* }"
+[ "$first" = "$second" ] || { echo "image reproducibility check failed" >&2; exit 1; }
+echo "image reproducibility check passed"
+built=$second
 if [ -n "${PUBLISH_IMAGE:-}" ] && [ -n "${IMAGE_REF_FILE:-}" ]; then
     printf '%s@%s\n' "${PUBLISH_IMAGE%:*}" "${built% *}" >"$IMAGE_REF_FILE"
 fi

@@ -177,11 +177,14 @@ wait_for "the registry" 30 curl -fsS "http://127.0.0.1:$registry_port/v2/"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --pretty=%ct)}
 # publish NAME VARIABLE BUILD_ARGS...: builds, pushes, and sets VARIABLE to repository@sha256.
 publish() {
-    local tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
+    local name=$1 tag="127.0.0.1:$registry_port/$1:rehearsal" variable=$2 digest
     shift 2
-    docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
-        --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" \
-        >/dev/null
+    if [[ "${REHEARSAL_PREBUILT:-0}" == 1 ]]; then
+        docker tag "$name:rehearsal" "$tag"
+    else
+        docker build --quiet --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
+            --build-arg "BUILD_JOBS=${CARGO_BUILD_JOBS:-}" -t "$tag" "$@" >/dev/null
+    fi
     local_images+=("$tag")
     docker push --quiet "$tag" >/dev/null
     digest=$(docker image inspect --format '{{json .RepoDigests}}' "$tag" |
@@ -194,8 +197,12 @@ publish phala-pay TOPUP_IMAGE "$root"
 publish postgres-walg POSTGRES_WALG_IMAGE -f "$root/deploy/Dockerfile.postgres-walg" "$root"
 publish phala-pay-reference-product PRODUCT_IMAGE \
     -f "$root/deploy/Dockerfile.reference-product" "$root"
-docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
-    -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
+if [[ "${REHEARSAL_PREBUILT:-0}" == 1 ]]; then
+    docker tag phala-pay-dstack-simulator:rehearsal "$TOPUP_LOCAL_DSTACK_IMAGE"
+else
+    docker build --quiet -t "$TOPUP_LOCAL_DSTACK_IMAGE" \
+        -f "$root/deploy/local/Dockerfile.dstack-simulator" "$root" >/dev/null
+fi
 jq -n --arg topup "$TOPUP_IMAGE" --arg postgres "$POSTGRES_WALG_IMAGE" --arg product "$PRODUCT_IMAGE" \
     '{"phala-pay": $topup, "postgres-walg": $postgres, "phala-pay-reference-product": $product}' \
     >"$tmp/images.json"
@@ -622,6 +629,50 @@ jq -n --arg factory "$factory" --arg implementation "$implementation" --arg toke
 product_python -m reference_product deposit --config /opt/driver.json \
     --driver-seed-file /opt/driver.seed --amount-minor 2500 --timeout 420
 echo "ok: the deposit driver's quote-first deposit is credited once in the product's ledger"
+# Capture the actual receiver ledger, resend through the service's signed delivery worker,
+# wait for acknowledgement, then compare the same rows. A queued event alone is not proof.
+ledger_credits() {
+    pc exec -T product /opt/venv/bin/python - <<'PYTHON'
+import json, sqlite3
+with sqlite3.connect("file:/data/ledger.sqlite3?mode=ro", uri=True) as db:
+    rows = db.execute("SELECT id, team_id, order_id, amount_minor FROM credit_transactions ORDER BY id").fetchall()
+    assert len(rows) == 1 and rows[0][3] == 2500, rows
+    print(json.dumps(rows))
+PYTHON
+}
+credits_before=$(ledger_credits)
+product_python - <<'PYTHON'
+import time
+from pathlib import Path
+import httpx
+
+with httpx.Client(base_url="http://topup:8080", timeout=30,
+                  headers={"Authorization": "Bearer " + Path("/opt/product.key").read_text()}) as api:
+    response = api.get("/v1/events", params={"type": "deposit.credited", "limit": 100})
+    response.raise_for_status()
+    events = [event for event in response.json()["data"] if event["type"] == "deposit.credited"]
+    assert len(events) == 1, events
+    event_id = events[0]["id"]
+    response = api.get("/v1/webhook_endpoints")
+    response.raise_for_status()
+    endpoints = response.json()["data"]
+    assert len(endpoints) == 1, endpoints
+    response = api.post(f"/v1/events/{event_id}/resend",
+                        json={"webhook_endpoint": endpoints[0]["id"]})
+    response.raise_for_status()
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        response = api.get(f"/v1/events/{event_id}")
+        response.raise_for_status()
+        if response.json()["pending_webhooks"] == 0:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("signed webhook redelivery was not acknowledged")
+PYTHON
+[[ "$(ledger_credits)" == "$credits_before" ]] || die "redelivery changed the receiver's credit"
+echo "ok: a signed deposit.credited redelivery was acknowledged without a second credit"
+
 # The route prices only from Coin Metrics, Binance, and Kraken over HTTPS, so a priced lock proves
 # the distroless service image verified those servers with its system CA bundle.
 priced_locks=$(dc exec -T postgres psql -U postgres -d topup -XAtq -c \
