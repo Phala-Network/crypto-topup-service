@@ -278,25 +278,25 @@ PRIVATE_KEY="$ANVIL_PRIVATE_KEY" \
 "$root/deploy/sandbox/deploy-test-contracts.sh" --anvil-unlocked "$owner" --rpc-url "$base_rpc_url" \
     >"$tmp/base-test-contracts.json"
 base_token=$(jq -er .test_token "$tmp/base-test-contracts.json")
-base_second_token=$(jq -er .unsupported_token "$tmp/base-test-contracts.json")
 base_oracle=$(jq -er .sanctions_oracle "$tmp/base-test-contracts.json")
-# usdt_token RPC_URL: deploys a USDT-like token, whose `transfer` returns nothing.
-usdt_token() {
-    (cd "$CONTRACTS_DIR" && forge create test/mocks/MockTokens.sol:UsdtLikeToken --rpc-url "$1" \
+# rehearsal_token CONTRACT RPC_URL: deploys six-decimal USDC/USDT fixtures matching the routes.
+rehearsal_token() {
+    (cd "$CONTRACTS_DIR" && forge create "test/mocks/MockTokens.sol:$1" --rpc-url "$2" \
         --unlocked --from "$owner" --broadcast --json) | jq -er .deployedTo
 }
-base_third_token=$(usdt_token "$base_rpc_url")
+base_second_token=$(rehearsal_token UsdcLikeToken "$base_rpc_url")
+base_third_token=$(rehearsal_token UsdtLikeToken "$base_rpc_url")
 printf 'base-sepolia: token=%s second_token=%s third_token=%s sanctions_oracle=%s\n' \
     "$base_token" "$base_second_token" "$base_third_token" "$base_oracle"
 
 echo "== writing the configuration and rendering the staging compose"
 # Phala's staging configuration with this network's addresses: on each chain the test token stands
-# in for PHA, the reference product's asset, the second mock token for USDC, and a USDT-like one
+# in for PHA, the reference product's asset, a six-decimal mock token for USDC, and a USDT-like one
 # for USDT. Provider A is keyless, as staging's; provider B is attested with a `{key}`, as a paid
 # provider is, and Anvil ignores the query that carries the key. Base Sepolia's two providers are
 # keyless, at two URLs of its Anvil.
-second_token=$(jq -er .unsupported_token "$tmp/test-contracts.json")
-third_token=$(usdt_token "$rpc_url")
+second_token=$(rehearsal_token UsdcLikeToken "$rpc_url")
+third_token=$(rehearsal_token UsdtLikeToken "$rpc_url")
 # The owner's admin key, in the PEM form deploy/runbooks/sign-admin-request.sh signs with.
 openssl genpkey -algorithm ed25519 -out "$tmp/admin.pem"
 admin_public_key=$(openssl pkey -in "$tmp/admin.pem" -pubout -outform DER | tail -c 32 | base64)
