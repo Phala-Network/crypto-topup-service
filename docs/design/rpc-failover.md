@@ -2,265 +2,390 @@
 
 Status: proposed for 0.7.0; design only. Base: 0.6.0.
 
-## Decision
+## Decision and scope
 
-Use **eRPC 0.3.0**, Apache-2.0, as two private sidecars, one for group A and one for
-B. Generate their configurations from the attested topup configuration. Keep credit
-agreement and monotonic-head enforcement in topup. Do not implement a routing engine.
+Keep the existing Alloy 2.5.0 HTTP client and introduce two independent typed
+`RpcGroupClient`s per chain: A for scanning, heads and reconciliation; B for independent
+receipt, head and call confirmation. Credit still requires both groups to agree. Use
+Tower timeout/retry middleware, governor budgets and the existing member CountingLayer.
+Implement two deterministic selectors plus application safety checks; no programmable
+policy engine, hedging or response cache.
 
-Today each chain lists provider ids; topup consumes positions 0 and 1 only, although
-configuration accepts more. Each id resolves to one attested URL and optionally a sealed
-`TOPUP_RPC_<ID>_KEY`. A scans logs, heads and reconciliation; B independently confirms
-receipts, heads and calls. An outage stalls work. See [RPC providers](../../deploy/README.md#rpc-providers),
+Today `chain.rpc_providers` accepts more than two ids but runtime uses only positions 0
+and 1. Each id has one attested URL and an optional sealed `TOPUP_RPC_<ID>_KEY`.
+See [RPC providers](../../deploy/README.md#rpc-providers),
 [usage accounting](../../deploy/README.md#measuring-rpc-usage), architecture
-[§7](../architecture.md#7-states-and-pump), [§8](../architecture.md#8-chain-valuation-screening), and
-[§13](../architecture.md#13-reconciliation), and
-[configuration](../../crates/topup/src/config.rs), [routes](../../crates/topup/src/routes.rs),
-[URL/key handling](../../crates/topup/src/rpc_provider.rs), and
-[EVM transport](../../crates/adapters/src/chain/evm/mod.rs).
+[§7](../architecture.md#7-states-and-pump), [§8](../architecture.md#8-chain-valuation-screening),
+[§13](../architecture.md#13-reconciliation), and the existing
+[config](../../crates/topup/src/config.rs), [routes](../../crates/topup/src/routes.rs),
+[key handling](../../crates/topup/src/rpc_provider.rs) and
+[EVM client](../../crates/adapters/src/chain/evm/mod.rs).
 
-| Choice | Verified behavior | Tradeoff |
-|---|---|---|
-| Alloy 2.5.0 `FallbackLayer` + `RetryBackoffLayer` | Ordinary reads race up to `active_transport_count` transports; only sync send methods are sequential by default. Fallback accepts `Ok(ResponsePacket)`, including JSON-RPC errors, and does no consensus. Retry inspects response errors and applies a retry policy. Sequential fallback visits only the top active count: setting it to 1 does not visit all backups. | Already in the Rust TCB; simplest deployment. Layer ordering can retry RPC errors, but neither layer supplies company isolation, monotonic heads, circuit breakers, sticky priorities or configurable health/rate policies. Implementing those becomes our routing product. |
-| eRPC 0.3.0 | Network retries select other upstreams; per-upstream breakers; bounded hedging; programmable selection, lag tracking, integrity checks, budgets and Prometheus metrics. | Adds Go, its dependencies and a JS policy interpreter to the TCB, two processes and another release to operate. Pre-1.0 schema/defaults need pinned contract tests. Much closer to HAProxy-style routing policies; avoids maintaining a bespoke scheduler. |
+This adds bounded Rust selection/state logic and governor to the service TCB, with no
+extra processes, images or configuration interpreter. It offers HAProxy-style priority
+failover and weighted distribution with explicit deadlines, classification and cooldowns;
+it does not implement HAProxy's full policy language. Enable Tower 0.5.3's `timeout` and
+`retry` features. Pin governor in Cargo.lock (Alloy's optional
+[throttle layer](https://docs.rs/alloy-transport/2.5.0/src/alloy_transport/layers/throttle.rs.html)
+uses governor 0.10); share governor instances rather than constructing a limiter per call.
+Use Alloy's
+[`http_with_client`](https://docs.rs/alloy-rpc-client/2.5.0/alloy_rpc_client/struct.ClientBuilder.html#method.http_with_client)
+with a reqwest 0.13.5 client and
+[`redirect::Policy::none()`](https://docs.rs/reqwest/0.13.5/reqwest/redirect/struct.Policy.html#method.none).
+All 3xx responses fail, including same-host redirects. Disable reqwest internal retries
+with `retry(reqwest::retry::never())` so every resubmission passes through admission/counting.
 
-Accept the TCB and pre-1.0 costs for policy configurability. Start with a small generated
-policy surface, disabled hedging/cache, and explicit defaults. eRPC is adaptive ranked
-routing, not a promise of HAProxy's exact round-robin/least-connections algorithms. Its
-consensus feature is **not** the application's independent A/B agreement. Two containers
-isolate health/configuration and keys; they do not defeat a common eRPC implementation bug.
+## Configuration
 
-## Verified dependency contract
-
-Use the official [documentation](https://docs.erpc.cloud), but resolve version-sensitive
-claims against documentation and source shipped at
-[0.3.0](https://github.com/erpc/erpc/releases/tag/0.3.0), commit
-`a98914408d5e13e848d4baba0ea06d20d58c62e9`; do not copy current-site defaults blindly.
-Alloy is the repository's exact 2.5.0 dependency.
-
-| Capability | Release documentation/source and implications |
-|---|---|
-| Alloy fallback/retry | [Fallback](https://docs.rs/alloy-transport/2.5.0/src/alloy_transport/layers/fallback.rs.html), [retry](https://docs.rs/alloy-transport/2.5.0/src/alloy_transport/layers/retry.rs.html): retry consumes JSON-RPC errors, but fallback alone treats them as successful packets; neither validates agreement or monotonicity. |
-| Failover/retry/breaker/hedge | [Failsafe docs](https://github.com/erpc/erpc/tree/0.3.0/docs/pages/config/failsafe), [network executor](https://github.com/erpc/erpc/blob/0.3.0/erpc/network_executor.go), [upstream executor](https://github.com/erpc/erpc/blob/0.3.0/upstream/upstream_executor.go): network retry rounds can sweep several upstreams. `maxAttempts` is rounds, not a bound on HTTP sends. Breakers belong at upstream scope; explicitly set both threshold counts/capacities rather than relying on defaults. Hedging creates extra billable attempts and cancellation cannot undo sends. |
-| Selection/lag/integrity | [Selection](https://github.com/erpc/erpc/blob/0.3.0/docs/pages/config/projects/selection-policies.mdx), [default policy](https://github.com/erpc/erpc/blob/0.3.0/internal/policy/default_policy.js), [integrity](https://github.com/erpc/erpc/blob/0.3.0/docs/pages/config/failsafe/integrity.mdx): default `whenEmpty(() => upstreams)` restores excluded candidates; omit it. Lag uses the corroborated (second-highest) head, so two-node and all-stale pools need application guards. `enforceHighestBlock` can synthesize `eth_blockNumber`; disable it. Intrinsic checks are useful but not consensus; authoritative checks add reads and may skip nonstandard chain encodings. |
-| Rate limits | [Budgets](https://github.com/erpc/erpc/blob/0.3.0/docs/pages/config/rate-limiters.mdx): auth/project/network/upstream scopes, method rules, memory or Redis. Use memory budgets; Redis has fail-open paths. Shared keys across chains share one budget within their sidecar. Disable the implicitly enabled upstream auto-tuner. |
-| Projects and secrets | [Projects](https://github.com/erpc/erpc/blob/0.3.0/docs/pages/config/projects.mdx), [config loader](https://github.com/erpc/erpc/blob/0.3.0/common/config.go): multiple projects have separate upstream/health state; endpoints are `/<project>/evm/<chainId>`. YAML uses `os.ExpandEnv`, so `${NAME}` works and an absent name expands to empty. Preflight must reject missing keys before eRPC starts. |
-| Cache | [Cache docs](https://github.com/erpc/erpc/blob/0.3.0/docs/pages/config/database/evm-json-rpc-cache.mdx), [defaults](https://github.com/erpc/erpc/blob/0.3.0/common/defaults.go): `database.evmJsonRpcCache: null` disables it. Policies support explicit `finality: finalized`; absence of that field means finalized, not all states. Choose disabled cache for 0.7.0; a future cache must also be separated by group and exclude heads, pending receipts, calls at latest and unknown finality. |
-| Metrics | [Definitions](https://github.com/erpc/erpc/blob/0.3.0/telemetry/metrics.go), [send path](https://github.com/erpc/erpc/blob/0.3.0/upstream/upstream.go), [poller](https://github.com/erpc/erpc/blob/0.3.0/architecture/evm/evm_state_poller.go): `erpc_upstream_request_total` counts each send attempt, including hedges; its `category` receives the method. Poller reads pass through upstream forwarding. Health-tracker counts exclude hedges and must not be used for billing. |
-| Image/build/license | [Dockerfile](https://github.com/erpc/erpc/blob/0.3.0/Dockerfile), [release workflow](https://github.com/erpc/erpc/blob/0.3.0/.github/workflows/release.yml), [license](https://github.com/erpc/erpc/blob/0.3.0/LICENSE): official nonroot distroless `ghcr.io/erpc/erpc:0.3.0`, amd64/arm64, build provenance and binary SBOM/checksums. Base images and dependency lockfiles are pinned, but `npm install -g pnpm` is unversioned and Go build inputs are not demonstrated bit-for-bit reproducible. Digest pinning fixes deployed bytes; it does not prove reproducible source builds. |
-
-Registry read-only verification on 2026-10-02 resolved the release image index to
-`ghcr.io/erpc/erpc@sha256:f273ab9a061dfea908e59444093fc235308fb37cc0c4d21b3e0e6eb92ef5ae7e`.
-Its linux/amd64 manifest is
-`sha256:1096d910aa36f6ee8929d6665dddefe97f2c9983b57b657b6d5c3fd2c341ee39`.
-Pin the platform and digest in the release manifest, verify provenance against the source
-commit, record SBOM/license review and scan results. Rebuild validation must pin pnpm and
-all toolchains and compare binary/image outputs; do not claim reproducibility until it passes.
-
-## Configuration and routing
-
-Proposed public schema below is **topup's schema, not verbatim eRPC YAML**. Group ids
-serve one chain; all routes on that chain name the same groups. The full document also
-contains the other chain/group definitions and routes.
+Proposed public schema; omitted routes and the second chain use the same structure.
+Member ids remain unique when URL templates match but keys differ.
 
 ```yaml
+rpc_companies:
+  tenderly: { domains: [tenderly.co] }
+  alchemy: { domains: [alchemy.com] }
+  publicnode: { domains: [publicnode.com] }
+rpc_budgets:
+  alchemy-account: { requests_per_second: 20, burst: 20 }
+  alchemy-key-1: { requests_per_second: 10, burst: 10 }
+  alchemy-key-2: { requests_per_second: 10, burst: 10 }
 rpc_groups:
   sepolia-a:
     chain_id: 11155111
-    upstreams:
-      - id: tenderly-sepolia
+    members:
+      - id: provider-a
+        company: tenderly
         url: https://sepolia.gateway.tenderly.co
         sealed_key: null
         priority: 0
-      - id: alchemy-sepolia
+        weight: 1
+      - id: alchemy-sepolia-1
+        company: alchemy
         url: https://eth-sepolia.g.alchemy.com/v2/{key}
-        sealed_key: TOPUP_RPC_ALCHEMY_SEPOLIA_KEY
+        sealed_key: TOPUP_RPC_ALCHEMY_SEPOLIA_1_KEY
+        account_budget: alchemy-account
+        key_budget: alchemy-key-1
         priority: 1
-        rate_limit: { budget: alchemy-account, max_count: 20, period: 1s }
+        weight: 2
+      - id: alchemy-sepolia-2
+        company: alchemy
+        url: https://eth-sepolia.g.alchemy.com/v2/{key}
+        sealed_key: TOPUP_RPC_ALCHEMY_SEPOLIA_2_KEY
+        account_budget: alchemy-account
+        key_budget: alchemy-key-2
+        priority: 1
+        weight: 1
     policy:
-      selection: priority
-      request_timeout: 3s
-      total_timeout: 10s
-      retry: { max_attempts: 2, delay: 100ms, backoff_factor: 2, max_delay: 1s, jitter: 100ms }
-      circuit_breaker: { failures: 5, window: 10, half_open_after: 30s, successes: 2, success_window: 2 }
-      hedge: { max_count: 0, delay: 500ms }
-      health: { poll_interval: 12s, max_head_lag_blocks: 4, max_finalized_lag_blocks: 32 }
-      integrity: intrinsic
+      selection: failover # or weighted_round_robin
+      total_deadline: 10s
+      attempt_timeout: 3s
+      max_attempts: 3
+      retry: { delay: 100ms, max_delay: 1s, jitter: 100ms }
+      cooldown: { failures: 3, duration: 30s }
+      recovery: { probe_interval: 30s, successes: 2 }
+      rpc_error_rules: [] # reviewed provider-specific code/message mappings
   sepolia-b:
     chain_id: 11155111
-    upstreams:
-      - id: publicnode-sepolia
+    members:
+      - id: provider-b
+        company: publicnode
         url: https://ethereum-sepolia-rpc.publicnode.com
         sealed_key: null
         priority: 0
-    policy: # same explicit policy fields as A; defaults resolved by config show
-      selection: fastest
+        weight: 1
+    policy: { selection: failover } # other fields resolve to the explicit defaults above
 chain:
-  rpc_groups: { a: sepolia-a, b: sepolia-b } # inside every route's chain section
+  rpc_groups: { a: sepolia-a, b: sepolia-b } # inside each route's chain section
 ```
 
-Allow 1–8 upstreams per group, including multiple URLs or credentials at the same company.
-`selection` is `priority` (lowest priority first, latency within a tier) or `fastest`
-(adaptive latency ranking; traffic shifts as load changes). Compile these to an attested
-`selectionPolicy.evalFunc`, evaluated every 1s: remove cordoned candidates, exclude lagging
-nodes and high-error nodes after a minimum of 10 samples, rank eligible nodes, and hold the
-primary with 30% hysteresis for 30s. No empty-pool fail-open, raw JS supplied by users,
-provider auto-discovery, shared upstream repository, shadow traffic, or cross-group fallback.
-Exclude unknown poller health until an initial successful probe; an empty group returns an error.
-Use chain-specific poll cadence and lag thresholds; the example values are starting points.
+Require exactly the named roles A and B, distinct group ids, 1–8 members per group, one
+chain per group and identical references across routes on that chain. Accept the same
+URL template with different sealed names; reject duplicate `(normalized URL, sealed name)`
+identities, member-id collisions and aliases that hide reuse of the same credential.
+Budget ids identify reviewed actual account/key quota scopes; reject conflicting limits
+for one id. Weights are bounded positive integers; priorities are ordered integers. Unknown/
+unused definitions, invalid bounds and missing mappings fail `topup config check`;
+`config show` resolves defaults without secrets. Keyed members require both account and
+key budget references; aliases of one credential must use the same key budget. Secret
+preflight detects equal keys under different names in memory without logging/persisting them.
 
-Render A and B as separate projects on separate sidecars; all A chain groups can share
-`rpc-a`, all B groups `rpc-b`. Topup derives two shared clients per chain at
-`http://rpc-a:4000/sepolia-a/evm/11155111` and
-`http://rpc-b:4000/sepolia-b/evm/11155111`. Restore checks use the same paths.
-Generate native `failsafe` entries: timeout/retry/hedge at network scope, timeout/breaker
-and `retry.maxAttempts: 1` at upstream scope. Map breaker fields to
-`failureThresholdCount`, `failureThresholdCapacity`, `halfOpenAfter`,
-`successThresholdCount`, `successThresholdCapacity`. Network retries are bounded by the
-10s deadline, candidate count and budgets; topup retains its outer deadline/backoff without
-an additional Alloy retry layer. Hedging is disabled for heads and transaction submission;
-optional hedging is limited to one extra idempotent read. Do not retry execution reverts or
-invalid parameters; transport failures, 429 and normalized transient RPC errors can fail over.
-A legitimate null receipt or empty log set remains valid evidence for existing A/B checks.
+**Company independence:** for every chain, A and B must have disjoint reviewed `company`
+identities. Hosts, registrable domains (pinned Public Suffix List), CNAMEs and vendor
+ownership records are evidence for that identity, not the identity itself. Map aliases,
+resellers and custom domains to their actual reviewed provider company; reject unmapped
+endpoints, contradictory mappings, or one company split under two ids. Different URLs,
+ports, subdomains or keys do not establish independence. No fallback crosses a group.
 
-Disable eRPC consensus, multiplexing and cache; set `directiveDefaults.enforceHighestBlock: false`,
-retain non-null tagged-block and log-range checks, use `integrity.level: intrinsic`, and
-reject caller directive overrides (`allowClientDirectives: ""`). No proxy-created head
-is acceptable credit evidence. Reorg/receipt disagreement remains topup's responsibility.
+## Group client and bounded execution
 
-## Safety, attestation and preflight
+Topup constructs shared typed A/B clients directly from `rpc_groups`; there is no proxy
+URL. Existing EVM readers consume these clients, while a private `MemberClient` exposes
+pinned-member probes and window reads. Each operation carries immutable chain/group,
+method, numeric block bounds, deadline and attempt budget. Selection and health transitions
+are serialized per group; network I/O never holds the selection lock.
 
-**Company independence.** Before rendering, expand each chain's A/B groups and require
-disjoint company identities: normalized hosts plus registrable domains from a pinned Public
-Suffix List (including private suffixes). Different ports, subdomains, paths or API keys
-never establish independence. Reject IP literals and unrecognized suffixes in attested
-production configurations; local fixtures use explicitly test-only identities. A reviewed,
-attested alias table unifies company-owned domains such as PublicNode's aliases; custom
-CNAMEs must resolve to a reviewed company mapping or fail validation. Domain checks cannot
-prove corporate ownership, reseller independence or different backend infrastructure;
-operator review is required for new companies. Never put Tenderly in both groups as fallback.
+`failover` tries eligible members in ascending priority then configured order.
+`weighted_round_robin` uses smooth weighted round robin among eligible members; weights
+apply to new operations, not individual subrequests of a logs window. A failed operation
+tries another eligible member before revisiting the failed one. An empty eligible set
+returns `GroupUnavailable`, never repopulates from excluded members. Selection errors
+return errors, never reuse a stale candidate list. Both modes skip quarantined members,
+capability failures and cooldowns; no latency race or hidden default fallback exists.
 
-**Monotonic heads.** Extend the existing `FinalizedGuard` to serialized, shared
-`(chain, group, tag)` guards for `latest`, `safe`, `finalized`. A lower response returns a
-retryable stale-head error; never clamp it to the previous number or publish it. Keep guards
-shared across scanners, credit checks, finality watch and reconciliation. A head reaching
-the guard is an actual successful response from that group. Persist accepted watermarks
-before publishing advances; initialize after restart/restore to those and committed scanner/
-reconciliation cursors. A finalized hash change at an accepted height freezes the chain;
-latest/safe same-height hash changes continue through existing reorg handling. A real
-height regression can delay progress until recovery; safety takes precedence over availability.
-One group unavailable or disagreeing always means wait, never credit from the other group.
+Execution order is: total Tower timeout → Tower retry with our typed classification
+policy → selection/pinned member operation → shared account and key governor admission
+→ per-send timeout → CountingLayer → existing Alloy HTTP transport. Count only when an
+admitted request future is actually polled into the HTTP transport, not when enqueued
+or cloned for retry. A member attempt includes validation calls and, for logs, every
+filter batch. `max_attempts` bounds member attempts including the first; each attempt's
+finite send count is derived from the operation's bounded filter list. All sends, admission
+waits and retry delays share one total deadline, including outer scanner/reconciler retries
+within that operation. Do not stack Alloy fallback/retry layers or reset the deadline
+for each RPC. Subsequent scheduled passes are new operations and keep existing backoff.
 
-**Attested deployment.** Add digest-pinned `rpc-a`/`rpc-b` to service, template, local and
-restore-check compose variants. Extend renderer, image manifest, exact service allowlists,
-`compose-policy.jq`, sealed-name validation and attested-compose tests. Inline public eRPC
-YAML under content-digest config names, mounted read-only at `/erpc.yaml`; invoke only
-`/erpc-server --config /erpc.yaml --require-config`. Restrict topup RPC HTTP destinations
-to these private service paths; upstream HTTPS remains mandatory. No published RPC/metrics/
-admin/pprof ports, Redis or persistent proxy volumes. Use read-only rootfs, dropped
-capabilities, bounded CPU/memory (`GOMEMLIMIT` below the memory limit), restart policy and
-private networks; sidecars receive neither DB credentials nor the dstack socket.
-The attested compose hash changes for images, configs, policies and sealed-name interfaces.
+Every real send acquires both account and key permits, irrespective of method, group or
+chain, including startup/recovery/head checks. Acquire in a fixed order under the deadline;
+if cancellation consumes a permit without a send, conservatively leave it consumed.
+No quota bypass for recovery and no limiter per method. Budgets are process-local: one
+active topup worker owns them; multiple active workers would need a shared admission service
+before claiming account-wide enforcement. Restarts refill buckets, so these are short-term
+rate/burst budgets, not persistent daily spending limits.
 
-**Sealed keys.** Reuse URL validation: at most one `{key}`, a whole path segment or query
-value, no userinfo/fragment/host placeholder; keys retain the existing character/length
-limits. Render `{key}` to `${TOPUP_RPC_ALCHEMY_SEPOLIA_KEY}` in eRPC YAML, escaping `$`
-as `$$` while composing so Compose preserves the literal for eRPC's runtime expansion.
-Pass each sealed name through the existing dstack sealed-env interface only to its owning
-sidecar; topup and restore-check do not receive upstream keys. Missing/empty/stray keys and
-normalized-name collisions fail secret preflight. Never render expanded URLs to disk or
-attested config. Use `LOG_LEVEL=disabled`, `logLevel: disabled`, Docker logging driver
-`none`, no tracing/config-dump/admin exposure; topup discards proxy error messages/data and reports only group/upstream ids and
-allowlisted error codes/classes (it cannot redact keys it no longer receives). Native endpoint redaction is not a guarantee against echoed RPC
-errors. Secret-canary tests of startup failures, responses and logs are a release gate;
-if suppression leaks, fix the logging boundary before shipping. Debug only with keyless
-fixtures; never enable verbose logs on keyed sidecars.
+### Error classification
 
-**Checks.** Offline `topup config check` rejects legacy/unknown fields, missing/unused groups,
-empty lists, duplicate ids/URLs, invalid budgets/timeouts, inconsistent chain definitions,
-A/B company overlap and extra roles. `--secrets` validates the sealed-key interface without
-printing values. Render checks compare the two native configs to the canonical inputs and
-parse them with pinned eRPC using dummy keys, never dump resolved real secrets.
-Online preflight probes **every upstream directly** in its owning group: TLS, `eth_chainId`,
-latest/safe/finalized and route factory/token/oracle/Multicall3 checks. Every A candidate must
-support 2,000-block logs and recipient-filtered logs without a contract address. Probe proxy
-paths too; require at least one eligible member in each group at runtime. A new release's
-preflight requires every candidate to pass; degraded existing deployments continue waiting/
-using eligible members rather than crediting with one group. Check health with actual RPC
-probes, not merely eRPC process liveness; distroless provides no shell/curl healthcheck.
+Classify a bounded response by method, HTTP status, RPC code and allowlisted normalized
+message patterns before deciding success, retry, cooldown or cursor eligibility. Parse
+HTTP-200 RPC errors too. Message matching uses bounded exact/prefix matches, with provider
+rules in attested configuration; raw messages/data/URLs never reach logs or clients.
+Each `rpc_error_rules` entry names `company`, `methods`, `http_statuses`, `rpc_code`,
+`message_prefix`, `class` and optional `budget_scope` (`key`/`account`); reject overlapping
+conflicting rules. Permanent request/safety classes cannot be redefined as success/retry.
+Precedence: safety/redirect/auth, semantic RPC errors, HTTP transport; a recognizable
+request error/revert inside a 5xx remains terminal.
 
-## Usage, alerts and runbook
+| Method/status/code/message | Class and action |
+|---|---|
+| Read, 2xx, valid result | Success only after typed validation. Null receipts and empty logs are legitimate only under the window/evidence rules; neither an error nor missing data is converted to `[]`. |
+| Any, DNS/connect/reset or timeout (including plain timeout) | Transient transport failure; retry another member within bounds; increment consecutive failure count and enter cooldown at the threshold. Cancellation by the caller/total deadline does not mark a member failed. |
+| Any, HTTP 408/429 or recognized quota/rate message | Throttled; honor bounded `Retry-After` with jitter and deadline, pause the affected key/account budget scope, try another independently budgeted member; never immediately hammer the same account. |
+| Any, HTTP 500/502/503/504 or RPC `-32603` without a terminal semantic cause | Transient server error; bounded failover and failure cooldown. Other non-2xx statuses not listed below fail terminally unless an attested transient rule matches. |
+| Any, HTTP 3xx | Redirect refused; quarantine member until endpoint config is reviewed. Never forward a key to `Location`. |
+| Any, HTTP 401/403, wrong chain/genesis, invalid TLS identity | Configuration/security failure; quarantine member, alert and require revalidation after repair. No retry to that member. Other eligible members may serve the operation. |
+| Any, RPC `-32600`/`-32602`, or invalid request/params message | Terminal request error; no retry or failure cooldown, no cursor advance. |
+| Read, RPC `-32601` or recognized unsupported-method message | Capability failure for this member/method; try another capable member, exclude that capability until revalidated. Never silently skip the required read. |
+| `eth_getLogs`, `-32005` with range/result-size/too-many-results message, or HTTP 413 | Window too large; fail this numeric window without advancing. Caller may plan smaller fixed windows; no same-shape retry or implicit partial success. |
+| Any, `-32005` with rate/credits/quota-exceeded message | Throttled as above; shared budget scope is determined by the reviewed rule. |
+| Any, unknown `-32005` or other unmapped RPC error/message | Terminal unclassified error; wait/alert, no heuristic unlimited retries. Add a reviewed rule only after identifying its meaning. |
+| `eth_call`, estimate or send, recognized execution revert (including send `-32000`/`-32003` with revert message) | Terminal execution failure; do not retry, do not count as transport failure. |
+| `eth_sendRawTransaction`, timeout/transport or server error | Submission uncertain; only bounded resubmission of identical signed bytes/hash is allowed. Never rebuild a transaction or change nonce. “Already known” is acknowledged submission, not receipt/credit evidence; nonce-too-low remains uncertain until receipt/nonce checks. |
+| Read validation: stale head, null required block, malformed/truncated result or mismatched window anchor | Reject attempt, discard result; stale member enters recovery-only selection, malformed response counts as failure. Finalized fork conflict freezes the chain. |
 
-Preserve admin-signed `/v1/admin/metrics` and the existing cost formula. Export
-`topup_rpc_calls_total{provider,chain_id,method}` from summed eRPC **upstream** attempt
-counters, mapping `upstream` to the configured upstream id, `network` to chain id and
-`category` to the existing 16 methods/`other`. Include errors, canceled sent hedges,
-retries, splits, health polls and integrity/preflight sends. Do not count the internal
-HTTP hop as another provider call. Direct runtime preflight probes retain the existing
-per-upstream CountingLayer and are added once to the eRPC totals; standalone CLI preflight
-reports its own process usage. Rename internal-hop counters to logical group requests; retain
-old upstream ids during migration. Fetch metrics privately, validate bounded labels and
-export raw counters without silently filling gaps with zero; expose sidecar-specific
-start times and scrape freshness so restarts are distinguishable from usage decreases.
-Report unavailable usage if a scrape fails. Rate/delta calculations handle counter resets;
-extra health traffic must appear in the staging cost comparison.
+Submission rules override generic retry rules. Unclassified errors never advance credit
+or cursors; every table row and overlapping status/message needs a test.
 
-Expose group eligibility, accepted heads, regression counters and scrape health through
-the same admin surface. eRPC supplies upstream attempts/errors/latency, lag, breaker
-transitions, selection switches, rate limiting and integrity violations. Page on zero
-eligible A or B for 1 minute, scanner/finality/reconciliation stalled beyond existing
-chain SLOs, finalized hash conflict, or missing usage telemetry for 5 minutes. Warn on
-sustained lag/regressions, frequent switches/breaker trips, 429s or unexpected cost growth.
-A healthy proxy process does not clear a group-outage alert.
+Consecutive successful validated operations reset the transient failure count. Cooldown
+expiry permits one probe lease per member, never automatic readmission; two consecutive
+successful pinned probes restore eligibility. Probes verify chain/genesis, required route
+contracts and heads/anchors at the group's current floor; A additionally probes log
+capabilities. Failed probes renew cooldown; auth/redirect/identity quarantine requires
+operator repair and revalidation. Probes use the same deadlines, keys, budgets and counts.
 
-Runbook: identify chain/group and last accepted heads; inspect sanitized metrics and
-keyless capability probes. Check outage versus lag, quota, key expiry or wrong chain.
-Drain a failing upstream through an attested config PR/upgrade, or rotate an existing
-sealed key through the owner workflow; adding a name requires resealing its interface.
-Never move a company across groups to restore availability or lower a head watermark.
-If a whole group is lost, leave credits pending and communicate the delay. Restore an
-independent member, verify both groups, resume from committed cursors and reconcile for
-missed deposits/duplicate credits. Roll back the complete image/config release only with
-compatible watermarks; preserve sealed material and DB cursors. No production operation
-is authorized by this design PR.
+## Heads, forks and logs windows
 
-## Validation and 0.7.0 migration
+Persist watermarks keyed by `(chain id, genesis hash, stable group id, tag, recovery epoch)`.
+Each record contains number, hash, parent hash, observed member id, acceptance time and
+config digest; retain the previous accepted anchors and cursor/replay floors. `latest`,
+`safe`, `finalized` have separate records. Fetch a real block/header even when the caller
+needs only `eth_blockNumber`. Under a serialized compare-and-persist step, reject any
+member response below that tag's current high-water mark and feed `StaleHead` back into
+selection before another attempt. Persist before publishing; persistence failure publishes
+nothing. Never synthesize/clamp a head or treat a lower observation as an advance.
 
-- Unit tests: exactly A/B roles; legacy lists of 0/1/3+ ids rejected; host/registrable-domain
-  and alias overlap; different keys at one company; URL/key validation and sealed-name
-  collisions; deterministic render and literal env escaping; invalid policy bounds;
-  concurrent tag guards, reorgs, persistence/restart and cursor floors; metric mapping,
-  extra attempts, reset/scrape-failure behavior and secret redaction.
-- Local integration: run the pinned sidecars with deterministic JSON-RPC fixtures, separate
-  A/B company identities and one healthy member per group. Add a failing connection/timeout
-  upstream, a lagging upstream (including the observed 156-block finalized regression),
-  and an HTTP-200 JSON-RPC-error upstream (`-32005`/429 plus nonretryable revert/invalid
-  params). Assert bounded failover, lag exclusion/recovery, breaker open/half-open recovery,
-  no published head regression, no synthetic head, correct error classification and counts.
-  Kill all A, then all B: no credit until both return and agree. Exercise divergent receipts,
-  reorgs, restart/restore, all-stale pools, multiple keys/quota sharing, disabled cache,
-  optional bounded read hedging and canary secrets echoed in errors. Compare fixture wire
-  sends to counters, including internal poller sends; an accounting mismatch blocks release.
-- Compose/attestation tests: image/config/policy/name changes alter the attested hash;
-  secret rotation does not alter public config; no plaintext key in compose, errors or logs;
-  service/socket/port/credential allowlists and preflight cover both sidecars and restore.
+Compare ancestry to saved anchors when advancing (fetch intervening headers or the saved
+height's canonical header). A conflicting finalized hash/ancestry freezes credit and both
+cursor writers for the chain. Latest/safe ancestry conflicts or same-height hash changes are reorgs: preserve
+the numeric high-water mark, update the canonical branch only through existing reorg
+handling and replay the affected interval. A new branch shorter than that numeric mark
+waits until it catches up. Receipt/call evidence stays tied to the requested block/hash and
+A/B agreement, not merely a high block number. Concurrent responses are rechecked against
+the watermark at acceptance, not just before sending.
 
-Staging currently uses keyless Tenderly A and PublicNode B on Sepolia and Base Sepolia.
-First map the existing four ids into singleton groups, preserving their company separation,
-route versions and cursors; this stage still has no upstream redundancy. Rehearse offline/
-locally, then use the normal reviewed staging release workflow in a follow-up implementation
-PR. Add Alchemy only to A and Infura only to B (or other reviewed disjoint companies), with
-per-chain upstream ids, capability checks, sealed keys and account-wide budgets. Multiple
-URLs/keys at one vendor improve quota/endpoint resilience, not company-outage resilience.
-Observe a full reconciliation/finality cycle and compare billed usage before promoting.
+A wrong high watermark is not cleared by restart, config edits, member removal or automatic
+expiry. Freeze the chain and investigate. An owner-authorized audited recovery verifies a
+lower canonical anchor against both independent companies, records old/new anchors and
+reason, and opens a new recovery epoch. Reconcile every affected credited deposit and replay
+from the last verified common anchor before unfreezing. Keep original watermarks/evidence;
+repair any invalid cursor only through a separate audited rescan checkpoint, never below
+a verified committed coverage floor. This explicit recovery is the only exception to
+monotonicity across epochs; ordinary operation remains monotonic within an epoch.
 
-Breaking changes in 0.7.0: replace top-level `rpc_providers` and ordered
-`chain.rpc_providers` with `rpc_groups` and explicit `{a, b}` references; remove implicit
-provider defaults and reject legacy fields (including >2 ids) with a migration error.
-Offer an offline migration command for **exactly two** old ids, requiring company review;
-never silently discard extra ids. Require the sidecars, new attested compose/images and
-role-scoped sealed-env interfaces; migrate template/self-hosting/preflight/restore docs.
-API key names can remain unchanged, but their recipient services change. Usage provider
-labels now identify actual upstreams; logical group traffic is separate, and proxy restarts
-require per-sidecar reset handling. Head watermark persistence needs an additive migration.
-Do not deploy 0.7.0 with a 0.6.0 compose/config or downgrade around its guards.
+**Logs completeness boundary:** a synced node can still omit logs; a matching head alone
+is not a cryptographic completeness proof. This design prevents routing through a known
+lagging/wrong-fork member; finalized replay detects omissions when another member returns
+the missing data. A/B receipt agreement still gates all credits.
+
+For scanners, address backfills and reconciler missing-deposit reads:
+
+1. Plan immutable inclusive numeric `[from, to]` windows (at most 2,000 blocks); no `latest`
+   tags in log filters. Pin one member and snapshot every token/recipient/factory filter
+   batch required for that window. Do not choose a new member for individual batches.
+2. Before reading logs, validate that member's appropriate head (`finalized` for finalized
+   work, `latest` for head scanning) against the persisted group watermark **and** `to`.
+   Fetch the window-end header and verify canonical ancestry/anchors. A head below either
+   floor rejects the member; do not send `getLogs` to it or accept its fast empty result.
+3. Read all filter batches from that member, without hedging/cache, and validate returned
+   logs, range bounds, block hashes and detectable truncation/result-limit errors. After the reads,
+   recheck that member's head/end anchor and the current group floor; detect regressions,
+   forks and concurrent watermark advancement before accepting even `[]`.
+4. Buffer the entire window. On any failure or member switch, discard it and retry the
+   **whole original window**, including head checks and all batches, on another member
+   under the original deadline/attempt bound. Never merge partial answers across members.
+5. Only a typed validated window can be committed. Record deposits/factory events,
+   address-backfill progress and the applicable cursor/checkpoint atomically. Errors,
+   timeout, cancellation or exhausted candidates leave both scanner and reconciler cursors
+   unchanged for that window. Already completed earlier windows need not be repeated.
+
+Persist a replay queue/checkpoint independent of forward cursors. Recheck the latest
+2,000 finalized blocks each reconciliation cycle with a different eligible A member when
+available; singleton groups replay against their sole member and report that limitation.
+Queue the full affected interval on a reorg, suspect omission, outage recovery or operator
+backfill request. Historical jobs start at the last verified anchor/address creation floor,
+use the same pinned-window rules and normal deposit uniqueness/confirmation path. Compare
+replay coverage and evidence, insert missed deposits idempotently, and freeze/investigate
+conflicting finalized evidence. A failed replay remains queued without advancing its own
+checkpoint; it cannot be hidden by a forward cursor already beyond the gap.
+
+## Preflight, sealed keys and attestation
+
+Topup and restore-check retain the existing owner-sealed environment interface. Each keyed
+member names `TOPUP_RPC_<...>_KEY`; URL templates permit at most one `{key}` as a whole path
+segment/query value and forbid userinfo, fragments, host substitutions and inline secrets.
+`config check --secrets` rejects missing/empty/stray keys and normalized-name collisions
+without printing values. All configured key names must be present even for an offline backup;
+network failure is distinct from malformed configuration or absent sealed material.
+
+Pinned-member preflight is an executable path inside the service: resolve that member's
+sealed key in memory, construct its ordinary counted HTTP client with redirects disabled,
+and invoke `probe_member(id)`, bypassing selection only. It does not bypass budgets,
+timeouts, chain checks or redaction. No separate key-isolated proxy prevents these probes.
+Offline deployment preflight validates templates/names without keys; owner secret preflight
+and in-CVM startup perform keyed checks. Expanded URLs never appear in config, command-line
+arguments, persistence or telemetry. Disable raw HTTP/RPC trace output; classify bounded
+messages internally and expose only ids/codes/classes. Test secrets echoed by upstreams.
+
+Persist acceptance of the public config digest with each member's verified chain/genesis,
+route capabilities, template and sealed-name identity. On **first acceptance or changed
+config**, independently probe all members under bounded startup deadlines. Require at least
+one freshly verified eligible member in each group; an unreachable backup is recorded as
+unverified/cooling and must not block startup. It cannot serve until full validation passes.
+Static identity/secrets/independence failures remain fatal; verified wrong-chain members
+are quarantined and alerted, never accepted as serving candidates.
+
+On **restart of the same accepted config**, load watermarks, cursors and member validation
+records; do not require every backup to pass again. Fresh pinned checks still gate eligibility,
+so an offline backup cannot block a healthy primary. If a whole previously accepted group
+is down, run API/health in degraded mode and wait with credit/cursor work disabled for that
+chain. First acceptance with no verified member in either group fails acceptance. Config
+changes cannot reset floors; unchanged members retain evidence, changed/new members need
+full probes. Recovery workers retry offline members after startup. Restore-check follows
+the same distinction and cannot mark an unverified chain ready for resumed credit.
+
+Retain the existing compose services and digest-pinned topup image. Inline group/company/
+policy/budget configuration under content-digest config names; update renderer, sealed-name
+allowlist and attested-compose tests for topup and restore-check. The service image, compiled
+classification/selection behavior and public config are attested. Keys stay sealed; rotation
+within an existing name does not change public config, adding a name requires resealing.
+No sidecar, proxy ports or additional live infrastructure is introduced.
+
+## Accounting and operation
+
+Keep admin-signed `/v1/admin/metrics`,
+`topup_rpc_calls_total{provider,chain_id,method}`, the existing 16 methods/`other`, process
+start timestamp and cost formula. Provider labels are actual member ids; preserve staging's
+four existing ids. Place CountingLayer at each real member transport, below admission and
+retry, and count failed as well as successful dispatches once, including head validation,
+preflight, recovery and replay. No group-level double counting or idle counter eviction.
+Move recording into the polled dispatch future if necessary: requests canceled before
+admission/dispatch count zero. A dispatched transport attempt may fail before reaching the
+remote server; this remains a dispatch estimate, not an exact provider invoice. Separate
+logical group-operation, retry and admission-wait counters from physical RPC dispatches.
+
+Add bounded-label group eligibility, member cooldown/quarantine, stale-head/window rejection,
+accepted-head/epoch, replay backlog/coverage and budget-wait metrics. Page on zero eligible
+A or B for 1 minute, finalized fork conflict, stalled scanner/finality/reconciliation SLOs,
+or overdue replay coverage; warn on repeated regressions, cooldowns, quota pressure and
+usage growth. Instrumentation failure must not be represented as zero usage.
+
+Runbook: identify chain/group/member and last verified anchors; distinguish outage, quota,
+lag, fork and credential/config failures using sanitized metrics and counted pinned probes.
+Leave credit pending when either group is unavailable. Repair endpoints via an attested
+config PR/upgrade or rotate an existing sealed key; never borrow a company from the other
+group. Validate recovery before readmission, drain queued replay/backfill and reconcile
+missed deposits without duplicating credits. Wrong-watermark recovery uses the audited epoch
+procedure above, not ordinary config rollback. This design authorizes no live operations.
+
+## Tests and 0.7.0 migration
+
+- Unit tests cover config/company aliases, exactly A/B, URL/key rules, duplicate templates
+  with distinct credentials, shared budget identity, selector order/weighted fairness under
+  concurrency, exclusion/empty pools, deadlines/cancellation, and every classification row
+  and provider-rule ambiguity. Test all-method/all-key shared account limits, per-key limits,
+  shared chains, budget waits and canceled unsent requests. Check guard persistence/races,
+  ancestry/reorgs, wrong-watermark epochs, no implicit floor reset and secret-canary redaction.
+- Local integration uses real group clients against deterministic HTTP fixtures: a failing
+  member, stale/lagging member and HTTP-200 RPC-error member beside a correct member. The
+  lagging member returns fast `[]` while the correct member has a deposit: reject the lagging
+  window and assert **neither scanner nor reconciler cursor advances**; allow advancement
+  only after a complete validated retry returns the correct answer. Also regress a head
+  between precheck and logs, switch after one recipient batch, fail the final batch and
+  cancel mid-window. Assert no partial commit and whole-window retry/replay after restart.
+- Exercise every error class, both `-32005` meanings, read/send reverts, request errors,
+  ambiguous submission, 429 across keys/methods, redirects to another host (target gets no
+  request/key), plain-timeout cooldown, probe failure and two-success recovery. Kill all A
+  then all B and assert no single-group credit. Compare fixture dispatches to CountingLayer;
+  test idle retention and cancellation before/after dispatch. First accept with one failing
+  backup, restart the same config with that backup still failing, and change the config:
+  healthy members permit startup, unverified backups cannot serve. Test all-down first
+  acceptance versus degraded restart, lost persistence, restore and queued historical gaps.
+- Compose tests cover public config/image/policy/name changes in attestation, unchanged hash
+  on key rotation, no secret in rendered output/logs/errors, and startup/restore interfaces.
+
+Staging starts with singleton Tenderly A and PublicNode B on Sepolia and Base Sepolia,
+preserving four existing member ids, route versions, sealed-name conventions and cursors.
+Singletons introduce the group client without upstream redundancy. Rehearse locally, then
+ship through a separate implementation PR and reviewed staging release. Add reviewed
+independent backup companies later (for example Alchemy only in A, Infura only in B), with
+capability probes and shared account/key budgets. Observe a full finality/reconciliation
+cycle, replay coverage and usage before promotion. Same-company keys provide quota
+resilience; company-outage resilience needs another company.
+
+0.7.0 replaces top-level `rpc_providers` and ordered `chain.rpc_providers` with typed
+`rpc_groups` and explicit `{a, b}` references; removes implicit provider defaults; rejects
+legacy/unknown fields, including lists of more than two ids. An offline migration tool
+accepts **exactly two** old ids and requires company review; never discard extra ids.
+Add acceptance/watermark/replay persistence through additive migrations and update config,
+self-hosting, preflight and restore documentation. Keep RPC keys in topup/restore-check and
+keep the metrics API; new member ids add series and validation/replay increase usage.
+
+Rollback only to an image that understands the accepted schema, watermarks and replay
+checkpoints; preserve all durable floors/evidence and sealed material. An immediate
+pre-credit staging rollback can restore the archived 0.6.0 image/config after verification.
+After 0.7.0 accepts new watermarks or processes credit, 0.6.0 is not a safe automatic
+rollback target: pause chain work and deploy a compatible corrective release, or use an
+owner-reviewed recovery/rescan procedure. Config rollback alone never lowers watermarks.
+
+## Considered: eRPC 0.3.0, rejected
+
+At tag `0.3.0`, commit `a98914408d5e13e848d4baba0ea06d20d58c62e9`,
+[empty selection refills registered upstreams](https://github.com/erpc/erpc/blob/0.3.0/erpc/networks.go#L1838-L1866),
+[policy errors retain stale candidates](https://github.com/erpc/erpc/blob/0.3.0/internal/policy/slot.go#L256-L269),
+and [logs omissions lack intrinsic proof](https://github.com/erpc/erpc/blob/0.3.0/architecture/evm/integrity/checks_getlogs.go#L11-L29).
+Its [retry/cooldown semantics](https://github.com/erpc/erpc/blob/0.3.0/upstream/upstream_executor.go),
+[method-scoped budgets](https://github.com/erpc/erpc/blob/0.3.0/upstream/ratelimiter_budget.go),
+[dispatch counters](https://github.com/erpc/erpc/blob/0.3.0/upstream/upstream.go) and
+[idle metric eviction](https://github.com/erpc/erpc/blob/0.3.0/health/tracker.go),
+[HTTP redirects](https://github.com/erpc/erpc/blob/0.3.0/clients/http_json_rpc_client.go),
+and [cache key scope](https://github.com/erpc/erpc/blob/0.3.0/architecture/evm/json_rpc_cache.go)
+do not match these contracts. Key-isolated sidecars also lacked a specified keyed
+per-member probe path. Correcting these boundaries would require maintaining proxy changes
+on top of its pre-1.0 Go/JS TCB; use the existing in-process transport instead.
