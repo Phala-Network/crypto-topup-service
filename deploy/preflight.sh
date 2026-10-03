@@ -106,7 +106,8 @@ jq -j --arg target /etc/topup/topup.yaml \
 # topup ARGS...: the pinned image's topup, offline, with topup.yaml on stdin. Only the RPC keys
 # reach it, by name; nothing secret is printed.
 topup() {
-    local name keys=() values=()
+    local name keys=() values=() network=(--network none)
+    [[ "$1" == rpc ]] && network=()
     for name in "${!env[@]}"; do
         [[ "$name" == TOPUP_RPC_*_KEY ]] || continue
         keys+=(-e "$name")
@@ -115,7 +116,7 @@ topup() {
     if [[ -n "${TOPUP:-}" ]]; then
         env -i PATH="$PATH" "${values[@]}" "$TOPUP" "$@" /dev/stdin <"$tmp/topup.yaml"
     else
-        env "${values[@]}" docker run --rm -i --pull never --network none "${keys[@]}" \
+        env "${values[@]}" docker run --rm -i --pull never "${network[@]}" "${keys[@]}" \
             "$topup_image" topup "$@" /dev/stdin <"$tmp/topup.yaml"
     fi
 }
@@ -190,9 +191,22 @@ else
         ETH_RPC_URL=$url cast "$@" 2>"$tmp/cast.err" ||
             printf 'error: %s' "$(redact "$(tool_error "$tmp/cast.err")")"
     }
-    # Each route on each provider it names: the chain, the contracts, and the asset.
+    if topup rpc check --config >"$tmp/healthy.json" 2>"$tmp/probe.err"; then
+        ok "RPC groups have a fully validated serving member each"
+    else
+        fail "RPC group preflight failed: $(redact "$(tool_error "$tmp/probe.err")")"
+        printf '[]' >"$tmp/healthy.json"
+    fi
+    # Manifest checks only use fully validated members; failing backups do not block startup.
     while IFS=$'\t' read -r name chain_id factory implementation contract oracle decimals providers; do
-        read -ra ids <<<"$providers"
+        read -ra configured_ids <<<"$providers"
+        ids=()
+        for id in "${configured_ids[@]}"; do
+            if jq -e --arg id "$id" 'index($id) != null' "$tmp/healthy.json" >/dev/null; then
+                ids+=("$id")
+            fi
+        done
+        ((${#ids[@]})) || continue
         chain_ok=1
         for id in "${ids[@]}"; do
             reported=$(rpc "${provider_url[$id]}" chain-id)

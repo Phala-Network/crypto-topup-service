@@ -23,14 +23,27 @@ pub struct RpcState {
 #[async_trait]
 impl WatermarkStore for RpcState {
     async fn blocked(&self, chain: u64) -> Result<(), Failure> {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT COALESCE((SELECT frozen FROM rpc_chain_state WHERE chain_id=$1),false)",
-        )
-        .bind(i64::try_from(chain).map_err(|_| Failure::Persistence)?)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|_| Failure::Persistence)?;
-        if blocked { Err(Failure::Fork) } else { Ok(()) }
+        let row =
+            sqlx::query("SELECT frozen,awaiting_anchor FROM rpc_chain_state WHERE chain_id=$1")
+                .bind(i64::try_from(chain).map_err(|_| Failure::Persistence)?)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|_| Failure::Persistence)?;
+        if let Some(row) = row {
+            if row
+                .try_get::<bool, _>("frozen")
+                .map_err(|_| Failure::Persistence)?
+            {
+                return Err(Failure::Fork);
+            }
+            if row
+                .try_get::<bool, _>("awaiting_anchor")
+                .map_err(|_| Failure::Persistence)?
+            {
+                return Err(Failure::Unavailable);
+            }
+        }
+        Ok(())
     }
     async fn freeze(&self, chain: u64) -> Result<(), Failure> {
         freeze(&self.pool, chain, "finalized hash conflict")
@@ -80,9 +93,10 @@ impl WatermarkStore for RpcState {
         let chain = i64::try_from(chain).map_err(|_| Failure::Persistence)?;
         let number = i64::try_from(head.number).map_err(|_| Failure::Persistence)?;
         let mut tx = self.pool.begin().await.map_err(|_| Failure::Persistence)?;
-        guard_in(
+        guard_state(
             &mut tx,
             u64::try_from(chain).map_err(|_| Failure::Persistence)?,
+            tag != "cursor",
         )
         .await
         .map_err(|_| Failure::Fork)?;
@@ -101,7 +115,7 @@ pub fn digest(value: &str) -> String {
 }
 /// Frozen safety state is checked by crediting and all cursor writers.
 pub async fn freeze(pool: &PgPool, chain: u64, reason: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO rpc_chain_state(chain_id,frozen,reason) VALUES($1,true,$2) ON CONFLICT(chain_id) DO UPDATE SET frozen=true,recovery_pending=false,reason=EXCLUDED.reason")
+    sqlx::query("INSERT INTO rpc_chain_state(chain_id,frozen,reason) VALUES($1,true,$2) ON CONFLICT(chain_id) DO UPDATE SET frozen=true,reason=EXCLUDED.reason")
         .bind(to_i64(chain,"rpc chain")?).bind(reason).execute(pool).await?;
     Ok(())
 }
@@ -138,18 +152,30 @@ pub async fn guard_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chain: u64,
 ) -> Result<(), sqlx::Error> {
+    guard_state(tx, chain, true).await
+}
+async fn guard_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain: u64,
+    requires_anchor: bool,
+) -> Result<(), sqlx::Error> {
     let chain = to_i64(chain, "RPC chain")?;
     sqlx::query("INSERT INTO rpc_chain_state(chain_id) VALUES($1) ON CONFLICT DO NOTHING")
         .bind(chain)
         .execute(&mut **tx)
         .await?;
-    let frozen: bool =
-        sqlx::query_scalar("SELECT frozen FROM rpc_chain_state WHERE chain_id=$1 FOR UPDATE")
-            .bind(chain)
-            .fetch_one(&mut **tx)
-            .await?;
-    if frozen {
-        return Err(sqlx::Error::Protocol("RPC chain frozen".to_owned()));
+    let row = sqlx::query(
+        "SELECT frozen,awaiting_anchor FROM rpc_chain_state WHERE chain_id=$1 FOR UPDATE",
+    )
+    .bind(chain)
+    .fetch_one(&mut **tx)
+    .await?;
+    if row.try_get::<bool, _>("frozen")?
+        || (requires_anchor && row.try_get::<bool, _>("awaiting_anchor")?)
+    {
+        return Err(sqlx::Error::Protocol(
+            "RPC chain frozen or awaiting anchor".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -203,6 +229,8 @@ pub async fn commit_window(
         let old_request: WindowRequest = serde_json::from_value(old.try_get("request")?)
             .map_err(|e| sqlx::Error::Decode(e.into()))?;
         if old_request.finalized && old.try_get::<String, _>("end_hash")? != proof.end_hash {
+            tx.rollback().await?;
+            freeze(pool, chain, "historical finalized window hash conflict").await?;
             return Err(sqlx::Error::Protocol(
                 "historical finalized window hash conflict".to_owned(),
             ));
@@ -240,7 +268,11 @@ pub async fn recover(
     actor: &str,
     reason: &str,
 ) -> Result<(), sqlx::Error> {
-    if reason.trim().is_empty() {
+    if reason.trim().is_empty()
+        || actor.trim().is_empty()
+        || reason.len() > 1024
+        || actor.len() > 128
+    {
         return Err(sqlx::Error::Protocol(
             "RPC recovery reason required".to_owned(),
         ));
@@ -255,7 +287,7 @@ pub async fn recover(
     .bind(chain)
     .fetch_all(&mut *tx)
     .await?;
-    let originals:serde_json::Value=sqlx::query_scalar("SELECT jsonb_build_object('cursors',(SELECT jsonb_agg(to_jsonb(c)) FROM cursors c WHERE chain_id=$1),'watermarks',(SELECT jsonb_agg(to_jsonb(w)) FROM rpc_watermarks w WHERE chain_id=$1),'reconciliation',(SELECT jsonb_agg(to_jsonb(r)) FROM reconciliation_deposit_cursors r WHERE chain_id=$1))").bind(chain).fetch_one(&mut *tx).await?;
+    let originals:serde_json::Value=sqlx::query_scalar("SELECT jsonb_build_object('cursors',(SELECT jsonb_agg(to_jsonb(c)) FROM cursors c WHERE chain_id=$1),'watermarks',(SELECT jsonb_agg(to_jsonb(w)) FROM rpc_watermarks w WHERE chain_id=$1),'reconciliation',(SELECT jsonb_agg(to_jsonb(r)) FROM reconciliation_deposit_cursors r WHERE chain_id=$1),'pending',(SELECT jsonb_agg(to_jsonb(p)) FROM pending_transfers p WHERE chain_id=$1))").bind(chain).fetch_one(&mut *tx).await?;
     let evidence=before.iter().map(|r|Ok(json!({"id":r.try_get::<Uuid,_>("id")?,"created_block":r.try_get::<i64,_>("created_block")?,"backfilled":r.try_get::<bool,_>("backfilled")?,"backfilled_through":r.try_get::<Option<i64>,_>("backfilled_through")?}))).collect::<Result<Vec<_>,sqlx::Error>>()?;
     sqlx::query(
         "INSERT INTO rpc_recoveries(chain_id,epoch,evidence,actor,reason) VALUES($1,$2,$3,$4,$5)",
@@ -270,9 +302,13 @@ pub async fn recover(
     // Rebase every suspect issuance to genesis conservatively: a height-only cursor is not proof
     // that an address's original creation height was correct. Preserve originals in the audit.
     sqlx::query("UPDATE addresses SET created_block=0,backfilled=false,backfilled_through=NULL WHERE chain_id=$1").bind(chain).execute(&mut *tx).await?;
-    sqlx::query("UPDATE cursors SET scanned_block=$2,confirmed_block=NULL WHERE chain_id=$1")
+    sqlx::query("UPDATE cursors SET scanned_block=$2,scanned_block_time=NULL,confirmed_block=NULL WHERE chain_id=$1")
         .bind(chain)
         .bind(number)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_transfers WHERE chain_id=$1")
+        .bind(chain)
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM reconciliation_deposit_cursors WHERE chain_id=$1")
@@ -314,6 +350,7 @@ pub async fn commit_head_window(
         ScanCommit {
             inserted: 0,
             unsupported_inserted: 0,
+            inserted_positions: Vec::new(),
         }
     };
     let head =
@@ -339,7 +376,7 @@ pub async fn refresh_metrics(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut out = String::from(
         "# HELP topup_rpc_chain_frozen Durable fork safety freeze.\n# TYPE topup_rpc_chain_frozen gauge\n# HELP topup_rpc_review_pending_windows Historical windows still requiring independent review.\n# TYPE topup_rpc_review_pending_windows gauge\n",
     );
-    for row in sqlx::query("SELECT chain_id,frozen FROM rpc_chain_state")
+    for row in sqlx::query("SELECT chain_id,frozen,awaiting_anchor,epoch FROM rpc_chain_state")
         .fetch_all(pool)
         .await?
     {
@@ -350,6 +387,25 @@ pub async fn refresh_metrics(pool: &PgPool) -> Result<(), sqlx::Error> {
             u8::from(row.try_get::<bool, _>("frozen")?)
         );
     }
+    out.push_str("# HELP topup_rpc_chain_awaiting_anchor Chain waiting for A/B cursor hash agreement.\n# TYPE topup_rpc_chain_awaiting_anchor gauge\n# HELP topup_rpc_chain_epoch Audited recovery epoch.\n# TYPE topup_rpc_chain_epoch gauge\n");
+    for row in sqlx::query("SELECT chain_id,awaiting_anchor,epoch FROM rpc_chain_state")
+        .fetch_all(pool)
+        .await?
+    {
+        let chain: i64 = row.try_get("chain_id")?;
+        let _ = writeln!(
+            out,
+            "topup_rpc_chain_awaiting_anchor{{chain_id=\"{chain}\"}} {}",
+            u8::from(row.try_get::<bool, _>("awaiting_anchor")?)
+        );
+        let _ = writeln!(
+            out,
+            "topup_rpc_chain_epoch{{chain_id=\"{chain}\"}} {}",
+            row.try_get::<i64, _>("epoch")?
+        );
+    }
+    out.push_str("# HELP topup_rpc_group_head Accepted persisted head height.\n# TYPE topup_rpc_group_head gauge\n");
+    for row in sqlx::query("SELECT chain_id,group_id,tag,number,epoch FROM rpc_watermarks WHERE epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_watermarks.chain_id),0)").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_group_head{{chain_id=\"{}\",group=\"{}\",tag=\"{}\",epoch=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<String,_>("group_id")?,row.try_get::<String,_>("tag")?,row.try_get::<i64,_>("epoch")?,row.try_get::<i64,_>("number")?);}
     for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_window_reviews WHERE reviewed_at IS NULL GROUP BY chain_id").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_review_pending_windows{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);}
     *HEALTH_METRICS
         .lock()

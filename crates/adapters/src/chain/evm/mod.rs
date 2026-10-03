@@ -500,13 +500,12 @@ impl EvmClient {
     }
 
     fn transport(&self, operation: &'static str, error: &TransportError) -> ChainError {
-        if let alloy::transports::RpcError::Transport(kind) = error {
-            if let Some(failure) = kind
+        if let alloy::transports::RpcError::Transport(kind) = error
+            && let Some(failure) = kind
                 .as_custom()
                 .and_then(|e| e.downcast_ref::<group::Failure>())
-            {
-                return ChainError::Group(*failure);
-            }
+        {
+            return ChainError::Group(*failure);
         }
         ChainError::Transport(self.endpoint.rpc_error(operation, error))
     }

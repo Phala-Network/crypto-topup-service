@@ -106,6 +106,7 @@ impl ScannerError {
                 | Self::FinalizedBehindCursor { .. }
                 | Self::Chain(
                     ChainError::Rpc(_)
+                        | ChainError::Group(_)
                         | ChainError::Transport(_)
                         | ChainError::MissingField(_)
                         | ChainError::InvalidTimestamp(_)
@@ -378,6 +379,10 @@ pub async fn scan_once<R: ChainReader>(
     };
 
     for (id, mut request, answering) in db::rpc::due_reviews(pool, chain_id).await? {
+        if request.to > finalized {
+            continue;
+        }
+        request.finalized = true;
         request.exclude_member = Some(answering);
         match reader.read_window(&request).await {
             Ok(window) => {
@@ -447,7 +452,7 @@ pub async fn scan_once<R: ChainReader>(
                 },
             )
             .await?;
-            record_committed(chain_id, &mut stats, committed.0)?;
+            record_committed(chain_id, &mut stats, &committed.0)?;
             stats.record_factory(committed.1);
         }
         let ids = pending_backfills
@@ -488,7 +493,7 @@ pub async fn scan_once<R: ChainReader>(
             pool, reader, routes, &addresses, from_block, to_block, progress,
         )
         .await?;
-        record_committed(chain_id, &mut stats, committed.0)?;
+        record_committed(chain_id, &mut stats, &committed.0)?;
         stats.record_factory(committed.1);
         stats.record_backfilled(backfilled.len())?;
         for id in &backfilled {
@@ -775,7 +780,7 @@ where
 fn record_committed(
     chain_id: u64,
     stats: &mut ScanStats,
-    committed: ScanCommit,
+    committed: &ScanCommit,
 ) -> Result<(), ScannerError> {
     stats.record_inserted(committed.inserted)?;
     report_unsupported_inflows(chain_id, committed.unsupported_inserted);

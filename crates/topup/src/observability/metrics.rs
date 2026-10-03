@@ -41,6 +41,7 @@ pub fn render() -> String {
         let _ = writeln!(body, "topup_rpc_calls_since_seconds {seconds}");
     }
     body.push_str(&topup_adapters::chain::evm::group::metrics::render());
+    body.push_str(&topup_adapters::chain::evm::group::metrics::events());
     body.push_str(&crate::db::rpc::metrics());
     body
 }

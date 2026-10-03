@@ -226,7 +226,7 @@ pub async fn scan_new_blocks<R: ChainReader>(
         window.proof.as_ref(),
     )
     .await?;
-    record_committed(chain_id, &mut super::ScanStats::default(), committed)?;
+    record_committed(chain_id, &mut super::ScanStats::default(), &committed)?;
     let inserted = committed.inserted;
     Ok(Some(HeadScan {
         from_block,

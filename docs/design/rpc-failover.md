@@ -28,9 +28,8 @@ it does not implement HAProxy's full policy language. Enable Tower 0.5.3's `time
 `retry` features. Pin governor in Cargo.lock (Alloy's optional
 [throttle layer](https://docs.rs/alloy-transport/2.5.0/src/alloy_transport/layers/throttle.rs.html)
 uses governor 0.10); share governor instances rather than constructing a limiter per call.
-Use Alloy's
-[`http_with_client`](https://docs.rs/alloy-rpc-client/2.5.0/alloy_rpc_client/struct.ClientBuilder.html#method.http_with_client)
-with a reqwest 0.13.5 client and
+Keep Alloy's typed providers/RPC client over `GroupTransport`, backed by a size-bounded
+reqwest 0.13.5 adapter, with
 [`redirect::Policy::none()`](https://docs.rs/reqwest/0.13.5/reqwest/redirect/struct.Policy.html#method.none).
 All 3xx responses fail, including same-host redirects. Disable reqwest internal retries
 with `retry(reqwest::retry::never())` so every resubmission passes through admission/counting.
@@ -182,19 +181,19 @@ request error/revert inside a 5xx remains terminal.
 | Method/status/code/message | Class and action |
 |---|---|
 | Read, 2xx, valid result | Success only after typed validation. Null receipts and empty logs are legitimate only under the window/evidence rules; neither an error nor missing data is converted to `[]`. |
-| Any, HTTP 408, DNS/connect/reset or timeout (including plain timeout) | Transient transport failure; retry another member within bounds; increment consecutive failure count and enter cooldown at the threshold. Cancellation by the caller/total deadline does not mark a member failed. |
-| Any, HTTP 429 or recognized quota/rate message | Throttled; honor bounded `Retry-After` with jitter and deadline, pause the affected key/account budget scope, try another independently budgeted member; never immediately hammer the same account. |
+| Any, HTTP 408, DNS/connect/TLS/reset or timeout (including plain timeout) | Transient transport failure; retry another member within bounds; increment consecutive failure count and enter cooldown at the threshold. Cancellation by the caller/total deadline does not mark a member failed. |
+| Any, HTTP 429 or recognized quota/rate message | Throttled; honor bounded `Retry-After` within the deadline, pause the affected key/account budget scope, try another independently budgeted member; never immediately hammer the same account. |
 | Any, HTTP 500/502/503/504 or RPC `-32603` without a terminal semantic cause | Transient server error; bounded failover and failure cooldown. Other non-2xx statuses not listed below fail terminally unless an attested transient rule matches. |
 | Any, HTTP 3xx | Redirect refused; quarantine member until endpoint config is reviewed. Never forward a key to `Location`. |
-| Any, HTTP 401/403, wrong chain/genesis, invalid TLS identity | Configuration/security failure; quarantine member, alert and require revalidation after repair. No retry to that member. Other eligible members may serve the operation. |
+| Any, HTTP 401/403, wrong chain/genesis | Configuration/security failure; quarantine member, alert and require revalidation after repair. No retry to that member. Other eligible members may serve the operation. |
 | Any, RPC `-32600`/`-32602`, or invalid request/params message | Terminal request error; no retry or failure cooldown, no cursor advance. |
 | Read, RPC `-32601` or recognized unsupported-method message | Capability failure for this member/method; try another capable member, exclude that capability until revalidated. Never silently skip the required read. |
-| `eth_getLogs`, `-32005` with range/result-size/too-many-results message, | Window too large; fail this numeric window without advancing. Caller may plan smaller fixed windows; no same-shape retry or implicit partial success. |
+| `eth_getLogs`, `-32005` with range/result-size/too-many-results message, | Split into smaller numeric subranges on the same fixed member within the original deadline; merge all subranges before committing the original window. No partial progress. |
 | Any, `-32005` with rate/credits/quota-exceeded message | Throttled as above; shared budget scope is determined by the reviewed rule. |
 | `eth_getLogs`, HTTP 413 | Request body too large; shrink address/topic batches on the same pinned member and retry the entire fixed numeric window. Do not shrink the block range or advance partial progress. |
 | Any, unknown `-32005` or other unmapped RPC error/message | Terminal unclassified error; wait/alert, no heuristic unlimited retries. Add a reviewed rule only after identifying its meaning. |
 | `eth_call`, estimate or send, recognized execution revert (including send `-32000`/`-32003` with revert message) | Terminal execution failure; do not retry, do not count as transport failure. |
-| `eth_sendRawTransaction`, timeout/transport or server error | Submission uncertain; only bounded resubmission of identical signed bytes/hash is allowed. Never rebuild a transaction or change nonce. “Already known” is acknowledged submission, not receipt/credit evidence; nonce-too-low remains uncertain until receipt/nonce checks. |
+| `eth_sendRawTransaction`, timeout/transport or server error | Submission uncertain; only bounded resubmission of identical signed bytes/hash is allowed. Never rebuild a transaction or change nonce. “Already known” and nonce-too-low remain explicit uncertain submission errors; the existing transaction lifecycle must verify receipt/nonce before treating them as accepted. |
 | Read validation: stale head, null required block, malformed/truncated result or mismatched window anchor | Reject attempt, discard result; stale member enters recovery-only selection, malformed response counts as failure. Finalized fork conflict freezes the chain. |
 
 Submission rules override generic retry rules. Unclassified errors never advance credit
@@ -209,9 +208,11 @@ operator repair and revalidation. Probes use the same deadlines, keys, budgets a
 
 ## Heads, forks and logs windows
 
-Persist watermarks keyed by `(chain id, genesis hash, stable group id, tag, recovery epoch)`.
-Each record contains number, hash, parent hash, observed member id, acceptance time and
-config digest; retain the previous accepted anchors and cursor/replay floors. `latest`,
+Persist watermarks keyed by `(chain id, stable group id, tag, recovery epoch)`; the chain's
+genesis identity is fixed by persisted member validation evidence and checked on startup,
+readmission and owner recovery. Each record contains number, hash, parent hash, observed
+member id, acceptance time and config digest; retain the current anchors, old recovery
+epochs and immutable cursor/window replay evidence. `latest`,
 `safe`, `finalized` have separate records. Fetch a real block/header even when the caller
 needs only `eth_blockNumber`. Under a serialized compare-and-persist step, reject any
 member response below that tag's current high-water mark and feed `StaleHead` back into
@@ -389,8 +390,8 @@ resilience; company-outage resilience needs another company.
 
 0.7.0 replaces top-level `rpc_providers` and ordered `chain.rpc_providers` with typed
 `rpc_groups` and explicit `{a, b}` references; removes implicit provider defaults; rejects
-legacy/unknown fields, including lists of more than two ids. An offline migration tool
-accepts **exactly two** old ids and requires company review; never discard extra ids.
+legacy/unknown fields, including lists of more than two ids. Manual offline migration
+maps **exactly two** old ids to singleton groups and requires company review; never discard extra ids.
 For a 0.6 height-only cursor, pin its canonical header/hash through agreement of A and B
 before treating it as a trusted anchor; disagreement/unavailability blocks chain progress,
 and a cursor above agreed heads enters audited recovery. Add acceptance/watermark/replay

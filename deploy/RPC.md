@@ -71,12 +71,15 @@ topup rpc resume --config /etc/topup/topup.yaml --chain 11155111 --max-windows 1
 
 Recover verifies A/B agreement, opens an audited epoch and preserves old watermarks, cursors and
 address progress. It repairs `created_block` conservatively to genesis, clears `backfilled` and
-`backfilled_through`, resets the confirmed/reconciliation cursors and queues historical review;
+`backfilled_through`, clears pending display progress and its cursor timestamp, resets the
+confirmed/reconciliation cursors and queues historical review;
 the chain stays frozen. Resume replays bounded complete windows, with atomic owner-only writes
 and retained progress. Repeat it while it reports incomplete replay. Every credited deposit's
-stored branch is checked against both groups; any mismatch refuses unfreeze and requires an
+stored branch, finalized inclusion and receipt transfer (token, sender, recipient and amount)
+are checked against both groups; any mismatch refuses unfreeze and requires an
 explicit ledger reconciliation. No automatic compensating credit is invented. Only successful
-replay and branch checks clear the recovery freeze. Run regular reconciliation and inspect
+replay, receipt and factory-ledger branch checks atomically save both new cursor anchors and
+clear the recovery freeze. New quotes wait for a fresh scanner timestamp after restart. Run regular reconciliation and inspect
 findings before restarting topup. Reconciliation freezes are separate and remain in force.
 
 ## Migration and rollback

@@ -152,7 +152,6 @@ fn config_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
         "environment: test\npublic_origin: http://127.0.0.1:8080\nadmin_key:\n  id: admin/v1\n  \
          public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n{rpc}\nroutes:\n  -\n{route}\n",
         rpc = include_str!("fixtures/rpc-groups.yaml")
-            .replace("chain_id: 1", "chain_id: 31337")
             .replace("https://eth-mainnet.g.alchemy.com/v2/{key}", &primary)
             .replace("https://rpc.example/eth", &secondary)
             .replace("alchemy.com", "127.0.0.1")
@@ -188,4 +187,104 @@ fn set_code(rpc_url: &str, contract: Address, code: &str) -> Result<()> {
 fn cast(arguments: &[&str]) -> Result<String> {
     let output = run_checked("cast", arguments, None)?;
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+#[tokio::test]
+async fn rpc_first_acceptance_tolerates_backup_and_restart_preserves_legacy_hash_anchor()
+-> Result<()> {
+    use support::TestDatabase;
+    use topup::{config::Config, db, rpc_runtime};
+    use topup_adapters::chain::evm::group::WatermarkStore;
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let Some(anvil) = Anvil::start_if_available(&[]).await? else {
+            return Ok(());
+        };
+        let factory = forge_create(
+            &anvil.rpc_url,
+            "src/ForwarderFactory.sol:ForwarderFactory",
+            &[],
+        )?;
+        let implementation = implementation_of(&anvil.rpc_url, factory)?;
+        let token = forge_create(&anvil.rpc_url, "test/mocks/MockTokens.sol:MockERC20", &[])?;
+        let oracle = forge_create(
+            &anvil.rpc_url,
+            "test/mocks/MockSanctionsOracle.sol:MockSanctionsOracle",
+            &[],
+        )?;
+        // Anvil finalized/safe tags lag latest; capability calls use the finalized block.
+        cast(&["rpc", "anvil_mine", "0x80", "--rpc-url", &anvil.rpc_url])?;
+        let yaml = config_yaml(&anvil, factory, TREASURY);
+        let mut config = Config::parse(&yaml).map_err(anyhow::Error::msg)?;
+        for route in &mut config.routes {
+            route.chain.chain_id = 31337;
+            route.chain.contracts.implementation = implementation;
+            route.livemode = false;
+            route.asset.contract = token;
+            route.screening.sanctions_oracle = oracle;
+        }
+        for group in config.rpc_groups.values_mut() {
+            group.chain_id = 31337;
+        }
+        let backup = config.rpc_groups.get_mut("alchemy").context("A")?;
+        backup.policy.attempt_timeout_ms = 1000;
+        backup.policy.total_deadline_ms = 15_000;
+        let mut member = backup.members[0].clone();
+        member.id = "offline-backup".into();
+        member.url = "http://127.0.0.1:1".into();
+        backup.members.push(member);
+        let routes = config.route_set().map_err(anyhow::Error::msg)?;
+        // 0.6 stored only a height. 0.7 must acquire its first independent hash before progress.
+        db::initialize_cursor(&database.app_pool, 31337, 1, chrono::Utc::now()).await?;
+        let public = config.resolved_json().map_err(anyhow::Error::msg)?;
+        rpc_runtime::accept(&database.app_pool, &routes, &public)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let state = db::rpc::state(&database.app_pool, db::rpc::digest(&public));
+        let a = state
+            .load(31337, "alchemy", "cursor")
+            .await?
+            .context("A anchor")?;
+        let b = state
+            .load(31337, "quicknode", "cursor")
+            .await?
+            .context("B anchor")?;
+        ensure!(a == b && a.number == 1);
+        ensure!(
+            routes
+                .provider(31337, 0)?
+                .group()
+                .context("A client")?
+                .eligible()
+                == 1
+        );
+        drop(anvil);
+        // All members are down, but the SAME accepted config can restart degraded without
+        // lowering an anchor. A first acceptance of a new digest still fails.
+        let restarted = config.route_set().map_err(anyhow::Error::msg)?;
+        rpc_runtime::accept(&database.app_pool, &restarted, &public)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        ensure!(
+            restarted
+                .provider(31337, 0)?
+                .group()
+                .context("A")?
+                .eligible()
+                == 0
+        );
+        ensure!(db::get_cursor(&database.app_pool, 31337).await? == Some(1));
+        ensure!(state.load(31337, "alchemy", "cursor").await? == Some(a));
+        ensure!(
+            rpc_runtime::accept(&database.app_pool, &restarted, &format!("{public} "))
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
 }

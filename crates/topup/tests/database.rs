@@ -594,6 +594,12 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("restore_deposit_tombstones", &["SELECT", "INSERT"]),
     // Plus `UPDATE` of its discard columns only, checked below.
     ("restore_delivered_credits", &["SELECT", "INSERT"]),
+    ("rpc_config_acceptances", &["SELECT", "INSERT"]),
+    ("rpc_member_validations", &["SELECT", "INSERT"]),
+    ("rpc_chain_state", &["SELECT", "INSERT"]),
+    ("rpc_window_reviews", &["SELECT", "INSERT"]),
+    ("rpc_watermarks", &["SELECT", "INSERT", "UPDATE"]),
+    ("rpc_recoveries", &["SELECT"]),
     ("_sqlx_migrations", &["SELECT"]),
     ("accounts", OPERATIONAL),
     ("payment_settings_revisions", &["SELECT", "INSERT"]),
@@ -662,6 +668,17 @@ async fn application_role_privileges_match_the_documented_grants() -> Result<()>
                         granted == expected.contains(&privilege),
                         "topup_app {privilege} on {table}: granted={granted}"
                     );
+                }
+            }
+            for (table, columns) in [
+                ("rpc_member_validations", vec![("validated_at",true),("genesis_hash",false)]),
+                ("rpc_chain_state", vec![("frozen",true),("awaiting_anchor",true),("epoch",false),("recovery_pending",false)]),
+                ("rpc_window_reviews", vec![("reviewed_at",true),("reviewed_by",true),("request",false),("end_hash",false)]),
+            ] {
+                for (column, expected) in columns {
+                    let granted: bool = sqlx::query_scalar("SELECT has_column_privilege('topup_app', $1, $2, 'UPDATE')")
+                        .bind(format!("public.{table}")).bind(column).fetch_one(&context.owner_pool).await?;
+                    ensure!(granted == expected, "UPDATE of {table}.{column}: granted={granted}");
                 }
             }
             // A delivered credit is recorded once; only its discard is ever written.

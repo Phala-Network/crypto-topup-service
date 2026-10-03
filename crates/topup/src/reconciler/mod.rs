@@ -163,6 +163,9 @@ impl Reconciler {
     /// Check failures are reported in [`ReconciliationReport::failed_checks`]; the other checks
     /// still run. The `Result` is kept for callers of the library entry point.
     pub async fn run_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
+        crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+            .await
+            .map_err(ReconciliationError::Chain)?;
         Ok(self.run_checks(false).await)
     }
 
@@ -173,11 +176,17 @@ impl Reconciler {
     /// the restored ledger meanwhile.
     pub async fn post_restore_once(&self) -> Result<ReconciliationReport, ReconciliationError> {
         let lock = store::exclusive_lease_owner_lock(&self.pool).await?;
-        let report = self.run_checks(true).await;
+        let result = async {
+            crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+                .await
+                .map_err(ReconciliationError::Chain)?;
+            Ok(self.run_checks(true).await)
+        }
+        .await;
         if let Err(error) = lock.release().await {
             tracing::warn!(%error, "failed to release the post-restore lease-owner lock");
         }
-        Ok(report)
+        result
     }
 
     /// Runs one check without persisting its findings.
@@ -186,6 +195,9 @@ impl Reconciler {
     /// ledger, and `address_derivation` and `custody_balance` freeze a chain, exactly as a full
     /// round does.
     pub async fn check(&self, check: CheckName) -> Result<Vec<Finding>, ReconciliationError> {
+        crate::rpc_runtime::ensure_anchors(&self.pool, &self.routes)
+            .await
+            .map_err(ReconciliationError::Chain)?;
         let mut findings = Vec::new();
         self.run_check(check, &mut RoundHeads::new(), &mut findings)
             .await?;
@@ -482,11 +494,14 @@ impl Reconciler {
                 },
             )
             .await?;
+            report_unsupported_inflows(chain_id, committed.unsupported_inserted);
             for deposit in deposits {
-                if committed.inserted == 0 {
+                if !committed
+                    .inserted_positions
+                    .contains(&(deposit.tx_hash, deposit.receipt_log_index))
+                {
                     continue;
                 }
-                report_unsupported_inflows(chain_id, committed.unsupported_inserted);
                 findings.push(Finding::new(
                     CheckName::MissingDeposit,
                     subjects([

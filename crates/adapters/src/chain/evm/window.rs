@@ -59,9 +59,15 @@ pub async fn read<R: ChainReader + ?Sized>(
     request: &WindowRequest,
 ) -> Result<WindowResult, ChainError> {
     let transfers = if request.tokens.is_empty() {
-        reader
-            .transfer_logs_to(&request.recipients, request.from, request.to)
-            .await?
+        let mut logs = Vec::new();
+        for recipients in request.recipients.chunks(super::MAX_ADDRESSES_PER_REQUEST) {
+            logs.extend(
+                reader
+                    .transfer_logs_to(recipients, request.from, request.to)
+                    .await?,
+            );
+        }
+        logs
     } else {
         reader
             .token_transfers(
@@ -140,10 +146,13 @@ impl FinalizedReader {
                         _=>Failure::Malformed,
                     })?;
                     if group.head(index,tag,deadline).await?.number<request.to {return Err(Failure::Stale);}
-                    for log in &result.transfers {
-                        let value=group.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",log.block_number),false]}),deadline).await?;
+                    let blocks = result.transfers.iter().map(|log| (log.block_number, log.block_hash))
+                        .chain(result.factory_logs.iter().map(|log| (log.block_number, log.block_hash)))
+                        .collect::<BTreeSet<_>>();
+                    for (number, hash) in blocks {
+                        let value=group.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{number:x}"),false]}),deadline).await?;
                         let canonical=HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
-                        if canonical.number!=log.block_number||canonical.hash!=format!("{:#x}",log.block_hash) {return Err(if request.finalized {Failure::Fork} else {Failure::Stale});}
+                        if canonical.number!=number||canonical.hash!=format!("{hash:#x}") {return Err(if request.finalized {Failure::Fork} else {Failure::Stale});}
                     }
                     let after=group.send(index,&anchor_request,deadline).await?;
                     let after=HeadAnchor::parse(after.get("result").ok_or(Failure::Malformed)?)?;
@@ -153,7 +162,10 @@ impl FinalizedReader {
                     Ok(result)
                 }.await;
                 match result {
-                    Ok(result) => return Ok(result),
+                    Ok(result) => {
+                        group.succeeded(index);
+                        return Ok(result);
+                    }
                     Err(error) => {
                         if error == Failure::Fork {
                             group.freeze().await?;

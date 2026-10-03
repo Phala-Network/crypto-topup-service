@@ -62,12 +62,14 @@ impl TryFrom<ScanAddressRecord> for ScanAddress {
 }
 
 /// Scanner writes committed atomically for one block range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScanCommit {
     /// Number of newly inserted deposits; duplicates are excluded.
     pub inserted: u64,
     /// Newly inserted deposits rejected as unsupported assets.
     pub unsupported_inserted: u64,
+    /// Transaction and receipt positions inserted by this transaction, excluding duplicates.
+    pub inserted_positions: Vec<(alloy_primitives::B256, u64)>,
 }
 
 async fn insert_rejected_event(
@@ -238,11 +240,13 @@ async fn insert_deposits_in(
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut inserted = 0_u64;
     let mut unsupported_inserted = 0_u64;
+    let mut inserted_positions = Vec::new();
     for deposit in deposits {
         if insert_scanned_deposit_in(transaction, deposit, evidence)
             .await?
             .is_some()
         {
+            inserted_positions.push((deposit.tx_hash, deposit.receipt_log_index));
             inserted = inserted.checked_add(1).ok_or_else(|| {
                 sqlx::Error::Protocol("inserted deposit count overflowed u64".to_owned())
             })?;
@@ -256,6 +260,7 @@ async fn insert_deposits_in(
     Ok(ScanCommit {
         inserted,
         unsupported_inserted,
+        inserted_positions,
     })
 }
 

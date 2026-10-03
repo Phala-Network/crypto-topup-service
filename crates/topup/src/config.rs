@@ -231,18 +231,29 @@ impl Config {
     /// otherwise, and URL-safe. Errors name the variable, never a value.
     pub fn check_secrets(&self, key: impl Fn(&str) -> Option<String>) -> Result<(), String> {
         let mut seen = BTreeMap::new();
+        let mut scopes = BTreeMap::new();
         for group in self.rpc_groups.values() {
             for member in &group.members {
                 let name = member
                     .sealed_key
                     .clone()
                     .unwrap_or_else(|| key_environment(&member.id));
-                let value = key(&name);
+                let value = key(&name).filter(|v| !v.is_empty());
                 ProviderUrl::parse(&member.url)
                     .map_err(str::to_owned)?
                     .resolve(value.as_deref())
                     .map_err(|e| format!("{name} {e} (member {})", member.id))?;
                 if let Some(value) = value {
+                    let credential = (member.company.clone(), value.clone());
+                    let budget = (member.account_budget.clone(), member.key_budget.clone());
+                    if scopes
+                        .insert(credential, budget.clone())
+                        .is_some_and(|previous| previous != budget)
+                    {
+                        return Err(
+                            "resolved RPC credential aliases must share account/key budgets".into(),
+                        );
+                    }
                     let identity = (member.url.clone(), value);
                     if seen
                         .insert(identity, name.clone())

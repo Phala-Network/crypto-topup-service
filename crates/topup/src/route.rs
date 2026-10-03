@@ -452,21 +452,21 @@ mod tests {
                     "rpc_groups: { a: alchemy, b: quicknode }",
                     "rpc_groups: { a: alchemy, b: alchemy }",
                 ),
-                "chain.rpc_providers",
+                "chain.rpc_groups",
             ),
             (
                 VALID.replace(
                     "rpc_groups: { a: alchemy, b: quicknode }",
                     "rpc_groups: { a: \"\", b: \"\" }",
                 ),
-                "chain.rpc_providers",
+                "chain.rpc_groups",
             ),
             (
                 VALID.replace(
                     "rpc_groups: { a: alchemy, b: quicknode }",
                     "rpc_providers: [alchemy]",
                 ),
-                "chain.rpc_providers",
+                "rpc_providers",
             ),
             (
                 VALID.replace(

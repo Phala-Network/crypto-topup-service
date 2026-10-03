@@ -648,7 +648,7 @@ pub struct ChainSpec {
     /// Sanctions oracle; default [`default_sanctions_oracle`] for the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanctions_oracle: Option<Address>,
-    /// RPC provider ids; default [`DEFAULT_RPC_PROVIDERS`].
+    /// Explicit independent A/B group ids; no implicit defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(
         rename = "rpc_groups",

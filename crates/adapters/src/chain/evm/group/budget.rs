@@ -96,9 +96,11 @@ impl Budgets {
                     wake = wake.max(b.paused);
                 }
                 if wake <= Instant::now() {
+                    let mut denied = false;
                     for id in &ids {
                         let b = budgets.get(*id).ok_or("unknown RPC budget")?;
                         if let Err(until) = b.limiter.check() {
+                            denied = true;
                             wake = wake.max(
                                 Instant::now()
                                     .checked_add(until.wait_time_from(b.limiter.clock().now()))
@@ -106,7 +108,7 @@ impl Budgets {
                             );
                         }
                     }
-                    if wake <= Instant::now() {
+                    if !denied {
                         return Ok(());
                     }
                     for (id, previous) in snapshots {

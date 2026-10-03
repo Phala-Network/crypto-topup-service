@@ -102,7 +102,7 @@ pub async fn chain_is_blocked(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx
     let chain_id =
         i64::try_from(chain_id).map_err(|error| sqlx::Error::Encode(error.to_string().into()))?;
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM reconciliation_blocks WHERE scope = 'chain' AND chain_id = $1) OR COALESCE((SELECT frozen FROM rpc_chain_state WHERE chain_id=$1),false)",
+        "SELECT EXISTS(SELECT 1 FROM reconciliation_blocks WHERE scope = 'chain' AND chain_id = $1) OR COALESCE((SELECT frozen OR awaiting_anchor FROM rpc_chain_state WHERE chain_id=$1),false)",
     )
     .bind(chain_id)
     .fetch_one(pool)

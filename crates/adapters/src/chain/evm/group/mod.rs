@@ -148,6 +148,27 @@ pub enum Failure {
     Deadline,
 }
 impl Failure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Server => "server",
+            Self::Throttled => "throttled",
+            Self::Request => "request",
+            Self::Revert => "revert",
+            Self::Capability => "capability",
+            Self::Range => "range",
+            Self::Body => "body",
+            Self::Redirect => "redirect",
+            Self::Identity => "identity",
+            Self::Malformed => "malformed",
+            Self::Stale => "stale",
+            Self::Fork => "fork",
+            Self::Persistence => "persistence",
+            Self::Unclassified => "unclassified",
+            Self::Unavailable => "unavailable",
+            Self::Deadline => "deadline",
+        }
+    }
     pub(crate) fn retryable(self) -> bool {
         matches!(
             self,
@@ -230,9 +251,6 @@ pub fn classify(method: &str, reply: &transport::HttpReply) -> Option<Failure> {
         return Some(Failure::Server);
     }
     if error.is_some() {
-        if method == "eth_sendRawTransaction" && message.contains("already known") {
-            return None;
-        }
         return Some(Failure::Unclassified);
     }
     if !(200..300).contains(&status) {
@@ -259,20 +277,20 @@ impl HeadAnchor {
         let number = value
             .get("number")
             .and_then(Value::as_str)
-            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .and_then(|s| u64::from_str_radix(s.strip_prefix("0x")?, 16).ok())
             .ok_or(Failure::Malformed)?;
         let hash = value
             .get("hash")
             .and_then(Value::as_str)
-            .filter(|s| s.parse::<alloy::primitives::B256>().is_ok())
+            .and_then(|s| s.parse::<alloy::primitives::B256>().ok())
             .ok_or(Failure::Malformed)?
-            .to_owned();
+            .to_string();
         let parent_hash = value
             .get("parentHash")
             .and_then(Value::as_str)
-            .filter(|s| s.parse::<alloy::primitives::B256>().is_ok())
+            .and_then(|s| s.parse::<alloy::primitives::B256>().ok())
             .ok_or(Failure::Malformed)?
-            .to_owned();
+            .to_string();
         Ok(Self {
             number,
             hash,
@@ -301,6 +319,7 @@ pub trait WatermarkStore: Send + Sync {
     ) -> Result<(), Failure>;
 }
 /// Resolved member; formatting never reveals its endpoint.
+#[derive(Clone)]
 pub struct Member {
     /// Stable log-safe identifier.
     pub id: String,
@@ -334,6 +353,7 @@ struct Health {
     quarantined: bool,
     score: i64,
     unsupported: BTreeSet<String>,
+    probe_after: Option<Instant>,
 }
 /// Shared group state. Cloned clients share heads, eligibility and budgets.
 pub struct RpcGroup {
@@ -384,6 +404,60 @@ impl RpcGroup {
         metrics::register(&group);
         Ok(group)
     }
+    /// Isolated, uncached preflight view sharing the real credentials and account/key budgets.
+    pub fn probe_copy(&self) -> Result<Arc<Self>, Failure> {
+        Ok(Arc::new(Self {
+            id: self.id.clone(),
+            chain: self.chain,
+            policy: self.policy.clone(),
+            members: self.members.clone(),
+            budgets: self.budgets.clone(),
+            http: self.http.clone(),
+            health: Mutex::new(self.members.iter().map(|_| Health::default()).collect()),
+            heads: tokio::sync::Mutex::new(BTreeMap::new()),
+            store: RwLock::new(None),
+        }))
+    }
+    /// Redirect/auth quarantine is never readmitted by recovery probing.
+    pub fn quarantined(&self, index: usize) -> bool {
+        self.health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .is_some_and(|h| h.quarantined)
+    }
+    /// Checks probe evidence against persisted floors without publishing a probe head.
+    pub async fn validate_probe(&self, index: usize, probe: &RpcGroup) -> Result<(), Failure> {
+        let store = self
+            .store
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(store) = store else {
+            return Ok(());
+        };
+        let heads = probe.heads.lock().await.clone();
+        for tag in ["latest", "finalized"] {
+            let current = heads.get(tag).ok_or(Failure::Malformed)?;
+            for floor in [tag, "cursor"] {
+                if let Some(previous) = store.load(self.chain, &self.id, floor).await? {
+                    if current.number < previous.number {
+                        return Err(Failure::Stale);
+                    }
+                    if tag == "finalized" {
+                        let value=probe.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",previous.number),false]}),Instant::now().checked_add(Duration::from_millis(self.policy.total_deadline_ms)).unwrap_or_else(Instant::now)).await?;
+                        let canonical =
+                            HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
+                        if canonical.number != previous.number || canonical.hash != previous.hash {
+                            store.freeze(self.chain).await?;
+                            return Err(Failure::Fork);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     /// Installs durable state before runtime requests start.
     pub fn set_store(&self, store: Arc<dyn WatermarkStore>) {
         *self.store.write().unwrap_or_else(PoisonError::into_inner) = Some(store);
@@ -397,9 +471,18 @@ impl RpcGroup {
             .get_mut(index)
         {
             h.eligible = ok;
-            h.quarantined = false;
+            if ok {
+                h.quarantined = false;
+            }
             h.failures = 0;
         }
+    }
+    /// Shared durable safety store, for stopped-service cursor anchoring.
+    pub fn watermark_store(&self) -> Option<Arc<dyn WatermarkStore>> {
+        self.store
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
     /// Number of independently validated serving candidates.
     pub fn eligible(&self) -> usize {
@@ -463,6 +546,7 @@ impl RpcGroup {
     }
     /// Feeds every failed attempt back into selection.
     pub fn failed(&self, index: usize, error: Failure) {
+        metrics::event(self, index, error.code(), 1);
         if let Some(h) = self
             .health
             .lock()
@@ -472,6 +556,10 @@ impl RpcGroup {
             if matches!(error, Failure::Redirect | Failure::Identity) {
                 h.quarantined = true;
                 h.eligible = false;
+            } else if error == Failure::Capability {
+                h.recoveries = 0;
+                h.probe_after =
+                    Instant::now().checked_add(Duration::from_millis(self.policy.cooldown_ms));
             } else if matches!(
                 error,
                 Failure::Transport | Failure::Server | Failure::Malformed | Failure::Stale
@@ -487,6 +575,17 @@ impl RpcGroup {
                     );
                 }
             }
+        }
+    }
+    /// Only a complete successful operation clears consecutive failures.
+    pub fn succeeded(&self, index: usize) {
+        if let Some(h) = self
+            .health
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(index)
+        {
+            h.failures = 0;
         }
     }
     /// Pinned-member send for preflight and window operations; no selection, redirects or cache.
@@ -505,10 +604,18 @@ impl RpcGroup {
             store.blocked(self.chain).await?;
         }
         let member = self.members.get(index).ok_or(Failure::Unavailable)?;
-        self.budgets
+        let waiting = Instant::now();
+        let admission = self
+            .budgets
             .admit(&member.account, &member.key, deadline)
-            .await
-            .map_err(|_| Failure::Deadline)?;
+            .await;
+        metrics::event(
+            self,
+            index,
+            "budget_wait",
+            u64::try_from(waiting.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
+        admission.map_err(|_| Failure::Deadline)?;
         if Instant::now() >= deadline {
             return Err(Failure::Deadline);
         }
@@ -545,15 +652,24 @@ impl RpcGroup {
             None
         };
         if let Some(error) = rule.map(|r| r.class.failure()).or(default) {
-            if error == Failure::Capability {
-                if let Some(h) = self
+            if matches!(error, Failure::Identity | Failure::Redirect)
+                && let Some(h) = self
                     .health
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get_mut(index)
-                {
-                    h.unsupported.insert(method.to_owned());
-                }
+            {
+                h.quarantined = true;
+                h.eligible = false;
+            }
+            if error == Failure::Capability
+                && let Some(h) = self
+                    .health
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_mut(index)
+            {
+                h.unsupported.insert(method.to_owned());
             }
             if error == Failure::Throttled {
                 self.budgets.pause(
@@ -587,11 +703,57 @@ impl RpcGroup {
     ) -> Pin<Box<dyn Future<Output = Result<Value, Failure>> + Send + 'a>> {
         Box::pin(async move {
             match self.send(index, request, deadline).await {
-                Err(Failure::Body) => {
+                Err(error @ (Failure::Body | Failure::Range)) => {
                     let filter = request
                         .get("params")
                         .and_then(|p| p.get(0))
                         .ok_or(Failure::Request)?;
+                    if error == Failure::Range {
+                        let number = |field: &str| {
+                            filter
+                                .get(field)
+                                .and_then(Value::as_str)
+                                .and_then(|s| u64::from_str_radix(s.strip_prefix("0x")?, 16).ok())
+                                .ok_or(Failure::Range)
+                        };
+                        let from = number("fromBlock")?;
+                        let to = number("toBlock")?;
+                        if from >= to {
+                            return Err(Failure::Range);
+                        }
+                        let mid = from
+                            .checked_add(
+                                to.saturating_sub(from)
+                                    .checked_div(2)
+                                    .ok_or(Failure::Range)?,
+                            )
+                            .ok_or(Failure::Range)?;
+                        let mut left = request.clone();
+                        let mut right = request.clone();
+                        *left
+                            .pointer_mut("/params/0/toBlock")
+                            .ok_or(Failure::Range)? = json!(format!("0x{mid:x}"));
+                        *right
+                            .pointer_mut("/params/0/fromBlock")
+                            .ok_or(Failure::Range)? =
+                            json!(format!("0x{:x}", mid.checked_add(1).ok_or(Failure::Range)?));
+                        let left = self.send_logs(index, &left, deadline).await?;
+                        let right = self.send_logs(index, &right, deadline).await?;
+                        let mut logs = left
+                            .get("result")
+                            .and_then(Value::as_array)
+                            .ok_or(Failure::Malformed)?
+                            .clone();
+                        logs.extend(
+                            right
+                                .get("result")
+                                .and_then(Value::as_array)
+                                .ok_or(Failure::Malformed)?
+                                .iter()
+                                .cloned(),
+                        );
+                        return Ok(json!({"jsonrpc":"2.0","id":request.get("id"),"result":logs}));
+                    }
                     let mut path = None;
                     if filter
                         .get("address")
@@ -600,13 +762,13 @@ impl RpcGroup {
                     {
                         path = Some("/params/0/address".to_owned());
                     }
-                    if path.is_none() {
-                        if let Some(topics) = filter.get("topics").and_then(Value::as_array) {
-                            for (i, topic) in topics.iter().enumerate() {
-                                if topic.as_array().is_some_and(|a| a.len() > 1) {
-                                    path = Some(format!("/params/0/topics/{i}"));
-                                    break;
-                                }
+                    if path.is_none()
+                        && let Some(topics) = filter.get("topics").and_then(Value::as_array)
+                    {
+                        for (i, topic) in topics.iter().enumerate() {
+                            if topic.as_array().is_some_and(|a| a.len() > 1) {
+                                path = Some(format!("/params/0/topics/{i}"));
+                                break;
                             }
                         }
                     }
@@ -666,10 +828,10 @@ impl RpcGroup {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        if let Some(store) = &store {
-            if let Some(previous) = store.load(self.chain, &self.id, tag).await? {
-                heads.insert(tag.to_owned(), previous);
-            }
+        if let Some(store) = &store
+            && let Some(previous) = store.load(self.chain, &self.id, tag).await?
+        {
+            heads.insert(tag.to_owned(), previous);
         }
         if let Some(store) = &store
             && let Some(cursor) = store.load(self.chain, &self.id, "cursor").await?
@@ -680,7 +842,7 @@ impl RpcGroup {
             if tag == "finalized" {
                 let value=self.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",cursor.number),false]}),deadline).await?;
                 let canonical = HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
-                if canonical.hash != cursor.hash {
+                if canonical.number != cursor.number || canonical.hash != cursor.hash {
                     store.freeze(self.chain).await?;
                     return Err(Failure::Fork);
                 }
@@ -697,7 +859,7 @@ impl RpcGroup {
                     let v=self.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",previous.number),false]}),deadline).await?;
                     HeadAnchor::parse(v.get("result").ok_or(Failure::Malformed)?)?
                 };
-                if canonical.hash != previous.hash {
+                if canonical.number != previous.number || canonical.hash != previous.hash {
                     if let Some(store) = &store {
                         store.freeze(self.chain).await?;
                     }
@@ -757,14 +919,19 @@ impl RpcGroup {
                     h.until = None;
                     h.failures = 0;
                     h.unsupported.clear();
+                    h.probe_after = None;
                 }
             } else {
                 h.recoveries = 0;
-                h.until = Some(
+                // Delay full probes without removing unrelated serving capabilities.
+                h.probe_after = Some(
                     Instant::now()
                         .checked_add(Duration::from_millis(self.policy.cooldown_ms))
                         .unwrap_or_else(Instant::now),
                 );
+                if !h.eligible {
+                    h.until = h.probe_after;
+                }
             }
         }
     }
@@ -775,7 +942,10 @@ impl RpcGroup {
             .unwrap_or_else(PoisonError::into_inner)
             .get(index)
             .is_some_and(|h| {
-                !h.eligible && !h.quarantined && h.until.is_none_or(|t| t <= Instant::now())
+                (!h.eligible || !h.unsupported.is_empty())
+                    && !h.quarantined
+                    && h.until.is_none_or(|t| t <= Instant::now())
+                    && h.probe_after.is_none_or(|t| t <= Instant::now())
             })
     }
     /// Executes a bounded request through Tower retry.
@@ -850,17 +1020,20 @@ impl Service<Operation> for Attempt {
     fn call(&mut self, request: Operation) -> Self::Future {
         let group = self.0.clone();
         Box::pin(async move {
-            let index = {
-                let mut tried = request.tried.lock().unwrap_or_else(PoisonError::into_inner);
-                let i = group.select(&tried, None)?;
-                tried.insert(i);
-                i
-            };
             let method = request
                 .value
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let index = {
+                let mut tried = request.tried.lock().unwrap_or_else(PoisonError::into_inner);
+                let index = group.select_for(&tried, None, Some(method)).or_else(|_| {
+                    tried.clear();
+                    group.select_for(&tried, None, Some(method))
+                })?;
+                tried.insert(index);
+                index
+            };
             let tag = if method == "eth_blockNumber" {
                 Some("latest")
             } else if method == "eth_getBlockByNumber" {
@@ -889,6 +1062,8 @@ impl Service<Operation> for Attempt {
             };
             if let Err(e) = &result {
                 group.failed(index, *e);
+            } else {
+                group.succeeded(index);
             }
             result
         })

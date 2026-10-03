@@ -494,6 +494,29 @@ async fn run_restore_check(
     let pool = connect_owner("restore-check", 4)
         .await
         .context("failed to connect to the restored database")?;
+    topup::rpc_runtime::preflight(&routes)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    topup::rpc_runtime::verify_persisted_genesis(&pool, &routes)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let config = load_config(&args.config)?;
+    let rpc_state = topup::db::rpc::state(
+        &pool,
+        topup::db::rpc::digest(
+            &config
+                .resolved_json()
+                .map_err(anyhow::Error::msg)?
+                .to_string(),
+        ),
+    );
+    for chain in routes.chain_ids() {
+        for role in 0..2 {
+            if let Some(group) = routes.provider(chain, role)?.group() {
+                group.set_store(rpc_state.clone());
+            }
+        }
+    }
     let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
         .context("failed to configure the post-restore reconciler")?;
     let expectations = topup::restore::RestoreExpectations {
@@ -806,10 +829,17 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     });
     tracing::info!(bind = %args.bind, "API listening");
 
+    let recovery_digest =
+        topup::db::rpc::digest(&config.resolved_json().map_err(anyhow::Error::msg)?);
     let recovery_pool = pool.clone();
     let recovery_routes = Arc::clone(&routes);
     tasks.spawn("RPC recovery probes", move |cancellation| {
-        topup::rpc_runtime::recover_members(recovery_pool, recovery_routes, cancellation)
+        topup::rpc_runtime::recover_members(
+            recovery_pool,
+            recovery_routes,
+            cancellation,
+            recovery_digest,
+        )
     });
     let scanner_pool = pool.clone();
     let scanner_routes = Arc::clone(&routes);
@@ -1129,6 +1159,29 @@ async fn reconcile(args: &ReconcileArgs) -> anyhow::Result<ExitCode> {
             "recording is held for the payment settings cutover; resume it with POST \
              /v1/admin/recording/resume first"
         );
+    }
+    topup::rpc_runtime::preflight(&routes)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    topup::rpc_runtime::verify_persisted_genesis(&pool, &routes)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let config = load_config(&args.config)?;
+    let rpc_state = topup::db::rpc::state(
+        &pool,
+        topup::db::rpc::digest(
+            &config
+                .resolved_json()
+                .map_err(anyhow::Error::msg)?
+                .to_string(),
+        ),
+    );
+    for chain in routes.chain_ids() {
+        for role in 0..2 {
+            if let Some(group) = routes.provider(chain, role)?.group() {
+                group.set_store(rpc_state.clone());
+            }
+        }
     }
     let reconciler = topup::reconciler::Reconciler::from_routes(pool.clone(), Arc::new(routes))
         .context("failed to configure reconciler")?;

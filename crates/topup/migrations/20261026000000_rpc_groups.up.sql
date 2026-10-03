@@ -15,6 +15,7 @@ CREATE TABLE rpc_member_validations (
 CREATE TABLE rpc_chain_state (
     chain_id bigint PRIMARY KEY,
     frozen boolean NOT NULL DEFAULT false,
+    awaiting_anchor boolean NOT NULL DEFAULT false,
     recovery_pending boolean NOT NULL DEFAULT false,
     reason text,
     epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0)
@@ -58,4 +59,11 @@ CREATE TABLE rpc_recoveries (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 GRANT SELECT, INSERT, UPDATE ON rpc_config_acceptances, rpc_member_validations, rpc_chain_state, rpc_watermarks, rpc_window_reviews TO topup_app;
-GRANT SELECT, INSERT ON rpc_recoveries TO topup_app;
+GRANT SELECT ON rpc_recoveries TO topup_app;
+REVOKE INSERT ON rpc_recoveries FROM topup_app;
+-- The 0.4 tenancy migration grants default CRUD: revoke destructive/immutable writes explicitly.
+REVOKE DELETE ON rpc_config_acceptances, rpc_member_validations, rpc_chain_state, rpc_watermarks, rpc_window_reviews, rpc_recoveries FROM topup_app;
+REVOKE UPDATE ON rpc_config_acceptances, rpc_member_validations, rpc_chain_state, rpc_window_reviews, rpc_recoveries FROM topup_app;
+GRANT UPDATE (validated_at) ON rpc_member_validations TO topup_app;
+GRANT UPDATE (frozen, reason, awaiting_anchor) ON rpc_chain_state TO topup_app;
+GRANT UPDATE (reviewed_at, reviewed_by) ON rpc_window_reviews TO topup_app;

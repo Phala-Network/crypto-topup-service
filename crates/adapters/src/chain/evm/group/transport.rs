@@ -44,7 +44,7 @@ pub async fn send(client: &Client, url: &url::Url, body: &Value) -> Result<HttpR
                     .and_then(|d| d.duration_since(SystemTime::now()).ok())
             })
         });
-    if status.is_redirection() {
+    if status.is_redirection() || matches!(status.as_u16(), 401 | 403 | 408 | 413) {
         return Ok(HttpReply {
             status: status.as_u16(),
             retry_after,
@@ -55,7 +55,7 @@ pub async fn send(client: &Client, url: &url::Url, body: &Value) -> Result<HttpR
         .content_length()
         .is_some_and(|size| size > u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX))
     {
-        return Err(Failure::Malformed);
+        return bounded_reply(status, retry_after);
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| Failure::Transport)? {
@@ -64,7 +64,7 @@ pub async fn send(client: &Client, url: &url::Url, body: &Value) -> Result<HttpR
             .checked_add(chunk.len())
             .is_none_or(|n| n > MAX_BODY_BYTES)
         {
-            return Err(Failure::Malformed);
+            return bounded_reply(status, retry_after);
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -76,5 +76,16 @@ pub async fn send(client: &Client, url: &url::Url, body: &Value) -> Result<HttpR
         status: status.as_u16(),
         retry_after,
         body,
+    })
+}
+
+fn bounded_reply(status: StatusCode, retry_after: Option<Duration>) -> Result<HttpReply, Failure> {
+    if status.is_success() {
+        return Err(Failure::Malformed);
+    }
+    Ok(HttpReply {
+        status: status.as_u16(),
+        retry_after,
+        body: Value::Null,
     })
 }

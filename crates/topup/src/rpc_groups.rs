@@ -101,6 +101,14 @@ pub fn validate(
             return Err("invalid RPC group id/member count".to_owned());
         }
         group.policy.validate().map_err(str::to_owned)?;
+        if group
+            .policy
+            .rpc_error_rules
+            .iter()
+            .any(|rule| !group.members.iter().any(|m| m.company == rule.company))
+        {
+            return Err("RPC error rule company has no member in its group".into());
+        }
         let mut identities = BTreeSet::new();
         for member in &group.members {
             if !name(&member.id)
@@ -204,11 +212,28 @@ pub fn clients(
 ) -> Result<BTreeMap<String, Arc<EvmClient>>, String> {
     let budgets = Arc::new(Budgets::new(budgets).map_err(str::to_owned)?);
     let mut clients = BTreeMap::new();
+    let mut credentials = BTreeMap::new();
     for (id, spec) in groups {
         let mut members = Vec::new();
         for m in &spec.members {
             let template = ProviderUrl::parse(&m.url).map_err(str::to_owned)?;
-            let secret = m.sealed_key.as_deref().and_then(&key);
+            let secret = m
+                .sealed_key
+                .as_deref()
+                .and_then(&key)
+                .filter(|v| !v.is_empty());
+            if let Some(secret) = &secret {
+                let identity = (m.company.clone(), secret.clone());
+                let scopes = (m.account_budget.clone(), m.key_budget.clone());
+                if credentials
+                    .insert(identity, scopes.clone())
+                    .is_some_and(|previous| previous != scopes)
+                {
+                    return Err(
+                        "resolved RPC credential aliases must share account/key budgets".into(),
+                    );
+                }
+            }
             let url = template
                 .resolve(secret.as_deref())
                 .map_err(|e| format!("RPC member {} key {e}", m.id))?;
