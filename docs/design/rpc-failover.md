@@ -11,7 +11,7 @@ Tower timeout/retry middleware, governor budgets and the existing member Countin
 Implement two deterministic selectors plus application safety checks; no programmable
 policy engine, hedging or response cache.
 
-Today `chain.rpc_providers` accepts more than two ids but runtime uses only positions 0
+In 0.6.0, `chain.rpc_providers` accepts more than two ids but runtime uses only positions 0
 and 1. Each id has one attested URL and an optional sealed `TOPUP_RPC_<ID>_KEY`.
 See [RPC providers](../../deploy/README.md#rpc-providers),
 [usage accounting](../../deploy/README.md#measuring-rpc-usage), architecture
@@ -381,8 +381,9 @@ procedure above, not ordinary config rollback. This design authorizes no live op
 
 Staging starts with singleton Tenderly A and PublicNode B on Sepolia and Base Sepolia,
 preserving four existing member ids, route versions, sealed-name conventions and cursors.
-Singletons introduce the group client without upstream redundancy. Rehearse locally, then
-ship through a separate implementation PR and reviewed staging release. Add reviewed
+Singletons introduce the group client without upstream redundancy. This PR includes the
+implementation and singleton config migration; rehearse locally before a reviewed staging
+release. Add reviewed
 independent backup companies later (for example Alchemy only in A, Infura only in B), with
 capability probes and shared account/key budgets. Observe a full finality/reconciliation
 cycle, replay coverage and usage before promotion. Same-company keys provide quota
