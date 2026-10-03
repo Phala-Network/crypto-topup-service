@@ -98,9 +98,14 @@ contract ForwarderFactory is ReentrancyGuardTransient {
                 return;
             }
         }
+        // Zero is deliberately skipped; any positive balance is flushed, with no target equality.
+        // slither-disable-next-line incorrect-equality
         if (balance == 0) return;
 
         if (forwarder.code.length == 0) {
+            // The address was computed with the identical implementation, args and salt above.
+            // OpenZeppelin reverts if CREATE2 fails; its returned address adds no information.
+            // slither-disable-next-line unused-return
             Clones.cloneDeterministicWithImmutableArgs(address(implementation), args, salt);
             // forge-lint: disable-next-line(reentrancy-events)
             emit ForwarderCreated(salt, forwarder, treasury);
@@ -132,6 +137,8 @@ contract ForwarderFactory is ReentrancyGuardTransient {
         // forge-lint: disable-next-line(require-revert-in-loop)
         if (gasleft() < gasLimit + gasLimit / 63 + CALL_GAS_RESERVE) revert InsufficientGas();
         uint256 size;
+        // Call copies no return data; gas is capped and returndata is bounded below.
+        // slither-disable-next-line assembly
         assembly ("memory-safe") {
             switch isStatic
             case 0 { success := call(gasLimit, target, 0, add(data, 0x20), mload(data), 0, 0) }
@@ -150,6 +157,8 @@ contract ForwarderFactory is ReentrancyGuardTransient {
 
     function _returnData(uint256 length) private pure returns (bytes memory data) {
         data = new bytes(length);
+        // Call copies no return data; gas is capped and returndata is bounded below.
+        // slither-disable-next-line assembly
         assembly ("memory-safe") {
             returndatacopy(add(data, 0x20), 0, length)
         }

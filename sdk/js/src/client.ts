@@ -3,6 +3,7 @@ import {
   retrieveQuote,
   type CheckoutOptions,
   type CheckoutSession,
+  type RetrieveQuoteOptions,
 } from "./checkout.js";
 import type { ClientQuote } from "./quote.js";
 
@@ -32,10 +33,15 @@ export class PhalaPay {
   }
 
   /** Reads the quote's public view once, refusing one whose address is not `expectedAddress`. */
-  retrieveQuote(clientSecret: string, expectedAddress: string): Promise<ClientQuote> {
+  retrieveQuote(
+    clientSecret: string,
+    expectedAddress: string,
+    options: Pick<RetrieveQuoteOptions, "signal" | "requestTimeout"> = {},
+  ): Promise<ClientQuote> {
     return retrieveQuote({
       clientSecret,
       expectedAddress,
+      ...options,
       apiBase: this.apiBase,
       ...this.#fetchOption(),
     });
@@ -44,7 +50,7 @@ export class PhalaPay {
   /** Follows the quote until it is credited, rejected, reversed, canceled, or expired. */
   checkout(
     clientSecret: string,
-    options: Pick<CheckoutOptions, "expectedAddress" | "pollInterval">,
+    options: Pick<CheckoutOptions, "expectedAddress" | "pollInterval" | "signal" | "requestTimeout">,
   ): CheckoutSession {
     return createCheckout({
       clientSecret,

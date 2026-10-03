@@ -73,6 +73,7 @@ from topup_sdk.addresses import same_address
 
 from .config import EVM_ADDRESS, MissingProductKeyError, ProductConfig
 from .ledger import ORDER_FLOW_CODE, DepositView, ProductLedger
+from .transport import DeadlineTransport
 
 LOG = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ class ApiRecorder(httpx.BaseTransport):
     the developer view, with the API key redacted to its prefix and client secrets masked."""
 
     def __init__(self, inner: httpx.BaseTransport | None = None) -> None:
-        self._inner = inner or httpx.HTTPTransport()
+        self._inner = inner or DeadlineTransport()
         self._local = threading.local()
 
     @contextmanager
@@ -204,7 +205,9 @@ class DemoConsole:
         self.web_origin = config.web_origin
         self.secure_cookie = urlsplit(config.public_url).scheme == "https"
         self.recorder = recorder or ApiRecorder()
-        self._http = http or httpx.Client(timeout=10, follow_redirects=False)
+        self._http = http or httpx.Client(
+            timeout=5, follow_redirects=False, transport=DeadlineTransport()
+        )
         self._clock = clock
         self._client: TopupClient | None = None
         self._lock = threading.Lock()
@@ -969,6 +972,8 @@ class DemoConsole:
                     forwarder=(self.config.factory, self.config.implementation),
                     treasuries=self.config.treasuries(),
                     transport=self.recorder,
+                    timeout=5,
+                    max_attempts=1,
                 )
             return self._client
 

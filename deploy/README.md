@@ -52,7 +52,7 @@ key, and the database passwords: that is a key migration, not an image bump.
 In the operator's environment repository ([self-hosting, "Your environment
 repository"](../docs/self-hosting.md#2-your-environment-repository)); Phala's is this repository,
 through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workflows run on
-`ubuntu-latest` unless the repository variable `CI_RUNNER` names another runner.
+GitHub-hosted `ubuntu-latest` runners.
 
 1. **Environments.** Repository Settings > Environments: `production` and, for a pre-production
    instance with test routes only, `staging` (the names Deploy offers), deployment branches `main`
@@ -105,15 +105,26 @@ which the SDKs share ([CONTRIBUTING.md, "Releasing"](../CONTRIBUTING.md#releasin
 ruleset restricting creation, update, and deletion to admins, and immutable releases, so a
 published `v<version>` always names the same commit and assets.
 
+CI runs the real-service `make cvm-rehearsal` on every pull request and push to main, and again
+before Release builds anything. It asserts a credited payment and an acknowledged, signed event
+redelivery with the receiver's credit unchanged. No live deployment or production credentials
+are involved; the existing rehearsal uses public HTTPS price sources.
+
 The tag runs [Release](../.github/workflows/release.yml). It runs the whole CI workflow on the
 commit first, then builds each image on its own GitHub-hosted runner with
 [verify-image.sh](verify-image.sh) (Buildx v0.37.1 and BuildKit v0.33.0 pinned by digest; `make
 verify-image` rebuilds the same way), pushes it to `ghcr.io/phala-network/` tagged `v<version>`
 (public packages: CVMs pull without credentials), and smoke-tests and attests it by the digest
 BuildKit reports for the push (`--metadata-file`), never by the tag.
-`phala-pay` and `phala-pay-reference-product` are reproducible: the pushed build must have the
-digest of an earlier build, and anyone rebuilds it from the tag. `postgres-walg` is not (apt and
-dpkg timestamps): it has provenance only. A stable release then publishes the SDKs at its version,
+All three images are reproducible: the pushed build must have the digest of an earlier build,
+and anyone rebuilds it from the tag. `postgres-walg` pins the Debian snapshot and direct package
+versions, removes apt/dpkg timestamp logs and ldconfig's auxiliary cache, and uses BuildKit's
+filesystem timestamp normalization. gosu and WAL-G are rebuilt with a pinned, patched Go
+toolchain and dependencies; WAL-G keeps libsodium encryption and Brotli/LZO restore support.
+After comparison, Trivy scans each final digest and generates
+an SPDX SBOM; `actions/attest-sbom` signs it and attaches it to the digest in GHCR, alongside build
+provenance. [verify-release.sh](verify-release.sh) requires both attestations with the release
+workflow identity, source commit, and GitHub-hosted runner constraints. A stable release then publishes the SDKs at its version,
 `@phala/pay` to npm and `phala-pay` to PyPI, with trusted publishing. The GitHub release's assets,
 each attested, are:
 
@@ -131,7 +142,8 @@ each attested, are:
 hand ([self-hosting, "Verify a release"](../docs/self-hosting.md#verify-a-release)). It stops at
 the first failure: the tag's commit must be in `main`'s history, the assets must match
 `SHA256SUMS`, and every asset and image must have a provenance attestation of `release.yml` at the
-tag, on a GitHub-hosted runner, for that commit (`gh attestation verify --source-digest`).
+tag, on a GitHub-hosted runner, for that commit (`gh attestation verify --source-digest`). Each
+image must also have an SPDX 2.3 SBOM attestation under the same identity and source constraints.
 
 ### Deploy
 
@@ -838,7 +850,7 @@ its payment settings are held until it sends its complete configuration again wi
 - `make cvm-rehearsal`: a staging-shaped artifact against Anvil, Garage, and the simulator, from
   the unsealed boot through sealing, a configuration upgrade (topup recreated, PostgreSQL not),
   operator onboarding of the product's account, its treasury proof and webhook endpoint, and one
-  credited deposit.
+  credited deposit and a signed event redelivery without a second credit.
 - `make restore-drill`: [RESTORE.md](RESTORE.md#local-and-ci-drills).
 - `make sandbox-local`: the integrator sandbox ([sandbox/README.md](sandbox/README.md)).
 - `deploy/validate-compose.sh`: every committed environment rendered and checked against

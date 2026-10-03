@@ -216,7 +216,7 @@ async function installWallet(
  * PHA, which earns the demo merchant's bonus; test USDC is a stablecoin.
  */
 async function expectPaymentOptions(product: Locator) {
-  await expect(product.getByRole("combobox", { name: "Network" })).toContainText("Sepolia");
+  await expect(product.getByRole("combobox", { name: "Network" })).toHaveValue(String(sepolia.id));
   const token = product.getByRole("radiogroup", { name: "Token" });
   await expect(token.getByRole("radio")).toHaveCount(2);
   await expect(token.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();
@@ -229,10 +229,10 @@ async function expectPaymentOptions(product: Locator) {
 }
 
 /** Chooses a network in the product's network select. */
-async function chooseNetwork(page: Page, product: Locator, name: string) {
-  await product.getByRole("combobox", { name: "Network" }).click();
-  await page.getByRole("option", { name: new RegExp(`^${name}`) }).click();
-  await expect(product.getByRole("combobox", { name: "Network" })).toContainText(name);
+async function chooseNetwork(product: Locator, name: string) {
+  const select = product.getByRole("combobox", { name: "Network" });
+  await select.selectOption({ label: name });
+  await expect(select.locator("option:checked")).toHaveText(name);
 }
 
 /** Collects the page's console errors and CSP violations; the flows expect none. */
@@ -337,6 +337,7 @@ test("a quote: locked price, metadata, the merchant's sweep, and refunds that su
   await installWallet(page);
   const response = await page.goto(env("SITE_URL"));
   expect(response?.headers()["content-security-policy"]).toContain("default-src 'none'");
+  expect(response?.headers()["content-security-policy"]).not.toContain("'unsafe-inline'");
 
   // The headline, its call to deploy, the product (marked as a testnet demo) beside its backend
   // (the attestation in the backend's Trust tab), and a fresh demo account.
@@ -687,7 +688,7 @@ test("networks and tokens: USDC and USDT at $1.00 without a bonus, and PHA on Ba
   // Base Sepolia: its own token list and faucets; test PHA mints there, from the wallet on that
   // network, and a PHA quote there earns the bonus, at staging's rate, formatted.
   await product.getByRole("button", { name: "Add more credits" }).click();
-  await chooseNetwork(page, product, "Base Sepolia");
+  await chooseNetwork(product, "Base Sepolia testnet");
   const tokens = product.getByRole("radiogroup", { name: "Token" });
   await expect(tokens.getByRole("radio")).toHaveCount(2);
   await expect(tokens.getByRole("radio", { name: "Test PHA", exact: true })).toBeChecked();

@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 
-# Jobs run in parallel on the self-hosted runners; a new push to a PR supersedes its previous run.
+# Jobs run in parallel on GitHub-hosted runners; a new push to a PR supersedes its previous run.
 # Pushes to main queue instead, so every merge keeps a complete CI result.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -22,7 +22,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust
@@ -40,7 +40,7 @@ jobs:
   # The service and both SDKs share one version, the Cargo workspace version (CONTRIBUTING.md,
   # "Releasing").
   version:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The SDKs name the Cargo workspace version
@@ -51,7 +51,7 @@ jobs:
   # Every Markdown file, linted with .markdownlint-cli2.jsonc, and its relative links and anchors
   # checked offline with lychee.toml (CONTRIBUTING.md, "Documentation").
   docs:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Lint the Markdown
@@ -69,7 +69,7 @@ jobs:
   # instead of skipping when CI=true (set by Actions). The dstack simulator test still skips by
   # design: no simulator runs here.
   test:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     env:
       # The test harness's database owner and application login (crates/topup/tests/support).
       OWNER_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
@@ -118,7 +118,7 @@ jobs:
         run: cargo test --workspace --locked --all-features -- --nocapture
 
   sdk:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -130,7 +130,7 @@ jobs:
         run: make -C sdk/python check
 
   sdk-js:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdk/js
@@ -164,7 +164,7 @@ jobs:
   # and its demo calling the reference product's API cross-origin, end to end on Anvil against a
   # stand-in service (deploy/product/web/e2e/fake_service.py).
   demo:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The e2e deploys the real ForwarderFactory, which needs only OpenZeppelin to build.
@@ -206,30 +206,140 @@ jobs:
             deploy/product/web/test-results
           retention-days: 7
 
-  image:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        directory: [sdk/js, deploy/product/web, sdk/python, docs/reference, deploy/tools]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image
-        run: >-
-          docker build
-          --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          --tag phala-pay:ci .
+      - uses: ./.github/actions/security
+        with:
+          scan-ref: ${{ matrix.directory }}
+
+  slither:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.3
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.18"
+      - name: Analyze production contracts
+        working-directory: contracts
+        run: uvx --from slither-analyzer==0.11.6 slither . --filter-paths 'lib/|test/|script/' --exclude-dependencies --fail-pedantic
+
+  cvm-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: v1.8.3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+      # These disposable rehearsal images use a fixed epoch so documentation-only commits can
+      # reuse compiled layers. Release's clean rebuild comparison uses the commit timestamp.
+      - name: Build phala-pay with cached layers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: phala-pay:rehearsal
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay
+          cache-to: type=gha,scope=ci-phala-pay,mode=max
+      - name: Build postgres-walg with cached layers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile.postgres-walg
+          load: true
+          tags: postgres-walg:rehearsal
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-postgres-walg
+          cache-to: type=gha,scope=ci-postgres-walg,mode=max
+      - name: Build phala-pay-reference-product with cached layers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile.reference-product
+          load: true
+          tags: phala-pay-reference-product:rehearsal
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-reference-product
+          cache-to: type=gha,scope=ci-phala-pay-reference-product,mode=max
+      - name: Build phala-pay-dstack-simulator with cached layers
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/local/Dockerfile.dstack-simulator
+          load: true
+          tags: phala-pay-dstack-simulator:rehearsal
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-dstack-simulator
+          cache-to: type=gha,scope=ci-phala-pay-dstack-simulator,mode=max
+      - name: Rehearse a payment and signed webhook redelivery
+        env:
+          REHEARSAL_PREBUILT: "1"
+        run: make cvm-rehearsal
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+      - name: Build phala-pay
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: phala-pay:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay
+          cache-to: type=gha,scope=ci-phala-pay,mode=max
       - name: Smoke test runtime image
         run: docker run --rm phala-pay:ci topup --help
       - name: The webhook egress proxy refuses private, CGNAT, and IPv4-mapped targets
         run: deploy/tests/smokescreen.sh phala-pay:ci
-      - name: Build and smoke test the reference-product image
-        run: |
-          docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            -f deploy/Dockerfile.reference-product -t phala-pay-reference-product:ci .
-          docker run --rm phala-pay-reference-product:ci --help
-      # The Buildx version deploy/verify-image.sh requires; it builds on its own pinned BuildKit.
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build phala-pay-reference-product
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
-          version: v0.37.1
-          driver: docker
-          use: false
+          context: .
+          file: deploy/Dockerfile.reference-product
+          load: true
+          tags: phala-pay-reference-product:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-reference-product
+          cache-to: type=gha,scope=ci-phala-pay-reference-product,mode=max
+      - name: Smoke test the reference-product image
+        run: docker run --rm phala-pay-reference-product:ci --help
+      - uses: ./.github/actions/security
+        with:
+          scan-type: image
+          severity: HIGH,CRITICAL
+          image-ref: phala-pay:ci
+      - uses: ./.github/actions/security
+        with:
+          scan-type: image
+          severity: HIGH,CRITICAL
+          image-ref: phala-pay-reference-product:ci
       # Release publishes only after two matching builds; catch a nondeterministic
       # dependency here rather than at release. The phala-pay build is too slow to repeat per PR.
       - name: Check the reference-product image is reproducible
@@ -249,7 +359,7 @@ jobs:
             topup route validate --template /dev/stdin <"$route"
 
   deployment:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate the attested compose and the local, sandbox, and restore-drill overlays
@@ -271,6 +381,7 @@ jobs:
           deploy/tests/render.sh
           deploy/tests/render-route.sh
           deploy/tests/verify-release.sh
+          python3 .github/security/test-exceptions.py
           deploy/tests/phala-cvm-wait.sh
           deploy/tests/attested-compose.sh
           deploy/tests/verify-ingress-evidence.sh
@@ -303,8 +414,25 @@ jobs:
           TOPUP="$PWD/target/debug/topup" deploy/tests/deploy.sh
       - name: Check runbook commands against the CLI and OpenAPI
         run: make runbook-check
-      - name: Build postgres-walg image
-        run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+      - name: Build postgres-walg
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile.postgres-walg
+          load: true
+          tags: postgres-walg:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-postgres-walg
+          cache-to: type=gha,scope=ci-postgres-walg,mode=max
+      - uses: ./.github/actions/security
+        with:
+          scan-type: image
+          severity: HIGH,CRITICAL
+          image-ref: postgres-walg:ci
       - name: Check WAL-G runtime
         run: docker run --rm postgres-walg:ci wal-g --version
       - name: postgres-walg carries TLS roots for the object store
@@ -315,7 +443,7 @@ jobs:
         run: deploy/tests/walg-archive-switch.sh postgres-walg:ci
 
   contracts:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

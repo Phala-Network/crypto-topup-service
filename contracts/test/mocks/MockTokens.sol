@@ -269,6 +269,10 @@ contract UsdcLikeToken {
     mapping(address account => uint256) public balanceOf;
     uint256 public totalSupply;
 
+    function decimals() external pure returns (uint8) {
+        return 6;
+    }
+
     function mint(address account, uint256 amount) external {
         balanceOf[account] += amount;
         totalSupply += amount;
@@ -300,6 +304,10 @@ contract UsdtLikeToken {
     mapping(address account => bool) public isBlackListed;
     mapping(address account => uint256) public balanceOf;
     uint256 public totalSupply;
+
+    function decimals() external pure returns (uint8) {
+        return 6;
+    }
 
     function mint(address account, uint256 amount) external {
         balanceOf[account] += amount;

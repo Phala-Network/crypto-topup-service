@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { formatUnits } from "viem";
 import { networkName } from "../chains.js";
 import {
@@ -11,7 +11,7 @@ import {
 import { CheckoutError, pollDelay } from "../checkout.js";
 import { formatWait } from "../format.js";
 import { depositAddressTransfer, type DepositAddressDetails } from "../payment.js";
-import { STYLES, appearanceStyle, type Appearance } from "./appearance.js";
+import type { Appearance } from "./appearance.js";
 import { Field } from "./Field.js";
 import { QrCode } from "./QrCode.js";
 
@@ -55,6 +55,7 @@ export function DepositAddress({
   className,
 }: DepositAddressProps) {
   const { networks } = depositAddress;
+  const id = useId();
   const view = useClientView(clientSecret, apiBase, pollInterval ?? 3000);
   const payments = view?.payments ?? [];
   const [selectedChain, setSelectedChain] = useState(chainId ?? networks[0]?.chain_id);
@@ -76,49 +77,43 @@ export function DepositAddress({
     <div
       className={className === undefined ? "pp-root" : `pp-root ${className}`}
       data-theme={appearance?.theme ?? "light"}
-      style={appearanceStyle(appearance)}
     >
-      <style>{STYLES}</style>
       <p className="pp-subtitle">
         {depositAddress.address === null
           ? "Your deposit address for every supported token; it differs on some networks"
           : "One address for all supported tokens and networks"}
       </p>
       {networks.length > 1 && (
-        <div className="pp-tabs" role="tablist" aria-label="Network">
+        <fieldset className="pp-choices">
+          <legend>Network</legend>
           {networks.map((each) => (
-            <button
-              key={each.chain_id}
-              type="button"
-              role="tab"
-              className="pp-tab"
-              aria-selected={each.chain_id === network.chain_id}
-              onClick={() => {
-                setSelectedChain(each.chain_id);
-              }}
-            >
+            <label key={each.chain_id}>
+              <input
+                type="radio"
+                name={`${id}-network`}
+                checked={each.chain_id === network.chain_id}
+                onChange={() => setSelectedChain(each.chain_id)}
+              />
               {networkName(each.chain_id)}
-            </button>
+            </label>
           ))}
-        </div>
+        </fieldset>
       )}
       {network.assets.length > 1 && (
-        <div className="pp-tabs" role="tablist" aria-label="Token">
+        <fieldset className="pp-choices">
+          <legend>Token</legend>
           {network.assets.map((each) => (
-            <button
-              key={each.asset}
-              type="button"
-              role="tab"
-              className="pp-tab"
-              aria-selected={each.asset === token.asset}
-              onClick={() => {
-                setSelectedAsset(each.asset);
-              }}
-            >
+            <label key={each.asset}>
+              <input
+                type="radio"
+                name={`${id}-token`}
+                checked={each.asset === token.asset}
+                onChange={() => setSelectedAsset(each.asset)}
+              />
               {each.asset.toUpperCase()}
-            </button>
+            </label>
           ))}
-        </div>
+        </fieldset>
       )}
       <div className="pp-qr-panel">
         <QrCode value={token.payment_uri} label={`Deposit address for ${symbol} on ${name}`} />
@@ -161,13 +156,14 @@ function useClientView(
     if (clientSecret === undefined || apiBase === undefined) {
       return;
     }
+    const controller = new AbortController();
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     const load = async () => {
       let failure: CheckoutError | null = null;
       try {
-        const view = await retrieveDepositAddress({ clientSecret, apiBase });
+        const view = await retrieveDepositAddress({ clientSecret, apiBase, signal: controller.signal });
         failures = 0;
         if (!stopped) {
           setCurrent({ key, view });
@@ -187,6 +183,7 @@ function useClientView(
     void load();
     return () => {
       stopped = true;
+      controller.abort();
       clearTimeout(timer);
     };
   }, [key, clientSecret, apiBase, interval]);

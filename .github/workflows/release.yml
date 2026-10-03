@@ -13,9 +13,8 @@ name: Release
 # runner by deploy/verify-image.sh (Buildx v0.37.1 and the pinned BuildKit, as a local rebuild
 # uses), pushed tagged v<version>, and attested (actions/attest-build-provenance, also pushed to the
 # registry):
-# - phala-pay and phala-pay-reference-product are reproducible: the pushed build's digest must
-#   equal an earlier build's, and anyone rebuilds the same digest from the tag;
-# - postgres-walg is not (apt and dpkg record wall-clock times): built once, with provenance only.
+# All three pushed digests must equal an earlier build. Each final digest is scanned and gets
+# signed provenance and SPDX SBOM attestations.
 # `assets` then builds, checks, and attests the release assets: images.json (the repository@sha256
 # references by image name, deploy/render.sh's --images); the deploy kit
 # phala-pay-deploy-v<version>.tar.gz (deploy/build-kit.sh); phala-cloud-template.yml (the Phala
@@ -52,6 +51,12 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
+  codeql:
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      security-events: write
+
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -85,7 +90,7 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
   image:
-    needs: [ci, version]
+    needs: [ci, codeql, version]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
@@ -98,15 +103,12 @@ jobs:
         include:
           - name: phala-pay
             dockerfile: Dockerfile
-            mode: ""
             smoke: topup --help
           - name: postgres-walg
             dockerfile: deploy/Dockerfile.postgres-walg
-            mode: --once
             smoke: wal-g --version
           - name: phala-pay-reference-product
             dockerfile: deploy/Dockerfile.reference-product
-            mode: ""
             smoke: --help
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -130,19 +132,40 @@ jobs:
         id: publish
         env:
           DOCKERFILE: ${{ matrix.dockerfile }}
-          MODE: ${{ matrix.mode }}
           SMOKE: ${{ matrix.smoke }}
           IMAGE_REF_FILE: ${{ runner.temp }}/image.ref
           TMPDIR: ${{ runner.temp }}
         run: |
           repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}"
-          PUBLISH_IMAGE="$repository:$GITHUB_REF_NAME" deploy/verify-image.sh ${MODE:+"$MODE"}
+          PUBLISH_IMAGE="$repository:$GITHUB_REF_NAME" deploy/verify-image.sh
           ref=$(cat "$IMAGE_REF_FILE")
           read -ra smoke <<<"$SMOKE"
           docker run --rm --pull=always "$ref" "${smoke[@]}" >/dev/null
           { echo "name=$repository"; echo "digest=${ref#*@}"; } >>"$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/ref" && jq -n --arg name "${{ matrix.name }}" --arg ref "$ref" \
             '{($name): $ref}' >"$RUNNER_TEMP/ref/${{ matrix.name }}.json"
+      - uses: ./.github/actions/security
+        with:
+          scan-type: image
+          severity: HIGH,CRITICAL
+          image-ref: ${{ steps.publish.outputs.name }}@${{ steps.publish.outputs.digest }}
+      - name: Generate the final digest's SPDX SBOM after the equality check
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.75.0
+          scan-type: image
+          severity: HIGH,CRITICAL
+          image-ref: ${{ steps.publish.outputs.name }}@${{ steps.publish.outputs.digest }}
+          format: spdx-json
+          output: ${{ runner.temp }}/sbom.spdx.json
+          cache-dir: ${{ runner.temp }}/trivy-cache
+          timeout: 15m
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.publish.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.spdx.json
+          push-to-registry: true
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.publish.outputs.name }}
@@ -213,7 +236,7 @@ jobs:
   # The SDKs' checks and end-to-end tests ran in `ci`; this builds the sdist and wheel that
   # py-publish uploads, outside the job that can mint the publishing token.
   py-build:
-    needs: [ci, version]
+    needs: [ci, codeql, version]
     if: ${{ !contains(needs.version.outputs.version, '-') }}
     runs-on: ubuntu-latest
     steps:
