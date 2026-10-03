@@ -5727,6 +5727,7 @@ dependencies = [
  "crc",
  "ed25519-dalek",
  "futures-util",
+ "governor",
  "hex",
  "hmac 0.13.0",
  "httpdate",

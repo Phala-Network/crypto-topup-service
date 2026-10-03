@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::tenancy::Scope;
+use governor::{DefaultKeyedRateLimiter, Quota};
+use std::num::NonZeroU32;
 
 const SECOND: Duration = Duration::from_secs(1);
 /// Tracked scopes beyond which idle ones are dropped; an idle scope is indistinguishable from a
@@ -47,6 +49,7 @@ pub struct ApiRateLimiter {
     limits: RateLimits,
     clock: Clock,
     state: Mutex<State>,
+    source_limiter: DefaultKeyedRateLimiter<String>,
 }
 
 impl std::fmt::Debug for ApiRateLimiter {
@@ -63,7 +66,6 @@ struct State {
     /// Theoretical arrival time of each scope's next request.
     scopes: HashMap<Scope, Instant>,
     test_platform: Option<Instant>,
-    sources: HashMap<String, Instant>,
 }
 
 impl Default for ApiRateLimiter {
@@ -75,14 +77,8 @@ impl Default for ApiRateLimiter {
 impl ApiRateLimiter {
     /// Counts an unauthenticated request by its ingress source.
     pub fn allow_source(&self, source: &str) -> bool {
-        let now = (self.clock)();
-        let mut state = self.state.lock().expect("rate limiter mutex poisoned");
-        let next = state.sources.entry(source.to_owned()).or_insert(now);
-        if *next > now + Duration::from_millis(990) {
-            return false;
-        }
-        *next = (*next).max(now) + Duration::from_millis(10);
-        true
+        self.source_limiter.retain_recent();
+        self.source_limiter.check_key(&source.to_owned()).is_ok()
     }
     /// A limiter enforcing `limits`.
     #[must_use]
@@ -101,6 +97,9 @@ impl ApiRateLimiter {
             limits,
             clock: Box::new(clock),
             state: Mutex::default(),
+            source_limiter: DefaultKeyedRateLimiter::keyed(Quota::per_second(
+                NonZeroU32::new(100).unwrap(),
+            )),
         }
     }
 

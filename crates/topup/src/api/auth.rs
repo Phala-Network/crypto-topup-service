@@ -5,7 +5,7 @@ use super::AppState;
 use super::error::ApiError;
 use super::repository;
 use axum::body::{Body, to_bytes};
-use axum::extract::{MatchedPath, Request, State};
+use axum::extract::{ConnectInfo, MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -13,6 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
+use std::net::SocketAddr;
 use topup_adapters::http_signature::{self, PublicOrigin, SignedMessage};
 use zeroize::Zeroizing;
 
@@ -30,18 +31,19 @@ pub async fn ingress_budget(
     request: Request,
     next: Next,
 ) -> Response {
-    let source = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    if !state.rate_limits.allow_source(source) {
+    let source = source_for_request(&request);
+    if !state.rate_limits.allow_source(&source) {
         return ApiError::too_many_requests().into_response();
     }
     next.run(request).await
+}
+
+fn source_for_request(request: &Request) -> String {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// A configured RFC 9421 ed25519 verification key of the admin API.
@@ -311,11 +313,25 @@ fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a st
 
 #[cfg(test)]
 mod tests {
+    use axum::http::Request;
     use std::error::Error;
 
     use ed25519_dalek::SigningKey;
 
     use super::*;
+
+    #[test]
+    fn ingress_source_ignores_spoofed_forwarding_headers_and_requires_peer_info() {
+        let mut request = Request::new(Body::empty());
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
+        assert_eq!(source_for_request(&request), "unknown");
+        request.extensions_mut().insert(ConnectInfo(
+            "192.0.2.9:443".parse::<SocketAddr>().expect("peer"),
+        ));
+        assert_eq!(source_for_request(&request), "192.0.2.9");
+    }
 
     fn signed_message<'a>(
         vector: &'a serde_json::Value,
