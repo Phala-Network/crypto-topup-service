@@ -242,6 +242,21 @@ async fn cooldown_requires_repeated_success_and_redirect_quarantine_is_permanent
     assert!(!group.probe_due(0));
 }
 #[tokio::test]
+async fn serving_metrics_follow_account_pause_without_changing_selection() {
+    let group = group("http://127.0.0.1:1");
+    group.verified(0, true);
+    assert_eq!(group.serving_members(), 1);
+    group.budgets.pause("account", Duration::from_secs(1));
+    assert_eq!(group.serving_members(), 0);
+    assert_eq!(
+        group.eligible(),
+        1,
+        "quota pause does not remove identity verification"
+    );
+    assert!(group.select(&Default::default(), None).is_err());
+}
+
+#[tokio::test]
 async fn stale_head_is_not_published() {
     let number = Arc::new(AtomicUsize::new(100));
     let source = number.clone();

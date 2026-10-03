@@ -1704,7 +1704,51 @@ age, unflushed balance, open lock exposure, undelivered `deposit.credited` event
 reconciliation) is in the daily admin
 report (`GET /v1/admin/reports/daily`); RPC calls per provider, chain, and method are counters in
 the admin-signed `GET /v1/admin/metrics` (Prometheus text), read on demand since no collector
-runs. Log lines and their spans (`deposit_id`, `chain_id`,
+runs. The standard Prometheus client encodes HTTP request counters and latency histograms and
+RPC health snapshots. HTTP labels are matched route templates (or `unmatched`), a fixed method
+set (or `other`), and status class. No raw path, query, secret, customer, account, peer address or
+request id becomes a metric label. Metrics wrap authentication, ingress/load-shed rejection and
+read-only rejection, measuring time to response headers, including middleware and database/RPC
+waits; response-body streaming time is excluded. Buckets are 5, 10, 25, 50, 100, 250, 500 ms and
+1, 2.5, 5, 10, 30 s, plus infinity. Counters reset with the process.
+
+RPC operational alerts use the same Sentry tracing integration, fingerprints, runbook links and
+ten-minute repeat suppression as other alerts. `TopupRpcGroupUnavailable` fires after one minute
+without a serving candidate; recovery clears that timer. An independent cancellation-aware
+five-second monitor observes availability even while recovery probes or database refreshes wait,
+so an uninterrupted outage is detected within 70 seconds (observation plus alert polling). `TopupRpcChainFrozen` fires after a
+durable fork freeze. Quarantine, cooldown, upstream quota pressure and unclassified upstream
+errors emit `TopupRpcMemberQuarantined`, `TopupRpcMemberCooldown`, `TopupRpcQuotaPressure` and
+`TopupRpcUnclassifiedError`. `TopupRpcAnchorUnavailable` reports a closed cursor safety gate;
+`TopupRpcRecoveryUnavailable` reports a failed durable identity read and leaves members unverified.
+`TopupRpcMetricsRefreshFailed` reports failed collection without stopping recovery or replacing
+last successful gauges with zeros. `topup_rpc_metrics_refreshed_at_seconds` distinguishes stale
+snapshots; before the first successful refresh durable gauges are absent. See
+[RPC health](../deploy/runbooks/rpc-health.md).
+
+### Service objectives and measurement
+
+These are operational targets, reviewed over 30 days; deliberate safety freezes, restore drills,
+merchant pauses and invalid client requests are recorded separately. Safety takes precedence over
+availability. Production has no deployed metrics collector, so Prometheus snapshots provide
+on-demand diagnostics, not automatic rolling SLO accounting or alert evaluation. Sentry is the
+only alert channel. HTTP percentages/percentiles below require an explicitly recorded observation
+interval and counter deltas from the same process; do not claim a continuous 30-day result from
+one snapshot. A restart ends that interval. Sentry Uptime history supplies external availability;
+Crons and issue history supply worker/incident evidence.
+
+| Objective | Target and evidence | Operational response through Sentry |
+|---|---|---|
+| API availability | 99.9% successful `/healthz` probes over 30 days; inspect Sentry Uptime history. Authenticated API diagnostic error ratio is 5xx / (2xx + 3xx + 5xx). | Uptime failures page; inspect load-shed and 5xx request counts on demand. |
+| API latency | During an observed interval, p95 successful GET/HEAD response headers ≤ 250 ms and POST ≤ 1 s. Use HTTP histogram bucket deltas for matched routes; exclude admin reports/attestation and intentional waits. | This percentile is a diagnostic target with no automatic alert; investigate an Uptime or worker incident using snapshots. |
+| RPC evidence availability | Every required A/B group has a serving candidate; no uninterrupted outage ≥ 1 minute. Count quota-paused candidates as unavailable. | Page on `TopupRpcGroupUnavailable`; fork freezes and quarantines require immediate safety triage. Cooldown/quota/unclassified events warn. |
+| Deposit progress | For unpaused, supported deposits, target 99% leaving `detected` and `confirmed` within 30 minutes after satisfying the configured confirmation policy (for example `depth2`, `depth3`, or `finalized`), rather than starting all clocks at finalization. Review the policy, daily report ages and deposit timelines; this target is not a measured percentile. | Existing route age alerts (default 1,800 s) and scanner/finality Crons identify stalled work; Crons check-in margins are 5 minutes. This is not an automatically computed percentile. |
+| Reconciliation and backup | Every scheduled reconciliation succeeds before its next round; backup success marker age ≤ 2 minutes. Inspect Sentry Crons and the daily report. | Existing reconciliation and backup monitors alert; backup requires three stale observations to avoid restart noise. |
+
+Configure Sentry issue rules by the above alert names and existing Crons/Uptime monitors; this
+change adds no collector, Prometheus alert rules, new monitoring endpoint or deployed service.
+Replay/coverage backlogs and HTTP latency remain diagnostic snapshots; ongoing incident review
+must confirm those backlogs drain after provider recovery. Log lines and their spans (`deposit_id`, `chain_id`,
 `state`, `attempt`) serve local stacks.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against

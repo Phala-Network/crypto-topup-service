@@ -516,14 +516,18 @@ pub(crate) async fn lift_reconciliation_block(
     security(("http_message_signature" = [])),
     tag = "admin"
 )]
-pub(crate) async fn metrics() -> ([(header::HeaderName, &'static str); 1], String) {
-    (
+pub(crate) async fn metrics() -> Result<([(header::HeaderName, &'static str); 1], String), ApiError>
+{
+    Ok((
         [(
             header::CONTENT_TYPE,
             crate::observability::metrics::CONTENT_TYPE,
         )],
-        crate::observability::metrics::render(),
-    )
+        crate::observability::metrics::render().map_err(|error| {
+            tracing::error!(%error, "metrics encoding failed");
+            ApiError::internal()
+        })?,
+    ))
 }
 
 #[utoipa::path(

@@ -13,7 +13,18 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Added
+
+- Bounded HTTP request counters and latency histograms in signed admin metrics, including
+  authentication, load-shed and read-only errors; documented operational service objectives.
+- RPC operational alerts through the existing Sentry integration, with a one-minute group outage
+  threshold and an RPC health runbook. Durable metrics expose their last successful refresh time.
+
 ### Changed
+
+- Encode metrics with the pinned standard Prometheus client and enforce merchant/client-secret
+  quotas with the existing pinned governor library, preserving tenant/mode and joint admission.
+- Separate treasury ownership proofs, tenant-scoped reads and periodic work into focused modules.
 
 - Quote lists batch deposit and pending-payment reads after scoped pagination, keeping detail
   payment selection, tenant/mode isolation, filters and cursor semantics.
@@ -27,6 +38,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   `429` and optional `503` retry delays, and describes tenant response cache protection.
 
 ### Fixed
+
+- A failed RPC metrics refresh retains the previous snapshot and allows recovery to continue.
 
 - RPC acceptance and readmission now retry only transient failures within explicit probe attempt
   and deadline bounds, honoring throttling delays. Capability checks share one finalized snapshot

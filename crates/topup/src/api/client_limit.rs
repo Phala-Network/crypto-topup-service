@@ -17,7 +17,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 use super::error::ApiError;
-use super::rate_limit::{Clock, PRUNE_ABOVE, gcra};
+use super::rate_limit::{Clock, PRUNE_ABOVE, trial_admission};
 use crate::client_secret::ClientSecretKey;
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -114,7 +114,7 @@ impl ClientReadLimiter {
             .reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match gcra(reads.get(&object).copied(), now, PER_OBJECT, MINUTE) {
+        match trial_admission(reads.get(&object).copied(), now, PER_OBJECT, MINUTE) {
             Ok(next) => {
                 if reads.len() >= PRUNE_ABOVE {
                     reads.retain(|_, next| *next > now);
@@ -176,6 +176,38 @@ mod tests {
         assert_eq!(admitted(&limiter, late, quote, PER_OBJECT), PER_OBJECT);
         // A millisecond later, across where a fixed window would reset, the budget is spent.
         assert_eq!(admitted(&limiter, start + MINUTE, quote, PER_OBJECT), 0);
+    }
+
+    #[tokio::test]
+    async fn forged_or_wrong_object_secrets_consume_no_read_budget() {
+        use axum::response::IntoResponse as _;
+        let now = Instant::now();
+        let limiter = ClientReadLimiter::with_clock(move || now);
+        let object = Uuid::from_u128(1);
+        let id = format!("quo_{}", object.simple());
+        let valid = limiter.key().issue("acct_test", &id).unwrap();
+        let forged = ClientSecretKey::ephemeral()
+            .issue("acct_test", &id)
+            .unwrap();
+        let other_object = limiter.key().issue("acct_test", "quo_other").unwrap();
+        for _ in 0..PER_OBJECT {
+            for secret in [&forged, &other_object] {
+                let error = limiter.admit(&id, object, secret).await.unwrap_err();
+                assert_eq!(
+                    error.into_response().status(),
+                    axum::http::StatusCode::NOT_FOUND
+                );
+            }
+        }
+        for _ in 0..PER_OBJECT {
+            let permit = limiter.admit(&id, object, &valid).await.unwrap();
+            drop(permit);
+        }
+        let error = limiter.admit(&id, object, &valid).await.unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     #[test]

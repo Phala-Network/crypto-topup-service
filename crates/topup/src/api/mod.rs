@@ -455,6 +455,16 @@ pub struct ApiDocs {
 
 /// Builds the Axum router, serving both OpenAPI documents, and the documents.
 pub fn router(state: AppState) -> (Router, ApiDocs) {
+    let (router, docs) = router_inner(state);
+    (
+        router
+            .layer(middleware::from_fn(cache::no_store))
+            .layer(middleware::from_fn(crate::observability::request_context)),
+        docs,
+    )
+}
+
+fn router_inner(state: AppState) -> (Router, ApiDocs) {
     // Every merchant POST is idempotent by `Idempotency-Key`; authentication and then
     // authorization run first, so a replay needs the route's permission too.
     let merchant = merchant_routes()
@@ -510,9 +520,8 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         // Stripe's error object for any other path or method too, never an empty body.
         .fallback(unrecognized_request)
         .method_not_allowed_fallback(unrecognized_request)
-        .layer(middleware::from_fn(crate::observability::request_context))
-        .layer(Extension(Arc::new(docs.clone())))
-        .layer(middleware::from_fn(cache::no_store));
+        .layer(Extension(Arc::new(docs.clone())));
+
     (router, docs)
 }
 
@@ -536,13 +545,14 @@ fn restoring() -> Response {
 /// and may fail before it does. `/healthz` reports the boot-time `restore-check` result read from
 /// `restore_report`.
 pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Router {
-    let (router, _) = router(state);
+    let (router, _) = router_inner(state);
     router
         .layer(middleware::from_fn(reject_writes))
         .layer(middleware::from_fn(cache::no_store))
         .layer(Extension(ReadOnly {
             restore_report: restore_report.map(Arc::from),
         }))
+        .layer(middleware::from_fn(crate::observability::request_context))
 }
 
 /// Marks a read-only router and locates its restore-check report.
@@ -738,6 +748,140 @@ mod tests {
             .expect("a key generates");
         let (status, _) = send("GET", "/v1/account", Some(&format!("Bearer {}", *key))).await;
         assert!(status.is_server_error(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn read_only_and_auth_errors_are_observed_on_the_real_router() {
+        for (router, method, uri, expected) in [
+            (
+                super::router(offline_state()).0,
+                "HEAD",
+                "/v1/account",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                super::read_only_router(offline_state(), None),
+                "DELETE",
+                "/v1/quotes",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let class = if expected.is_server_error() {
+                "5xx"
+            } else {
+                "4xx"
+            };
+            let before = crate::observability::metrics::http_observations(uri, method, class);
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            if expected == StatusCode::SERVICE_UNAVAILABLE {
+                assert_eq!(response.headers()["retry-after"], "300");
+                let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], "service_restoring");
+            }
+            assert_eq!(
+                crate::observability::metrics::http_observations(uri, method, class),
+                before + 1
+            );
+        }
+        let metrics = crate::observability::metrics::render().unwrap();
+        assert!(metrics.contains("method=\"HEAD\",route=\"/v1/account\",status_class=\"4xx\""));
+        assert!(metrics.contains("method=\"DELETE\",route=\"/v1/quotes\",status_class=\"5xx\""));
+    }
+
+    #[tokio::test]
+    async fn successful_real_router_responses_keep_cache_protection_and_one_observation() {
+        for router in [
+            super::router(offline_state()).0,
+            super::read_only_router(offline_state(), None),
+        ] {
+            let before = crate::observability::metrics::http_observations(
+                "/openapi.admin.json",
+                "HEAD",
+                "2xx",
+            );
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("HEAD")
+                        .uri("/openapi.admin.json")
+                        .header("signature", "invalid")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(
+                crate::observability::metrics::http_observations(
+                    "/openapi.admin.json",
+                    "HEAD",
+                    "2xx"
+                ),
+                before + 1,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn real_router_overload_is_observed_once_before_authentication() {
+        for read_only in [false, true] {
+            let state = offline_state();
+            let pool = state.pool.clone();
+            let router = if read_only {
+                super::read_only_router(state, None)
+            } else {
+                super::router(state).0
+            };
+            let mut admitted = Vec::new();
+            // Poll requests into the real concurrency gate and pending database health check.
+            // No reactor turn occurs before saturation, so failures cannot free permits.
+            for _ in 0..256 {
+                let request = Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap();
+                let mut response = Box::pin(router.clone().oneshot(request));
+                assert!(futures_util::poll!(&mut response).is_pending());
+                admitted.push(response);
+            }
+            let before =
+                crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx");
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/treasuries")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            drop(admitted);
+            pool.close().await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["retry-after"], "1");
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["type"], "api_error");
+            assert_eq!(body["error"]["code"], "unavailable");
+            assert_eq!(
+                crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx"),
+                before + 1,
+            );
+        }
     }
 
     #[tokio::test]

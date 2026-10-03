@@ -1030,7 +1030,7 @@ async fn admin_metrics_serve_rpc_call_counters_to_the_admin_only() -> Result<()>
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let text = String::from_utf8(body.to_vec())?;
         ensure!(
-            text.contains("# TYPE topup_rpc_calls_total counter"),
+            text.contains("# TYPE topup_http_requests_total counter"),
             "{text}"
         );
         Ok(())

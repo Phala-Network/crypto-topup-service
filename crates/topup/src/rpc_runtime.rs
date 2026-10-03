@@ -450,35 +450,80 @@ pub async fn recover_members(
     cancellation: CancellationToken,
     config_digest: String,
 ) -> Result<(), String> {
+    recover_members_every(
+        pool,
+        routes,
+        cancellation,
+        config_digest,
+        Duration::from_secs(5),
+    )
+    .await
+}
+
+async fn recover_members_every(
+    pool: PgPool,
+    routes: Arc<RouteSet>,
+    cancellation: CancellationToken,
+    config_digest: String,
+    period: Duration,
+) -> Result<(), String> {
     let state = db::rpc::state(&pool, config_digest);
     let groups = groups(&routes)?;
-    loop {
-        tokio::select! {()=cancellation.cancelled()=>return Ok(()),()=tokio::time::sleep(Duration::from_secs(5))=>{}}
-        db::rpc::refresh_metrics(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        for (group, route_files) in groups.values() {
-            for index in 0..group.members.len() {
-                if group.probe_due(index) {
-                    let result = probe(group, index, route_files).await;
-                    let known: Option<String> = sqlx::query_scalar(
-                        "SELECT genesis_hash FROM rpc_member_validations WHERE chain_id=$1 LIMIT 1",
-                    )
-                    .bind(i64::try_from(group.chain).map_err(|e| e.to_string())?)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    group.probe_result(
-                        index,
-                        result.is_ok_and(|hash| known.as_ref() == Some(&hash)),
-                    );
+    let watched = groups
+        .values()
+        .map(|(group, _)| group.clone())
+        .collect::<Vec<_>>();
+    let recovery = async {
+        loop {
+            tokio::select! {()=cancellation.cancelled()=>return Ok(()),()=tokio::time::sleep(period)=>{}}
+            refresh_metrics_safely(db::rpc::refresh_metrics(&pool)).await;
+            for (group, route_files) in groups.values() {
+                for index in 0..group.members.len() {
+                    if group.probe_due(index) {
+                        let result = probe(group, index, route_files).await;
+                        let known = sqlx::query_scalar::<_, String>(
+                            r#"
+                            SELECT genesis_hash
+                            FROM rpc_member_validations
+                            WHERE chain_id = $1
+                            LIMIT 1
+                            "#,
+                        )
+                        .bind(i64::try_from(group.chain).map_err(|e| e.to_string())?)
+                        .fetch_optional(&pool)
+                        .await;
+                        let known = match known {
+                            Ok(known) => known,
+                            Err(_) => {
+                                group.probe_result(index, false);
+                                tracing::warn!(
+                                    tags.alert = "TopupRpcRecoveryUnavailable",
+                                    tags.group = %group.id,
+                                    tags.chain = group.chain,
+                                    "RPC recovery identity unavailable; member remains unverified"
+                                );
+                                continue;
+                            }
+                        };
+                        group.probe_result(
+                            index,
+                            result.is_ok_and(|hash| known.as_ref() == Some(&hash)),
+                        );
+                    }
                 }
             }
+            if anchor_cursors(&pool, &routes, state.as_ref())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    tags.alert = "TopupRpcAnchorUnavailable",
+                    "RPC cursor anchor unavailable; safety gate remains closed"
+                );
+            }
         }
-        if let Err(error) = anchor_cursors(&pool, &routes, state.as_ref()).await {
-            tracing::warn!(%error, "RPC cursor anchor unavailable; safety gate remains closed");
-        }
-    }
+    };
+    with_availability_monitor(&watched, &cancellation, recovery).await
 }
 
 /// Per-member network preflight, returning only stable ids. An offline backup is reported and
@@ -764,6 +809,107 @@ pub async fn resume_recovery(
     }.await;
     lock.release().await.map_err(|e| e.to_string())?;
     result
+}
+
+// Metric collection is observational: preserve the last snapshot and continue recovery.
+pub(crate) async fn refresh_metrics_safely(refresh: impl Future<Output = Result<(), sqlx::Error>>) {
+    if refresh.await.is_err() {
+        tracing::warn!(
+            tags.alert = "TopupRpcMetricsRefreshFailed",
+            "RPC metrics refresh failed; recovery continues"
+        );
+    }
+}
+
+// Poll recovery and health independently; cancellation drops blocked DB/HTTP work as well.
+// This owned future pair avoids detached tasks and shares the worker's lifetime.
+pub(crate) async fn with_availability_monitor(
+    groups: &[Arc<RpcGroup>],
+    cancellation: &CancellationToken,
+    recovery: impl Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    let availability = async {
+        let mut unavailable_since = BTreeMap::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return,
+                _ = ticker.tick() => {
+                    for group in groups {
+                        report_group_availability(&group.id, group.chain, group.serving_members() > 0,
+                            &mut unavailable_since, Instant::now());
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(()),
+        () = availability => Ok(()),
+        result = recovery => result,
+    }
+}
+
+/// Pages through Sentry only after a group has no serving candidate for one minute.
+pub(crate) fn report_group_availability(
+    group: &str,
+    chain: u64,
+    serving: bool,
+    unavailable_since: &mut BTreeMap<String, Instant>,
+    now: Instant,
+) {
+    if serving {
+        unavailable_since.remove(group);
+        return;
+    }
+    let since = unavailable_since.entry(group.to_owned()).or_insert(now);
+    if now.saturating_duration_since(*since) >= Duration::from_secs(60) {
+        tracing::warn!(
+            tags.alert = "TopupRpcGroupUnavailable",
+            tags.group = group,
+            tags.chain = chain,
+            "RPC group has had no serving member for one minute"
+        );
+    }
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+    #[tokio::test]
+    async fn failed_metrics_refresh_keeps_recovery_running_until_cancellation() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .unwrap();
+        pool.close().await;
+        let snapshot = db::rpc::metrics();
+        let routes = Arc::new(RouteSet::with_providers(Vec::new(), &BTreeMap::new()).unwrap());
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let task = tokio::spawn(recover_members_every(
+            pool,
+            routes,
+            cancellation,
+            "test".into(),
+            Duration::from_millis(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(
+            !task.is_finished(),
+            "metrics failure stopped the recovery worker"
+        );
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(db::rpc::metrics(), snapshot);
+    }
 }
 
 #[cfg(test)]

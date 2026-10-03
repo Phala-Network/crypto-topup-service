@@ -28,6 +28,7 @@ futures-util.workspace = true
 governor.workspace = true
 httpdate.workspace = true
 hex.workspace = true
+prometheus.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
