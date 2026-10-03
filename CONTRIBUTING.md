@@ -191,8 +191,9 @@ code comments, runbooks, and Sentry alerts link to some of them.
   [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) type, for example
   `fix/scanner-stall`.
 - Title the pull request as a Conventional Commit, `<type>(<scope>): <summary>`, for example
-  `fix(scanner): retry a stale finalized head`. Pull requests are squash-merged, so the title
-  becomes the commit message on `main`.
+  `fix(scanner): retry a stale finalized head`. Pull requests are squash-merged through the merge
+  queue, which runs the required checks on each change combined with the ones queued before it, so
+  the title becomes the commit message on `main` and `main` stays green.
 - Keep each pull request to one change, and fill in the
   [pull request template](.github/PULL_REQUEST_TEMPLATE.md): what changed, the specification
   sections it implements, and the verification commands you ran with their results.
