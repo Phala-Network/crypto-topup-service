@@ -19,19 +19,16 @@ async fn probe(
     routes: &[&RouteFile],
 ) -> Result<String, String> {
     let copy = group.probe_copy().map_err(|e| e.to_string())?;
-    let result = tokio::time::timeout(
-        Duration::from_millis(group.policy.total_deadline_ms),
-        async {
-            let hash = probe_inner(&copy, index, routes).await?;
-            group
-                .validate_probe(index, &copy)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(hash)
-        },
-    )
+    let result = tokio::time::timeout(Duration::from_millis(group.policy.probe.deadline), async {
+        let hash = probe_inner(&copy, index, routes).await?;
+        group
+            .validate_probe(index, &copy)
+            .await
+            .map_err(|e| format!("persisted head/genesis anchor: {e}"))?;
+        Ok(hash)
+    })
     .await
-    .map_err(|_| "RPC preflight deadline".to_owned())?;
+    .map_err(|_| "probe total deadline: RPC deadline expired".to_owned())?;
     if copy.quarantined(index) {
         group.failed(index, topup_adapters::chain::evm::group::Failure::Identity);
     }
@@ -43,7 +40,7 @@ async fn probe_inner(
     routes: &[&RouteFile],
 ) -> Result<String, String> {
     let deadline = Instant::now()
-        .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
+        .checked_add(Duration::from_millis(group.policy.probe.deadline))
         .unwrap_or_else(Instant::now);
     let chain = group
         .send(
@@ -52,14 +49,16 @@ async fn probe_inner(
             deadline,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("chain id: {e}"))?;
     if chain.get("result").and_then(serde_json::Value::as_str)
         != Some(format!("0x{:x}", group.chain).as_str())
     {
         group.failed(index, topup_adapters::chain::evm::group::Failure::Identity);
-        return Err("RPC chain identity mismatch".to_owned());
+        return Err("chain id: RPC member identity invalid (mismatch)".to_owned());
     }
-    let genesis = block(group, index, 0, deadline).await?;
+    let genesis = block(group, index, 0, deadline)
+        .await
+        .map_err(|e| format!("genesis: {e}"))?;
     let client = EvmClient::from_group(group.clone(), Some(index)).map_err(|e| e.to_string())?;
     let mut contracts = std::collections::BTreeSet::new();
     for route in routes {
@@ -67,45 +66,62 @@ async fn probe_inner(
             route.chain.contracts.forwarder_factory,
             route.chain.contracts.implementation,
         )) {
-            crate::contracts::verify_on(&client, route).await?;
+            crate::contracts::verify_on(&client, route)
+                .await
+                .map_err(|e| format!("route {} contracts/multicall: {e}", route.route))?;
         }
     }
     group
         .head(index, "latest", deadline)
         .await
-        .map_err(|e| e.to_string())?;
-    group
-        .head(index, "finalized", deadline)
-        .await
-        .map_err(|e| e.to_string())?;
-    group
-        .head(index, "safe", deadline)
-        .await
-        .map_err(|e| e.to_string())?;
-    group.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":[format!("0x{}","00".repeat(32))]}),deadline).await.map_err(|e|e.to_string())?;
+        .map_err(|e| format!("latest head: {e}"))?;
+    // Use one finalized snapshot for every numeric capability/log check. Tagged heads
+    // from a load-balanced endpoint can regress between redundant reads.
     let head = group
         .head(index, "finalized", deadline)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("finalized head: {e}"))?;
+    group
+        .head(index, "safe", deadline)
+        .await
+        .map_err(|e| format!("safe head: {e}"))?;
+    group.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":[format!("0x{}","00".repeat(32))]}),deadline).await.map_err(|e|format!("receipt capability: {e}"))?;
     if routes
         .iter()
         .any(|r| r.chain.rpc_providers.first() == Some(&group.id))
     {
         let logs = json!({"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"fromBlock":format!("0x{:x}",head.number.saturating_sub(1999)),"toBlock":format!("0x{:x}",head.number),"topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",null,[format!("0x{}","00".repeat(32))]]}]});
         group
-            .send_logs(index, &logs, deadline)
+            .send(index, &logs, deadline)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("address-less transfer logs (2000 blocks): {e}"))?;
+    } else {
+        for route in routes {
+            let logs = json!({"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{
+                "fromBlock":format!("0x{:x}",head.number.saturating_sub(99)),
+                "toBlock":format!("0x{:x}",head.number), "address":format!("{:#x}",route.asset.contract),
+                "topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",null,[format!("0x{}","00".repeat(32))]]
+            }]});
+            group.send(index, &logs, deadline).await.map_err(|e| {
+                format!(
+                    "route {} recent-range transfer logs (100 blocks): {e}",
+                    route.route
+                )
+            })?;
+        }
     }
     for route in routes {
         for contract in [route.asset.contract, route.screening.sanctions_oracle] {
             if client
                 .code_at(contract)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("route {} contract code {contract:#x}: {e}", route.route))?
                 .is_empty()
             {
-                return Err("RPC route token/oracle code unavailable".to_owned());
+                return Err(format!(
+                    "route {} contract code {contract:#x}: RPC capability unavailable (missing code)",
+                    route.route
+                ));
             }
         }
     }
@@ -118,12 +134,15 @@ async fn probe_inner(
                 Some(head.number.into()),
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("route {} token decimals capability: {e}", route.route))?;
         if decimals.len() != 32
             || alloy_primitives::U256::from_be_slice(&decimals)
                 != alloy_primitives::U256::from(route.asset.decimals)
         {
-            return Err("RPC token decimals mismatch".to_owned());
+            return Err(format!(
+                "route {} token decimals capability: RPC member identity invalid (mismatch)",
+                route.route
+            ));
         }
         let hash = alloy_primitives::keccak256("isSanctioned(address)");
         let mut data = hash
@@ -140,11 +159,14 @@ async fn probe_inner(
                 Some(head.number.into()),
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("route {} oracle capability: {e}", route.route))?;
         if answer.len() != 32
             || alloy_primitives::U256::from_be_slice(&answer) > alloy_primitives::U256::from(1)
         {
-            return Err("RPC oracle capability malformed".to_owned());
+            return Err(format!(
+                "route {} oracle capability: RPC malformed response",
+                route.route
+            ));
         }
     }
     Ok(genesis.hash)
@@ -464,22 +486,41 @@ pub async fn recover_members(
 pub async fn preflight(routes: &RouteSet) -> Result<Vec<String>, String> {
     let mut healthy = Vec::new();
     let mut genesis = BTreeMap::new();
+    let mut failures = Vec::new();
     for (group, files) in groups(routes)?.values() {
+        let mut reasons = Vec::new();
         for index in 0..group.members.len() {
             group.verified(index, false);
-            if let Ok(hash) = probe(group, index, files).await {
+            let member = group.members.get(index).ok_or("missing member")?;
+            let result = probe(group, index, files).await.and_then(|hash| {
                 if genesis.get(&group.chain).is_some_and(|old| old != &hash) {
                     group.failed(index, topup_adapters::chain::evm::group::Failure::Identity);
-                    continue;
+                    return Err("genesis: RPC member identity invalid (mismatch)".to_owned());
                 }
-                genesis.insert(group.chain, hash.clone());
-                group.verified(index, true);
-                healthy.push(group.members.get(index).ok_or("missing member")?.id.clone());
+                Ok(hash)
+            });
+            match result {
+                Ok(hash) => {
+                    genesis.insert(group.chain, hash);
+                    group.verified(index, true);
+                    healthy.push(member.id.clone());
+                }
+                Err(error) => {
+                    tracing::warn!(group=%group.id, member=%member.id, %error, "RPC member preflight failed");
+                    reasons.push(format!("{}: {error}", member.id));
+                }
             }
         }
         if group.eligible() == 0 {
-            return Err(format!("RPC group {} has no verified member", group.id));
+            failures.push(format!(
+                "RPC group {} has no verified member [{}]",
+                group.id,
+                reasons.join("; ")
+            ));
         }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
     }
     Ok(healthy)
 }
@@ -691,4 +732,110 @@ pub async fn resume_recovery(
     }.await;
     lock.release().await.map_err(|e| e.to_string())?;
     result
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use axum::{Json, Router, routing::post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use topup_adapters::{
+        chain::evm::group::{
+            GroupPolicy, Member,
+            budget::{BudgetSpec, Budgets},
+        },
+        redaction::Redacted,
+    };
+
+    #[tokio::test]
+    async fn acceptance_uses_one_finalized_snapshot_for_numeric_capabilities() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let count = reads.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/",
+                    post(move |Json(request): Json<serde_json::Value>| {
+                        let count = count.clone();
+                        async move {
+                            let result = match request["method"].as_str().unwrap() {
+                                "eth_chainId" => json!("0x1"),
+                                "eth_getTransactionReceipt" => serde_json::Value::Null,
+                                "eth_getBlockByNumber" => {
+                                    let number = if request["params"][0] == "0x0" {
+                                        0
+                                    } else if request["params"][0] == "finalized" {
+                                        // A load-balanced endpoint would regress on the redundant read.
+                                        100u64.saturating_sub(
+                                            u64::try_from(count.fetch_add(1, Ordering::SeqCst))
+                                                .unwrap(),
+                                        )
+                                    } else {
+                                        200
+                                    };
+                                    let mut block =
+                                        serde_json::to_value(alloy::rpc::types::Block::<
+                                            alloy::rpc::types::Transaction,
+                                        >::default(
+                                        ))
+                                        .unwrap();
+                                    block["number"] = json!(format!("0x{number:x}"));
+                                    block["hash"] = json!(format!("0x{}", "11".repeat(32)));
+                                    block["parentHash"] = json!(format!("0x{}", "22".repeat(32)));
+                                    block
+                                }
+                                _ => unreachable!(),
+                            };
+                            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let budgets = Arc::new(
+            Budgets::new(&BTreeMap::from([
+                (
+                    "account".into(),
+                    BudgetSpec {
+                        requests_per_second: 100,
+                        burst: 100,
+                    },
+                ),
+                (
+                    "key".into(),
+                    BudgetSpec {
+                        requests_per_second: 100,
+                        burst: 100,
+                    },
+                ),
+            ]))
+            .unwrap(),
+        );
+        let group = RpcGroup::new(
+            "a".into(),
+            1,
+            GroupPolicy::default(),
+            vec![Member {
+                id: "one".into(),
+                company: "company".into(),
+                endpoint: Redacted::parse(&url).unwrap(),
+                account: "account".into(),
+                key: "key".into(),
+                priority: 0,
+                weight: 1,
+            }],
+            budgets,
+        )
+        .unwrap();
+        let result = probe(&group, 0, &[]).await;
+        server.abort();
+        assert_eq!(result.unwrap(), format!("0x{}", "11".repeat(32)));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(group.eligible(), 0, "a probe alone cannot admit a member");
+    }
 }

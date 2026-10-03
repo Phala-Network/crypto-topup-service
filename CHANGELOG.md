@@ -13,6 +13,18 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- RPC acceptance and readmission now retry only transient failures within explicit probe attempt
+  and deadline bounds, honoring throttling delays. Capability checks share one finalized snapshot
+  so redundant tagged reads cannot spuriously reject a load-balanced endpoint's regressing head.
+  Persisted head floors, chain/genesis identity and contract validation remain mandatory.
+- `topup rpc check` reserves stdout for JSON and reports sanitized member/probe failure reasons
+  on stderr, which the Deploy preflight now surfaces. A capability probes require an unsplit
+  address-less 2 000-block log window; B probes verify recent addressed logs.
+- Staging has independent, keyless Sentio A and Pocket B backups on both chains, with reviewed
+  company domains and shared quota budgets; the Phala Cloud template routes are unchanged.
+
 ## [0.7.0] - 2026-10-02
 
 ### Changed

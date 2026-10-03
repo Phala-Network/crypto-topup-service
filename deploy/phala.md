@@ -55,21 +55,42 @@ Deploy Phala's instance, never a reset.
 
 ### RPC providers
 
-Staging's providers, in the `rpc_providers` of its [topup.yaml](environments/phala-network/staging/topup/topup.yaml)
-([RPC providers](README.md#rpc-providers)); all four are keyless and free:
+Staging's independent groups are configured in
+[topup.yaml](environments/phala-network/staging/topup/topup.yaml)
+([RPC providers](README.md#rpc-providers)). Every member is public and keyless; backups have
+priority 10 and separate synthetic key budgets. Account budgets are shared across chains.
 
-| Chain | Slot | Provider |
-|---|---|---|
-| Sepolia | A | Tenderly public gateway (`https://sepolia.gateway.tenderly.co`) |
-| Sepolia | B | PublicNode (`https://ethereum-sepolia-rpc.publicnode.com`) |
-| Base Sepolia | A | Tenderly (`https://base-sepolia.gateway.tenderly.co`) |
-| Base Sepolia | B | PublicNode (`https://base-sepolia-rpc.publicnode.com`) |
+| Chain | Group | Primary | Backup |
+|---|---|---|---|
+| Sepolia | A (`provider-a`) | Tenderly (`https://sepolia.gateway.tenderly.co`) | Sentio (`https://sepolia.rpc.sentio.xyz`) |
+| Sepolia | B (`provider-b`) | PublicNode (`https://ethereum-sepolia-rpc.publicnode.com`) | Pocket (`https://eth-sepolia-testnet.api.pocket.network`) |
+| Base Sepolia | A (`base-sepolia-a`) | Tenderly (`https://base-sepolia.gateway.tenderly.co`) | Sentio (`https://base-sepolia.rpc.sentio.xyz`) |
+| Base Sepolia | B (`base-sepolia-b`) | PublicNode (`https://base-sepolia-rpc.publicnode.com`) | Pocket (`https://base-testnet.api.pocket.network`) |
 
-Checked on 2026-09-29, Tenderly is the only keyless public endpoint that serves slot A's
-`eth_getLogs` over 2 000 blocks without a contract address on both chains (Grove/Pocket serves it
-on Sepolia but was not chosen, and returned regressing `finalized` heads on Base Sepolia), while
-`sepolia.base.org` caps the range at 1 000 blocks, PublicNode requires an address, thirdweb caps
-the response size, and Nodies and 1RPC cap the range at 50 blocks.
+The branch image's real `topup rpc check` verified the backups on 2026-10-02 PDT: chain id,
+genesis agreement, canonical Multicall3, deployed factory/implementation, token/oracle code and
+calls, latest/safe/finalized heads, receipts and recent logs. Both Sentio A backups also passed
+address-less Transfer logs over an unsplit 2 000-block window. No route changed; the Phala Cloud
+template's routes remain byte-identical.
+
+Reviewed company evidence: [Sentio](https://www.sentio.xyz/), its
+[official RPC documentation](https://github.com/sentioxyz/docs/blob/HEAD/docs/Sentio%20Debugger/rpc-nodes.md),
+and [Pocket's keyless public RPC service](https://api.pocket.network/). The registry's domain
+suffixes and PSL registrable domains are distinct: `tenderly.co`, `publicnode.com`, `sentio.xyz`
+and `pocket.network`. Each company appears in only one group on each chain.
+
+Other candidates were rejected by actual probes: dRPC Sepolia requires a paid plan; Ankr
+requires a key; Coinbase and dRPC Base Sepolia prune genesis history; 1RPC cannot serve the
+required log window. OnFinality repeatedly throttled complete probes even at one request per
+second. These endpoints were not added as usable backups.
+
+Debug loops reproduced v0.7.0's failure in the second `eth_getBlockByNumber("finalized")`
+probe: load-balanced gateways can return a lower finalized height a few hundred milliseconds
+after the first answer (`stale`). Acceptance now uses one finalized snapshot for its numeric
+capability checks. Runtime and readmission still enforce persisted floors and canonical hashes;
+stale or mismatched evidence is never retried into acceptance. Bounded transient probe retries
+also tolerate the separately observed `eth_call` oracle capability failures classified as
+`throttled` on Base Sepolia. See [the RPC runbook](RPC.md#configuration-and-acceptance).
 
 Mainnet needs paid providers from two different companies.
 
