@@ -79,7 +79,11 @@ impl Default for ApiRateLimiter {
 impl ApiRateLimiter {
     /// Counts an unauthenticated request by its ingress source.
     pub fn allow_source(&self, source: &str) -> bool {
-        if self.source_housekeeping.fetch_add(1, Ordering::Relaxed) % 1024 == 0 {
+        if self
+            .source_housekeeping
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(1024)
+        {
             self.source_limiter.retain_recent();
             self.source_limiter.shrink_to_fit();
         }
@@ -103,7 +107,7 @@ impl ApiRateLimiter {
             clock: Box::new(clock),
             state: Mutex::default(),
             source_limiter: DefaultKeyedRateLimiter::keyed(Quota::per_second(
-                NonZeroU32::new(1_000).unwrap(),
+                NonZeroU32::new(10_000).unwrap(),
             )),
             source_housekeeping: AtomicUsize::new(0),
         }
@@ -232,10 +236,10 @@ mod tests {
     fn ingress_budget_is_keyed_by_source() {
         let limiter = ApiRateLimiter::default();
         assert_eq!(
-            (0..1_000)
+            (0..10_000)
                 .filter(|_| limiter.allow_source("198.51.100.1"))
                 .count(),
-            1_000
+            10_000
         );
         assert!(limiter.allow_source("198.51.100.2"));
         assert!(limiter.allow_source("198.51.100.2"));
