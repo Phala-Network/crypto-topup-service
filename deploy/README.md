@@ -52,7 +52,7 @@ key, and the database passwords: that is a key migration, not an image bump.
 In the operator's environment repository ([self-hosting, "Your environment
 repository"](../docs/self-hosting.md#2-your-environment-repository)); Phala's is this repository,
 through [Deploy Phala's instance](../.github/workflows/deploy-phala.yml). Workflows run on
-`ubuntu-latest` unless the repository variable `CI_RUNNER` names another runner.
+GitHub-hosted `ubuntu-latest` runners.
 
 1. **Environments.** Repository Settings > Environments: `production` and, for a pre-production
    instance with test routes only, `staging` (the names Deploy offers), deployment branches `main`

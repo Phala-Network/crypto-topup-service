@@ -152,6 +152,7 @@ Repository owners must enable **Settings > Advanced Security > Dependabot > Depe
 and **Dependabot security updates**. Under **Settings > Rules > Rulesets**, add the following CI
 checks to main's required status checks, alongside the existing checks:
 `dependencies (sdk/js)`, `dependencies (deploy/product/web)`, `dependencies (sdk/python)`,
+`dependencies (docs/reference)`, `dependencies (deploy/tools)`,
 `slither`, `cvm-rehearsal`, and CodeQL's `analyze (actions)`, `analyze (javascript-typescript)`,
 `analyze (python)`, `analyze (rust)`. Keep `image` and `deployment` required: they now scan final
 images. Use CodeQL **advanced setup** (this versioned workflow); disable default setup if it is

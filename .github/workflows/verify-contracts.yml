@@ -28,7 +28,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       STAGING_CONFIG: deploy/environments/phala-network/staging/topup/topup.yaml
