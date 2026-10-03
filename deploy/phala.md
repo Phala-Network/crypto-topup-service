@@ -63,11 +63,11 @@ priority 10 and separate synthetic key budgets. Account budgets are shared acros
 | Chain | Group | Primary | Backup |
 |---|---|---|---|
 | Sepolia | A (`provider-a`) | Tenderly (`https://sepolia.gateway.tenderly.co`) | Sentio (`https://sepolia.rpc.sentio.xyz`) |
-| Sepolia | B (`provider-b`) | PublicNode (`https://ethereum-sepolia-rpc.publicnode.com`) | Pocket (`https://eth-sepolia-testnet.api.pocket.network`) |
+| Sepolia | B (`provider-b`) | PublicNode (`https://ethereum-sepolia-rpc.publicnode.com`) | ethPandaOps (`https://rpc.sepolia.ethpandaops.io`) |
 | Base Sepolia | A (`base-sepolia-a`) | Tenderly (`https://base-sepolia.gateway.tenderly.co`) | Sentio (`https://base-sepolia.rpc.sentio.xyz`) |
 | Base Sepolia | B (`base-sepolia-b`) | PublicNode (`https://base-sepolia-rpc.publicnode.com`) | Pocket (`https://base-testnet.api.pocket.network`) |
 
-The branch image's real `topup rpc check` verified the backups on 2026-10-02 PDT: chain id,
+The branch image's real `topup rpc check` verified the backups on 2026-10-03 PDT: chain id,
 genesis agreement, canonical Multicall3, deployed factory/implementation, token/oracle code and
 calls, latest/safe/finalized heads, receipts and recent logs. Both Sentio A backups also passed
 address-less Transfer logs over an unsplit 2 000-block window. No route changed; the Phala Cloud
@@ -75,14 +75,18 @@ template's routes remain byte-identical.
 
 Reviewed company evidence: [Sentio](https://www.sentio.xyz/), its
 [official RPC documentation](https://github.com/sentioxyz/docs/blob/HEAD/docs/Sentio%20Debugger/rpc-nodes.md),
+[Ethereum Foundation's ethPandaOps team](https://github.com/ethpandaops), its
+[official repository's Foundation contributors](https://github.com/ethpandaops/ethereum-package#credits),
 and [Pocket's keyless public RPC service](https://api.pocket.network/). The registry's domain
-suffixes and PSL registrable domains are distinct: `tenderly.co`, `publicnode.com`, `sentio.xyz`
-and `pocket.network`. Each company appears in only one group on each chain.
+suffixes and PSL registrable domains are distinct: `tenderly.co`, `publicnode.com`, `sentio.xyz`,
+`ethpandaops.io` and `pocket.network`. Each company appears in only one group on each chain.
 
 Other candidates were rejected by actual probes: dRPC Sepolia requires a paid plan; Ankr
 requires a key; Coinbase and dRPC Base Sepolia prune genesis history; 1RPC cannot serve the
 required log window. OnFinality repeatedly throttled complete probes even at one request per
-second. These endpoints were not added as usable backups.
+second. Pocket Sepolia intermittently failed genesis reads (pruned history); ethPandaOps
+passed three consecutive complete probes and replaces it. These rejected endpoints were not
+added as usable backups.
 
 Debug loops reproduced v0.7.0's failure in the second `eth_getBlockByNumber("finalized")`
 probe: load-balanced gateways can return a lower finalized height a few hundred milliseconds

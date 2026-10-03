@@ -15,6 +15,10 @@ rpc_companies:
   publicnode:
     domains:
     - publicnode.com
+  ethereum-foundation:
+    # ethPandaOps team: github.com/ethpandaops; public Sepolia RPC, no API key.
+    domains:
+    - ethpandaops.io
   sentio:
     # Sentio's public testnet RPCs; reviewed against sentio.xyz and its official docs.
     domains:
@@ -54,8 +58,11 @@ rpc_budgets:
   pocket-account:
     requests_per_second: 5
     burst: 5
-  pocket-sepolia-key:
-    requests_per_second: 5
+  ethpandaops-account:
+    requests_per_second: 2
+    burst: 2
+  ethpandaops-sepolia-key:
+    requests_per_second: 2
     burst: 2
   pocket-base-sepolia-key:
     requests_per_second: 5
@@ -87,11 +94,11 @@ rpc_groups:
       url: https://ethereum-sepolia-rpc.publicnode.com
       account_budget: publicnode-account
       key_budget: provider-b-key
-    - id: pocket-sepolia-b
-      company: pocket
-      url: https://eth-sepolia-testnet.api.pocket.network
-      account_budget: pocket-account
-      key_budget: pocket-sepolia-key
+    - id: ethpandaops-sepolia-b
+      company: ethereum-foundation
+      url: https://rpc.sepolia.ethpandaops.io
+      account_budget: ethpandaops-account
+      key_budget: ethpandaops-sepolia-key
       priority: 10
   base-sepolia-a:
     chain_id: 84532

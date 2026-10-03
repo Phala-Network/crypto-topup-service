@@ -22,8 +22,9 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - `topup rpc check` reserves stdout for JSON and reports sanitized member/probe failure reasons
   on stderr, which the Deploy preflight now surfaces. A capability probes require an unsplit
   address-less 2 000-block log window; B probes verify recent addressed logs.
-- Staging has independent, keyless Sentio A and Pocket B backups on both chains, with reviewed
-  company domains and shared quota budgets; the Phala Cloud template routes are unchanged.
+- Staging has keyless Sentio A backups on both chains, ethPandaOps B on Sepolia and Pocket B on
+  Base Sepolia, with reviewed company domains and shared quota budgets; the Phala Cloud template
+  routes are unchanged.
 
 ## [0.7.0] - 2026-10-02
 

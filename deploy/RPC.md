@@ -7,7 +7,8 @@ and restore-check in the environment's compose overlay. No RPC sidecar or cache 
 
 ## Configuration and acceptance
 
-Staging uses Tenderly/Sentio A and PublicNode/Pocket B on each chain (see
+Staging uses Tenderly/Sentio A on both chains, PublicNode/ethPandaOps B on Sepolia, and
+PublicNode/Pocket B on Base Sepolia (see
 [staging routes](phala.md#staging-routes)). Keep the
 existing member ids so usage series continue. Add credentials or backups through a reviewed PR;
 review company ownership independently of DNS names, including resellers and aliases. Companies
