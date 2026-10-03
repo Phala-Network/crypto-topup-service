@@ -509,13 +509,40 @@ fn reviewed_company_aliases_cannot_split_one_registrable_domain_across_roles() -
         .domains = vec!["b.vendor.co.uk".into()];
     for group in groups.values_mut() {
         for member in &mut group.members {
-            member.url = if member.company == "tenderly" {
-                "https://a.vendor.co.uk/{key}".into()
+            let host = if member.company == "tenderly" {
+                "a.vendor.co.uk"
             } else {
-                "https://b.vendor.co.uk".into()
+                "b.vendor.co.uk"
             };
+            let path = if member.sealed_key.is_some() {
+                "/{key}"
+            } else {
+                "/"
+            };
+            member.url = format!("https://{host}{path}");
         }
     }
+    let mut independent_companies = companies.clone();
+    independent_companies
+        .get_mut("publicnode")
+        .context("publicnode")?
+        .domains = vec!["b.independent.co.uk".into()];
+    let mut independent_groups = groups.clone();
+    for group in independent_groups.values_mut() {
+        for member in &mut group.members {
+            if member.company == "publicnode" {
+                member.url = member.url.replace("b.vendor.co.uk", "b.independent.co.uk");
+            }
+        }
+    }
+    topup::rpc_groups::validate(
+        &config.routes,
+        &independent_groups,
+        &independent_companies,
+        &config.rpc_budgets,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("the control config must be valid")?;
     let error =
         topup::rpc_groups::validate(&config.routes, &groups, &companies, &config.rpc_budgets)
             .expect_err("PSL identity must reject sibling-domain aliases");
