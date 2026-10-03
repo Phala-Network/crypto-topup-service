@@ -549,3 +549,43 @@ fn reviewed_company_aliases_cannot_split_one_registrable_domain_across_roles() -
     ensure!(error.contains("domain ownership"), "{error}");
     Ok(())
 }
+
+/// Durable snapshots preserve failures, expose freshness, and clear replay/review gauges to zero.
+#[tokio::test]
+async fn metrics_refresh_preserves_then_recovers_the_durable_snapshot() -> Result<()> {
+    let Some(database) = TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let pool = &database.app_pool;
+        db::rpc::freeze(pool, 1, "metrics test").await?;
+        let mut tx = pool.begin().await?;
+        db::rpc::coverage_in(&mut tx, 1, &proof("metrics-member", 1, 10)).await?;
+        tx.commit().await?;
+        sqlx::query("INSERT INTO rpc_reorg_ranges (chain_id, group_id, epoch, from_block, to_block) VALUES (1, 'a', 0, 1, 10)").execute(pool).await?;
+        db::rpc::refresh_metrics(pool).await?;
+        let value = |name: &str| -> Result<f64> {
+            let families = db::rpc::metrics();
+            let family = families.iter().find(|family| family.name() == name).context("missing family")?;
+            let metric = family.get_metric().first().context("missing sample")?;
+            Ok(metric.get_gauge().get_value())
+        };
+        ensure!(value("topup_rpc_chain_frozen")? == 1.0);
+        ensure!(value("topup_rpc_review_pending_windows")? == 1.0);
+        ensure!(value("topup_rpc_reorg_pending_ranges")? == 1.0);
+        ensure!(value("topup_rpc_metrics_refreshed_at_seconds")? > 0.0);
+        let previous = db::rpc::metrics();
+        let closed = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+        closed.close().await;
+        ensure!(db::rpc::refresh_metrics(&closed).await.is_err());
+        ensure!(db::rpc::metrics() == previous);
+        sqlx::query("UPDATE rpc_window_reviews SET reviewed_at = now() WHERE chain_id = 1").execute(pool).await?;
+        sqlx::query("UPDATE rpc_reorg_ranges SET replayed_through = to_block WHERE chain_id = 1").execute(pool).await?;
+        db::rpc::refresh_metrics(pool).await?;
+        ensure!(value("topup_rpc_review_pending_windows")? == 0.0);
+        ensure!(value("topup_rpc_reorg_pending_ranges")? == 0.0);
+        Ok(())
+    }.await;
+    let cleanup = database.cleanup().await;
+    result.and(cleanup)
+}

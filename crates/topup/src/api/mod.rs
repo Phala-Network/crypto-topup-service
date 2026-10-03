@@ -452,6 +452,14 @@ pub struct ApiDocs {
 
 /// Builds the Axum router, serving both OpenAPI documents, and the documents.
 pub fn router(state: AppState) -> (Router, ApiDocs) {
+    let (router, docs) = router_inner(state);
+    (
+        router.layer(middleware::from_fn(crate::observability::request_context)),
+        docs,
+    )
+}
+
+fn router_inner(state: AppState) -> (Router, ApiDocs) {
     // Every merchant POST is idempotent by `Idempotency-Key`; authentication and then
     // authorization run first, so a replay needs the route's permission too.
     let merchant = merchant_routes()
@@ -492,7 +500,6 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         // Stripe's error object for any other path or method too, never an empty body.
         .fallback(unrecognized_request)
         .method_not_allowed_fallback(unrecognized_request)
-        .layer(middleware::from_fn(crate::observability::request_context))
         .layer(Extension(Arc::new(docs.clone())));
     (router, docs)
 }
@@ -517,12 +524,13 @@ fn restoring() -> Response {
 /// and may fail before it does. `/healthz` reports the boot-time `restore-check` result read from
 /// `restore_report`.
 pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Router {
-    let (router, _) = router(state);
+    let (router, _) = router_inner(state);
     router
         .layer(middleware::from_fn(reject_writes))
         .layer(Extension(ReadOnly {
             restore_report: restore_report.map(Arc::from),
         }))
+        .layer(middleware::from_fn(crate::observability::request_context))
 }
 
 /// Marks a read-only router and locates its restore-check report.
@@ -718,6 +726,46 @@ mod tests {
             .expect("a key generates");
         let (status, _) = send("GET", "/v1/account", Some(&format!("Bearer {}", *key))).await;
         assert!(status.is_server_error(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn read_only_and_auth_errors_are_observed_on_the_real_router() {
+        for (router, method, uri, expected) in [
+            (
+                super::router(offline_state()).0,
+                "HEAD",
+                "/v1/account",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                super::read_only_router(offline_state(), None),
+                "DELETE",
+                "/v1/quotes",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let class = if expected.is_server_error() {
+                "5xx"
+            } else {
+                "4xx"
+            };
+            let before = crate::observability::metrics::http_observations(uri, method, class);
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(
+                crate::observability::metrics::http_observations(uri, method, class),
+                before + 1
+            );
+        }
+        let metrics = crate::observability::metrics::render().unwrap();
+        assert!(metrics.contains("method=\"HEAD\",route=\"/v1/account\",status_class=\"4xx\""));
+        assert!(metrics.contains("method=\"DELETE\",route=\"/v1/quotes\",status_class=\"5xx\""));
     }
 
     #[tokio::test]

@@ -27,9 +27,11 @@ clap.workspace = true
 crc.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
+governor.workspace = true
 hex.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
+prometheus.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 sentry.workspace = true
@@ -58,7 +60,8 @@ psl = "2.1.215"
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 sentry = { workspace = true, features = ["test"] }
-tower.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true, features = ["limit", "load-shed"] }
 tracing-test = { version = "=0.2.6", features = ["no-env-filter"] }
 
 [lints.rust]

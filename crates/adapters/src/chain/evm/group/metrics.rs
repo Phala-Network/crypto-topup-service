@@ -1,7 +1,9 @@
 //! Bounded group health metrics; URLs, keys and raw errors never become labels.
 use super::RpcGroup;
+use prometheus::{
+    CounterVec, IntCounterVec, IntGaugeVec, Opts, core::Collector, proto::MetricFamily,
+};
 use std::collections::BTreeMap;
-use std::fmt::Write;
 use std::sync::{Mutex, OnceLock, PoisonError, Weak};
 static GROUPS: OnceLock<Mutex<BTreeMap<String, Weak<RpcGroup>>>> = OnceLock::new();
 pub(super) fn register(group: &std::sync::Arc<RpcGroup>) {
@@ -11,46 +13,58 @@ pub(super) fn register(group: &std::sync::Arc<RpcGroup>) {
         .unwrap_or_else(PoisonError::into_inner)
         .insert(group.id.clone(), std::sync::Arc::downgrade(group));
 }
-/// Appends standard Prometheus health gauges for the current configured groups.
-pub fn render() -> String {
-    let mut out = String::from(
-        "# HELP topup_rpc_group_eligible_members Serving validated members.\n# TYPE topup_rpc_group_eligible_members gauge\n# HELP topup_rpc_member_eligible Member currently serving.\n# TYPE topup_rpc_member_eligible gauge\n# HELP topup_rpc_member_quarantined Redirect or credential quarantine.\n# TYPE topup_rpc_member_quarantined gauge\n",
-    );
-    let Some(groups) = GROUPS.get() else {
-        return out;
-    };
-    for group in groups
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .values()
-        .filter_map(Weak::upgrade)
-    {
-        let _ = writeln!(
-            out,
-            "topup_rpc_group_eligible_members{{group=\"{}\",chain_id=\"{}\"}} {}",
-            group.id,
-            group.chain,
-            group.eligible()
-        );
-        let health = group.health.lock().unwrap_or_else(PoisonError::into_inner);
-        for (m, h) in group.members.iter().zip(health.iter()) {
-            let labels = format!(
-                "group=\"{}\",chain_id=\"{}\",member=\"{}\"",
-                group.id, group.chain, m.id
-            );
-            let _ = writeln!(
-                out,
-                "topup_rpc_member_eligible{{{labels}}} {}",
-                u8::from(h.eligible && !h.quarantined && h.until.is_none())
-            );
-            let _ = writeln!(
-                out,
-                "topup_rpc_member_quarantined{{{labels}}} {}",
-                u8::from(h.quarantined)
-            );
+/// Standard Prometheus health gauges for the current configured groups.
+pub fn collect() -> Result<Vec<MetricFamily>, prometheus::Error> {
+    let groups_metric = IntGaugeVec::new(
+        Opts::new(
+            "topup_rpc_group_eligible_members",
+            "Serving validated members.",
+        ),
+        &["group", "chain_id"],
+    )?;
+    let eligible = IntGaugeVec::new(
+        Opts::new("topup_rpc_member_eligible", "Member currently serving."),
+        &["group", "chain_id", "member"],
+    )?;
+    let quarantined = IntGaugeVec::new(
+        Opts::new(
+            "topup_rpc_member_quarantined",
+            "Redirect or credential quarantine.",
+        ),
+        &["group", "chain_id", "member"],
+    )?;
+    if let Some(groups) = GROUPS.get() {
+        for group in groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter_map(Weak::upgrade)
+        {
+            let chain = group.chain.to_string();
+            groups_metric
+                .with_label_values(&[&group.id, &chain])
+                .set(i64::try_from(group.serving_members()).unwrap_or(i64::MAX));
+            let health = group.health.lock().unwrap_or_else(PoisonError::into_inner);
+            for (m, h) in group.members.iter().zip(health.iter()) {
+                let labels = [&*group.id, &*chain, &*m.id];
+                eligible.with_label_values(&labels).set(i64::from(
+                    h.eligible
+                        && !h.quarantined
+                        && h.until.is_none()
+                        && !group.budgets.paused(&m.account, &m.key),
+                ));
+                quarantined
+                    .with_label_values(&labels)
+                    .set(i64::from(h.quarantined));
+            }
         }
     }
-    out
+    Ok(groups_metric
+        .collect()
+        .into_iter()
+        .chain(eligible.collect())
+        .chain(quarantined.collect())
+        .collect())
 }
 
 type EventKey = (String, u64, String, &'static str);
@@ -64,28 +78,38 @@ pub(super) fn event(group: &RpcGroup, index: usize, class: &'static str, value: 
         *total = total.saturating_add(value);
     }
 }
-/// Failure and quota-wait counters never evict idle members or include raw upstream messages.
-pub fn events() -> String {
-    let mut out = String::from(
-        "# HELP topup_rpc_member_failures_total Rejected group member attempts by bounded class.\n# TYPE topup_rpc_member_failures_total counter\n# HELP topup_rpc_budget_wait_seconds_total Time awaiting joint account and key admission.\n# TYPE topup_rpc_budget_wait_seconds_total counter\n",
-    );
+/// Failure and quota-wait counters with configured labels and bounded failure classes.
+pub fn events() -> Result<Vec<MetricFamily>, prometheus::Error> {
+    let failures = IntCounterVec::new(
+        Opts::new(
+            "topup_rpc_member_failures_total",
+            "Rejected group member attempts by bounded class.",
+        ),
+        &["group", "chain_id", "member", "class"],
+    )?;
+    let wait = CounterVec::new(
+        Opts::new(
+            "topup_rpc_budget_wait_seconds_total",
+            "Time awaiting joint account and key admission.",
+        ),
+        &["group", "chain_id", "member"],
+    )?;
     for ((group, chain, member, class), value) in
         EVENTS.lock().unwrap_or_else(PoisonError::into_inner).iter()
     {
-        let labels = format!("group=\"{group}\",chain_id=\"{chain}\",member=\"{member}\"");
+        let chain = chain.to_string();
         if *class == "budget_wait" {
-            let _ = writeln!(
-                out,
-                "topup_rpc_budget_wait_seconds_total{{{labels}}} {}.{:09}",
-                value.checked_div(1_000_000_000).unwrap_or(0),
-                value.checked_rem(1_000_000_000).unwrap_or(0)
-            );
+            wait.with_label_values(&[group, &chain, member])
+                .inc_by(std::time::Duration::from_nanos(*value).as_secs_f64());
         } else {
-            let _ = writeln!(
-                out,
-                "topup_rpc_member_failures_total{{{labels},class=\"{class}\"}} {value}"
-            );
+            failures
+                .with_label_values(&[group.as_str(), chain.as_str(), member.as_str(), *class])
+                .inc_by(*value);
         }
     }
-    out
+    Ok(failures
+        .collect()
+        .into_iter()
+        .chain(wait.collect())
+        .collect())
 }
