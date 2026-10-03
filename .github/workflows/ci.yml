@@ -133,12 +133,22 @@ jobs:
 
   sdk-js:
     needs: sdk-js-react18
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdk/js
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require the React 18 floor job to pass
+        working-directory: .
+        env:
+          FLOOR_RESULT: ${{ needs.sdk-js-react18.result }}
+        run: |
+          if [[ "$FLOOR_RESULT" != "success" ]]; then
+            echo "sdk-js-react18 finished with '$FLOOR_RESULT'; refusing to run the default SDK check" >&2
+            exit 1
+          fi
       - uses: ./.github/actions/sdk-js
       - name: Typecheck, lint, unit tests, and build
         run: pnpm run check
