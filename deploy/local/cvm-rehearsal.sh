@@ -126,8 +126,8 @@ cleanup() {
     status=$?
     set +e
     if ((status != 0)); then
-        echo "--- topup logs (last 60 lines) ---" >&2
-        dc logs --no-color --tail 60 topup >&2
+        echo "--- workload logs (last 60 lines per service) ---" >&2
+        dc logs --no-color --tail 60 keys postgres migrate topup backup >&2
     fi
     docker rm -f "$client" >/dev/null 2>&1
     if ((status != 0)) && [[ -f "$tmp/product.yml" ]]; then
@@ -361,14 +361,14 @@ printf '%s=\n' "${env_names[@]}" >"$cvm/.env"
 grep -qx 'AWS_SECRET_ACCESS_KEY=' "$cvm/.env" || die "the unsealed .env carries the S3 secret"
 
 echo "== docker compose up unsealed (the CVM's app-compose command)"
-# Without credentials the backup prefix cannot be listed, so PostgreSQL refuses to initialize
-# and never becomes healthy: `up` fails like dstack's boot, and nothing after it starts.
+# The entrypoint rejects missing S3 credentials before attempting the backup listing, so
+# PostgreSQL never initializes or becomes healthy: `up` fails like dstack's boot.
 if dc up -d --remove-orphans >/dev/null 2>&1; then
     die "the unsealed stack started"
 fi
 refused() {
     dc logs --no-color postgres 2>&1 |
-        grep -F 'the backup prefix could not be listed; refusing to initialize an empty data directory' \
+        grep -F 'AWS_ACCESS_KEY_ID must be set: S3 storage needs both credentials' \
             >/dev/null
 }
 wait_for "PostgreSQL to refuse initialization" 90 refused
