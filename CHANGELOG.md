@@ -13,9 +13,11 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
-### Breaking (0.7.0)
+## [0.7.0] - 2026-10-02
 
-- RPC configuration now requires explicit `chain.rpc_groups: { a: ..., b: ... }` and the
+### Changed
+
+- **Breaking:** RPC configuration now requires explicit `chain.rpc_groups: { a: ..., b: ... }` and the
   `rpc_groups`, `rpc_companies` and `rpc_budgets` registries. The old provider list/flat registry
   is rejected, including a third id that 0.6.0 silently ignored. Reviewed provider companies
   must be disjoint between A and B; repeated URL templates with different sealed credentials
@@ -23,7 +25,7 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - RPC groups select in-process with bounded failover or weighted round robin, shared account/key
   admission, refused redirects and no cache. Every real member send retains the existing usage
   counter. Fixed numeric log windows commit evidence, review coverage and progress atomically.
-- Migrate the database before starting 0.7.0: persisted hash watermarks, configuration acceptance,
+- **Breaking:** migrate the database before starting 0.7.0: persisted hash watermarks, configuration acceptance,
   historical review coverage and audited recovery are required. Legacy height-only cursors need
   an A/B-agreed hash anchor. Rollback requires the stopped-service recovery procedure in
   [the RPC runbook](deploy/RPC.md); configuration rollback never lowers a watermark.
@@ -1178,7 +1180,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...v0.5.0
 [0.3.5]: https://github.com/Phala-Network/phala-pay/compare/v0.3.4...v0.3.5
