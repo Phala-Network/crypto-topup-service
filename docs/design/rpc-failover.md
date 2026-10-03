@@ -134,7 +134,10 @@ capability failures and cooldowns; no latency race or hidden default fallback ex
 
 Execution order is: total Tower timeout → Tower retry with our typed classification
 policy → selection/pinned member operation → shared account and key governor admission
-→ per-send timeout → CountingLayer → existing Alloy HTTP transport. Count only when an
+→ per-send timeout → CountingLayer → size-bounded reqwest transport adapter under Alloy.
+The thin adapter retains HTTP status, parsed `Retry-After`, redirect status and bounded
+body bytes before JSON-RPC decoding; native Alloy non-2xx normalization loses metadata
+and cannot implement this table. Reject oversized bodies without logging their contents. Count only when an
 admitted request future is actually polled into the HTTP transport, not when enqueued
 or cloned for retry. A member attempt includes validation calls and, for logs, every
 filter batch. `max_attempts` bounds member attempts including the first; each attempt's
@@ -144,8 +147,12 @@ within that operation. Do not stack Alloy fallback/retry layers or reset the dea
 for each RPC. Subsequent scheduled passes are new operations and keep existing backoff.
 
 Every real send acquires both account and key permits, irrespective of method, group or
-chain, including startup/recovery/head checks. Acquire in a fixed order under the deadline;
-if cancellation consumes a permit without a send, conservatively leave it consumed.
+chain, including startup/recovery/head checks. Admission checks both limiters together under one shared admission lock immediately
+before dispatch. Never reserve one permit while waiting for the other: after every wait,
+recheck both; charge both only when both are available. This prevents banked account
+permits bursting when keys recover. Keyless members have explicit account budgets and
+a synthetic per-member key budget. Unknown 429 pauses the entire configured account
+scope by default; only a reviewed rule may narrow it to a key.
 No quota bypass for recovery and no limiter per method. Budgets are process-local: one
 active topup worker owns them; multiple active workers would need a shared admission service
 before claiming account-wide enforcement. Restarts refill buckets, so these are short-term
@@ -166,15 +173,16 @@ request error/revert inside a 5xx remains terminal.
 | Method/status/code/message | Class and action |
 |---|---|
 | Read, 2xx, valid result | Success only after typed validation. Null receipts and empty logs are legitimate only under the window/evidence rules; neither an error nor missing data is converted to `[]`. |
-| Any, DNS/connect/reset or timeout (including plain timeout) | Transient transport failure; retry another member within bounds; increment consecutive failure count and enter cooldown at the threshold. Cancellation by the caller/total deadline does not mark a member failed. |
-| Any, HTTP 408/429 or recognized quota/rate message | Throttled; honor bounded `Retry-After` with jitter and deadline, pause the affected key/account budget scope, try another independently budgeted member; never immediately hammer the same account. |
+| Any, HTTP 408, DNS/connect/reset or timeout (including plain timeout) | Transient transport failure; retry another member within bounds; increment consecutive failure count and enter cooldown at the threshold. Cancellation by the caller/total deadline does not mark a member failed. |
+| Any, HTTP 429 or recognized quota/rate message | Throttled; honor bounded `Retry-After` with jitter and deadline, pause the affected key/account budget scope, try another independently budgeted member; never immediately hammer the same account. |
 | Any, HTTP 500/502/503/504 or RPC `-32603` without a terminal semantic cause | Transient server error; bounded failover and failure cooldown. Other non-2xx statuses not listed below fail terminally unless an attested transient rule matches. |
 | Any, HTTP 3xx | Redirect refused; quarantine member until endpoint config is reviewed. Never forward a key to `Location`. |
 | Any, HTTP 401/403, wrong chain/genesis, invalid TLS identity | Configuration/security failure; quarantine member, alert and require revalidation after repair. No retry to that member. Other eligible members may serve the operation. |
 | Any, RPC `-32600`/`-32602`, or invalid request/params message | Terminal request error; no retry or failure cooldown, no cursor advance. |
 | Read, RPC `-32601` or recognized unsupported-method message | Capability failure for this member/method; try another capable member, exclude that capability until revalidated. Never silently skip the required read. |
-| `eth_getLogs`, `-32005` with range/result-size/too-many-results message, or HTTP 413 | Window too large; fail this numeric window without advancing. Caller may plan smaller fixed windows; no same-shape retry or implicit partial success. |
+| `eth_getLogs`, `-32005` with range/result-size/too-many-results message, | Window too large; fail this numeric window without advancing. Caller may plan smaller fixed windows; no same-shape retry or implicit partial success. |
 | Any, `-32005` with rate/credits/quota-exceeded message | Throttled as above; shared budget scope is determined by the reviewed rule. |
+| `eth_getLogs`, HTTP 413 | Request body too large; shrink address/topic batches on the same pinned member and retry the entire fixed numeric window. Do not shrink the block range or advance partial progress. |
 | Any, unknown `-32005` or other unmapped RPC error/message | Terminal unclassified error; wait/alert, no heuristic unlimited retries. Add a reviewed rule only after identifying its meaning. |
 | `eth_call`, estimate or send, recognized execution revert (including send `-32000`/`-32003` with revert message) | Terminal execution failure; do not retry, do not count as transport failure. |
 | `eth_sendRawTransaction`, timeout/transport or server error | Submission uncertain; only bounded resubmission of identical signed bytes/hash is allowed. Never rebuild a transaction or change nonce. “Already known” is acknowledged submission, not receipt/credit evidence; nonce-too-low remains uncertain until receipt/nonce checks. |
@@ -215,8 +223,12 @@ expiry. Freeze the chain and investigate. An owner-authorized audited recovery v
 lower canonical anchor against both independent companies, records old/new anchors and
 reason, and opens a new recovery epoch. Reconcile every affected credited deposit and replay
 from the last verified common anchor before unfreezing. Keep original watermarks/evidence;
-repair any invalid cursor only through a separate audited rescan checkpoint, never below
-a verified committed coverage floor. This explicit recovery is the only exception to
+repair invalid cursors and all derived address progress (`created_block`,
+`backfilled_through`, backfilled flags and replay coverage) through an audited rescan
+checkpoint. Rebase poisoned address starting points to the last trusted issuance anchor
+or conservatively the deployment/route activation floor; clear invalid backfill completion
+and queue all affected addresses/windows. Never silently skip history. Preserve originals
+in audit evidence and never lower a verified coverage floor. This explicit recovery is the only exception to
 monotonicity across epochs; ordinary operation remains monotonic within an epoch.
 
 **Logs completeness boundary:** a synced node can still omit logs; a matching head alone
@@ -245,9 +257,12 @@ For scanners, address backfills and reconciler missing-deposit reads:
    timeout, cancellation or exhausted candidates leave both scanner and reconciler cursors
    unchanged for that window. Already completed earlier windows need not be repeated.
 
-Persist a replay queue/checkpoint independent of forward cursors. Recheck the latest
-2,000 finalized blocks each reconciliation cycle with a different eligible A member when
-available; singleton groups replay against their sole member and report that limitation.
+Persist per-window review coverage, original answering member, bounds/filters, end anchor
+and independent replay checkpoint in the same transaction as progress. Every window,
+including historical catch-up, remains due for review until re-read with another eligible
+member where possible. A rolling finalized tail is additional review, not replacement: old
+unreviewed windows never expire when the latest 2,000-block tail moves. Singleton groups
+retain pending independent review and replay against their sole member; report that limitation until another independent member is available.
 Queue the full affected interval on a reorg, suspect omission, outage recovery or operator
 backfill request. Historical jobs start at the last verified anchor/address creation floor,
 use the same pinned-window rules and normal deposit uniqueness/confirmation path. Compare
@@ -347,6 +362,10 @@ procedure above, not ordinary config rollback. This design authorizes no live op
   backup, restart the same config with that backup still failing, and change the config:
   healthy members permit startup, unverified backups cannot serve. Test all-down first
   acceptance versus degraded restart, lost persistence, restore and queued historical gaps.
+- Acceptance tests additionally cover every status/RPC/Retry-After/redirect/oversized-body
+  adapter combination, delayed-key recovery without account-permit bursts, a missed log in
+  an old historical window after the rolling tail moves, repair of poisoned address
+  progress, and 0.6 height-only migration to a trusted A/B-agreed hash anchor.
 - Compose tests cover public config/image/policy/name changes in attestation, unchanged hash
   on key rotation, no secret in rendered output/logs/errors, and startup/restore interfaces.
 
@@ -363,7 +382,10 @@ resilience; company-outage resilience needs another company.
 `rpc_groups` and explicit `{a, b}` references; removes implicit provider defaults; rejects
 legacy/unknown fields, including lists of more than two ids. An offline migration tool
 accepts **exactly two** old ids and requires company review; never discard extra ids.
-Add acceptance/watermark/replay persistence through additive migrations and update config,
+For a 0.6 height-only cursor, pin its canonical header/hash through agreement of A and B
+before treating it as a trusted anchor; disagreement/unavailability blocks chain progress,
+and a cursor above agreed heads enters audited recovery. Add acceptance/watermark/replay
+persistence through additive migrations and update config,
 self-hosting, preflight and restore documentation. Keep RPC keys in topup/restore-check and
 keep the metrics API; new member ids add series and validation/replay increase usage.
 
