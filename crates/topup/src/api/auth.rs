@@ -24,6 +24,26 @@ use crate::tenancy::Scope;
 const MAX_SIGNED_BODY_BYTES: usize = 1_048_576;
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 
+/// Applies a small ingress budget before any database-backed authentication work.
+pub async fn ingress_budget(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let source = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    if !state.rate_limits.allow_source(source) {
+        return ApiError::too_many_requests().into_response();
+    }
+    next.run(request).await
+}
+
 /// A configured RFC 9421 ed25519 verification key of the admin API.
 #[derive(Clone, Debug)]
 pub struct VerificationKey {
