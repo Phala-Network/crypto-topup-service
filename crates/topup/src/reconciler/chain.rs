@@ -24,6 +24,27 @@ pub trait ReconciliationChain: Send + Sync {
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ReconciliationError>;
 
+    /// Complete numeric window, without partial commit across address batches.
+    async fn read_window(
+        &self,
+        request: &topup_adapters::chain::evm::window::WindowRequest,
+    ) -> Result<topup_adapters::chain::evm::window::WindowResult, ReconciliationError> {
+        let mut transfers = Vec::new();
+        for batch in request
+            .recipients
+            .chunks(topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST)
+        {
+            transfers.extend(
+                self.transfer_logs_to(batch, request.from, request.to)
+                    .await?,
+            );
+        }
+        Ok(topup_adapters::chain::evm::window::WindowResult {
+            transfers,
+            factory_logs: Vec::new(),
+            proof: None,
+        })
+    }
     /// Returns token balances at one block in bounded JSON-RPC batches.
     async fn token_balances(
         &self,
@@ -76,6 +97,13 @@ impl ReconciliationChain for FinalizedReader {
             )
         })
         .await?)
+    }
+
+    async fn read_window(
+        &self,
+        request: &topup_adapters::chain::evm::window::WindowRequest,
+    ) -> Result<topup_adapters::chain::evm::window::WindowResult, ReconciliationError> {
+        Ok(backing_off(|| ChainReader::read_window(self, request)).await?)
     }
 
     async fn token_balances(

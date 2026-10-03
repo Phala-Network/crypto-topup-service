@@ -187,7 +187,19 @@ pub async fn commit_confirmed_scan(
     confirmed_block: u64,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Confirmed).await?;
+    super::rpc::guard_in(&mut transaction, chain_id).await?;
+    let result =
+        commit_confirmed_scan_in(&mut transaction, chain_id, deposits, confirmed_block).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+pub(crate) async fn commit_confirmed_scan_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: u64,
+    deposits: &[NewDeposit],
+    confirmed_block: u64,
+) -> Result<ScanCommit, sqlx::Error> {
+    let commit = insert_deposits_in(transaction, deposits, Evidence::Confirmed).await?;
     sqlx::query(
         r#"
         UPDATE cursors
@@ -197,9 +209,8 @@ pub async fn commit_confirmed_scan(
     )
     .bind(to_i64(chain_id, "cursors.chain_id")?)
     .bind(to_i64(confirmed_block, "cursors.confirmed_block")?)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
-    transaction.commit().await?;
     Ok(commit)
 }
 
@@ -311,12 +322,33 @@ pub async fn commit_scan(
     scanned_block_time: Option<DateTime<Utc>>,
 ) -> Result<ScanCommit, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let commit = insert_deposits_in(&mut transaction, deposits, Evidence::Finalized).await?;
+    let result = commit_scan_in(
+        &mut transaction,
+        chain_id,
+        deposits,
+        backfilled_address_ids,
+        scanned_block,
+        scanned_block_time,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn commit_scan_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: u64,
+    deposits: &[NewDeposit],
+    backfilled_address_ids: &[Uuid],
+    scanned_block: Option<u64>,
+    scanned_block_time: Option<DateTime<Utc>>,
+) -> Result<ScanCommit, sqlx::Error> {
+    let commit = insert_deposits_in(transaction, deposits, Evidence::Finalized).await?;
 
     if !backfilled_address_ids.is_empty() {
         sqlx::query("UPDATE addresses SET backfilled = true WHERE id = ANY($1)")
             .bind(backfilled_address_ids)
-            .execute(&mut *transaction)
+            .execute(&mut **transaction)
             .await?;
     }
 
@@ -338,11 +370,10 @@ pub async fn commit_scan(
         .bind(chain_id)
         .bind(scanned_block)
         .bind(scanned_block_time)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
-        super::pending::delete_finalized_in(&mut transaction, chain_id, scanned_block).await?;
+        super::pending::delete_finalized_in(transaction, chain_id, scanned_block).await?;
     }
 
-    transaction.commit().await?;
     Ok(commit)
 }

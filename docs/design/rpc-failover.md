@@ -1,6 +1,6 @@
 # RPC load balancing and failover
 
-Status: proposed for 0.7.0; design only. Base: 0.6.0.
+Status: implementation target for 0.7.0. Base: 0.6.0.
 
 ## Decision and scope
 
@@ -46,6 +46,10 @@ rpc_companies:
   alchemy: { domains: [alchemy.com] }
   publicnode: { domains: [publicnode.com] }
 rpc_budgets:
+  tenderly-account: { requests_per_second: 10, burst: 10 }
+  tenderly-public: { requests_per_second: 10, burst: 5 }
+  publicnode-account: { requests_per_second: 10, burst: 10 }
+  publicnode-public: { requests_per_second: 10, burst: 5 }
   alchemy-account: { requests_per_second: 20, burst: 20 }
   alchemy-key-1: { requests_per_second: 10, burst: 10 }
   alchemy-key-2: { requests_per_second: 10, burst: 10 }
@@ -55,6 +59,8 @@ rpc_groups:
     members:
       - id: provider-a
         company: tenderly
+        account_budget: tenderly-account
+        key_budget: tenderly-public
         url: https://sepolia.gateway.tenderly.co
         sealed_key: null
         priority: 0
@@ -77,18 +83,21 @@ rpc_groups:
         weight: 1
     policy:
       selection: failover # or weighted_round_robin
-      total_deadline: 10s
-      attempt_timeout: 3s
+      total_deadline_ms: 10000
+      attempt_timeout_ms: 3000
       max_attempts: 3
-      retry: { delay: 100ms, max_delay: 1s, jitter: 100ms }
-      cooldown: { failures: 3, duration: 30s }
-      recovery: { probe_interval: 30s, successes: 2 }
+      retry_delay_ms: 100
+      failures: 3
+      cooldown_ms: 30000
+      recovery_successes: 2 # bounded worker schedules full probes every 5s
       rpc_error_rules: [] # reviewed provider-specific code/message mappings
   sepolia-b:
     chain_id: 11155111
     members:
       - id: provider-b
         company: publicnode
+        account_budget: publicnode-account
+        key_budget: publicnode-public
         url: https://ethereum-sepolia-rpc.publicnode.com
         sealed_key: null
         priority: 0

@@ -24,7 +24,7 @@ staging="$root/deploy/environments/phala-network/staging/topup"
 route_json() {
     jq -c --arg name "$1" --argjson chain "$2" --argjson live "$3" \
         '.route = $name | .chain.chain_id = $chain | .livemode = $live
-        | .chain.rpc_providers = ["\($name)-a", "\($name)-b"]' "$tmp/route.json"
+        | .chain.rpc_groups = {a:"\($name)-a", b:"\($name)-b"}' "$tmp/route.json"
 }
 # environment NAME ROUTE_LINE...: staging's environment with each route appended as a list item,
 # and each route's two providers configured; rendered to $tmp/NAME.yml.
@@ -35,8 +35,10 @@ environment() {
     for line in "$@"; do
         printf '  - %s\n' "$line" >>"$tmp/$name/topup.yaml"
         id=$(sed -E 's/.*route"?: *"?([a-z0-9-]+).*/\1/' <<<"$line")
-        sed -i "s|^rpc_providers:$|rpc_providers:\n  $id-a: https://$id-a.example.net\n  $id-b: https://$id-b.example.net|" \
-            "$tmp/$name/topup.yaml"
+        chain=$(sed -E 's/.*chain_id"?: *([0-9]+).*/\1/' <<<"$line")
+        if ! grep -q '^  test-a:' "$tmp/$name/topup.yaml"; then sed -i "s|^rpc_companies:$|rpc_companies:\n  test-a: { domains: [test-a.example] }\n  test-b: { domains: [test-b.example] }|" "$tmp/$name/topup.yaml"; fi
+        sed -i "s|^rpc_groups:$|rpc_groups:\n  $id-a:\n    chain_id: $chain\n    members: [{id: $id-a, company: test-a, url: 'https://$id.test-a.example', account_budget: tenderly-account, key_budget: provider-a-key}]\n  $id-b:\n    chain_id: $chain\n    members: [{id: $id-b, company: test-b, url: 'https://$id.test-b.example', account_budget: publicnode-account, key_budget: provider-b-key}]|" "$tmp/$name/topup.yaml"
+
     done
     "$root/deploy/render.sh" --images "$tmp/images.json" \
         --gateway-domain gateway.dstack-pha-prod5.phala.network "$tmp/$name" >"$tmp/$name.yml"

@@ -32,6 +32,7 @@ crc = "=3.4.0"
 clap = { version = "4.6.7", features = ["derive"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+governor = { version = "=0.10.4", default-features = false, features = ["std"] }
 hex = "=0.4.3"
 hmac = "=0.13.0"
 httpdate = "=1.0.3"
@@ -51,7 +52,7 @@ sqlx = { version = "=0.9.0", default-features = false, features = ["chrono", "js
 static_assertions = "=1.1.0"
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
-tower = { version = "=0.5.3", features = ["util"] }
+tower = { version = "=0.5.3", features = ["util", "timeout", "retry"] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }

@@ -79,7 +79,7 @@ pub async fn verify_routes(routes: &RouteSet) -> Result<(), String> {
 /// difference from the audited build. The treasury is not in any contract: it is each clone's
 /// argument, so a sample `addressOf(treasury, salt)` proves the factory derives addresses as the
 /// service does for any treasury.
-async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> {
+pub(crate) async fn verify_on(client: &EvmClient, route: &RouteFile) -> Result<(), String> {
     let contracts = &route.chain.contracts;
     let factory = contracts.forwarder_factory;
     let implementation = contracts.implementation;

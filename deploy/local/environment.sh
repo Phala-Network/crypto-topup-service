@@ -30,11 +30,8 @@ public_origin: https://topup.localhost
 admin_key:
   id: $admin_key_id
   public_key: $admin_public_key
-rpc_providers:
-  provider-a: http://127.0.0.1:1
-  provider-b: http://127.0.0.1:2
-  base-sepolia-a: http://127.0.0.1:3
-  base-sepolia-b: http://127.0.0.1:4
 YAML
+    sed -n '/^rpc_companies:/,/^routes:$/p' "$root/deploy/environments/phala-network/staging/topup/topup.yaml" |
+        sed '$d; s|domains:|domains:|; s|tenderly.co|127.0.0.1|g; s|publicnode.com|localhost|g; s|https://sepolia.gateway.127.0.0.1|http://127.0.0.1:1|; s|https://base-sepolia.gateway.127.0.0.1|http://127.0.0.1:3|; s|https://ethereum-sepolia-rpc.localhost|http://localhost:2|; s|https://base-sepolia-rpc.localhost|http://localhost:4|'
     sed -n '/^routes:$/,$p' "$root/deploy/environments/phala-network/staging/topup/topup.yaml"
 } >"$out/topup.yaml"

@@ -7,9 +7,44 @@ admin_key:                                # from `topup-sdk keygen`; the seed ne
   public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=
 # Two providers per chain, from different companies; the first a route names makes every log
 # request. A key goes in `{key}` and is sealed as TOPUP_RPC_<ID>_KEY (compose.yaml).
-rpc_providers:
-  alchemy-sepolia: https://eth-sepolia.g.alchemy.com/v2/{key}
-  publicnode-sepolia: https://ethereum-sepolia-rpc.publicnode.com
+rpc_companies:
+  alchemy:
+    domains:
+    - alchemy.com
+  publicnode:
+    domains:
+    - publicnode.com
+rpc_budgets:
+  alchemy-account:
+    requests_per_second: 10
+    burst: 10
+  alchemy-sepolia-key:
+    requests_per_second: 10
+    burst: 5
+  publicnode-account:
+    requests_per_second: 10
+    burst: 10
+  publicnode-sepolia-key:
+    requests_per_second: 10
+    burst: 5
+rpc_groups:
+  alchemy-sepolia:
+    chain_id: 11155111
+    members:
+    - id: alchemy-sepolia
+      company: alchemy
+      url: https://eth-sepolia.g.alchemy.com/v2/{key}
+      account_budget: alchemy-account
+      key_budget: alchemy-sepolia-key
+      sealed_key: TOPUP_RPC_ALCHEMY_SEPOLIA_KEY
+  publicnode-sepolia:
+    chain_id: 11155111
+    members:
+    - id: publicnode-sepolia
+      company: publicnode
+      url: https://ethereum-sepolia-rpc.publicnode.com
+      account_budget: publicnode-account
+      key_budget: publicnode-sepolia-key
 # The fields and their defaults are in docs/architecture.md §14; `topup config show` prints them.
 routes:
   - route: example-sepolia-pha-usd
@@ -19,7 +54,7 @@ routes:
       chain_id: 11155111
       forwarder_factory: "0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747"
       confirmations: 2
-      rpc_providers: [alchemy-sepolia, publicnode-sepolia]
+      rpc_groups: { a: alchemy-sepolia, b: publicnode-sepolia }
       sanctions_oracle: "0x28A73f8235d966244210D9c49E34EDdA4fF9e1f6" # no Chainalysis oracle on Sepolia
     asset:
       symbol: pha

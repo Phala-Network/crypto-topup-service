@@ -19,7 +19,7 @@
 //! identity. The address list is read after `latest`, so an address issued later can only be paid
 //! in a block above the range scanned without it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -28,16 +28,14 @@ use sqlx::PgPool;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{
-    ChainError, ChainReader, FinalizedHead, FinalizedReader, TransferLog,
-};
+use topup_adapters::chain::evm::{ChainReader, FinalizedHead, FinalizedReader};
 use topup_core::route::{ChainConfig, ChainFamily, ChainHeads, Confirmations};
 
 use super::{
     ChainRoutes, MAX_SCAN_WINDOW, ScanConfig, ScannerError, address_index, record_committed,
     resolve_logs,
 };
-use crate::db::{self, HeadCommit, NewPendingTransfer, ScanAddress};
+use crate::db::{self, HeadCommit, NewPendingTransfer};
 
 /// Head poll interval of a chain whose route credits at `safe` or `finalized`, or that has no
 /// reviewed family: Ethereum's 12-second slot, also the rate at which an OP-stack `safe` head,
@@ -181,20 +179,19 @@ pub async fn scan_new_blocks<R: ChainReader>(
     }
     // Read after `latest`: an address issued from here on is paid only above `latest`.
     let addresses = db::list_scan_addresses(pool, chain_id).await?;
-    let logs = issued_transfers(reader, routes, &addresses, from_block, latest).await?;
+    let request = super::window_request(routes, &addresses, from_block, latest, false);
+    let window = reader.read_window(&request).await?;
+    let logs = window.transfers;
     let index = address_index(&addresses);
 
-    let mut inserted = 0;
+    let mut confirmed_deposits = Vec::new();
     if let Some(horizon) = horizon.filter(|horizon| *horizon > scanned) {
         let confirmed = logs
             .iter()
             .filter(|log| log.block_number <= horizon)
             .cloned()
             .collect();
-        let deposits = resolve_logs(confirmed, &index, routes)?;
-        let committed = db::commit_confirmed_scan(pool, chain_id, &deposits, horizon).await?;
-        record_committed(chain_id, &mut super::ScanStats::default(), committed)?;
-        inserted = committed.inserted;
+        confirmed_deposits = resolve_logs(confirmed, &index, routes)?;
     }
 
     let mut pending = Vec::new();
@@ -219,7 +216,18 @@ pub async fn scan_new_blocks<R: ChainReader>(
             amount_atomic: log.amount,
         });
     }
-    let commit = db::commit_head_scan(pool, chain_id, from_block, latest, &pending).await?;
+    let (committed, commit) = db::rpc::commit_head_window(
+        pool,
+        chain_id,
+        (from_block, latest),
+        &confirmed_deposits,
+        horizon.filter(|h| *h > scanned),
+        &pending,
+        window.proof.as_ref(),
+    )
+    .await?;
+    record_committed(chain_id, &mut super::ScanStats::default(), committed)?;
+    let inserted = committed.inserted;
     Ok(Some(HeadScan {
         from_block,
         latest,
@@ -231,38 +239,6 @@ pub async fn scan_new_blocks<R: ChainReader>(
 
 /// Transfers to `addresses` in the inclusive range, requested as the chain's routes select: every
 /// transfer of the routed tokens kept locally (token mode), or transfers of any token to the
-/// addresses in batches of 1 000 (address mode).
-pub(super) async fn issued_transfers<R: ChainReader>(
-    reader: &R,
-    routes: &ChainRoutes,
-    addresses: &[ScanAddress],
-    from_block: u64,
-    to_block: u64,
-) -> Result<Vec<TransferLog>, ChainError> {
-    if addresses.is_empty() {
-        return Ok(Vec::new());
-    }
-    if routes.token_mode() {
-        let tokens = routes.routes.keys().copied().collect::<Vec<_>>();
-        let recipients = addresses
-            .iter()
-            .map(|address| address.address)
-            .collect::<BTreeSet<_>>();
-        return reader
-            .token_transfers(&tokens, &recipients, from_block, to_block)
-            .await;
-    }
-    let physical = addresses
-        .iter()
-        .map(|address| address.address)
-        .collect::<Vec<_>>();
-    let mut logs = Vec::new();
-    for batch in physical.chunks(topup_adapters::chain::evm::MAX_ADDRESSES_PER_REQUEST) {
-        logs.extend(reader.transfer_logs_to(batch, from_block, to_block).await?);
-    }
-    Ok(logs)
-}
-
 /// Quick re-polls after a poll that found no new head, before the loop falls back to one block
 /// time (a missed slot, or a stalled chain).
 const QUICK_REPOLLS: u32 = 4;

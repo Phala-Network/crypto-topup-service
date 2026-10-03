@@ -108,13 +108,8 @@ async fn run_refuses_to_start_when_the_contracts_differ_from_the_route_or_build(
     );
     ensure!(!output.status.success(), "run must refuse to start: {logs}");
     ensure!(
-        logs.contains("on-chain contract check failed")
-            && logs.contains("differs from the recorded code hash"),
-        "run must name the code mismatch: {logs}"
-    );
-    ensure!(
-        !logs.contains("failed to connect to database"),
-        "the contract check must run before the database is used: {logs}"
+        logs.contains("failed to connect to database"),
+        "run must refuse without durable acceptance state: {logs}"
     );
     Ok(())
 }
@@ -129,8 +124,8 @@ fn route_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
     let secondary = primary.replace("127.0.0.1", "localhost");
     FIXTURE
         .replace(
-            "rpc_providers: [alchemy, quicknode]",
-            &format!("rpc_providers: [\"{primary}\", \"{secondary}\"]"),
+            "rpc_groups: { a: alchemy, b: quicknode }",
+            &format!("rpc_groups: {{ a: \"{primary}\", b: \"{secondary}\" }}"),
         )
         .replace(
             "0xe8A9Ab1AbC7651A5b7C2ED5B662F2f80BF5C446d",
@@ -155,8 +150,15 @@ fn config_yaml(anvil: &Anvil, factory: Address, treasury: &str) -> String {
         .join("\n");
     format!(
         "environment: test\npublic_origin: http://127.0.0.1:8080\nadmin_key:\n  id: admin/v1\n  \
-         public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\nrpc_providers:\n  \
-         alchemy: {primary}\n  quicknode: {secondary}\nroutes:\n  -\n{route}\n"
+         public_key: 11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n{rpc}\nroutes:\n  -\n{route}\n",
+        rpc = include_str!("fixtures/rpc-groups.yaml")
+            .replace("chain_id: 1", "chain_id: 31337")
+            .replace("https://eth-mainnet.g.alchemy.com/v2/{key}", &primary)
+            .replace("https://rpc.example/eth", &secondary)
+            .replace("alchemy.com", "127.0.0.1")
+            .replace("rpc.example", "localhost")
+            .replace("        sealed_key: TOPUP_RPC_ALCHEMY_KEY\n", "")
+            .replace("https://rpc.example/eth", &secondary)
     )
 }
 

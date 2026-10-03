@@ -38,6 +38,7 @@ pub mod refunds;
 pub mod restore;
 pub mod restore_mode;
 pub mod routes;
+pub mod rpc_groups;
 pub mod rpc_provider;
 pub mod scanner;
 pub mod steps;
@@ -45,3 +46,6 @@ pub mod tenancy;
 pub mod treasuries;
 pub mod webhook_endpoints;
 pub mod webhook_keys;
+
+/// RPC group acceptance and recovery probes.
+pub mod rpc_runtime;

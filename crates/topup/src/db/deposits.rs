@@ -626,6 +626,16 @@ pub async fn apply_transition(
         ));
     }
 
+    // Serialize credit/derived writes with finalized-fork freeze and audited recovery.
+    let chain: i64 = sqlx::query_scalar("SELECT chain_id FROM deposits WHERE id=$1")
+        .bind(deposit_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+    super::rpc::guard_in(
+        transaction,
+        u64::try_from(chain).map_err(|e| sqlx::Error::Encode(e.into()))?,
+    )
+    .await?;
     let expected = state_code(expected_state);
     let target = state_code(update.transition.to);
     let reason = update.rejection_reason.map(RejectReason::code);

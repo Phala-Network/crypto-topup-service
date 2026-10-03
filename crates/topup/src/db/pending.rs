@@ -103,10 +103,30 @@ pub async fn commit_head_scan(
     head_block: u64,
     transfers: &[NewPendingTransfer],
 ) -> Result<HeadCommit, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    super::rpc::guard_in(&mut transaction, chain_id).await?;
+    let result = commit_head_scan_in(
+        &mut transaction,
+        chain_id,
+        from_block,
+        head_block,
+        transfers,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+pub(crate) async fn commit_head_scan_in(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chain_id: u64,
+    from_block: u64,
+    head_block: u64,
+    transfers: &[NewPendingTransfer],
+) -> Result<HeadCommit, sqlx::Error> {
     let chain = to_i64(chain_id, "pending_transfers.chain_id")?;
     let from_block = to_i64(from_block, "pending_transfers.block_number")?;
     let head = to_i64(head_block, "pending_transfers.head_block")?;
-    let mut transaction = pool.begin().await?;
+
     // `FOR SHARE` makes a concurrent cursor advance wait for this transaction (or this read wait
     // for it), so a row at or below the committed cursor is never inserted after the finalized
     // scanner deleted that range.
@@ -114,7 +134,7 @@ pub async fn commit_head_scan(
         "SELECT scanned_block FROM cursors WHERE chain_id = $1 FOR SHARE",
     )
     .bind(chain)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await?
     .unwrap_or(-1);
     let tx_hashes = transfers
@@ -147,7 +167,7 @@ pub async fn commit_head_scan(
     .bind(&tx_hashes)
     .bind(&log_indexes)
     .bind(head)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?
     .rows_affected();
 
@@ -160,10 +180,9 @@ pub async fn commit_head_scan(
         if block_number <= cursor {
             continue;
         }
-        upsert(&mut transaction, chain, head, transfer).await?;
+        upsert(transaction, chain, head, transfer).await?;
         commit.seen = commit.seen.saturating_add(1);
     }
-    transaction.commit().await?;
     Ok(commit)
 }
 

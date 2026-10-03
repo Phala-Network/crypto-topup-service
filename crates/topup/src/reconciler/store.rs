@@ -102,7 +102,7 @@ pub async fn chain_is_blocked(pool: &PgPool, chain_id: u64) -> Result<bool, sqlx
     let chain_id =
         i64::try_from(chain_id).map_err(|error| sqlx::Error::Encode(error.to_string().into()))?;
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM reconciliation_blocks WHERE scope = 'chain' AND chain_id = $1)",
+        "SELECT EXISTS(SELECT 1 FROM reconciliation_blocks WHERE scope = 'chain' AND chain_id = $1) OR COALESCE((SELECT frozen FROM rpc_chain_state WHERE chain_id=$1),false)",
     )
     .bind(chain_id)
     .fetch_one(pool)
@@ -305,45 +305,6 @@ pub(crate) async fn deposit_cursor(
     .fetch_optional(pool)
     .await?;
     next.map(db_u64).transpose()
-}
-
-/// Advances the missing-deposit cursor from `from` to `next`; returns false if another pass did.
-pub(crate) async fn advance_deposit_cursor(
-    pool: &PgPool,
-    chain_id: u64,
-    from: Option<u64>,
-    next: u64,
-) -> Result<bool, ReconciliationError> {
-    let chain_id = db_i64(chain_id)?;
-    let next = db_i64(next)?;
-    let rows = match from {
-        None => sqlx::query(
-            r#"
-            INSERT INTO reconciliation_deposit_cursors (chain_id, next_block)
-            VALUES ($1, $2)
-            ON CONFLICT (chain_id) DO NOTHING
-            "#,
-        )
-        .bind(chain_id)
-        .bind(next)
-        .execute(pool)
-        .await?
-        .rows_affected(),
-        Some(from) => sqlx::query(
-            r#"
-            UPDATE reconciliation_deposit_cursors
-            SET next_block = $3, updated_at = now()
-            WHERE chain_id = $1 AND next_block = $2
-            "#,
-        )
-        .bind(chain_id)
-        .bind(db_i64(from)?)
-        .bind(next)
-        .execute(pool)
-        .await?
-        .rows_affected(),
-    };
-    Ok(rows == 1)
 }
 
 fn parse_u256(value: &str) -> Result<U256, ReconciliationError> {

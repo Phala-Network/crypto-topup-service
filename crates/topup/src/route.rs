@@ -342,15 +342,15 @@ mod tests {
             // The service sends no transactions: no operator key, flush schedule, or gas policy.
             (
                 VALID.replace(
-                    "  rpc_providers: [alchemy, quicknode]\n",
-                    "  rpc_providers: [alchemy, quicknode]\n  operator_key_version: 1\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n  operator_key_version: 1\n",
                 ),
                 "operator_key_version",
             ),
             (
                 VALID.replace(
-                    "  rpc_providers: [alchemy, quicknode]\n",
-                    "  rpc_providers: [alchemy, quicknode]\n  flush:\n    schedule: \"0 * * * *\"\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n  flush:\n    schedule: \"0 * * * *\"\n",
                 ),
                 "flush",
             ),
@@ -449,29 +449,29 @@ mod tests {
             (VALID.replace("livemode: true\n", ""), "livemode"),
             (
                 VALID.replace(
-                    "rpc_providers: [alchemy, quicknode]",
-                    "rpc_providers: [alchemy, alchemy]",
+                    "rpc_groups: { a: alchemy, b: quicknode }",
+                    "rpc_groups: { a: alchemy, b: alchemy }",
                 ),
                 "chain.rpc_providers",
             ),
             (
                 VALID.replace(
-                    "rpc_providers: [alchemy, quicknode]",
-                    "rpc_providers: [\"\", \"\"]",
+                    "rpc_groups: { a: alchemy, b: quicknode }",
+                    "rpc_groups: { a: \"\", b: \"\" }",
                 ),
                 "chain.rpc_providers",
             ),
             (
                 VALID.replace(
-                    "rpc_providers: [alchemy, quicknode]",
+                    "rpc_groups: { a: alchemy, b: quicknode }",
                     "rpc_providers: [alchemy]",
                 ),
                 "chain.rpc_providers",
             ),
             (
                 VALID.replace(
-                    "  rpc_providers: [alchemy, quicknode]\n",
-                    "  rpc_providers: [alchemy, quicknode]\n  implementation: \"0x0000000000000000000000000000000000000000\"\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n",
+                    "  rpc_groups: { a: alchemy, b: quicknode }\n  implementation: \"0x0000000000000000000000000000000000000000\"\n",
                 ),
                 "chain.implementation",
             ),

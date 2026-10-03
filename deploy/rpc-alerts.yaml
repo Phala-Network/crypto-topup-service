@@ -1,0 +1,31 @@
+# Import into the operator's Prometheus rule_files. Scrape the admin-signed metrics exporter.
+groups:
+  - name: phala-pay-rpc
+    rules:
+      - alert: RpcGroupUnavailable
+        expr: topup_rpc_group_eligible_members == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "RPC group {{ $labels.group }} unavailable; credit waits for A and B"
+          runbook: "deploy/RPC.md"
+      - alert: RpcFinalizedFork
+        expr: topup_rpc_chain_frozen == 1
+        labels: { severity: critical }
+        annotations:
+          summary: "Chain {{ $labels.chain_id }} is durably frozen"
+          runbook: "deploy/RPC.md"
+      - alert: RpcMemberQuarantined
+        expr: topup_rpc_member_quarantined == 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "RPC member {{ $labels.member }} requires credential or redirect review"
+          runbook: "deploy/RPC.md"
+      - alert: RpcHistoricalReviewBacklog
+        expr: topup_rpc_review_pending_windows > 0
+        for: 24h
+        labels: { severity: warning }
+        annotations:
+          summary: "Historical coverage still needs a different answering member"
+          runbook: "deploy/RPC.md"

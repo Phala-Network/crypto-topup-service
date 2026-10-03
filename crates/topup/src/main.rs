@@ -63,6 +63,11 @@ enum TopupCommand {
         #[command(subcommand)]
         command: RouteCommand,
     },
+    /// Pinned RPC member preflight and stopped-service owner recovery.
+    Rpc {
+        #[command(subcommand)]
+        command: RpcCommand,
+    },
     /// Run one reconciliation pass and exit.
     Reconcile(ReconcileArgs),
     /// Print attestation evidence binding a nonce to an account's webhook keys in one mode, as
@@ -83,6 +88,39 @@ enum TopupCommand {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RpcCommand {
+    /// Probe every member with its sealed credential; print only validated member ids.
+    Check {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Verify an agreed lower finalized anchor and repair derived address/cursor progress.
+    /// Requires an owner DATABASE_URL and the running service stopped; leaves the chain frozen.
+    Recover {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        chain: u64,
+        #[arg(long)]
+        block: u64,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Replay a bounded number of windows, verify credited branches, then unfreeze when complete.
+    /// Requires the owner DATABASE_URL and an audited recovery with the service stopped.
+    Resume {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        chain: u64,
+        #[arg(long,default_value_t=16,value_parser=clap::value_parser!(u32).range(1..=128))]
+        max_windows: u32,
     },
 }
 
@@ -305,6 +343,7 @@ async fn main() -> ExitCode {
             command: RouteCommand::Show { template, file },
         } => return show_route(&file, template),
         TopupCommand::Reconcile(args) => reconcile(&args).await,
+        TopupCommand::Rpc { command } => rpc_command(command).await,
         TopupCommand::Attest(args) => {
             return match attest(&args).await {
                 Ok(()) => ExitCode::SUCCESS,
@@ -617,12 +656,6 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         };
         return serve_read_only(args.bind, state, args.restore_report.clone()).await;
     }
-    // Architecture §4: before the database is touched, every provider must show the route's
-    // factory and implementation, so nothing issues addresses otherwise.
-    topup::contracts::verify_routes(&routes)
-        .await
-        .map_err(anyhow::Error::msg)
-        .context("on-chain contract check failed")?;
     let routes = Arc::new(routes);
     let scanner_count = routes.chain_ids().count();
     let connection_count = u32::try_from(PUMPS)
@@ -665,6 +698,14 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     let Some(lease_owner) = wait_for_lease_owner_lock(&pool).await? else {
         return Ok(ExitCode::SUCCESS);
     };
+    topup::rpc_runtime::accept(
+        &pool,
+        &routes,
+        &config.resolved_json().map_err(anyhow::Error::msg)?,
+    )
+    .await
+    .map_err(anyhow::Error::msg)
+    .context("RPC group acceptance failed")?;
     // A chain added since the last start gets its cursor at its `finalized` head before the API
     // issues an address on it (architecture §8). After a restore, a chain without a restored
     // cursor is rescanned from genesis instead, so addresses re-issued on it find the payments
@@ -765,6 +806,11 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     });
     tracing::info!(bind = %args.bind, "API listening");
 
+    let recovery_pool = pool.clone();
+    let recovery_routes = Arc::clone(&routes);
+    tasks.spawn("RPC recovery probes", move |cancellation| {
+        topup::rpc_runtime::recover_members(recovery_pool, recovery_routes, cancellation)
+    });
     let scanner_pool = pool.clone();
     let scanner_routes = Arc::clone(&routes);
     let scan_config = topup::scanner::ScanConfig {
@@ -1023,6 +1069,50 @@ async fn serve_read_only(
     pool.close().await;
     served.context("read-only API failed")?;
     tracing::info!("read-only API stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn rpc_command(command: RpcCommand) -> anyhow::Result<ExitCode> {
+    let file = match &command {
+        RpcCommand::Check { config }
+        | RpcCommand::Recover { config, .. }
+        | RpcCommand::Resume { config, .. } => config,
+    };
+    let config = load_config(file)?;
+    config
+        .check_secrets(|name| std::env::var(name).ok())
+        .map_err(anyhow::Error::msg)?;
+    let routes = config.route_set().map_err(anyhow::Error::msg)?;
+    if matches!(&command, RpcCommand::Check { .. }) {
+        let ids = topup::rpc_runtime::preflight(&routes)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        println!("{}", serde_json::to_string(&ids)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let pool = connect("RPC recovery", 4).await?;
+    let result = match command {
+        RpcCommand::Recover {
+            chain,
+            block,
+            actor,
+            reason,
+            ..
+        } => topup::rpc_runtime::recover_watermark(&pool, &routes, chain, block, &actor, &reason)
+            .await
+            .map(|()| true),
+        RpcCommand::Resume {
+            chain, max_windows, ..
+        } => topup::rpc_runtime::resume_recovery(&pool, &routes, chain, max_windows).await,
+        RpcCommand::Check { .. } => Err("unexpected RPC check dispatch".to_owned()),
+    };
+    pool.close().await;
+    let complete = result.map_err(anyhow::Error::msg)?;
+    if !complete {
+        tracing::info!(
+            "recovery replay retained progress; run rpc resume again with the service stopped"
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

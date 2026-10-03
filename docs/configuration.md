@@ -39,9 +39,23 @@ public_origin: https://pay-api-staging.phala.com
 admin_key:
   id: admin/staging-v1                     # the key id admin requests sign with
   public_key: 23Y9wEJMOTySGV3UXmcTFnQsbigA9/cYTvmqdQxzmdo=   # standard base64 ed25519
-rpc_providers:                             # id → URL
-  provider-a: https://sepolia.gateway.tenderly.co
-  provider-b: https://eth-sepolia.g.alchemy.com/v2/{key}
+rpc_companies:
+  tenderly: { domains: [tenderly.co] }
+  publicnode: { domains: [publicnode.com] }
+rpc_budgets:
+  tenderly-account: { requests_per_second: 10, burst: 10 }
+  tenderly-public: { requests_per_second: 10, burst: 5 }
+  publicnode-account: { requests_per_second: 10, burst: 10 }
+  publicnode-public: { requests_per_second: 10, burst: 5 }
+rpc_groups:
+  sepolia-a:
+    chain_id: 11155111
+    members: [{id: provider-a, company: tenderly, url: 'https://sepolia.gateway.tenderly.co',
+               account_budget: tenderly-account, key_budget: tenderly-public}]
+  sepolia-b:
+    chain_id: 11155111
+    members: [{id: provider-b, company: publicnode, url: 'https://ethereum-sepolia-rpc.publicnode.com',
+               account_budget: publicnode-account, key_budget: publicnode-public}]
 routes:                                    # every enabled route version, as route files are written
   - route: phala-cloud-sepolia-pha-usd
     version: 3
@@ -58,15 +72,17 @@ routes:                                    # every enabled route version, as rou
   template's, whose deploy form holds them
   ([deploy/README.md](../deploy/README.md#the-phala-cloud-template-variant)). `topup run` refuses
   to start unless each has exactly one source. Every other deployment writes both, attested.
-- **`rpc_providers`** maps each provider id (lowercase letters, digits, `-`) to its URL, `https` in
-  a deployment (preflight requires it). Routes name their chain's providers by id in
-  `chain.rpc_providers`, and a route that names none uses `provider-a` and `provider-b`. The first
-  provider is provider A, which scans. A provider that puts an API key in its URL is configured
-  with the placeholder `{key}` where its documentation puts the key. `{key}` must be a whole path
-  segment or a whole query value, and filling it must leave the scheme, host, and port unchanged.
-  The key itself is the sealed `TOPUP_RPC_<ID>_KEY` (the id upper-cased, every non-alphanumeric
-  character `_`): at least 8 characters of `A-Z a-z 0-9 - . _ ~`. A key without a placeholder, or
-  a placeholder without a key, is refused.
+- **`rpc_groups`** configures independent A/B groups. Each route explicitly names
+  `chain.rpc_groups: { a: sepolia-a, b: sepolia-b }`; there is no implicit provider list.
+  Members have unique ids, reviewed `company`, `url`, optional `sealed_key`, `account_budget`
+  and `key_budget`, plus priority/weight. Companies must be disjoint between A and B.
+  Each `{key}` is a whole path segment or query value and cannot change authority. Keys stay
+  sealed under the explicit `TOPUP_RPC_*_KEY` name, with at least 8 URL-safe characters.
+  Repeated templates with different credentials are allowed; identical URL/credential identities
+  and conflicting shared quota scopes are refused. Keyless endpoints still have synthetic key
+  budgets. Public policies resolve to bounded failover defaults; weighted round robin is optional.
+  See [the design schema and error table](design/rpc-failover.md#configuration) and
+  [the RPC runbook](../deploy/RPC.md) for preflight, recovery and migration.
 - **`routes`** are route files, one list item each; their fields and defaults are in
   [architecture §14](architecture.md#14-configuration-and-deployment).
 

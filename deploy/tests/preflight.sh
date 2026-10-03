@@ -127,7 +127,7 @@ edited_environment() {
 }
 # A keyed provider is attested with {key}, and its sealed key must fit it: checked with --secrets,
 # skipped with --unsealed, and never printed.
-edited_environment keyed 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/{key}|' \
+edited_environment keyed 's|url: https://sepolia.gateway.tenderly.co|url: https://sepolia.gateway.tenderly.co/{key}\n      sealed_key: TOPUP_RPC_PROVIDER_A_KEY|' \
     TOPUP_RPC_PROVIDER_A_KEY
 env_file keyed "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed-key-0123456789
 passes --env "$tmp/keyed.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
@@ -143,10 +143,10 @@ env_file bad-key "$tmp/keyed.yml" TOPUP_RPC_PROVIDER_A_KEY=sealed/key
 expect_failure bad-key "TOPUP_RPC_PROVIDER_A_KEY must be at least 8 characters" \
     --env "$tmp/bad-key.env" --compose "$tmp/keyed.yml" --environment-dir "$tmp/keyed"
 # A URL that carries its key would publish it; a placeholder in the host is refused by topup.
-edited_environment embedded 's|provider-a: .*|provider-a: https://eth-sepolia.g.alchemy.com/v2/aB3dEfGhIjKlMnOpQrStUvWxYz012345|'
+edited_environment embedded 's|url: https://sepolia.gateway.tenderly.co|url: https://sepolia.gateway.tenderly.co/aB3dEfGhIjKlMnOpQrStUvWxYz012345|'
 expect_failure embedded "RPC provider provider-a's URL seems to embed an API key" \
     --env "$tmp/complete.env" --compose "$tmp/embedded.yml" --environment-dir "$tmp/embedded"
-edited_environment host-key 's|provider-a: .*|provider-a: https://{key}.example.net/rpc|'
+edited_environment host-key 's|url: https://sepolia.gateway.tenderly.co|url: https://{key}.example.net/rpc|'
 expect_failure host-key "may have {key} only as a whole path segment or a whole query value" \
     --env "$tmp/complete.env" --compose "$tmp/host-key.yml" --environment-dir "$tmp/host-key"
 if grep -rqE 'aB3dEfGhIjKlMnOpQrStUvWxYz012345|sealed-key-0123456789|sealed/key' "$tmp"/*.out "$tmp"/*.err; then
@@ -158,8 +158,8 @@ fi
 edited_environment zero-route 's|forwarder_factory: "0x[0-9a-fA-F]*"|forwarder_factory: "0x0000000000000000000000000000000000000000"|'
 expect_failure zero-route "must not be the zero address" \
     --env "$tmp/complete.env" --compose "$tmp/zero-route.yml" --environment-dir "$tmp/zero-route"
-edited_environment two-chains 's|rpc_providers: \[base-sepolia-a, base-sepolia-b\]|rpc_providers: [provider-a, base-sepolia-b]|'
-expect_failure two-chains "is named on chain 84532 and chain 11155111" \
+edited_environment two-chains 's|rpc_groups: { a: base-sepolia-a, b: base-sepolia-b }|rpc_groups: { a: provider-a, b: base-sepolia-b }|'
+expect_failure two-chains "RPC group chain mismatch" \
     --env "$tmp/complete.env" --compose "$tmp/two-chains.yml" --environment-dir "$tmp/two-chains"
 
 # Only the approved production image passes.

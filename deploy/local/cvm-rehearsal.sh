@@ -310,11 +310,13 @@ write_config() {
                     "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle],
                     "phala-cloud-base-sepolia-usdt-usd": [$base_usdt, $base_oracle]}')" '
             .admin_key = {id: $id, public_key: $key}
-            | .rpc_providers = {
-                "provider-a": "http://anvil:8545",
-                "provider-b": "http://anvil:8545/?key={key}",
-                "base-sepolia-a": "http://anvil-base-sepolia:8545",
-                "base-sepolia-b": "http://anvil-base-sepolia:8545/?provider=b"}
+            | .rpc_companies.tenderly.domains = ["anvil", "anvil-base-sepolia"]
+            | .rpc_companies.publicnode.domains = ["anvil-b", "anvil-base-sepolia-b"]
+            | .rpc_groups["provider-a"].members[0].url = "http://anvil:8545"
+            | .rpc_groups["provider-b"].members[0].url = "http://anvil-b:8545/?key={key}"
+            | .rpc_groups["provider-b"].members[0].sealed_key = "TOPUP_RPC_PROVIDER_B_KEY"
+            | .rpc_groups["base-sepolia-a"].members[0].url = "http://anvil-base-sepolia:8545"
+            | .rpc_groups["base-sepolia-b"].members[0].url = "http://anvil-base-sepolia-b:8545"
             | .routes |= map(($assets[.route] // error("no rehearsal token for \(.route)")) as $asset
                 | .chain.forwarder_factory = $factory | .chain.implementation = $implementation
                 | .asset.contract = $asset[0] | .chain.sanctions_oracle = $asset[1])' \

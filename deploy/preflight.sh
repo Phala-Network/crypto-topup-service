@@ -136,16 +136,17 @@ fi
 
 # Every RPC URL is published with the compose: https, and a key only in its `{key}`.
 declare -A provider_url=()
-while IFS=$'\t' read -r id url; do
+while IFS=$'\t' read -r id url configured_key; do
     [[ "$url" == https://* ]] || fail "RPC provider $id must use https"
     embeds_key "${url//\{key\}/}" &&
         fail "RPC provider $id's URL seems to embed an API key, which the compose publishes;" \
             "attest it with {key} in the key's place and seal the key"
     key_name=$(jq -rn --arg id "$id" '"TOPUP_RPC_\($id | ascii_upcase | gsub("[^A-Z0-9]"; "_"))_KEY"')
+    [[ -z "$configured_key" ]] || key_name=$configured_key
     key=${env[$key_name]-}
     [[ -z "$key" ]] || url=${url//"{key}"/"$key"}
     provider_url[$id]=$url
-done < <(jq -r '.rpc_providers | to_entries[] | [.key, .value] | @tsv' "$tmp/config.json")
+done < <(jq -r '.rpc_groups[].members[] | [.id, .url, (.sealed_key // "")] | @tsv' "$tmp/config.json")
 while IFS=$'\t' read -r route factory implementation; do
     for key in "$factory" "$implementation"; do
         if ! is_address "$key" || grep -Eiq '^0x([0-9a-f])\1{39}$' <<<"$key"; then
@@ -244,9 +245,9 @@ else
         reported=$(rpc "${provider_url[${ids[0]}]}" call "$contract" 'decimals()(uint8)')
         [[ "$reported" == "$decimals" ]] ||
             fail "route $name: asset decimals() is $reported, the route says $decimals"
-    done < <(jq -r '.routes[] | [.route, .chain.chain_id, .chain.forwarder_factory,
+    done < <(jq -r '. as $config | .routes[] | [.route, .chain.chain_id, .chain.forwarder_factory,
         .chain.implementation, .asset.contract, .chain.sanctions_oracle, .asset.decimals,
-        (.chain.rpc_providers | join(" "))] | @tsv' "$tmp/config.json")
+        ([.chain.rpc_groups.a, .chain.rpc_groups.b] | map($config.rpc_groups[.].members[].id) | join(" "))] | @tsv' "$tmp/config.json")
 fi
 
 check_phala_cloud "$workspace" "$os_image"

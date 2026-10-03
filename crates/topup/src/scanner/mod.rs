@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::chain_retry::backing_off;
 use alloy_primitives::Address;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -30,7 +31,6 @@ use topup_core::retry::backoff;
 use topup_core::route::{Backstop, ChainConfig};
 use tracing::Instrument as _;
 
-use crate::chain_retry::backing_off;
 use crate::db::{self, NewDeposit, ScanAddress, ScanCommit};
 use crate::jitter::{JitterSource as _, OsJitter};
 use crate::routes::RouteSet;
@@ -246,7 +246,76 @@ pub async fn initialize_cursors(pool: &PgPool, route_set: &RouteSet) -> Result<(
         let client = route_set
             .provider(chain_id, 0)
             .map_err(|error| ScannerError::Configuration(error.to_string()))?;
-        initialize_cursor(pool, &FinalizedReader::new(Arc::clone(client)), chain_id).await?;
+        if db::get_cursor(pool, chain_id).await?.is_some() {
+            continue;
+        }
+        if let Some(a) = client.group() {
+            let b = route_set
+                .provider(chain_id, 1)
+                .map_err(|e| ScannerError::Configuration(e.to_string()))?
+                .group()
+                .ok_or_else(|| ScannerError::Configuration("RPC B group missing".to_owned()))?;
+            let (Ok(ai), Ok(bi)) = (
+                a.select(&Default::default(), None),
+                b.select(&Default::default(), None),
+            ) else {
+                continue;
+            };
+            let deadline = tokio::time::Instant::now()
+                .checked_add(Duration::from_millis(
+                    a.policy.total_deadline_ms.min(b.policy.total_deadline_ms),
+                ))
+                .unwrap_or_else(tokio::time::Instant::now);
+            let height = a
+                .head(ai, "finalized", deadline)
+                .await
+                .map_err(ChainError::Group)?
+                .number
+                .min(
+                    b.head(bi, "finalized", deadline)
+                        .await
+                        .map_err(ChainError::Group)?
+                        .number,
+                );
+            let request = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{height:x}"),false]});
+            let av = a
+                .send(ai, &request, deadline)
+                .await
+                .map_err(ChainError::Group)?;
+            let bv = b
+                .send(bi, &request, deadline)
+                .await
+                .map_err(ChainError::Group)?;
+            let ah = topup_adapters::chain::evm::group::HeadAnchor::parse(av.get("result").ok_or(
+                ChainError::Group(topup_adapters::chain::evm::group::Failure::Malformed),
+            )?)
+            .map_err(ChainError::Group)?;
+            let bh = topup_adapters::chain::evm::group::HeadAnchor::parse(bv.get("result").ok_or(
+                ChainError::Group(topup_adapters::chain::evm::group::Failure::Malformed),
+            )?)
+            .map_err(ChainError::Group)?;
+            if ah != bh {
+                a.freeze().await.map_err(ChainError::Group)?;
+                return Err(
+                    ChainError::Group(topup_adapters::chain::evm::group::Failure::Fork).into(),
+                );
+            }
+            a.persist_cursor(ai, &ah).await.map_err(ChainError::Group)?;
+            b.persist_cursor(bi, &ah).await.map_err(ChainError::Group)?;
+            let timestamp = av
+                .get("result")
+                .and_then(|v| v.get("timestamp"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .and_then(|n| i64::try_from(n).ok())
+                .and_then(|n| DateTime::from_timestamp(n, 0))
+                .ok_or(ChainError::Group(
+                    topup_adapters::chain::evm::group::Failure::Malformed,
+                ))?;
+            db::initialize_cursor(pool, chain_id, height, timestamp).await?;
+        } else {
+            initialize_cursor(pool, &FinalizedReader::new(Arc::clone(client)), chain_id).await?;
+        }
     }
     Ok(())
 }
@@ -308,6 +377,32 @@ pub async fn scan_once<R: ChainReader>(
         ..ScanStats::default()
     };
 
+    for (id, mut request, answering) in db::rpc::due_reviews(pool, chain_id).await? {
+        request.exclude_member = Some(answering);
+        match reader.read_window(&request).await {
+            Ok(window) => {
+                let index = address_index(&addresses);
+                let deposits = resolve_logs(window.transfers, &index, routes)?;
+                db::rpc::commit_window(
+                    pool,
+                    chain_id,
+                    &deposits,
+                    &window.factory_logs,
+                    window.proof.as_ref(),
+                    db::rpc::WindowProgress {
+                        reviewed: Some(id),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                break;
+            }
+            Err(ChainError::Group(topup_adapters::chain::evm::group::Failure::Unavailable)) => {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     // Addresses issued at or below the cursor are read once from their creation block to the
     // cursor, together. Each committed window is kept, so a failed pass or a restart resumes the
     // backfill where it stopped: the cursor waits for it, and one that restarted from its creation
@@ -334,18 +429,32 @@ pub async fn scan_once<R: ChainReader>(
                 .filter(|address| address.backfill_start() <= to_block)
                 .cloned()
                 .collect::<Vec<_>>();
-            let committed =
-                scan_window(pool, reader, routes, &window, from_block, to_block).await?;
+            let committed = scan_window(
+                pool,
+                reader,
+                routes,
+                &window,
+                from_block,
+                to_block,
+                db::rpc::WindowProgress {
+                    through: Some((window.iter().map(|a| a.id).collect(), to_block)),
+                    backfilled: if to_block == through {
+                        window.iter().map(|a| a.id).collect()
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await?;
             record_committed(chain_id, &mut stats, committed.0)?;
             stats.record_factory(committed.1);
-            let ids = window.iter().map(|address| address.id).collect::<Vec<_>>();
-            db::record_backfill_progress(pool, &ids, to_block).await?;
         }
         let ids = pending_backfills
             .iter()
             .map(|address| address.id)
             .collect::<Vec<_>>();
-        db::commit_scan(pool, chain_id, &[], &ids, None, None).await?;
+
         stats.record_backfilled(ids.len())?;
     }
 
@@ -365,26 +474,22 @@ pub async fn scan_once<R: ChainReader>(
     }
 
     for (from_block, to_block) in scan_windows(start, finalized)? {
-        let committed = scan_window(pool, reader, routes, &addresses, from_block, to_block).await?;
-        record_committed(chain_id, &mut stats, committed.0)?;
-        stats.record_factory(committed.1);
         let backfilled = pending_backfill_marks
             .iter()
-            .filter(|(_, created_block)| **created_block <= to_block)
+            .filter(|(_, created)| **created <= to_block)
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
-        // Only the finalized head's time is known without another RPC; intermediate windows keep
-        // the previous time, a lower bound on the cursor block's time.
-        let scanned_block_time = (to_block == finalized).then_some(head.time);
-        db::commit_scan(
-            pool,
-            chain_id,
-            &[],
-            &backfilled,
-            Some(to_block),
-            scanned_block_time,
+        let progress = db::rpc::WindowProgress {
+            scanned: Some((to_block, (to_block == finalized).then_some(head.time))),
+            backfilled: backfilled.clone(),
+            ..Default::default()
+        };
+        let committed = scan_window(
+            pool, reader, routes, &addresses, from_block, to_block, progress,
         )
         .await?;
+        record_committed(chain_id, &mut stats, committed.0)?;
+        stats.record_factory(committed.1);
         stats.record_backfilled(backfilled.len())?;
         for id in &backfilled {
             pending_backfill_marks.remove(id);
@@ -394,6 +499,28 @@ pub async fn scan_once<R: ChainReader>(
     Ok(stats)
 }
 
+/// Fixed selectors shared by finalized, head and historical review reads.
+pub(crate) fn window_request(
+    routes: &ChainRoutes,
+    addresses: &[ScanAddress],
+    from: u64,
+    to: u64,
+    finalized: bool,
+) -> topup_adapters::chain::evm::window::WindowRequest {
+    topup_adapters::chain::evm::window::WindowRequest {
+        from,
+        to,
+        recipients: addresses.iter().map(|a| a.address).collect(),
+        tokens: if routes.token_mode() {
+            routes.routes.keys().copied().collect()
+        } else {
+            Vec::new()
+        },
+        factory: finalized.then_some(routes.chain.contracts.forwarder_factory),
+        finalized,
+        exclude_member: None,
+    }
+}
 /// Records one window's transfers to `addresses` at or above each address's creation block, and
 /// the factory's events about them.
 async fn scan_window<R: ChainReader>(
@@ -403,37 +530,37 @@ async fn scan_window<R: ChainReader>(
     addresses: &[ScanAddress],
     from_block: u64,
     to_block: u64,
+    progress: db::rpc::WindowProgress,
 ) -> Result<(ScanCommit, db::FactoryCommit), ScannerError> {
     let chain_id = routes.chain.chain_id;
     let span = crate::observability::scanner_window_span(chain_id, from_block, to_block);
     async {
         let index = address_index(addresses);
         let created = |address: Address| index.get(&address).map(|known| known.created_block);
-        let logs =
-            backing_off(|| head::issued_transfers(reader, routes, addresses, from_block, to_block))
-                .await?
-                .into_iter()
-                .filter(|log| created(log.to).is_some_and(|block| log.block_number >= block))
-                .collect();
+        let request = window_request(routes, addresses, from_block, to_block, true);
+        let window = backing_off(|| reader.read_window(&request)).await?;
+        let logs = window
+            .transfers
+            .into_iter()
+            .filter(|log| created(log.to).is_some_and(|block| log.block_number >= block))
+            .collect();
         let deposits = resolve_logs(logs, &index, routes)?;
-        let physical = addresses
-            .iter()
-            .map(|address| address.address)
+        let factory_logs = window
+            .factory_logs
+            .into_iter()
+            .filter(|log| {
+                created(log.event.forwarder()).is_some_and(|block| log.block_number >= block)
+            })
             .collect::<Vec<_>>();
-        let factory_logs = backing_off(|| {
-            reader.factory_logs(
-                routes.chain.contracts.forwarder_factory,
-                &physical,
-                from_block,
-                to_block,
-            )
-        })
-        .await?
-        .into_iter()
-        .filter(|log| created(log.event.forwarder()).is_some_and(|block| log.block_number >= block))
-        .collect::<Vec<_>>();
-        let committed = db::commit_scan(pool, chain_id, &deposits, &[], None, None).await?;
-        let indexed = db::commit_factory_logs(pool, chain_id, &factory_logs).await?;
+        let (committed, indexed) = db::rpc::commit_window(
+            pool,
+            chain_id,
+            &deposits,
+            &factory_logs,
+            window.proof.as_ref(),
+            progress,
+        )
+        .await?;
         Ok((committed, indexed))
     }
     .instrument(span)

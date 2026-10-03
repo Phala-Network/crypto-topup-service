@@ -12,7 +12,7 @@
 //! [`Config::runtime_admin_key`]): the Phala Cloud template (deploy/compose.template.yaml), whose
 //! deploy form holds them. Each has exactly one source; neither or both refuses to start.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,9 @@ use topup_core::route::RouteFile;
 
 use crate::api::{PublicOrigin, VerificationKey};
 use crate::routes::RouteSet;
-use crate::rpc_provider::{ProviderUrl, environment_key, key_environment};
+use crate::rpc_groups::{Company, GroupSpec};
+use crate::rpc_provider::{ProviderUrl, key_environment};
+use topup_adapters::chain::evm::group::budget::BudgetSpec;
 
 /// The file as written. Every field but the two that `topup run` may take from its environment is
 /// required; an unknown field is an error.
@@ -31,7 +33,9 @@ struct ConfigSpec {
     #[serde(default)]
     public_origin: Option<String>,
     admin_key: AdminKeySpec,
-    rpc_providers: BTreeMap<String, String>,
+    rpc_groups: BTreeMap<String, GroupSpec>,
+    rpc_companies: BTreeMap<String, Company>,
+    rpc_budgets: BTreeMap<String, BudgetSpec>,
     routes: Vec<RouteFile>,
 }
 
@@ -59,6 +63,12 @@ pub struct Config {
     pub admin_key: Option<VerificationKey>,
     /// Each provider id's URL; a keyed one keeps `{key}` here.
     pub rpc_providers: BTreeMap<String, ProviderUrl>,
+    /// Independent typed groups.
+    pub rpc_groups: BTreeMap<String, GroupSpec>,
+    /// Reviewed company identities.
+    pub rpc_companies: BTreeMap<String, Company>,
+    /// Process-wide account and key quota scopes.
+    pub rpc_budgets: BTreeMap<String, BudgetSpec>,
     /// Every enabled route version.
     pub routes: Vec<RouteFile>,
     admin_key_spec: AdminKeySpec,
@@ -80,7 +90,9 @@ struct ResolvedConfig<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     public_origin: Option<String>,
     admin_key: &'a AdminKeySpec,
-    rpc_providers: &'a BTreeMap<String, ProviderUrl>,
+    rpc_groups: &'a BTreeMap<String, GroupSpec>,
+    rpc_companies: &'a BTreeMap<String, Company>,
+    rpc_budgets: &'a BTreeMap<String, BudgetSpec>,
     routes: &'a [RouteFile],
 }
 
@@ -120,28 +132,35 @@ impl Config {
         if spec.admin_key.id.is_empty() || spec.admin_key.id.chars().any(char::is_whitespace) {
             return Err("admin_key.id must be a non-empty key id without spaces".to_owned());
         }
+        crate::rpc_groups::validate(
+            &spec.routes,
+            &spec.rpc_groups,
+            &spec.rpc_companies,
+            &spec.rpc_budgets,
+        )?;
         let mut rpc_providers = BTreeMap::new();
-        for (id, url) in &spec.rpc_providers {
-            if !is_name(id, 64) || id.contains('_') {
-                return Err(format!(
-                    "rpc_providers: `{id}` is not a provider id (lowercase letters, digits, `-`)"
-                ));
+        for group in spec.rpc_groups.values() {
+            for member in &group.members {
+                rpc_providers.insert(
+                    member.id.clone(),
+                    ProviderUrl::parse(&member.url).map_err(str::to_owned)?,
+                );
             }
-            let url = ProviderUrl::parse(url)
-                .map_err(|problem| format!("rpc_providers.{id}: the URL {problem}"))?;
-            rpc_providers.insert(id.clone(), url);
         }
         if spec.routes.is_empty() {
             return Err("routes must list at least one route".to_owned());
         }
         RouteSet::check(&spec.routes)?;
-        check_providers(&spec.routes, &rpc_providers)?;
+
         Ok(Self {
             environment: spec.environment,
             public_origin,
             admin_key_id: spec.admin_key.id.clone(),
             admin_key,
             rpc_providers,
+            rpc_groups: spec.rpc_groups,
+            rpc_companies: spec.rpc_companies,
+            rpc_budgets: spec.rpc_budgets,
             routes: spec.routes,
             admin_key_spec: spec.admin_key,
         })
@@ -199,31 +218,47 @@ impl Config {
 
     /// The routes with each provider's client, its key read from `TOPUP_RPC_<ID>_KEY`.
     pub fn route_set(&self) -> Result<RouteSet, String> {
-        RouteSet::with_providers(self.routes.clone(), &self.rpc_providers)
+        self.check_secrets(|name| std::env::var(name).ok())?;
+        RouteSet::with_groups(
+            self.routes.clone(),
+            crate::rpc_groups::clients(&self.rpc_groups, &self.rpc_budgets, |name| {
+                std::env::var(name).ok()
+            })?,
+        )
     }
 
     /// Checks that every provider's sealed key fits its URL: present for a `{key}`, absent
     /// otherwise, and URL-safe. Errors name the variable, never a value.
     pub fn check_secrets(&self, key: impl Fn(&str) -> Option<String>) -> Result<(), String> {
-        let problems = self
-            .rpc_providers
-            .iter()
-            .filter_map(|(id, url)| {
-                url.resolve(key(id).as_deref())
-                    .err()
-                    .map(|problem| format!("{} {problem} (provider {id})", key_environment(id)))
-            })
-            .collect::<Vec<_>>();
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(problems.join("; "))
+        let mut seen = BTreeMap::new();
+        for group in self.rpc_groups.values() {
+            for member in &group.members {
+                let name = member
+                    .sealed_key
+                    .clone()
+                    .unwrap_or_else(|| key_environment(&member.id));
+                let value = key(&name);
+                ProviderUrl::parse(&member.url)
+                    .map_err(str::to_owned)?
+                    .resolve(value.as_deref())
+                    .map_err(|e| format!("{name} {e} (member {})", member.id))?;
+                if let Some(value) = value {
+                    let identity = (member.url.clone(), value);
+                    if seen
+                        .insert(identity, name.clone())
+                        .is_some_and(|previous| previous != name)
+                    {
+                        return Err("RPC credential aliases duplicate a URL identity".to_owned());
+                    }
+                }
+            }
         }
+        Ok(())
     }
 
-    /// [`Config::check_secrets`] with the keys of the process environment.
+    /// Checks sealed keys by their explicit environment names.
     pub fn check_environment_secrets(&self) -> Result<(), String> {
-        self.check_secrets(environment_key)
+        self.check_secrets(|name| std::env::var(name).ok())
     }
 
     /// The resolved configuration as pretty JSON, which is also a valid configuration file.
@@ -232,7 +267,9 @@ impl Config {
             environment: &self.environment,
             public_origin: self.public_origin.as_ref().map(ToString::to_string),
             admin_key: &self.admin_key_spec,
-            rpc_providers: &self.rpc_providers,
+            rpc_groups: &self.rpc_groups,
+            rpc_companies: &self.rpc_companies,
+            rpc_budgets: &self.rpc_budgets,
             routes: &self.routes,
         })
         .map(|json| json + "\n")
@@ -268,53 +305,6 @@ fn is_name(value: &str, max: usize) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
 }
 
-/// Every provider a route names is configured, none is unused, a provider serves one chain, and a
-/// chain's providers are different URLs.
-fn check_providers(
-    routes: &[RouteFile],
-    providers: &BTreeMap<String, ProviderUrl>,
-) -> Result<(), String> {
-    let mut chain_of = BTreeMap::<&str, u64>::new();
-    for route in routes {
-        let chain_id = route.chain.chain_id;
-        let mut urls = BTreeSet::new();
-        for id in &route.chain.rpc_providers {
-            let url = providers.get(id.as_str()).ok_or_else(|| {
-                format!(
-                    "route `{}` names the RPC provider `{id}`, which rpc_providers does not \
-                     configure",
-                    route.route
-                )
-            })?;
-            if !urls.insert(url.as_str()) {
-                return Err(format!(
-                    "route `{}`: two of its RPC providers have the same URL; a chain's providers \
-                     must be different providers",
-                    route.route
-                ));
-            }
-            match chain_of.insert(id.as_str(), chain_id) {
-                Some(other) if other != chain_id => {
-                    return Err(format!(
-                        "RPC provider `{id}` is named on chain {other} and chain {chain_id}; each \
-                         chain needs providers of its own"
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(unused) = providers
-        .keys()
-        .find(|id| !chain_of.contains_key(id.as_str()))
-    {
-        return Err(format!(
-            "rpc_providers configures `{unused}`, but no route names it"
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,19 +312,17 @@ mod tests {
     const ROUTE: &str = include_str!("../tests/fixtures/phala-cloud-pha.yaml");
     const KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
 
+    const PROVIDERS: &str = include_str!("../tests/fixtures/rpc-groups.yaml");
     fn config(providers: &str, origin: &str) -> String {
         let route = ROUTE
             .lines()
-            .map(|line| format!("    {line}"))
+            .map(|l| format!("    {l}"))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "environment: staging\npublic_origin: {origin}\nadmin_key:\n  id: admin/staging-v1\n  \
-             public_key: {KEY}\nrpc_providers:\n{providers}\nroutes:\n  -\n{route}\n"
+            "environment: staging\npublic_origin: {origin}\nadmin_key:\n  id: admin/staging-v1\n  public_key: {KEY}\n{providers}\nroutes:\n  -\n{route}\n"
         )
     }
-
-    const PROVIDERS: &str = "  alchemy: https://eth-mainnet.g.alchemy.com/v2/{key}\n  quicknode: https://rpc.example/eth\n";
 
     #[test]
     fn a_valid_configuration_parses_without_any_secret() {
@@ -369,7 +357,9 @@ mod tests {
         );
         assert!(!missing.contains("QUICKNODE"), "{missing}");
         parsed
-            .check_secrets(|id| (id == "alchemy").then(|| "0123456789abcdef".to_owned()))
+            .check_secrets(|id| {
+                (id == "TOPUP_RPC_ALCHEMY_KEY").then(|| "0123456789abcdef".to_owned())
+            })
             .expect("the keyed provider has its key");
         let stray = parsed
             .check_secrets(|_| Some("0123456789abcdef".to_owned()))
@@ -383,51 +373,51 @@ mod tests {
             (config(PROVIDERS, "https://pay.example/v1"), "public_origin"),
             (
                 config(
-                    "  alchemy: https://{key}/v2\n  quicknode: https://rpc.example/eth\n",
+                    &PROVIDERS.replace(
+                        "https://eth-mainnet.g.alchemy.com/v2/{key}",
+                        "https://{key}/v2",
+                    ),
                     "https://pay.example",
                 ),
                 "whole path segment",
             ),
             (
-                config("  alchemy: https://rpc.example/a\n", "https://pay.example"),
-                "`quicknode`",
+                config(
+                    &PROVIDERS.replace("chain_id: 1", "chain_id: 2"),
+                    "https://pay.example",
+                ),
+                "chain mismatch",
             ),
             (
                 config(
-                    &format!("{PROVIDERS}  spare: https://spare.example\n"),
+                    &PROVIDERS.replace("company: quicknode", "company: alchemy"),
                     "https://pay.example",
                 ),
-                "no route names it",
-            ),
-            (
-                config(
-                    "  alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/a\n",
-                    "https://pay.example",
-                ),
-                "same URL",
-            ),
-            (
-                config(
-                    "  Alchemy: https://rpc.example/a\n  quicknode: https://rpc.example/b\n",
-                    "https://pay.example",
-                ),
-                "not a provider id",
+                "reviewed company",
             ),
             (
                 config(PROVIDERS, "https://pay.example")
-                    .replace("environment: staging\n", "environment: staging\nextra: 1\n"),
+                    .replace("environment: staging", "extra: 1\nenvironment: staging"),
+                "unknown field",
+            ),
+            (
+                config(PROVIDERS, "https://pay.example").replace(
+                    "rpc_groups: { a: alchemy, b: quicknode }",
+                    "rpc_groups: { a: alchemy, b: quicknode, c: spare }",
+                ),
+                "unknown field",
+            ),
+            (
+                config(PROVIDERS, "https://pay.example").replace(
+                    "rpc_groups: { a: alchemy, b: quicknode }",
+                    "rpc_providers: [alchemy, quicknode, spare]",
+                ),
                 "unknown field",
             ),
         ] {
             let error = Config::parse(&yaml).expect_err(reason);
             assert!(error.contains(reason), "{reason}: {error}");
         }
-        // Local stacks and rehearsals use http providers; preflight requires https for a CVM.
-        Config::parse(&config(
-            "  alchemy: http://anvil:8545/?key={key}\n  quicknode: http://anvil:8545\n",
-            "https://pay.example",
-        ))
-        .expect("http providers");
     }
 
     /// Every committed configuration validates without secrets, as CI and Deploy's unsealed

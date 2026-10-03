@@ -171,7 +171,7 @@ comes from a release.
 
    | File | Settings |
    |---|---|
-   | `topup.yaml` ([reference](configuration.md#the-configuration-file)) | `environment` (the Sentry environment), `public_origin` (`https://` + your domain), `admin_key` (step 2), `rpc_providers` (each chain's two providers' URLs, with `{key}` in place of an API key; the first must serve `eth_getLogs` over 2 000 blocks and with no contract address, [deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)), and `routes` (section 3) |
+   | `topup.yaml` ([reference](configuration.md#the-configuration-file)) | `environment` (the Sentry environment), `public_origin` (`https://` + your domain), `admin_key` (step 2), `rpc_groups`, `rpc_companies` and `rpc_budgets` (each chain's A/B members, with `{key}` in place of an API key; the first must serve `eth_getLogs` over 2 000 blocks and with no contract address, [deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)), and `routes` (section 3) |
    | `compose.yaml` | `WALG_S3_PREFIX` (`s3://BUCKET/PATH`, empty and used by no other app), `AWS_ENDPOINT`, `AWS_REGION`, `AWS_S3_FORCE_PATH_STYLE`, dstack-ingress's `DOMAIN` (your domain), and one `TOPUP_RPC_<ID>_KEY` line per keyed provider |
 
    The kit renders it and the release's image checks it, so you can check it before committing:
@@ -267,15 +267,12 @@ Deploy `upgrade`, never a runtime setting.
   not list. A chain is added there, and to [networks.json](../deploy/contracts/networks.json) for
   the contract scripts, by a pull request to Phala Pay and ships in its next release. A chain without a Chainalysis sanctions oracle needs
   `chain.sanctions_oracle`.
-- **Its RPC providers.** A route names its chain's providers by id, `chain.rpc_providers:
-  [alchemy-base-sepolia, drpc-base-sepolia]` (lowercase letters, digits, `-`); one that names none
-  uses `provider-a` and `provider-b`, the Sepolia routes'. `rpc_providers` gives each id its URL,
-  with `{key}` as a whole path segment or query value for a provider that puts an API key in its
-  URL. The key itself is sealed as `TOPUP_RPC_<ID>_KEY` (the id upper-cased, `-` as `_`) and
-  declared in the directory's `compose.yaml`. A provider serves one chain, so another chain's route
-  names providers of its own. `topup config check` enforces these rules, and preflight checks that
-  each provider reports the chain of every route naming it
-  ([deploy/README.md, "RPC providers"](../deploy/README.md#rpc-providers)).
+- **Its RPC providers.** Require explicit `chain.rpc_groups: { a: ..., b: ... }` and
+  company-disjoint reviewed groups. Configure every member URL/credential, shared budget and
+  bounded selection policy in the attested public configuration; keep credentials sealed under
+  the explicit member key names. See [RPC configuration](../deploy/README.md#rpc-providers) and
+  [the RPC runbook](../deploy/RPC.md) for startup checks, outage recovery and migration.
+
 - **The contracts.** The `ForwarderFactory` has no owner, no roles, and no admin, and is deployed
   deterministically through the Arachnid proxy at `0x45466D37587E6E46DC35eB96b74ba3D3b1E5b747`,
   with its implementation at `0x49F2F1F1a25269Ea0C6FF2AB1C7B09dCBE9c5bA9`, on every chain. Reuse it;

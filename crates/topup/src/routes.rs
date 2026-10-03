@@ -91,6 +91,30 @@ impl RouteSet {
         })
     }
 
+    /// Constructs A/B clients resolved from the attested typed group configuration.
+    pub fn with_groups(
+        routes: Vec<RouteFile>,
+        clients: BTreeMap<String, Arc<EvmClient>>,
+    ) -> Result<Self, String> {
+        let (current, chains) = index(&routes, |chain| {
+            chain
+                .rpc_providers
+                .iter()
+                .map(|id| {
+                    clients
+                        .get(id)
+                        .cloned()
+                        .ok_or_else(|| ProviderError::MissingUrl { label: id.clone() })
+                })
+                .collect()
+        })?;
+        Ok(Self {
+            routes,
+            current,
+            chains,
+        })
+    }
+
     /// Checks everything that must agree across routes, without creating a client or reading a
     /// secret: the validation `topup config check` shares with the service.
     pub fn check(routes: &[RouteFile]) -> Result<(), String> {

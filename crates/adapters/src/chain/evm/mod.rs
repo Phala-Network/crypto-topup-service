@@ -1,7 +1,9 @@
 //! The EVM JSON-RPC client shared by every consumer of one (chain, provider), and the
 //! finalized-log reader built on it.
 
+pub mod group;
 pub mod metrics;
+pub mod window;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Formatter};
@@ -145,6 +147,9 @@ pub struct FactoryLog {
 /// Failure while reading or validating EVM chain data.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainError {
+    /// Typed group failure with no raw upstream message.
+    #[error("{0}")]
+    Group(#[from] group::Failure),
     /// The configured provider URL is invalid.
     #[error("invalid RPC URL")]
     InvalidUrl,
@@ -204,6 +209,14 @@ impl ChainError {
 
 /// Chain reads required by the scanner, the confirm step, and the finality watch.
 pub trait ChainReader: Send + Sync {
+    /// Reads every filter of one numeric window as a single operation.
+    fn read_window(
+        &self,
+        request: &window::WindowRequest,
+    ) -> impl Future<Output = Result<window::WindowResult, ChainError>> + Send {
+        window::read(self, request)
+    }
+
     /// Returns the provider's current finalized block number and time.
     fn finalized_head(&self) -> impl Future<Output = Result<FinalizedHead, ChainError>> + Send;
 
@@ -371,6 +384,7 @@ pub struct EvmClient {
     endpoint: Redacted,
     request_timeout: Duration,
     labels: CallLabels,
+    group: Option<Arc<group::RpcGroup>>,
 }
 
 impl fmt::Debug for EvmClient {
@@ -413,7 +427,45 @@ impl EvmClient {
             endpoint,
             request_timeout,
             labels,
+            group: None,
         })
+    }
+
+    /// Builds the shared typed group client over the metadata-preserving transport.
+    pub fn from_group(
+        group: Arc<group::RpcGroup>,
+        pinned: Option<usize>,
+    ) -> Result<Self, ChainError> {
+        let endpoint = group
+            .members
+            .first()
+            .ok_or(ChainError::InvalidUrl)?
+            .endpoint
+            .clone()
+            .with_provider(group.id.clone());
+        let client = ClientBuilder::default().transport(
+            group::GroupTransport {
+                group: group.clone(),
+                pinned,
+            },
+            false,
+        );
+        Ok(Self {
+            provider: RootProvider::new(client.clone()),
+            receipts: RootProvider::new(client),
+            endpoint,
+            request_timeout: Duration::from_millis(group.policy.total_deadline_ms),
+            labels: CallLabels {
+                provider: group.id.clone(),
+                chain_id: Some(group.chain),
+            },
+            group: Some(group),
+        })
+    }
+
+    /// Shared group state, absent only for inline test clients.
+    pub fn group(&self) -> Option<&Arc<group::RpcGroup>> {
+        self.group.as_ref()
     }
 
     /// Labels provider errors and call counters with the configured provider id instead of the
@@ -448,6 +500,14 @@ impl EvmClient {
     }
 
     fn transport(&self, operation: &'static str, error: &TransportError) -> ChainError {
+        if let alloy::transports::RpcError::Transport(kind) = error {
+            if let Some(failure) = kind
+                .as_custom()
+                .and_then(|e| e.downcast_ref::<group::Failure>())
+            {
+                return ChainError::Group(*failure);
+            }
+        }
         ChainError::Transport(self.endpoint.rpc_error(operation, error))
     }
 
@@ -832,6 +892,11 @@ impl FinalizedReader {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&block_hash);
+        let cached = if self.client.group().is_some() {
+            None
+        } else {
+            cached
+        };
         if let Some(time) = cached {
             return Ok(time);
         }
@@ -873,6 +938,11 @@ impl FinalizedReader {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&tx_hash);
+        let cached = if self.client.group().is_some() {
+            None
+        } else {
+            cached
+        };
         if let Some(origin) = cached {
             return Ok(origin);
         }
@@ -905,6 +975,11 @@ impl FinalizedReader {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&(tx_hash, block_hash));
+        let cached = if self.client.group().is_some() {
+            None
+        } else {
+            cached
+        };
         let facts = match cached {
             Some(facts) => facts,
             None => {
@@ -1159,6 +1234,13 @@ fn is_transfer(log: &Log) -> bool {
 }
 
 impl ChainReader for FinalizedReader {
+    async fn read_window(
+        &self,
+        request: &window::WindowRequest,
+    ) -> Result<window::WindowResult, ChainError> {
+        self.group_window(request).await
+    }
+
     async fn finalized_head(&self) -> Result<FinalizedHead, ChainError> {
         let block = self
             .client

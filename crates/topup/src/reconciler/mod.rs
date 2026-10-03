@@ -10,7 +10,7 @@
 //! forwarders that hold unswept funds by the ledger.
 
 mod chain;
-mod store;
+pub(crate) mod store;
 mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,7 +22,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
-use topup_adapters::chain::evm::{FinalizedReader, MAX_ADDRESSES_PER_REQUEST};
+use topup_adapters::chain::evm::FinalizedReader;
 use topup_core::money::{PRICE_SCALE, ScaledPrice, credit};
 use topup_core::route::{RouteFile, UNIT_DECIMALS};
 use uuid::Uuid;
@@ -458,20 +458,31 @@ impl Reconciler {
             .map(|address| address.address)
             .collect::<Vec<_>>();
         for (from_block, to_block) in bounded_windows(start, through)? {
-            let mut logs = Vec::new();
-            for batch in physical.chunks(MAX_ADDRESSES_PER_REQUEST) {
-                logs.extend(chain.transfer_logs_to(batch, from_block, to_block).await?);
-            }
-            for deposit in resolve_logs_for_reconciliation(logs, &addresses, routes)? {
-                let committed = db::commit_scan(
-                    &self.pool,
-                    chain_id,
-                    std::slice::from_ref(&deposit),
-                    &[],
-                    None,
-                    None,
-                )
-                .await?;
+            let request = topup_adapters::chain::evm::window::WindowRequest {
+                from: from_block,
+                to: to_block,
+                recipients: physical.clone(),
+                tokens: Vec::new(),
+                factory: None,
+                finalized: true,
+                exclude_member: None,
+            };
+            let window = chain.read_window(&request).await?;
+            let deposits = resolve_logs_for_reconciliation(window.transfers, &addresses, routes)?;
+            let next_block = next_block(to_block)?;
+            let (committed, _) = db::rpc::commit_window(
+                &self.pool,
+                chain_id,
+                &deposits,
+                &[],
+                window.proof.as_ref(),
+                db::rpc::WindowProgress {
+                    reconciliation: Some((cursor, next_block)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            for deposit in deposits {
                 if committed.inserted == 0 {
                     continue;
                 }
@@ -488,11 +499,6 @@ impl Reconciler {
                     true,
                     false,
                 )?);
-            }
-            let next_block = next_block(to_block)?;
-            if !store::advance_deposit_cursor(&self.pool, chain_id, cursor, next_block).await? {
-                tracing::debug!(chain_id, "missing-deposit cursor advanced concurrently");
-                return Ok(());
             }
             cursor = Some(next_block);
         }

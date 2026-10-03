@@ -5,6 +5,7 @@ mod addresses;
 mod deposits;
 mod outbox;
 mod pending;
+pub mod rpc;
 mod scanner;
 mod sweeps;
 mod types;
