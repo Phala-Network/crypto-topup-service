@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -135,18 +136,18 @@ def test_rejects_invalid_wire_framing(product: ProductServer, length: str) -> No
     cast(Mock, product.fulfillment.handle).assert_not_called()
 
 
+@pytest.mark.parametrize("protected", [True, False])
 def test_slow_headers_have_total_deadline_and_do_not_503(
-    product: ProductServer, monkeypatch: pytest.MonkeyPatch
+    product: ProductServer, protected: bool
 ) -> None:
-    # Reconstruct with the same options used by the production supervisor.
-    monkeypatch.setattr(transport, "HEADER_TIMEOUT_MILLISECONDS", 300)
     assert product._server.http1_settings is not None
-    product._server.http1_settings.header_read_timeout = 300
+    product._server.http1_settings.header_read_timeout = 300 if protected else 30_000
     with product, ExitStack() as stack:
         port = product.fulfillment.config.listen_port
+        # Exceed the worker admission cap: queued connections must also eventually drain.
         peers = [
             stack.enter_context(socket.create_connection(("127.0.0.1", port), timeout=2))
-            for _ in range(transport.CONNECTION_LIMIT)
+            for _ in range(2 * transport.CONNECTION_LIMIT)
         ]
         for peer in peers:
             peer.sendall(b"POST /topup/webhooks HTTP/1.1\r\nHost: localhost\r\nX-Slow: ")
@@ -160,17 +161,69 @@ def test_slow_headers_have_total_deadline_and_do_not_503(
 
         thread = threading.Thread(target=trickle)
         thread.start()
+
+        def assert_closed() -> None:
+            pending = set(peers)
+            deadline = time.monotonic() + 1.5
+            while pending and time.monotonic() < deadline:
+                readable, _, _ = select.select(list(pending), [], [], 0.05)
+                for peer in readable:
+                    with suppress(ConnectionResetError):
+                        assert peer.recv(4096) == b""
+                    pending.remove(peer)
+            assert not pending, "slow header connections remained open past the total deadline"
+
         try:
-            started = time.monotonic()
-            with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=2) as client:
-                assert client.get("/topup/healthz").status_code == 200
-                assert client.post("/topup/webhooks", content=b"{}").status_code == 200
-            assert time.monotonic() - started < 1.5
-            for peer in peers:
-                assert peer.recv(4096) == b""
+            if protected:
+                assert_closed()
+                with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=2) as client:
+                    assert client.get("/topup/healthz").status_code == 200
+                    assert client.post("/topup/webhooks", content=b"{}").status_code == 200
+            else:
+                # Mutation control: continuous trickling must fail the same closure assertion
+                # when the deadline is removed. An idle read timeout would fail this too.
+                with pytest.raises(AssertionError, match="remained open"):
+                    assert_closed()
         finally:
             stop.set()
             thread.join()
+
+
+@pytest.mark.parametrize("protected", [True, False])
+def test_connection_admission_and_os_backlog_bound_slow_headers(
+    product: ProductServer, protected: bool
+) -> None:
+    # Keep headers incomplete throughout the admission probe so no deadline releases permits.
+    assert product._server.http1_settings is not None
+    product._server.http1_settings.header_read_timeout = 30_000
+    if not protected:
+        product._server.backpressure = 10_000
+    with product, ExitStack() as stack:
+        port = product.fulfillment.config.listen_port
+        refused = False
+        # Linux's completed accept queue can hold backlog + 1. Probe beyond that plus all
+        # worker permits. TCP handshakes can succeed while sockets are still in the OS queue;
+        # they are not yet accepted by Granian and their header timer has not started.
+        for _ in range(transport.CONNECTION_LIMIT + transport.LISTEN_BACKLOG + 16):
+            try:
+                peer = stack.enter_context(
+                    socket.create_connection(("127.0.0.1", port), timeout=0.1)
+                )
+                peer.sendall(b"GET /topup/healthz HTTP/1.1\r\nHost: localhost\r\nX-Slow: ")
+            except (TimeoutError, ConnectionRefusedError, ConnectionResetError):
+                refused = True
+                break
+
+        def assert_bounded() -> None:
+            assert refused, "excess connections were admitted beyond worker cap and OS backlog"
+
+        if protected:
+            assert_bounded()
+        else:
+            # Removing worker admission accepts the entire probe: this regression check must
+            # fail even though the OS backlog and header deadline still exist.
+            with pytest.raises(AssertionError, match="excess connections were admitted"):
+                assert_bounded()
 
 
 def test_shutdown_drains_trickling_sync_network_work(

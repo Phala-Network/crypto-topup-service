@@ -177,13 +177,31 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
 
 ## Staging reference product
 
-The product runs Starlette under a single supervised Granian worker. HTTP/1 connections have
-a five-second **total** header-read deadline, a 16 KiB header buffer, and admission backpressure
-at 32 connections (64 pending connections in the listen backlog). Keep-alive is disabled. Bodies
-are limited to 1 MiB; application requests have a 30-second deadline and at most 16 synchronous
-handlers. SDK and demo outbound HTTP exchanges share a 25-second handler budget, including
-response reads and pagination, and disable automatic SDK retries so `Retry-After` cannot extend
-shutdown. A timed-out synchronous handler retains its admission slot until it finishes.
+The product runs Starlette under a single supervised Granian worker with one runtime thread.
+Granian 2.8.4's `backpressure=32` bounds **worker-accepted connections**, including incomplete
+headers: its [accept loop](https://github.com/emmett-framework/granian/blob/v2.8.4/src/workers.rs#L1037)
+acquires a semaphore permit **before** `accept()`, and its
+[HTTP/1 connection handler](https://github.com/emmett-framework/granian/blob/v2.8.4/src/workers.rs#L670)
+releases that permit only after the connection ends. This is distinct from the limit of 16
+synchronous application handlers. Keep-alive is disabled. Accepted connections have a five-second
+**total** header-read deadline and a 16 KiB header buffer; trickling bytes does not reset the timer.
+
+The configured listen backlog is **128**, Granian 2.8.4's minimum, subject to the OS limit.
+Connections beyond the worker's 32 permits wait in the kernel accept queue; TCP handshakes can
+succeed there without Granian accepting a socket. The header deadline starts when Granian accepts
+the connection, **not** while it is queued. On Linux the completed queue can hold backlog + 1;
+further connection attempts can time out or be refused. The SYN queue is a separate OS resource.
+There is no promise that only 32 clients can establish TCP connections or that queued clients
+close within five seconds. The admission cap bounds worker sockets and header buffers, while the
+finite OS queue absorbs excess connections without allocating more application resources. Header
+deadlines release occupied permits even under continuous trickling. These limits bound resources,
+but sustained saturation can still delay legitimate clients; they do not guarantee availability
+against an unlimited connection flood.
+
+Bodies are limited to 1 MiB; application requests have a 30-second deadline. SDK and demo outbound
+HTTP exchanges share a 25-second handler budget, including response reads and pagination, and
+disable automatic SDK retries so `Retry-After` cannot extend shutdown. A timed-out synchronous
+handler retains its admission slot until it finishes.
 
 On SIGTERM, the worker drains synchronous work before closing clients. Granian kills a worker
 that cannot drain within 35 seconds, leaving margin inside Compose's 45-second stop grace period.

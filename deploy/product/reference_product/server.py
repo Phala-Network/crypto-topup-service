@@ -66,6 +66,7 @@ MAX_BODY_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
 HEADER_TIMEOUT_MILLISECONDS = 5000
 CONNECTION_LIMIT = 32
+LISTEN_BACKLOG = 128
 SHUTDOWN_TIMEOUT_SECONDS = 35
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -225,8 +226,10 @@ def _server_options() -> dict[str, Any]:
         "interface": Interfaces.ASGI,
         "http": HTTPModes.http1,
         "websockets": False,
+        # Granian v2.8.4 acquires a permit before accept and holds it for the connection.
         "backpressure": CONNECTION_LIMIT,
-        "backlog": 64,
+        # Granian clamps backlog to at least 128; the OS may clamp it further.
+        "backlog": LISTEN_BACKLOG,
         "http1_settings": HTTP1Settings(
             header_read_timeout=HEADER_TIMEOUT_MILLISECONDS,
             max_buffer_size=16 * 1024,
