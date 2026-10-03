@@ -471,16 +471,21 @@ impl RpcGroup {
     }
     /// Isolated, uncached preflight view sharing the real credentials and account/key budgets.
     pub fn probe_copy(&self) -> Result<Arc<Self>, Failure> {
+        self.isolated_copy(
+            Instant::now()
+                .checked_add(Duration::from_millis(self.policy.probe.deadline))
+                .unwrap_or_else(Instant::now),
+        )
+    }
+    /// Isolated read-only operation sharing budgets and probe retry rules, bounded by its
+    /// caller's absolute deadline rather than the complete member-probe configuration.
+    pub fn isolated_copy(&self, deadline: Instant) -> Result<Arc<Self>, Failure> {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             chain: self.chain,
             policy: self.policy.clone(),
             members: self.members.clone(),
-            probe_deadline: Some(
-                Instant::now()
-                    .checked_add(Duration::from_millis(self.policy.probe.deadline))
-                    .unwrap_or_else(Instant::now),
-            ),
+            probe_deadline: Some(deadline),
             budgets: self.budgets.clone(),
             http: self.http.clone(),
             health: Mutex::new(self.members.iter().map(|_| Health::default()).collect()),
@@ -526,7 +531,16 @@ impl RpcGroup {
                         return Err(Failure::Fork);
                     }
                     if tag == "finalized" {
-                        let value=probe.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",previous.number),false]}),Instant::now().checked_add(Duration::from_millis(self.policy.total_deadline_ms)).unwrap_or_else(Instant::now)).await?;
+                        let value=probe.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",previous.number),false]}),Instant::now().checked_add(Duration::from_millis(self.policy.total_deadline_ms)).unwrap_or_else(Instant::now)).await;
+                        let value = match value {
+                            Err(Failure::Fork) => {
+                                // Snapshot consistency can reject before canonical comparison.
+                                // Conflicting finalized evidence still closes the durable gate.
+                                store.freeze(self.chain).await?;
+                                return Err(Failure::Fork);
+                            }
+                            result => result?,
+                        };
                         let canonical =
                             HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
                         if canonical.number != previous.number || canonical.hash != previous.hash {
@@ -864,7 +878,7 @@ impl RpcGroup {
                         if Instant::now().checked_add(delay).is_some() {
                             delay
                         } else {
-                            Duration::from_millis(self.policy.probe.deadline)
+                            deadline.saturating_duration_since(Instant::now())
                         }
                     } else {
                         reply

@@ -1028,13 +1028,21 @@ async fn probe_timeouts_retry_and_connection_errors_stop_at_attempt_bound() {
     task.abort();
 }
 
-struct FinalizedFloor;
+#[derive(Default)]
+struct FinalizedFloor {
+    frozen: std::sync::atomic::AtomicBool,
+}
 #[async_trait]
 impl WatermarkStore for FinalizedFloor {
     async fn blocked(&self, _: u64) -> Result<(), Failure> {
-        Ok(())
+        if self.frozen.load(Ordering::SeqCst) {
+            Err(Failure::Fork)
+        } else {
+            Ok(())
+        }
     }
     async fn freeze(&self, _: u64) -> Result<(), Failure> {
+        self.frozen.store(true, Ordering::SeqCst);
         Ok(())
     }
     async fn load(&self, _: u64, _: &str, tag: &str) -> Result<Option<HeadAnchor>, Failure> {
@@ -1076,7 +1084,8 @@ async fn probe_rejects_snapshot_conflicting_with_same_height_persisted_anchor() 
     ))
     .await;
     let group = group(&url);
-    group.set_store(Arc::new(FinalizedFloor));
+    let store = Arc::new(FinalizedFloor::default());
+    group.set_store(store.clone());
     let probe = group.probe_copy().unwrap();
     for tag in ["latest", "safe", "finalized"] {
         probe
@@ -1085,6 +1094,7 @@ async fn probe_rejects_snapshot_conflicting_with_same_height_persisted_anchor() 
             .unwrap();
     }
     assert_eq!(group.validate_probe(0, &probe).await, Err(Failure::Fork));
+    assert!(store.frozen.load(Ordering::SeqCst));
     assert_eq!(
         numeric.load(Ordering::SeqCst),
         0,
@@ -1113,10 +1123,24 @@ async fn probe_rejects_later_numeric_hash_conflicting_with_snapshot_without_retr
         }),
     ))
     .await;
-    let probe = group(&url).probe_copy().unwrap();
+    let group = group(&url);
+    let store = Arc::new(FinalizedFloor::default());
+    group.set_store(store.clone());
+    let probe = group.probe_copy().unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
-    probe.head(0, "finalized", deadline).await.unwrap();
-    assert_eq!(probe.send(0, &json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x64",false]}), deadline).await, Err(Failure::Fork));
+    for tag in ["latest", "safe", "finalized"] {
+        probe.head(0, tag, deadline).await.unwrap();
+    }
+    assert_eq!(group.validate_probe(0, &probe).await, Err(Failure::Fork));
+    assert!(store.frozen.load(Ordering::SeqCst));
+    // Serving requests must be prevented from advancing after the rejected probe.
+    let other = self::group(&url);
+    other.set_store(store.clone());
+    other.verified(0, true);
+    assert_eq!(
+        other.head(0, "finalized", deadline).await,
+        Err(Failure::Fork)
+    );
     assert_eq!(numeric.load(Ordering::SeqCst), 1);
     task.abort();
 }

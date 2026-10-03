@@ -634,8 +634,13 @@ async fn recovery_anchor(
     valid_b: &[usize],
     height: u64,
 ) -> Result<HeadAnchor, String> {
-    let a = a.probe_copy().map_err(|e| e.to_string())?;
-    let b = b.probe_copy().map_err(|e| e.to_string())?;
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(
+            a.policy.total_deadline_ms.min(b.policy.total_deadline_ms),
+        ))
+        .unwrap_or_else(Instant::now);
+    let a = a.isolated_copy(deadline).map_err(|e| e.to_string())?;
+    let b = b.isolated_copy(deadline).map_err(|e| e.to_string())?;
     for index in valid_a {
         a.verified(*index, true);
     }
@@ -648,11 +653,6 @@ async fn recovery_anchor(
     let bi = b
         .select(&Default::default(), None)
         .map_err(|e| e.to_string())?;
-    let deadline = Instant::now()
-        .checked_add(Duration::from_millis(
-            a.policy.total_deadline_ms.min(b.policy.total_deadline_ms),
-        ))
-        .unwrap_or_else(Instant::now);
     tokio::time::timeout_at(deadline, async {
         if a.head(ai, "finalized", deadline)
             .await
@@ -797,6 +797,7 @@ mod probe_tests {
         regress_finalized: bool,
         throttle_oracle: bool,
         reject_wide_logs: bool,
+        block_delay: Duration,
     }
     impl MockProbe {
         fn new() -> Self {
@@ -817,6 +818,7 @@ mod probe_tests {
                 regress_finalized: false,
                 throttle_oracle: false,
                 reject_wide_logs: false,
+                block_delay: Duration::ZERO,
             }
         }
         fn response(&self, request: &serde_json::Value) -> axum::response::Response {
@@ -961,7 +963,12 @@ mod probe_tests {
                     "/",
                     post(move |Json(request): Json<serde_json::Value>| {
                         let mock = mock.clone();
-                        async move { mock.response(&request) }
+                        async move {
+                            if request["method"] == "eth_getBlockByNumber" {
+                                tokio::time::sleep(mock.block_delay).await;
+                            }
+                            mock.response(&request)
+                        }
                     }),
                 ),
             )
@@ -1099,5 +1106,24 @@ mod probe_tests {
         assert_eq!(anchor.number, 2000);
         assert_eq!(anchor.hash, format!("0x{}", "11".repeat(32)));
         task.abort();
+    }
+    #[tokio::test]
+    async fn recovery_anchor_uses_full_operation_budget_beyond_probe_deadline() {
+        let mock = Arc::new(MockProbe {
+            block_delay: Duration::from_millis(350),
+            ..MockProbe::new()
+        });
+        let (url, task) = server(mock).await;
+        let mut policy = GroupPolicy::default();
+        policy.probe.deadline = 1000;
+        policy.attempt_timeout_ms = 800;
+        // The four sequential anchor RPCs take >= 1.4 s, within the independent 10 s budget.
+        let a = group(&url, "provider-a", 100, policy.clone());
+        let b = group(&url, "provider-b", 100, policy);
+        let started = Instant::now();
+        let result = recovery_anchor(&a, &[0], &b, &[0], 2000).await;
+        task.abort();
+        assert!(started.elapsed() > Duration::from_secs(1));
+        assert_eq!(result.unwrap().number, 2000);
     }
 }

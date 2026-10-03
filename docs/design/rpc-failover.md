@@ -224,7 +224,9 @@ B checks a 100-block addressed recent log range. Persisted floors and finalized 
 are still checked before readmission. Same-height hashes must agree across the snapshot,
 persisted anchors and every subsequent block read within a probe. Owner recovery gives each
 member a fresh `probe.deadline`, then starts anchor agreement on fresh copies with a separate
-shared `total_deadline_ms` bound after both groups finish probing.
+shared `total_deadline_ms` bound after both groups finish probing; `probe.deadline` does not
+cap anchor operations. A finalized conflict detected during numeric validation freezes the
+chain even when snapshot consistency rejects the response before canonical comparison.
 
 ## Heads, forks and logs windows
 
