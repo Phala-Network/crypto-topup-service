@@ -558,7 +558,14 @@ def _make_product(config: ProductConfig, *, pin_wait_s: float = 0) -> ProductSer
     try:
         webhook_keys(wait_s=pin_wait_s)
     except MissingProductKeyError:
-        if config.livemode():
+        # A CVM starts before its secret is sealed.  An actually configured live key still
+        # requires a pre-verified pin; an absent key has no mode to enforce yet and is allowed
+        # to start so the provisioning health check can run.
+        try:
+            key = config.api_key()
+        except MissingProductKeyError:
+            key = ""
+        if key.startswith(("ppay_sk_live_", "ppay_rk_live_")):
             raise
         LOG.warning("the product key is not configured; webhook keys are pinned once it is")
     ledger = ProductLedger(config.ledger_path)

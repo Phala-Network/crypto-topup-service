@@ -29,7 +29,7 @@ from reference_product.config import (
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
 from reference_product.ledger import Delivery, ProductLedger
 from reference_product.restore_records import export_restore_records
-from reference_product.server import AccountApi, pin_webhook_keys
+from reference_product.server import AccountApi, _make_product, pin_webhook_keys
 from topup_sdk import (
     RequestSigner,
     credited_event_id,
@@ -467,6 +467,30 @@ def test_live_mode_requires_a_preverified_webhook_pin(tmp_path: Path) -> None:
     config = replace(CONFIG, api_key_file=str(key_file))
     with pytest.raises(MissingProductKeyError, match="pre-verified"):
         pin_webhook_keys(config)
+
+
+def test_live_product_without_a_pin_fails_startup(tmp_path: Path) -> None:
+    key_file = tmp_path / "api-key"
+    key_file.write_text("ppay_sk_live_" + "a" * 40)
+    config = replace(
+        CONFIG,
+        api_key_file=str(key_file),
+        driver_public_key=DRIVER.public_key_base64(),
+    )
+    with pytest.raises(MissingProductKeyError, match="pre-verified"):
+        _make_product(config)
+
+
+def test_unsealed_test_product_starts_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("UNSEALED_TEST_KEY", raising=False)
+    config = replace(
+        CONFIG,
+        api_key_file=None,
+        api_key_env="UNSEALED_TEST_KEY",
+        driver_public_key=DRIVER.public_key_base64(),
+    )
+    with _make_product(config):
+        pass
 
 
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))
