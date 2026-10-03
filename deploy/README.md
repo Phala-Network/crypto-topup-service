@@ -119,7 +119,9 @@ BuildKit reports for the push (`--metadata-file`), never by the tag.
 All three images are reproducible: the pushed build must have the digest of an earlier build,
 and anyone rebuilds it from the tag. `postgres-walg` pins the Debian snapshot and direct package
 versions, removes apt/dpkg timestamp logs and ldconfig's auxiliary cache, and uses BuildKit's
-filesystem timestamp normalization. After comparison, Trivy scans each final digest and generates
+filesystem timestamp normalization. gosu and WAL-G are rebuilt with a pinned, patched Go
+toolchain and dependencies; WAL-G keeps libsodium encryption and Brotli/LZO restore support.
+After comparison, Trivy scans each final digest and generates
 an SPDX SBOM; `actions/attest-sbom` signs it and attaches it to the digest in GHCR, alongside build
 provenance. [verify-release.sh](verify-release.sh) requires both attestations with the release
 workflow identity, source commit, and GitHub-hosted runner constraints. A stable release then publishes the SDKs at its version,

@@ -145,7 +145,8 @@ Actions, JavaScript/TypeScript, Python, and Rust on pull requests, main, and wee
 
 The payment gate runs `make cvm-rehearsal` with the real Rust service, PostgreSQL, Anvil, the dstack
 simulator and signed receiver. It checks a 2,500-cent credit, redelivers the actual event through
-the service, waits for acknowledgement, and compares the receiver's credit rows.
+the service, waits for acknowledgement, and compares the receiver's credit, bonus, adjustment, order and
+balance records.
 
 Repository owners must enable **Settings > Advanced Security > Dependabot > Dependabot alerts**
 and **Dependabot security updates**. Under **Settings > Rules > Rulesets**, add the following CI

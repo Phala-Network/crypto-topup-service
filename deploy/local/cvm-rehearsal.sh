@@ -317,13 +317,13 @@ write_config() {
                     "phala-cloud-base-sepolia-usdc-usd": [$base_usdc, $base_oracle],
                     "phala-cloud-base-sepolia-usdt-usd": [$base_usdt, $base_oracle]}')" '
             .admin_key = {id: $id, public_key: $key}
-            | .rpc_companies.tenderly.domains = ["anvil", "anvil-base-sepolia"]
-            | .rpc_companies.publicnode.domains = ["anvil-b", "anvil-base-sepolia-b"]
-            | .rpc_groups["provider-a"].members[0].url = "http://anvil:8545"
-            | .rpc_groups["provider-b"].members[0].url = "http://anvil-b:8545/?key={key}"
+            | .rpc_companies.tenderly.domains = ["rehearsal-a.test"]
+            | .rpc_companies.publicnode.domains = ["rehearsal-b.test"]
+            | .rpc_groups["provider-a"].members[0].url = "http://anvil.rehearsal-a.test:8545"
+            | .rpc_groups["provider-b"].members[0].url = "http://anvil.rehearsal-b.test:8545/?key={key}"
             | .rpc_groups["provider-b"].members[0].sealed_key = "TOPUP_RPC_PROVIDER_B_KEY"
-            | .rpc_groups["base-sepolia-a"].members[0].url = "http://anvil-base-sepolia:8545"
-            | .rpc_groups["base-sepolia-b"].members[0].url = "http://anvil-base-sepolia-b:8545"
+            | .rpc_groups["base-sepolia-a"].members[0].url = "http://base.rehearsal-a.test:8545"
+            | .rpc_groups["base-sepolia-b"].members[0].url = "http://base.rehearsal-b.test:8545"
             | .routes |= map(($assets[.route] // error("no rehearsal token for \(.route)")) as $asset
                 | .chain.forwarder_factory = $factory | .chain.implementation = $implementation
                 | .asset.contract = $asset[0] | .chain.sanctions_oracle = $asset[1])' \
@@ -637,7 +637,13 @@ import json, sqlite3
 with sqlite3.connect("file:/data/ledger.sqlite3?mode=ro", uri=True) as db:
     rows = db.execute("SELECT id, team_id, order_id, amount_minor FROM credit_transactions ORDER BY id").fetchall()
     assert len(rows) == 1 and rows[0][3] == 2500, rows
-    print(json.dumps(rows))
+    bonuses = db.execute("SELECT id, team_id, order_id, amount_minor, reason FROM bonus_credits ORDER BY id").fetchall()
+    adjustments = db.execute("SELECT id, team_id, order_id, amount_minor, reason FROM credit_adjustments ORDER BY id").fetchall()
+    orders = db.execute("SELECT id, team_id, provider_order_id, credit_transaction_id, status FROM orders ORDER BY id").fetchall()
+    assert len(orders) == 1, orders
+    balance = sum(row[3] for row in rows + bonuses + adjustments)
+    print(json.dumps({"credits": rows, "bonuses": bonuses, "adjustments": adjustments,
+                      "orders": orders, "balance_minor": balance}))
 PYTHON
 }
 credits_before=$(ledger_credits)
