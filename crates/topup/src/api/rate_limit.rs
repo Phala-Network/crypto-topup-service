@@ -77,7 +77,7 @@ impl Default for ApiRateLimiter {
 }
 
 impl ApiRateLimiter {
-    /// Counts an unauthenticated request by its ingress source.
+    /// Counts an unauthenticated request by its transport peer.
     pub fn allow_source(&self, source: &str) -> bool {
         if self
             .source_housekeeping
