@@ -231,8 +231,8 @@ importers:
         specifier: ^6.1.1
         version: 6.1.1(vite@8.3.1(@types/node@24.19.0)(esbuild@0.28.1)(jiti@2.7.0))
       cf:
-        specifier: 1.0.0-beta.5
-        version: 1.0.0-beta.5(@types/node@24.19.0)
+        specifier: 1.0.0-beta.6
+        version: 1.0.0-beta.6(@types/node@24.19.0)
       eslint:
         specifier: ^10.11.0
         version: 10.11.0(jiti@2.7.0)(supports-color@10.2.2)
@@ -2101,8 +2101,8 @@ packages:
   caniuse-lite@1.0.30001812:
     resolution: {integrity: sha512-qN+QNNBr93TCmFrmte0bBCjSDMuRvt78VlHT99qIGPszm4QsqCX8lnyWUFkHi8B7ZBAPq8SH+UqyXNy/odMdng==}
 
-  cf@1.0.0-beta.5:
-    resolution: {integrity: sha512-IKGKDAQNs8hbu7jOt3qSWKxDjmJTS+hcHCJ5B0IkF7gZ3RmEfMTUxZ0Fi7GRftjag04J127u8Nk8uppXx3OBZw==}
+  cf@1.0.0-beta.6:
+    resolution: {integrity: sha512-4jGc5FkGiYa8063KOP0rYIu1iOrCPqjIAMWlo7OSi5C2OaB50zQdAflrHAL08aA87RmQ1PFJtCl0wFRc671rGw==}
     engines: {node: '>=22'}
     hasBin: true
 
@@ -5501,7 +5501,7 @@ snapshots:
 
   caniuse-lite@1.0.30001812: {}
 
-  cf@1.0.0-beta.5(@types/node@24.19.0):
+  cf@1.0.0-beta.6(@types/node@24.19.0):
     dependencies:
       '@cloudflare/build-output-utils': 0.8.2
       '@cloudflare/codemods': 0.2.1
