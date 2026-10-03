@@ -40,35 +40,35 @@ export const keys = {
 
 /** The visitor's demo account: balance, ledger lines, and payments. */
 export function useAccount() {
-  return useQuery({ queryKey: keys.account, queryFn: getAccount, refetchInterval: 4000 });
+  return useQuery({ queryKey: keys.account, queryFn: ({ signal }) => getAccount(signal), refetchInterval: 4000 });
 }
 
 /** The networks, and their tokens, a customer can pay with; the service's config changes rarely. */
 export function useNetworks() {
-  return useQuery({ queryKey: keys.networks, queryFn: getNetworks, staleTime: 5 * 60_000 });
+  return useQuery({ queryKey: keys.networks, queryFn: ({ signal }) => getNetworks(signal), staleTime: 5 * 60_000 });
 }
 
 /** The service's attestation, checked by the product (cached there for 5 minutes). */
 export function useTrust() {
-  return useQuery({ queryKey: keys.trust, queryFn: getTrust, staleTime: 5 * 60_000 });
+  return useQuery({ queryKey: keys.trust, queryFn: ({ signal }) => getTrust(signal), staleTime: 5 * 60_000 });
 }
 
 /** The followed payment's timeline, live. */
 export function useTimeline(selection: Selection | null) {
   return useQuery({
     queryKey: keys.timeline(selection),
-    queryFn: selection === null ? skipToken : () => getTimeline(selection),
+    queryFn: selection === null ? skipToken : ({ signal }) => getTimeline(selection, signal),
     refetchInterval: 3000,
   });
 }
 
 /** The visitor's deposit address and its payments, followed once the product has shown it. */
 export function useDepositAddress(enabled: boolean) {
-  return useQuery({ queryKey: keys.depositAddress, queryFn: getDepositAddress, enabled, refetchInterval: 3000 });
+  return useQuery({ queryKey: keys.depositAddress, queryFn: ({ signal }) => getDepositAddress(signal), enabled, refetchInterval: 3000 });
 }
 
 export function useSweeps() {
-  return useQuery({ queryKey: keys.sweeps, queryFn: getSweeps, refetchInterval: 10_000 });
+  return useQuery({ queryKey: keys.sweeps, queryFn: ({ signal }) => getSweeps(signal), refetchInterval: 10_000 });
 }
 
 export function useCreateQuote() {

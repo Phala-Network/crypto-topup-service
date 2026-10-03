@@ -13,11 +13,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from starlette.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from reference_product import config as product_config
 from reference_product.__main__ import write_records
 from reference_product.config import (
     DRIVER_KEYID,
@@ -29,8 +32,9 @@ from reference_product.config import (
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
 from reference_product.ledger import Delivery, ProductLedger
 from reference_product.restore_records import export_restore_records
-from reference_product.server import AccountApi
+from reference_product.server import AccountApi, ProductServer
 from topup_sdk import (
+    ApiError,
     RequestSigner,
     credited_event_id,
     load_public_key,
@@ -862,3 +866,45 @@ def test_the_account_api_serves_the_restore_records_to_the_driver_only() -> None
     # Its path is not a workspace's.
     register = json.dumps({"account_id": "restore-records"}).encode()
     assert _account_call(api, "POST", "/accounts", register).status == 400
+
+
+def test_restore_records_over_asgi_preserves_signed_query_and_payload() -> None:
+    fulfillment = _fulfillment()
+    ledger = fulfillment.ledger
+    ledger.record_quote(TEAM, _quote())
+    api = AccountApi(CONFIG, ledger, load_public_key(DRIVER.public_key_base64()))
+    product = ProductServer(fulfillment, api)
+    try:
+        with TestClient(product.app) as client:
+            for query, since in (("", None), ("?since=1790000000", 1_790_000_000)):
+                target, headers = _signed("GET", "/accounts/restore-records" + query, b"")
+                response = client.get(target, headers=headers)
+                assert response.status_code == 200
+                assert response.json() == export_restore_records(
+                    CONFIG.account, ledger, since=since
+                )
+            assert client.get(target).status_code == 401
+    finally:
+        product._workers.shutdown(wait=True, cancel_futures=True)
+        api.close()
+
+
+def test_product_sdk_does_not_wait_on_retry_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            429, headers={"Retry-After": "3600"}, json={"error": {"code": "rate_limited"}}
+        )
+
+    monkeypatch.setattr(product_config, "DeadlineTransport", lambda: httpx.MockTransport(upstream))
+    key = tmp_path / "api-key"
+    key.write_text("ppay_sk_test_" + "ab" * 32)
+    config = replace(CONFIG, api_key_file=str(key))
+    with config.client() as client, pytest.raises(ApiError) as raised:
+        client.get_account()
+    assert raised.value.status_code == 429
+    assert len(calls) == 1

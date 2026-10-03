@@ -44,18 +44,6 @@ export function App() {
   // page's one primary.
   const appearance: Appearance = {
     theme,
-    variables: {
-      colorPrimary: "var(--primary)",
-      accessibleColorOnColorPrimary: "var(--primary-foreground)",
-      colorBackground: "var(--card)",
-      colorText: "var(--card-foreground)",
-      colorTextSecondary: "var(--muted-foreground)",
-      colorBorder: "var(--border)",
-      colorDanger: "var(--destructive)",
-      colorSuccess: "var(--success)",
-      borderRadius: "var(--radius)",
-      fontFamily: "inherit",
-    },
   };
 
   // One page: the headline, then the product (what the customer sees) beside its backend (what

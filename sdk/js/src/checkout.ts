@@ -1,3 +1,4 @@
+import { requestSignal } from "./request.js";
 import { getAddress, isAddress, isAddressEqual } from "viem";
 import { parseClientQuote, quoteIdFromClientSecret, type ClientQuote } from "./quote.js";
 
@@ -109,6 +110,10 @@ export interface CheckoutOptions {
   apiBase: string;
   /** Milliseconds between status reads; default 3000. */
   pollInterval?: number;
+  /** Cancels this request/session together with its own deadline. */
+  signal?: AbortSignal;
+  /** Request deadline in milliseconds; default 10000. */
+  requestTimeout?: number;
   fetch?: typeof globalThis.fetch;
   /** Current time in milliseconds; for tests. */
   now?: () => number;
@@ -120,7 +125,7 @@ export interface CheckoutSession {
   subscribe(listener: (state: CheckoutState) => void): () => void;
   /** Reads the quote now instead of at the next poll. */
   refresh(): Promise<void>;
-  /** Stops polling. */
+  /** Stops polling and aborts the active request. */
   destroy(): void;
 }
 
@@ -132,6 +137,10 @@ export interface RetrieveQuoteOptions {
   /** The address your backend recomputed; a quote naming another one is refused. */
   expectedAddress: string;
   apiBase: string;
+  /** Cancels this request/session together with its own deadline. */
+  signal?: AbortSignal;
+  /** Request deadline in milliseconds; default 10000. */
+  requestTimeout?: number;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -147,7 +156,11 @@ export async function retrieveQuote(options: RetrieveQuoteOptions): Promise<Clie
   const url = `${base}/v1/quotes/${quoteId}?client_secret=${encodeURIComponent(options.clientSecret)}`;
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   // A simple GET with no custom headers, so the browser sends no CORS preflight.
-  const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
+  const response = await fetchImpl(url, {
+    cache: "no-store",
+    credentials: "omit",
+    signal: requestSignal(options),
+  });
   if (!response.ok) {
     throw responseError(response, "the quote or its client secret is unknown");
   }
@@ -198,6 +211,11 @@ export function checkoutStatus(quote: ClientQuote, nowSeconds: number): Checkout
 export function createCheckout(options: CheckoutOptions): CheckoutSession {
   quoteIdFromClientSecret(options.clientSecret);
   expectedAddress(options.expectedAddress);
+  const controller = new AbortController();
+  const signal =
+    options.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([controller.signal, options.signal]);
   const now = options.now ?? Date.now;
   const interval = options.pollInterval ?? DEFAULT_POLL_INTERVAL;
   const listeners = new Set<(state: CheckoutState) => void>();
@@ -226,6 +244,7 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
     const { status, quote } = state;
     return (
       destroyed ||
+      signal.aborted ||
       status === "error" ||
       status === "credited" ||
       status === "rejected" ||
@@ -237,10 +256,16 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
 
   async function load(): Promise<void> {
     try {
-      const quote = await retrieveQuote(options);
+      const quote = await retrieveQuote({ ...options, signal });
+      if (destroyed || signal.aborted) {
+        return;
+      }
       failures = 0;
       setState({ status: checkoutStatus(quote, now() / 1000), quote, error: null });
     } catch (cause) {
+      if (destroyed || signal.aborted) {
+        return;
+      }
       const error =
         cause instanceof CheckoutError
           ? cause
@@ -263,6 +288,9 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
   }
 
   function refresh(): Promise<void> {
+    if (destroyed || signal.aborted) {
+      return Promise.resolve();
+    }
     inFlight ??= load().finally(() => {
       inFlight = undefined;
     });
@@ -292,6 +320,7 @@ export function createCheckout(options: CheckoutOptions): CheckoutSession {
     refresh,
     destroy() {
       destroyed = true;
+      controller.abort();
       clearTimeout(timer);
       listeners.clear();
     },
