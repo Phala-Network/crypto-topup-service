@@ -24,7 +24,6 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - OpenAPI includes shared merchant `403` and merchant/admin `503` errors, documents required
   `429` and optional `503` retry delays, and describes tenant response cache protection.
 
-
 ### Fixed
 
 - RPC acceptance and readmission now retry only transient failures within explicit probe attempt
@@ -54,7 +53,6 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 #### Changed
 
 - Regenerate the client with shared forbidden and unavailable error responses.
-
 
 ### JS SDK
 

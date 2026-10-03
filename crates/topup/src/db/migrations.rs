@@ -94,16 +94,14 @@ async fn recover_queue_indexes(connection: &mut PgConnection) -> Result<(), Migr
         sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL")
             .fetch_one(&mut *connection)
             .await?;
-    if !exists {
-        return Ok(());
-    }
     for index in QUEUE_INDEXES {
-        let recorded: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM public._sqlx_migrations WHERE version=$1)",
-        )
-        .bind(index.version)
-        .fetch_one(&mut *connection)
-        .await?;
+        let recorded: bool = exists
+            && sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM public._sqlx_migrations WHERE version=$1)",
+            )
+            .bind(index.version)
+            .fetch_one(&mut *connection)
+            .await?;
         if recorded {
             continue;
         }
@@ -121,7 +119,7 @@ async fn recover_queue_indexes(connection: &mut PgConnection) -> Result<(), Migr
         };
         // Only an unapplied queue migration following the RPC epoch schema owns this recovery.
         // Fail closed for a dirty or inconsistent history, before CREATE IF NOT EXISTS can run.
-        let eligible: bool = sqlx::query_scalar(
+        let eligible: bool = exists && sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM public._sqlx_migrations WHERE version=20261027000000 AND success) \
              AND NOT EXISTS (SELECT 1 FROM public._sqlx_migrations WHERE version > $1 OR NOT success)",
         )

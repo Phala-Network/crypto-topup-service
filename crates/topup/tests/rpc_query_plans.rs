@@ -167,6 +167,13 @@ async fn migration_recovery_preserves_valid_and_unrelated_indexes() -> Result<()
             ensure!(!unrelated.status.success() && cli_text(&unrelated).contains("refusing recovery"),"{}",cli_text(&unrelated));
             let valid: bool = sqlx::query_scalar("SELECT indisvalid FROM pg_index WHERE indexrelid='public.rpc_window_reviews_due_idx'::regclass").fetch_one(pool).await?;
             ensure!(!valid,"unrelated invalid index was changed");
+            // Missing bookkeeping must not allow CREATE IF NOT EXISTS to bypass inspection.
+            let oid: i64 = sqlx::query_scalar("SELECT 'public.rpc_window_reviews_due_idx'::regclass::oid::bigint").fetch_one(pool).await?;
+            pool.execute("DROP TABLE public._sqlx_migrations").await?;
+            let missing_history = topup::db::migrate(pool).await;
+            ensure!(missing_history.is_err_and(|error| error.to_string().contains("inconsistent migration history")));
+            let kept: i64 = sqlx::query_scalar("SELECT 'public.rpc_window_reviews_due_idx'::regclass::oid::bigint").fetch_one(pool).await?;
+            ensure!(kept==oid,"index without migration history was changed");
             Ok(())
         })
     }).await
