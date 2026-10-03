@@ -467,6 +467,10 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::ingress_budget,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let client_secret = client_secret_routes()
@@ -497,10 +501,6 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
                 .layer(LoadShedLayer::new())
                 .layer(ConcurrencyLimitLayer::new(256)),
         )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::ingress_budget,
-        ))
         .with_state(state)
         .route("/openapi.json", get(serve_openapi))
         .route("/openapi.admin.json", get(serve_admin_openapi))
