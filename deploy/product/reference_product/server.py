@@ -473,6 +473,8 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
     try:
         webhook_keys(wait_s=pin_wait_s)
     except MissingProductKeyError:
+        if config.livemode():
+            raise
         LOG.warning("the product key is not configured; webhook keys are pinned once it is")
     ledger = ProductLedger(config.ledger_path)
     fulfillment = Fulfillment(config, ledger, webhook_keys)

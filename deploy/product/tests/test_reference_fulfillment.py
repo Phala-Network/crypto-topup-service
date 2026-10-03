@@ -29,7 +29,7 @@ from reference_product.config import (
 from reference_product.fulfillment import Answer, Fulfillment, PinnedKeys
 from reference_product.ledger import Delivery, ProductLedger
 from reference_product.restore_records import export_restore_records
-from reference_product.server import AccountApi
+from reference_product.server import AccountApi, pin_webhook_keys
 from topup_sdk import (
     RequestSigner,
     credited_event_id,
@@ -459,6 +459,14 @@ def test_deliveries_wait_until_the_webhook_keys_are_pinned() -> None:
 
     fulfillment = Fulfillment(CONFIG, ProductLedger(), unpinned)
     assert fulfillment.handle(*_credited()).status == 503
+
+
+def test_live_mode_requires_a_preverified_webhook_pin(tmp_path: Path) -> None:
+    key_file = tmp_path / "api-key"
+    key_file.write_text("ppay_sk_live_" + "a" * 40)
+    config = replace(CONFIG, api_key_file=str(key_file))
+    with pytest.raises(MissingProductKeyError, match="pre-verified"):
+        pin_webhook_keys(config)
 
 
 DRIVER = RequestSigner.from_seed(DRIVER_KEYID, bytes([7] * 32))

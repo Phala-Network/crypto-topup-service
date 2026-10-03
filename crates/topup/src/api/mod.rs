@@ -46,7 +46,7 @@ use axum::{Json, Router};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
 
-use tower::{ServiceBuilder, limit::ConcurrencyLimitLayer, load_shed::LoadShedLayer};
+use tower::{ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -467,10 +467,6 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::authenticate_merchant,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::ingress_budget,
         ));
     // A quote and a deposit address are also readable without an API key by a `client_secret`.
     let client_secret = client_secret_routes()
@@ -483,7 +479,13 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         state.clone(),
         auth::authenticate_admin,
     ));
-    let (merchant_router, merchant_doc) = merchant.merge(client_secret).split_for_parts();
+    let (merchant_router, merchant_doc) = merchant
+        .merge(client_secret)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::ingress_budget,
+        ))
+        .split_for_parts();
     let (admin_router, admin_doc) = admin.split_for_parts();
     let docs = ApiDocs {
         merchant: openapi::merchant(&merchant_doc),
@@ -499,7 +501,7 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
                     StatusCode::SERVICE_UNAVAILABLE
                 }))
                 .layer(LoadShedLayer::new())
-                .layer(ConcurrencyLimitLayer::new(256)),
+                .layer(GlobalConcurrencyLimitLayer::new(256)),
         )
         .with_state(state)
         .route("/openapi.json", get(serve_openapi))

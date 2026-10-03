@@ -823,9 +823,12 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     };
     let (application, _) = topup::api::router(state);
     tasks.spawn("API server", |cancellation| {
-        axum::serve(listener, application)
-            .with_graceful_shutdown(cancellation.cancelled_owned())
-            .into_future()
+        axum::serve(
+            listener,
+            application.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(cancellation.cancelled_owned())
+        .into_future()
     });
     tracing::info!(bind = %args.bind, "API listening");
 
@@ -983,13 +986,30 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         clean_shutdown = false;
     }
     // Release the lease-owner lock only after every lease-holding task has stopped.
-    let lease_owner = match lease_owner_finished {
-        Some(result) => result,
-        None => lease_owner_task.await,
+    let lease_owner = match tokio::time::timeout(Duration::from_secs(15), async {
+        match lease_owner_finished {
+            Some(result) => result,
+            None => lease_owner_task.await,
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::error!("lease-owner task drain deadline exceeded");
+            return Ok(ExitCode::FAILURE);
+        }
     };
     match lease_owner {
         Ok(Ok(lock)) => {
-            if let Err(error) = lock.release().await {
+            if let Err(error) = tokio::time::timeout(Duration::from_secs(15), lock.release())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(topup::reconciler::ReconciliationError::LeaseOwnerLock(
+                        "lease unlock deadline exceeded",
+                    ))
+                })
+            {
                 tracing::error!(%error, "failed to release the lease-owner lock");
                 clean_shutdown = false;
             }
@@ -1006,7 +1026,13 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
             clean_shutdown = false;
         }
     }
-    pool.close().await;
+    if tokio::time::timeout(Duration::from_secs(15), pool.close())
+        .await
+        .is_err()
+    {
+        tracing::error!("database pool close deadline exceeded");
+        clean_shutdown = false;
+    }
     tracing::info!("topup service stopped");
 
     Ok(if clean_shutdown {
@@ -1089,13 +1115,16 @@ async fn serve_read_only(
         .with_context(|| format!("failed to bind API listener on {bind}"))?;
     let application = topup::api::read_only_router(state, report);
     tracing::warn!(%bind, "API listening read-only (--read-only)");
-    let served = axum::serve(listener, application)
-        .with_graceful_shutdown(async {
-            if let Err(error) = wait_for_shutdown_signal().await {
-                tracing::error!(%error, "failed to listen for shutdown signal");
-            }
-        })
-        .await;
+    let served = axum::serve(
+        listener,
+        application.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        if let Err(error) = wait_for_shutdown_signal().await {
+            tracing::error!(%error, "failed to listen for shutdown signal");
+        }
+    })
+    .await;
     pool.close().await;
     served.context("read-only API failed")?;
     tracing::info!("read-only API stopped");

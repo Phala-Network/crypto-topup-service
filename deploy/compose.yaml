@@ -86,7 +86,7 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: 1g
     pids_limit: 256
-    stop_grace_period: 300s
+    stop_grace_period: 360s
     command: [topup, run, --config, /etc/topup/topup.yaml, --webhook-proxy, "http://smokescreen:4750"]
     environment:
       DATABASE_URL: postgres://topup_service@postgres:5432/topup

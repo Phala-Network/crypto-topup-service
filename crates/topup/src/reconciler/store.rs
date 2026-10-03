@@ -224,7 +224,11 @@ impl LeaseOwnerLock {
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(self),
                 _ = ticks.tick() => {
-                    if let Err(error) = self.connection.ping().await {
+                    let ping = timeout(Duration::from_secs(5), self.connection.ping());
+                    if let Err(error) = match ping.await {
+                        Ok(result) => result,
+                        Err(_) => Err(sqlx::Error::PoolTimedOut),
+                    } {
                         shutdown.cancel();
                         return Err(error.into());
                     }

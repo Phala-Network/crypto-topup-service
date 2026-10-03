@@ -27,6 +27,7 @@ clap.workspace = true
 crc.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
+governor.workspace = true
 hex.workspace = true
 hmac.workspace = true
 httpdate.workspace = true

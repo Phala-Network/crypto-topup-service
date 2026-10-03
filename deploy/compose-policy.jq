@@ -129,8 +129,16 @@ def common_violations($variant; $project):
           check(.services[$service].cap_drop == ["ALL"]; "\($service) must drop all capabilities"),
           check((.services[$service].security_opt // []) | index("no-new-privileges:true") != null;
                 "\($service) must disable privilege escalation"),
-          check((.services[$service].mem_limit // null) != null; "\($service) must set a memory limit"),
-          check((.services[$service].pids_limit // null) != null; "\($service) must set a pids limit")
+          check((.services[$service].mem_limit // "") | test("^[1-9][0-9]*[bkmgBKMG]$");
+                "\($service) must set a positive finite memory limit"),
+          check((.services[$service].pids_limit // 0) | type == "number" and . > 0;
+                "\($service) must set a positive pids limit"),
+          check((.services[$service].privileged // false) != true;
+                "\($service) must not be privileged"),
+          check((.services[$service].cap_add // []) == [];
+                "\($service) must not add capabilities"),
+          check((.services[$service].security_opt // []) == ["no-new-privileges:true"];
+                "\($service) must use only no-new-privileges")
         ] | flatten
       ) | flatten);
 
