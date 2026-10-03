@@ -16,7 +16,6 @@ use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use topup::pump::{AgeAlertConfig, AgeAlerter, Pump, PumpConfig, StepSet};
@@ -985,24 +984,60 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
     if !tasks.shutdown().await {
         clean_shutdown = false;
     }
+    if !cleanup_service(
+        lease_owner_task,
+        lease_owner_finished,
+        &pool,
+        Duration::from_secs(15),
+    )
+    .await
+    {
+        clean_shutdown = false;
+    }
+    tracing::info!("topup service stopped");
+
+    Ok(if clean_shutdown {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Bounded cleanup after all lease-holding tasks have stopped.
+async fn cleanup_service(
+    mut lease_owner_task: tokio::task::JoinHandle<
+        Result<topup::reconciler::LeaseOwnerLock, topup::reconciler::ReconciliationError>,
+    >,
+    lease_owner_finished: Option<
+        Result<
+            Result<topup::reconciler::LeaseOwnerLock, topup::reconciler::ReconciliationError>,
+            tokio::task::JoinError,
+        >,
+    >,
+    pool: &PgPool,
+    timeout: Duration,
+) -> bool {
+    let mut clean_shutdown = true;
     // Release the lease-owner lock only after every lease-holding task has stopped.
-    let lease_owner = match tokio::time::timeout(Duration::from_secs(15), async {
+    let lease_owner = match tokio::time::timeout(timeout, async {
         match lease_owner_finished {
             Some(result) => result,
-            None => lease_owner_task.await,
+            None => (&mut lease_owner_task).await,
         }
     })
     .await
     {
-        Ok(result) => result,
+        Ok(result) => Some(result),
         Err(_) => {
             tracing::error!("lease-owner task drain deadline exceeded");
-            return Ok(ExitCode::FAILURE);
+            lease_owner_task.abort();
+            clean_shutdown = false;
+            None
         }
     };
     match lease_owner {
-        Ok(Ok(lock)) => {
-            if let Err(error) = tokio::time::timeout(Duration::from_secs(15), lock.release())
+        Some(Ok(Ok(lock))) => {
+            if let Err(error) = tokio::time::timeout(timeout, lock.release())
                 .await
                 .unwrap_or_else(|_| {
                     Err(topup::reconciler::ReconciliationError::LeaseOwnerLock(
@@ -1014,32 +1049,24 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
                 clean_shutdown = false;
             }
         }
-        Ok(Err(error)) => {
+        Some(Ok(Err(error))) => {
             tracing::error!(
                 %error,
                 "lease-owner lock connection failed; deposit processing was stopped"
             );
             clean_shutdown = false;
         }
-        Err(error) => {
+        Some(Err(error)) => {
             tracing::error!(%error, "lease-owner lock task failed");
             clean_shutdown = false;
         }
+        None => {}
     }
-    if tokio::time::timeout(Duration::from_secs(15), pool.close())
-        .await
-        .is_err()
-    {
+    if tokio::time::timeout(timeout, pool.close()).await.is_err() {
         tracing::error!("database pool close deadline exceeded");
         clean_shutdown = false;
     }
-    tracing::info!("topup service stopped");
-
-    Ok(if clean_shutdown {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    clean_shutdown
 }
 
 /// Runs `task` once the service is not frozen after a restore (`topup::restore_mode`); nothing when
@@ -1115,18 +1142,60 @@ async fn serve_read_only(
         .with_context(|| format!("failed to bind API listener on {bind}"))?;
     let application = topup::api::read_only_router(state, report);
     tracing::warn!(%bind, "API listening read-only (--read-only)");
+    serve_read_only_until(
+        listener,
+        application,
+        pool,
+        wait_for_shutdown_signal(),
+        Duration::from_secs(300),
+        Duration::from_secs(15),
+    )
+    .await
+}
+
+async fn serve_read_only_until(
+    listener: tokio::net::TcpListener,
+    application: axum::Router,
+    pool: PgPool,
+    shutdown: impl Future<Output = std::io::Result<()>>,
+    drain_timeout: Duration,
+    close_timeout: Duration,
+) -> anyhow::Result<ExitCode> {
+    let cancellation = CancellationToken::new();
     let served = axum::serve(
         listener,
         application.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        if let Err(error) = wait_for_shutdown_signal().await {
-            tracing::error!(%error, "failed to listen for shutdown signal");
+    .with_graceful_shutdown(cancellation.clone().cancelled_owned())
+    .into_future();
+    tokio::pin!(served);
+    let result = tokio::select! {
+        result = &mut served => Some(result),
+        signal = shutdown => {
+            if let Err(error) = signal {
+                tracing::error!(%error, "failed to listen for shutdown signal");
+            }
+            cancellation.cancel();
+            match tokio::time::timeout(drain_timeout, &mut served).await {
+                Ok(result) => Some(result),
+                Err(_) => {
+                    tracing::error!("read-only API drain deadline exceeded");
+                    None
+                }
+            }
         }
-    })
-    .await;
-    pool.close().await;
-    served.context("read-only API failed")?;
+    };
+    let closed = tokio::time::timeout(close_timeout, pool.close()).await;
+    if closed.is_err() {
+        tracing::error!("read-only database pool close deadline exceeded");
+    }
+    match result {
+        Some(result) => result.context("read-only API failed")?,
+        None => return Ok(ExitCode::FAILURE),
+    }
+    if closed.is_err() {
+        return Ok(ExitCode::FAILURE);
+    }
     tracing::info!("read-only API stopped");
     Ok(ExitCode::SUCCESS)
 }
@@ -1440,34 +1509,7 @@ fn database_url(command: &'static str) -> anyhow::Result<String> {
 /// Connects a pool of at most `max_connections` to `DATABASE_URL`.
 async fn connect(command: &'static str, max_connections: u32) -> anyhow::Result<PgPool> {
     let url = database_url(command)?;
-    let (statement, lock, idle) = if command == "migrate" || command == "restore-check" {
-        (
-            Duration::from_secs(300),
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-        )
-    } else {
-        (
-            Duration::from_secs(30),
-            Duration::from_secs(5),
-            Duration::from_secs(60),
-        )
-    };
-    Ok(PgPoolOptions::new()
-        .max_connections(max_connections)
-        .after_connect(move |connection, _| {
-            Box::pin(async move {
-                sqlx::query("SELECT set_config('statement_timeout', $1, false), set_config('lock_timeout', $2, false), set_config('idle_in_transaction_session_timeout', $3, false)")
-                    .bind(format!("{}ms", statement.as_millis()))
-                    .bind(format!("{}ms", lock.as_millis()))
-                    .bind(format!("{}ms", idle.as_millis()))
-                    .execute(connection)
-                    .await?;
-                Ok(())
-            })
-        })
-        .connect(&url)
-        .await?)
+    Ok(topup::db::connect(&url, command, max_connections).await?)
 }
 
 /// [`connect`] for the commands that create roles and repair the ledger (`migrate`,
@@ -1644,6 +1686,65 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{ServiceTasks, parse_nonce};
+
+    #[tokio::test]
+    async fn read_only_shutdown_bounds_a_stalled_request_and_closes_the_pool() {
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let entered = CancellationToken::new();
+        let handler_entered = entered.clone();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move || {
+                let entered = handler_entered.clone();
+                async move {
+                    entered.cancel();
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .unwrap();
+        let observed_pool = pool.clone();
+        let server = tokio::spawn(super::serve_read_only_until(
+            listener,
+            app,
+            pool,
+            async move {
+                entered.cancelled().await;
+                Ok(())
+            },
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        ));
+        let request = tokio::spawn(async move { reqwest::get(format!("http://{address}/")).await });
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, std::process::ExitCode::FAILURE);
+        assert!(observed_pool.is_closed());
+        request.abort();
+    }
+
+    #[tokio::test]
+    async fn lease_owner_drain_timeout_still_closes_the_pool() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .unwrap();
+        let task = tokio::spawn(std::future::pending());
+        let aborted = task.abort_handle();
+        assert!(
+            !super::cleanup_service(task, None, &pool, std::time::Duration::from_millis(20)).await
+        );
+        assert!(pool.is_closed());
+        tokio::task::yield_now().await;
+        assert!(aborted.is_finished());
+    }
 
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
