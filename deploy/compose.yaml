@@ -79,7 +79,9 @@ services:
   topup:
     image: phala-pay
     user: "999:999"
-    read_only: true
+    # Compose v2.26 injects inline configs with CopyToContainer at / before start. Docker
+    # requires a writable rootfs for that API; the root-owned 0444 config stays immutable to uid 999.
+    read_only: false
     tmpfs:
       - /tmp
     cap_drop: [ALL]
