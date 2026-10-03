@@ -116,6 +116,14 @@ jq -e '[.services[].ports[]?] == []' "$tmp/drill.json" >/dev/null ||
 TOPUP_LOCAL_DSTACK_IMAGE=validate "$compose" -p validate-rehearsal \
     --project-directory "$root/deploy/local" -f "$tmp/service.yml" \
     -f "$root/deploy/local/cvm-rehearsal.compose.yml" config --format json >"$tmp/rehearsal.json"
+# Compare both through the runtime loader: it normalizes memory units and omits false defaults.
+"$compose" -f "$tmp/service.yml" config --format json >"$tmp/service-runtime.json"
+jq -e --slurpfile service "$tmp/service-runtime.json" '
+    [.services.topup, .services.heartbeat, .services.smokescreen
+     | {read_only, user, tmpfs, cap_drop, security_opt, mem_limit, pids_limit, configs}]
+    == ([$service[0].services.topup, $service[0].services.heartbeat, $service[0].services.smokescreen
+         | {read_only, user, tmpfs, cap_drop, security_opt, mem_limit, pids_limit, configs}])' \
+    "$tmp/rehearsal.json" >/dev/null || fail "the CVM rehearsal must preserve release hardening and configs"
 jq -e '[.services[].volumes[]? | select(.type == "bind")] == []' "$tmp/rehearsal.json" >/dev/null ||
     fail "the CVM rehearsal stack bind-mounts a host path"
 jq -e '[.services | to_entries[] | select((.value.ports // []) | length > 0) | .key] | sort

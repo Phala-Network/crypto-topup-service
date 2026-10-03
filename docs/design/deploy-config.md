@@ -51,6 +51,21 @@ environment (dstack v0.5.9 `basefiles/app-compose.{sh,service}`:
      committed environment directory.
 9. **A `{key}` may only fill a whole path segment or a whole query value**, and substitution must
    leave the URL's authority unchanged (§4).
+10. **Inline config consumers require a writable root filesystem.** Compose v2.26.0's
+    [injectConfigs](https://github.com/docker/compose/blob/v2.26.0/pkg/compose/secrets.go)
+    copies a tar archive to `/` through `CopyToContainer` before starting the container. Docker's
+    [archive extraction](https://github.com/moby/moby/blob/v26.0.0/daemon/archive_unix.go)
+    rejects that extraction point when the root filesystem is read-only, even with tmpfs at the
+    config target's parent. topup therefore uses `read_only: false` in every variant; uid/gid 999,
+    root-owned `0444` configs in root-owned directories, dropped capabilities, no-new-privileges, finite
+    resource limits and read-only credential mounts remain. The root filesystem can now be
+    written wherever Unix permissions allow uid 999; `/tmp` remains tmpfs. smokescreen and
+    heartbeat consume no configs and retain read-only root filesystems. The reference product
+    already uses a writable root filesystem and runs as uid/gid 10001 in its image.
+    The rehearsal inherits these same policies. `deploy/tests/compose-startup.sh` exercises
+    injection, byte equality, topup config permissions and recreation on real rendered service,
+    restore-check, template and product definitions, substituting bounded probes for application
+    processes and removing external connections. Application health remains the rehearsal's job.
 
 ## 2. Principle: four kinds of input, each with one home
 
