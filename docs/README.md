@@ -52,3 +52,6 @@ For the operator who runs an instance, onboards merchants, and handles incidents
 
 [CONTRIBUTING.md](../CONTRIBUTING.md) covers the development setup, tests, conventions, and
 releases. Report vulnerabilities as described in [SECURITY.md](../SECURITY.md).
+
+RPC queue performance evidence and concurrent migration behavior are recorded in
+[RPC queue query plans](design/db-api-query-plans.md).

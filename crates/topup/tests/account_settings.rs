@@ -775,7 +775,7 @@ async fn concurrent_migrates_wait_for_the_backfill_and_outer_commit() -> Result<
         seed_payment(owner, account.id, &route, 0x34).await?;
         topup::db::MIGRATOR.undo(owner, 20_261_023_000_000).await?;
         // Install a test-only gate in the old schema. It blocks legacy inserts, after SQLx
-        // has applied the DDL and released its own lock, without blocking schema migrations.
+        // has applied the DDL, without blocking the test connection's schema inspection.
         sqlx::raw_sql(r#"
             CREATE FUNCTION test_pause_backfill() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN
@@ -840,7 +840,7 @@ async fn wait_for_migrate_waiters(pool: &sqlx::PgPool, pattern: &str, count: i64
         loop {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
-                 AND wait_event_type = 'Lock' AND query LIKE $1",
+                 AND (wait_event_type = 'Lock' OR (state = 'idle' AND query LIKE '%pg_try_advisory_lock%')) AND query LIKE $1",
             )
             .bind(pattern)
             .fetch_one(pool)

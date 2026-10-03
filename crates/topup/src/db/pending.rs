@@ -250,6 +250,7 @@ pub(crate) async fn delete_finalized_in(
 
 #[derive(sqlx::FromRow)]
 struct PendingRecord {
+    address_id: Uuid,
     chain_id: i64,
     tx_hash: String,
     receipt_log_index: i64,
@@ -297,7 +298,7 @@ impl TryFrom<PendingRecord> for PendingTransfer {
 // not shown. Every row shown is at a position with no deposit, or with the revision-0 deposit the
 // fast scan recorded from it, so its deposit id is the position's revision-0 id.
 const PENDING_SELECT: &str = r#"
-    SELECT pending.chain_id, pending.tx_hash, pending.receipt_log_index, pending.log_index,
+    SELECT pending.address_id, pending.chain_id, pending.tx_hash, pending.receipt_log_index, pending.log_index,
            pending.block_number,
            pending.block_time, pending.head_block, address.address, pending.asset_contract,
            pending.from_address, pending.amount_atomic::text AS amount_atomic,
@@ -323,11 +324,37 @@ pub async fn list_address_pending<'e>(
 ) -> Result<Vec<PendingTransfer>, sqlx::Error> {
     let query = format!(
         "{PENDING_SELECT} AND pending.address_id = $1 \
-         ORDER BY pending.block_number, pending.log_index"
+         ORDER BY pending.block_number, pending.log_index, pending.tx_hash"
     );
     let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
         .bind(address_id)
         .fetch_all(executor)
         .await?;
     records.into_iter().map(TryInto::try_into).collect()
+}
+
+/// Pending transfers for a page of scoped address ids, oldest first within each address.
+/// Callers obtain the ids from an authenticated parent query; no arbitrary client ids belong here.
+pub async fn list_addresses_pending<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    address_ids: &[Uuid],
+) -> Result<Vec<(Uuid, PendingTransfer)>, sqlx::Error> {
+    if address_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = format!(
+        "{PENDING_SELECT} AND pending.address_id = ANY($1) \
+         ORDER BY pending.address_id, pending.block_number, pending.log_index, pending.tx_hash"
+    );
+    let records = sqlx::query_as::<_, PendingRecord>(AssertSqlSafe(query))
+        .bind(address_ids)
+        .fetch_all(executor)
+        .await?;
+    records
+        .into_iter()
+        .map(|record| {
+            let address_id = record.address_id;
+            PendingTransfer::try_from(record).map(|transfer| (address_id, transfer))
+        })
+        .collect()
 }

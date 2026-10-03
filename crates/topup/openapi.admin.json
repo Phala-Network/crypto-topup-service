@@ -4366,6 +4366,16 @@
             },
             "description": "OK: created, with its first secret keys",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4384,6 +4394,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4402,6 +4422,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4420,10 +4450,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -4465,6 +4541,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4483,6 +4569,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4501,10 +4597,56 @@
             },
             "description": "Not Found: no account has this id",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -4554,6 +4696,16 @@
             },
             "description": "OK: updated, or already holding these values",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4572,6 +4724,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4590,6 +4752,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4608,6 +4780,16 @@
             },
             "description": "Not Found: no account has this id",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4626,10 +4808,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -4681,6 +4909,16 @@
             },
             "description": "OK: the key with its `secret`, shown once",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4699,6 +4937,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4717,6 +4965,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4735,6 +4993,16 @@
             },
             "description": "`testmode_charges_only`: a live key for an account without live mode",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4753,6 +5021,16 @@
             },
             "description": "Not Found: no account has this id",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4771,10 +5049,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -4835,6 +5159,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4853,6 +5187,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4871,6 +5215,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4889,10 +5243,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -4953,6 +5353,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4971,6 +5381,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -4989,6 +5409,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5007,10 +5437,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5062,6 +5538,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5080,6 +5566,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5098,6 +5594,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5116,10 +5622,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5171,6 +5723,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5189,6 +5751,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5207,6 +5779,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5225,10 +5807,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5289,6 +5917,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5307,6 +5945,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5325,6 +5973,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5343,10 +6001,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5407,6 +6111,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5425,6 +6139,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5443,6 +6167,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5461,10 +6195,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5524,6 +6304,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5542,6 +6332,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5560,6 +6360,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5578,6 +6388,16 @@
             },
             "description": "Not Found: no such account",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5596,10 +6416,28 @@
             },
             "description": "Service Unavailable",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5641,6 +6479,16 @@
             },
             "description": "OK: the deposit as its account sees it, with `admin`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5659,6 +6507,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5677,10 +6535,56 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5722,6 +6626,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5740,6 +6654,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5758,6 +6682,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5776,10 +6710,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5809,10 +6789,56 @@
             },
             "description": "OK: the process's counters in the Prometheus text format, such as `topup_rpc_calls_total{provider, chain_id, method}`; they restart at zero with the process",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5863,6 +6889,16 @@
             },
             "description": "OK: lifted, or already lifted",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5881,6 +6917,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5899,6 +6945,16 @@
             },
             "description": "Not Found: no active or lifted block has this key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5917,10 +6973,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -5960,6 +7062,16 @@
             },
             "description": "OK: recording runs, whether it was held or not",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5978,6 +7090,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -5996,6 +7118,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6014,10 +7146,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6061,6 +7239,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6079,10 +7267,56 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6113,6 +7347,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6131,10 +7375,56 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6175,6 +7465,16 @@
             },
             "description": "OK: revoked, or already revoked",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6193,6 +7493,16 @@
             },
             "description": "Bad Request: no or both selectors, several keys match (name it by `id`), or `last_api_key` (issue a recovery key with `revoke_existing`); or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6211,6 +7521,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6229,6 +7549,16 @@
             },
             "description": "Not Found: no key of the account matches",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6247,10 +7577,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6291,6 +7667,16 @@
             },
             "description": "OK: discarded, or discarded already",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6309,6 +7695,16 @@
             },
             "description": "Bad Request",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6327,6 +7723,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6345,6 +7751,16 @@
             },
             "description": "Not Found: no delivered credit was imported for the deposit",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6363,10 +7779,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6407,6 +7869,16 @@
             },
             "description": "OK: re-issued, or the customer's existing version",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6425,6 +7897,16 @@
             },
             "description": "Bad Request: the address is not the customer's over a treasury of the account in force since the restore point (restore a lost treasury change first), the `client_secret` is not one the service issued for the `id` to the account, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6443,6 +7925,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6461,6 +7953,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6479,10 +7981,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6523,6 +8071,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6541,6 +8099,16 @@
             },
             "description": "Bad Request: a delivery's signature does not verify with its account's webhook keys, or its event is malformed, of another type, or its id is not the one its type and deposit derive; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6559,6 +8127,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6577,6 +8155,16 @@
             },
             "description": "Not Found: no account has an event's `account`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6595,6 +8183,16 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6613,10 +8211,28 @@
             },
             "description": "Service Unavailable: the webhook keys cannot be derived",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6657,6 +8273,16 @@
             },
             "description": "OK: re-issued, or the quote exists already for the customer at the address",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6675,6 +8301,16 @@
             },
             "description": "Bad Request: the address is not the quote's over the account's treasury of the chain in force at its `created` (restore a lost treasury change first), the `client_secret` is not one the service issued for the quote to the account, no route has the chain and asset, the quote exists with another customer or address, or `treasury_not_set`; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6693,6 +8329,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6711,6 +8357,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6729,10 +8385,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6773,6 +8475,16 @@
             },
             "description": "OK: applied, or in force already",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6791,6 +8503,16 @@
             },
             "description": "Bad Request: the delivery's signature does not verify with its account's webhook keys, it is not the `treasury.updated` of a pending change applying, the restored treasury is another or canceled, its time-lock had not ended, or a sanctions list names it now; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6809,6 +8531,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6827,6 +8559,16 @@
             },
             "description": "Not Found: no account has the event's `account`, or the restored database lacks the treasury (proven after the restore point: the merchant proves it again after the unfreeze)",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6845,6 +8587,16 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6863,10 +8615,28 @@
             },
             "description": "Service Unavailable: the webhook keys cannot be derived; retry",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -6907,6 +8677,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6925,6 +8705,16 @@
             },
             "description": "Bad Request; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6943,6 +8733,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -6961,10 +8761,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -7005,6 +8851,16 @@
             },
             "description": "OK: unfrozen",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7023,6 +8879,16 @@
             },
             "description": "Bad Request: a checklist item is not `true`, `restore_not_frozen`, or `restore_rescan_incomplete`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7041,6 +8907,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7059,10 +8935,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -7103,6 +9025,16 @@
             },
             "description": "OK: deleted",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7121,6 +9053,16 @@
             },
             "description": "Bad Request; or `restore_not_frozen`",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7139,6 +9081,16 @@
             },
             "description": "Unauthorized",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7157,6 +9109,16 @@
             },
             "description": "Not Found: no endpoint of the account and mode, or deleted already",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7175,10 +9137,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -7230,6 +9238,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7248,6 +9266,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7266,10 +9294,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }
@@ -7320,6 +9394,16 @@
             },
             "description": "OK",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7338,6 +9422,16 @@
             },
             "description": "Not Found",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
@@ -7356,10 +9450,56 @@
             },
             "description": "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still running; retry with the same key",
             "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
               "Request-Id": {
                 "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            "headers": {
+              "Cache-Control": {
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Request-Id": {
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "description": "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors",
+                "required": false,
+                "schema": {
+                  "minimum": 1,
+                  "type": "integer"
                 }
               }
             }

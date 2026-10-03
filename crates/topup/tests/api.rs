@@ -1536,3 +1536,50 @@ async fn response_json(response: axum::response::Response) -> Result<Value> {
     let bytes = to_bytes(response.into_body(), 1_048_576).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+
+/// Cache protection encloses router errors and the boot-time read-only gate, even before auth.
+#[tokio::test]
+async fn tenant_http_errors_and_read_only_rejections_are_not_stored() -> Result<()> {
+    let admin_key = SigningKey::from_bytes(&[29; 32]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+    let state = app_state(pool, &admin_key);
+    for router in [
+        topup::api::router(state.clone()).0,
+        topup::api::read_only_router(state, None),
+    ] {
+        for (method, path) in [
+            (Method::GET, "/v1/no_such_resource"),
+            (Method::DELETE, "/v1/config"),
+            (Method::GET, "/v1/quotes/qt_invalid?client_secret=invalid"),
+            (Method::POST, "/v1/api_keys"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            ensure!(response.status().is_client_error() || response.status().is_server_error());
+            ensure!(response.headers()["cache-control"] == "no-store", "{path}");
+        }
+        let document = router
+            .clone()
+            .oneshot(axum::http::Request::get("/openapi.json").body(Body::empty())?)
+            .await?;
+        ensure!(document.status() == StatusCode::OK);
+        ensure!(!document.headers().contains_key("cache-control"));
+        let credentialed = router
+            .oneshot(
+                axum::http::Request::get("/unknown")
+                    .header("Authorization", "Bearer invalid")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure!(credentialed.headers()["cache-control"] == "no-store");
+    }
+    Ok(())
+}

@@ -505,6 +505,16 @@ reads at the position takes the successor's id and `replaces` again (§14).
 
 ## 8. Chain, valuation, screening
 
+Durable RPC review queues use a partial index on chain, recovery epoch, replay/creation time,
+block floor and id; nonfinal reorg replay uses a partial index on chain, epoch and the next block
+expression. Completed evidence stays in the tables but leaves the queue indexes. Concurrent
+migrations replace the older review index after the new one is valid. Normal Deploy retries verify
+and rebuild only matching invalid indexes owned by the pending queue migrations; completed
+unrecorded builds keep their index after exact-definition verification. The payment-settings
+cutover transaction commits before concurrent index work starts. See the
+[query-plan evidence](design/db-api-query-plans.md) for the representative workload and SQLx
+migration behavior.
+
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
@@ -949,6 +959,24 @@ the welcome promotion by existing rule.
 
 The API follows Stripe's documented conventions, so an integrator who knows Stripe
 knows it. Where it departs, the last column says why.
+
+All `/v1` tenant and credential responses carry `Cache-Control: no-store`, including admin
+responses, public `client_secret` views, idempotent replays, and errors rejected before a handler
+runs. Credential-bearing requests to other paths also carry it. Unauthenticated health and
+OpenAPI documents remain outside this policy.
+
+The merchant OpenAPI document includes the shared authentication/authorization `403`, rate
+admission `429`, and temporary-unavailability `503` responses on every operation. The admin
+document also includes shared `503` responses. Every `429` sends a positive integer `Retry-After`
+in seconds. A `503` can send it (`1` for database admission/conflicts, `300` for restore gates);
+other temporary-unavailability responses may omit it. Clients respect the header when present.
+
+Quote lists select the account and mode's page before fetching payment observations. One batched
+deposit read and one batched pending-transfer read cover only the selected address ids; an empty
+page performs neither. Rendering keeps the same consumed-deposit priority, recorded-before-pending
+order, reversed-deposit exclusion, matching rules, and cursor/`has_more` semantics as detail reads.
+Within each address, observations sort by block number and log index, then by deposit id or
+pending transaction hash to break ties deterministically.
 
 | Convention | Stripe | Here |
 |---|---|---|

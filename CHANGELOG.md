@@ -13,6 +13,18 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Changed
+
+- Quote lists batch deposit and pending-payment reads after scoped pagination, keeping detail
+  payment selection, tenant/mode isolation, filters and cursor semantics.
+- RPC review and reorg replay queues use concurrent partial expression indexes keyed by chain
+  and recovery epoch; the superseded review index is removed. Normal Deploy migration retries
+  verify and rebuild interrupted invalid queue indexes without database shell access; concurrent
+  index work runs after the atomic payment-settings cutover transaction.
+- OpenAPI includes shared merchant `403` and merchant/admin `503` errors, documents required
+  `429` and optional `503` retry delays, and describes tenant response cache protection.
+
+
 ### Fixed
 
 - RPC acceptance and readmission now retry only transient failures within explicit probe attempt
@@ -31,6 +43,18 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   Owner recovery uses fresh full-probe deadlines for each member and an independent full
   operation deadline for anchor agreement, allowing healthy low-rate providers to complete
   route verification.
+
+### Security
+
+- Tenant and credential HTTP responses, including public payer views, idempotent replays,
+  authentication errors and restore rejections, send `Cache-Control: no-store`.
+
+### Python SDK (`phala-pay`)
+
+#### Changed
+
+- Regenerate the client with shared forbidden and unavailable error responses.
+
 
 ### JS SDK
 
