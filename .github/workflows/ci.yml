@@ -418,6 +418,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate the attested compose and the local, sandbox, and restore-drill overlays
         run: deploy/validate-compose.sh
+      - name: Create and recreate rendered compose config consumers with Docker
+        timeout-minutes: 5
+        run: deploy/tests/compose-startup.sh
       # Every tracked file with a shell shebang, with .shellcheckrc, but Phala Cloud's pre-launch
       # script, kept byte for byte as attested; streamed into the container, since the runner's
       # Docker daemon cannot bind-mount the workspace.

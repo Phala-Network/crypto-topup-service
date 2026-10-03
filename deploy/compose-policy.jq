@@ -114,6 +114,9 @@ def common_violations($variant; $project):
       check([.configs // {} | to_entries[] | (.value.file == null) and (.value.content | type == "string")
               and (.key | test("^[a-z0-9_]+_[0-9a-f]{12}$"))] | all;
             "every config must be inline content named after its digest"),
+      check([.services[] | select(.read_only == true) | .configs[]?
+              | select($root.configs[.source].content != null)] == [];
+            "inline config consumers must use a writable root filesystem for Compose injection"),
       check([.services[] | .environment | env_map | to_entries[]
               | select((.key | test("PASSWORD$")) or ((.value // "") | test("postgres(ql)?://[^/@]*:[^/@]*@")))]
               == []; "no service environment may carry a password"),
@@ -124,7 +127,11 @@ def common_violations($variant; $project):
       + (if $variant == "product" then [] elif $variant == "restore-check" then ["topup"] else ["topup", "smokescreen", "heartbeat"] end | map(
         . as $service
         | $root | [
-          check(.services[$service].read_only == true; "\($service) must use a read-only root filesystem"),
+          (if $service == "topup" then
+            check(.services[$service].user == "999:999"; "topup must run as uid/gid 999")
+           else
+            check(.services[$service].read_only == true; "\($service) must use a read-only root filesystem")
+           end),
           check((.services[$service].tmpfs // []) | length > 0; "\($service) must declare tmpfs"),
           check(.services[$service].cap_drop == ["ALL"]; "\($service) must drop all capabilities"),
           check((.services[$service].security_opt // []) | index("no-new-privileges:true") != null;
@@ -183,7 +190,10 @@ def topup_violations:
         check((.services.migrate.environment | env_map | .DATABASE_URL | database_user) == "postgres";
               "migrate must log in as the database owner"),
         check(mounted_config("topup"; "/etc/topup/topup.yaml") != "";
-              "topup must mount its topup.yaml at /etc/topup/topup.yaml")
+              "topup must mount its topup.yaml at /etc/topup/topup.yaml"),
+        check([.services.topup.configs[]? | (.uid // "0") == "0" and (.gid // "0") == "0"
+                and (.mode // 292) == 292] | all;
+              "topup configs must be root-owned with mode 0444")
       ];
 
 # The live instance, the service or the template variant: topup serves with its webhooks through

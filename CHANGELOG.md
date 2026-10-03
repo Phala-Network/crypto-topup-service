@@ -13,6 +13,13 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- CVM startup with inline Compose configs: topup uses the writable root filesystem required by
+  Docker's config injection, while retaining its non-root user and other service hardening.
+  The rehearsal now shares the release policy; Docker creation and recreation of every rendered
+  variant, including the reference product, run in CI.
+
 ## [0.8.0] - 2026-10-03
 
 ### Added

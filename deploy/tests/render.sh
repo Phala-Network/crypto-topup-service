@@ -152,6 +152,18 @@ policy() {
 }
 "$compose" -f "$tmp/restore-check.yml" config --no-interpolate --format json >"$tmp/restore-check.json"
 service=(service "$tmp/service.json")
+policy readonly-config "${service[@]}" '.services.topup.read_only = true' \
+    "inline config consumers must use a writable root filesystem for Compose injection"
+policy root-user "${service[@]}" '.services.topup.user = "0:0"' \
+    "topup must run as uid/gid 999"
+policy config-owner "${service[@]}" '.services.topup.configs[0].uid = "999"' \
+    "topup configs must be root-owned with mode 0444"
+policy config-writable "${service[@]}" '.services.topup.configs[0].mode = 438' \
+    "topup configs must be root-owned with mode 0444"
+for sidecar in heartbeat smokescreen; do
+    policy "writable-$sidecar" "${service[@]}" ".services.$sidecar.read_only = false" \
+        "$sidecar must use a read-only root filesystem"
+done
 policy secret-command "${service[@]}" '.services.heartbeat.command += ["${SENTRY_DSN:-60}"]' \
     "a sealed value may not fill services.heartbeat.command"
 policy secret-env "${service[@]}" '.services.migrate.environment.TOPUP_RPC_PROVIDER_A_KEY = "${TOPUP_RPC_PROVIDER_A_KEY:-}"' \
@@ -195,6 +207,8 @@ policy cap-add "${service[@]}" '.services.topup.cap_add = ["NET_ADMIN"]' \
     "topup must not add capabilities"
 policy security-opt "${service[@]}" '.services.topup.security_opt += ["seccomp:unconfined"]' \
     "topup must use only no-new-privileges"
+policy restore-readonly-config restore-check "$tmp/restore-check.json" '.services.topup.read_only = true' \
+    "inline config consumers must use a writable root filesystem for Compose injection"
 
 # The restore-check variant never reads the live storage credentials.
 policy live-credentials restore-check "$tmp/restore-check.json" \
@@ -222,6 +236,8 @@ cmp -s <("$compose" -f "$tmp/template.yml" config --variables | sort) \
     <("$compose" -f "$tmp/template-key-id.yml" config --variables | sort) ||
     { echo "a \$ in the template's topup.yaml became a runtime reference" >&2; exit 1; }
 "$compose" -f "$tmp/template.yml" config --no-interpolate --format json >"$tmp/template.json"
+policy template-readonly-config template "$tmp/template.json" '.services.topup.read_only = true' \
+    "inline config consumers must use a writable root filesystem for Compose injection"
 policy template-extra template "$tmp/template.json" \
     '.services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY = "${TOPUP_ADMIN_PUBLIC_KEY:-}"' \
     "a sealed value may not fill services.heartbeat.environment.TOPUP_ADMIN_PUBLIC_KEY"
@@ -258,6 +274,9 @@ allowed_envs not-a-list service "$tmp/service.json" 'null' "allowed_envs must be
 # The product:its one sealed name, and its public_url on its domain.
 product="$root/deploy/environments/phala-network/staging/product"
 render "${gateway[@]}" "$product" >"$tmp/product.yml"
+"$compose" -f "$tmp/product.yml" config --no-interpolate --format json >"$tmp/product.json"
+policy product-readonly-config product "$tmp/product.json" '.services.product.read_only = true' \
+    "inline config consumers must use a writable root filesystem for Compose injection"
 [[ "$("$compose" -f "$tmp/product.yml" config --variables | awk 'NR > 1 { print $1 }')" == PRODUCT_API_KEY ]]
 cp -r "$product" "$tmp/product-url"
 jq '.public_url = "https://other.phala.com"' "$product/config.json" >"$tmp/product-url/config.json"
