@@ -717,7 +717,11 @@ async fn recovery_probe_cannot_readmit_a_member_below_persisted_safe_head() {
 #[tokio::test]
 async fn unknown_rpc_limit_under_http_429_pauses_account_and_switches_account() {
     let (url, task) = server(Router::new().route("/", post(|Json(request):Json<Value>| async move {
-        (StatusCode::TOO_MANY_REQUESTS, [("retry-after","30")], Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32005,"message":"unfamiliar limit"}})))
+        if request["method"]=="eth_getBlockByNumber" {
+            (StatusCode::OK,[("retry-after","30")],Json(json!({"jsonrpc":"2.0","id":request["id"],"result":header("0x1".into())})))
+        } else {
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after","30")], Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32005,"message":"unfamiliar limit"}})))
+        }
     }))).await;
     let group = group(&url);
     group.verified(0, true);
@@ -769,6 +773,25 @@ async fn unknown_rpc_limit_under_http_429_pauses_account_and_switches_account() 
     backup.account = "other-account".into();
     backup.key = "other-key".into();
     backup.priority = 1;
+    let backup_hits = Arc::new(AtomicUsize::new(0));
+    let hits = backup_hits.clone();
+    let (healthy_url, healthy_task) = server(Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                let result = if request["method"] == "eth_getBlockByNumber" {
+                    header("0x1".into())
+                } else {
+                    json!("0x1234")
+                };
+                Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+            }
+        }),
+    ))
+    .await;
+    backup.endpoint = Redacted::parse(&healthy_url).unwrap();
     members.push(backup);
     let switched = RpcGroup::new(
         "b".into(),
@@ -780,8 +803,24 @@ async fn unknown_rpc_limit_under_http_429_pauses_account_and_switches_account() 
     .unwrap();
     switched.verified(0, true);
     switched.verified(1, true);
-    shared.pause("account", Duration::from_secs(30));
-    assert_eq!(switched.select(&BTreeSet::new(), None), Ok(1));
+    // Run the whole retry chain: the unknown RPC message must still honor HTTP 429,
+    // retain Retry-After and retry using the independently budgeted healthy account.
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{},"latest"]});
+    assert_eq!(
+        switched.request(request.clone()).await.unwrap()["result"],
+        json!("0x1234")
+    );
+    assert!(shared.paused("account", "key"));
+    assert!(backup_hits.load(Ordering::SeqCst) > 0);
+    // A subsequent full request skips the paused first account rather than waiting 30s.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), switched.request(request))
+            .await
+            .unwrap()
+            .unwrap()["result"],
+        json!("0x1234")
+    );
+    healthy_task.abort();
     assert_eq!(
         classify("eth_call", &reply(429, -32602, "invalid params")),
         Some(Failure::Request)

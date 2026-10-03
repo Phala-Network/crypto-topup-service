@@ -30,7 +30,11 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - RPC company aliases additionally use pinned PSL registrable-domain evidence; accepted A/B
   role/group ids cannot be renamed or swapped. Receipt/head/nonce evidence is member-pinned,
   and typed decoding participates in failover. Dense-window deadlines account for real
-  verification work and shared quotas. Singleton historical replay and nonfinal reorg replay
+  verification work, recursive log splits, factory checks and shared quotas; pinned sends
+  retain the operation deadline. Same-height latest/safe reorgs replay through the production
+  poll, recording deposits below prior confirmation progress without skipping unread ranges.
+  Recovery probes isolate member heads and validate existing deposit and flush ledgers.
+  Singleton historical replay and nonfinal reorg replay
   retain durable progress; authorized numeric-watermark recovery isolates old branch evidence
   in its audit epoch.
 

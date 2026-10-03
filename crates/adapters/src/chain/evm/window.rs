@@ -146,14 +146,24 @@ impl FinalizedReader {
                     let before=HeadAnchor::parse(anchor.get("result").ok_or(Failure::Malformed)?)?;
                     if before.number!=request.to {return Err(Failure::Malformed);}
                     if before.number==start_head.number && before.hash!=start_head.hash {return Err(if request.finalized {Failure::Fork} else {Failure::Stale});}
-                    let pinned=EvmClient::from_group(group.clone(),Some(index)).map_err(|_|Failure::Malformed)?;
-                    let reader=FinalizedReader::new(Arc::new(pinned));
                     // Buffer typed raw logs once, then budget the serial verification work.
                     // This is the current operation's evidence, never a cross-request cache.
                     let recipients=request.recipients.iter().copied().collect::<BTreeSet<_>>();
                     let selectors=if request.tokens.is_empty() {super::Recipients::Topic(&request.recipients)} else {super::Recipients::Local(&recipients)};
                     let batches=if request.tokens.is_empty() {request.recipients.len().div_ceil(super::MAX_ADDRESSES_PER_REQUEST)} else {1};
-                    deadline=deadline.checked_add(group.verification_time(index,u64::try_from(batches).map_err(|_|Failure::Malformed)?)?).ok_or(Failure::Deadline)?;
+                    // A range split is a binary tree with at most two sends per block.
+                    // Include the factory filter and its possible per-block canonical checks.
+                    let blocks=request.to.saturating_sub(request.from).saturating_add(1);
+                    let split_width=u64::try_from(if request.tokens.is_empty() {
+                        request.recipients.len().min(super::MAX_ADDRESSES_PER_REQUEST)
+                    } else {request.tokens.len()}).map_err(|_|Failure::Malformed)?.max(1);
+                    let filter_sends=u64::try_from(batches).map_err(|_|Failure::Malformed)?
+                        .saturating_mul(blocks).saturating_mul(split_width).saturating_mul(2);
+                    // Factory topic splits (at most three signatures), plus one canonical
+                    // check per distinct block, are independent of transfer density.
+                    let factory_sends=if request.factory.is_some() {blocks.saturating_mul(7)} else {0};
+                    deadline=deadline.checked_add(group.send_time(index,filter_sends.saturating_add(factory_sends))?).ok_or(Failure::Deadline)?;
+                    let reader=FinalizedReader::new(Arc::new(EvmClient::from_group_until(group.clone(),Some(index),Some(deadline)).map_err(|_|Failure::Malformed)?));
                     let raw=timeout(deadline.saturating_duration_since(Instant::now()),async {
                     let mut raw=Vec::new();
                     if request.tokens.is_empty() {
@@ -166,6 +176,7 @@ impl FinalizedReader {
                     Ok::<_,Failure>(raw)
                     }).await.map_err(|_|Failure::Deadline)??;
                     deadline=deadline.checked_add(group.verification_time(index,u64::try_from(raw.len()).map_err(|_|Failure::Malformed)?)?).ok_or(Failure::Deadline)?;
+                    let reader=FinalizedReader::new(Arc::new(EvmClient::from_group_until(group.clone(),Some(index),Some(deadline)).map_err(|_|Failure::Malformed)?));
                     timeout(deadline.saturating_duration_since(Instant::now()),async {
                     let transfers=reader.complete_logs(raw,selectors).await.map_err(window_failure)?;
                     let factory_logs=if let Some(factory)=request.factory { reader.factory_logs(factory,&request.recipients,request.from,request.to).await.map_err(window_failure)? } else {Vec::new()};

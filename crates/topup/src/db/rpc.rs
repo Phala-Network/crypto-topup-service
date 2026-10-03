@@ -364,8 +364,8 @@ pub async fn commit_head_window(
     if let Some(proof) = proof {
         coverage_in(&mut tx, chain, proof).await?;
     }
-    sqlx::query("UPDATE rpc_reorg_ranges SET replayed_through=GREATEST(COALESCE(replayed_through,from_block-1),$2) WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND from_block<=$2")
-        .bind(to_i64(chain,"reorg chain")?).bind(to_i64(range.1,"reorg through")?).execute(&mut *tx).await?;
+    sqlx::query("UPDATE rpc_reorg_ranges SET replayed_through=LEAST(to_block,$2) WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND COALESCE(replayed_through+1,from_block)>=$3 AND COALESCE(replayed_through+1,from_block)<=$2 AND COALESCE(replayed_through,from_block-1)<to_block")
+        .bind(to_i64(chain,"reorg chain")?).bind(to_i64(range.1,"reorg through")?).bind(to_i64(range.0,"reorg from")?).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((scan, head))
 }

@@ -492,6 +492,15 @@ impl EvmClient {
         group: Arc<group::RpcGroup>,
         pinned: Option<usize>,
     ) -> Result<Self, ChainError> {
+        Self::from_group_until(group, pinned, None)
+    }
+
+    /// Carries the whole operation's absolute deadline through every pinned request and split.
+    pub(crate) fn from_group_until(
+        group: Arc<group::RpcGroup>,
+        pinned: Option<usize>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, ChainError> {
         let endpoint = group
             .members
             .first()
@@ -503,6 +512,7 @@ impl EvmClient {
             group::GroupTransport {
                 group: group.clone(),
                 pinned,
+                deadline,
             },
             false,
         );
@@ -510,7 +520,10 @@ impl EvmClient {
             provider: RootProvider::new(client.clone()),
             receipts: RootProvider::new(client),
             endpoint,
-            request_timeout: Duration::from_millis(group.policy.total_deadline_ms),
+            request_timeout: deadline.map_or_else(
+                || Duration::from_millis(group.policy.total_deadline_ms),
+                |at| at.saturating_duration_since(tokio::time::Instant::now()),
+            ),
             labels: CallLabels {
                 provider: group.id.clone(),
                 chain_id: Some(group.chain),

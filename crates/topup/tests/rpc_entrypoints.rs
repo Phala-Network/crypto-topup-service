@@ -60,6 +60,24 @@ fn transfer(index: usize) -> Value {
     }
     log
 }
+fn factory_event(height: u64) -> Value {
+    use alloy::sol_types::SolEvent;
+    let event = topup_adapters::chain::flush::Flushed {
+        salt: B256::ZERO,
+        forwarder: RECIPIENT.parse().unwrap(),
+        token: transfer(0)["address"].as_str().unwrap().parse().unwrap(),
+        treasury: support::seed::FIXTURE_TREASURY,
+        amount: U256::from(1),
+    };
+    let data = event.encode_log_data();
+    let mut log = transfer(0);
+    log["topics"] = json!(data.topics());
+    log["data"] = json!(data.data);
+    log["blockNumber"] = json!(format!("0x{height:x}"));
+    log["blockHash"] = header(height)["hash"].clone();
+    log["logIndex"] = json!(format!("0x{height:x}"));
+    log
+}
 struct Node {
     url: String,
     mode: Arc<AtomicUsize>,
@@ -85,13 +103,13 @@ impl Node {
         let router=Router::new().route("/",post(move |Json(request):Json<Value>|{
             let mode=m.clone();let sends=hits.clone();let signal=signal.clone();async move {
                 let m=mode.load(Ordering::SeqCst);
-                if m==6 {tokio::time::sleep(Duration::from_millis(30)).await;}
+                if m==6 || m==12 {tokio::time::sleep(Duration::from_millis(30)).await;}
                 let result=match request["method"].as_str().unwrap(){
                     "eth_getBlockByNumber"|"eth_getBlockByHash"=>{
                         let arg=request["params"][0].as_str().unwrap();
-                        let height=if ["latest","safe","finalized"].contains(&arg){if m==2 || ((m==5 || m==7) && arg=="finalized") {HEIGHT-1}else{HEIGHT}}else{u64::from_str_radix(arg.trim_start_matches("0x"),16).unwrap_or(HEIGHT)};
+                        let height=if ["latest","safe","finalized"].contains(&arg){if m==13 {5000}else if m==2 || ([5,7,8,9,10,11].contains(&m) && arg=="finalized") {HEIGHT-1}else if [10,11].contains(&m) && arg=="latest" {HEIGHT+1}else{HEIGHT}}else{u64::from_str_radix(arg.trim_start_matches("0x"),16).unwrap_or(HEIGHT)};
                         let mut h=header(height);
-                        if (m==5 && height==HEIGHT && arg!="finalized") || (m==7 && ["latest","safe"].contains(&arg)){h["hash"]=json!(format!("0x{}","33".repeat(32)));}
+                        if ([5,9,11].contains(&m) && height==HEIGHT && arg!="finalized") || (m==7 && ["latest","safe"].contains(&arg)){h["hash"]=json!(format!("0x{}","33".repeat(32)));}
                         h
                     },
                     "eth_getLogs"=>{
@@ -102,16 +120,19 @@ impl Node {
                         if batched && m==4 && batch>0 {signal.notify_one();std::future::pending::<()>().await;}
                         let from=u64::from_str_radix(filter["fromBlock"].as_str().unwrap().trim_start_matches("0x"),16).unwrap();
                         let to=u64::from_str_radix(filter["toBlock"].as_str().unwrap().trim_start_matches("0x"),16).unwrap();
+                        if m==12 && from<to {return Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32005,"message":"block range too wide"}}));}
                         let is_transfer=filter.pointer("/topics/0").and_then(Value::as_str)==Some("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
-                        if m==1 || m==2 || !is_transfer || from>HEIGHT || to<HEIGHT {json!([])} else {
-                            json!((0..count).map(transfer).collect::<Vec<_>>())
+                        if m==12 && !is_transfer {
+                            json!((from..=to).map(factory_event).collect::<Vec<_>>())
+                        } else if [1,2,8,10].contains(&m) || !is_transfer || from>HEIGHT || to<HEIGHT {json!([])} else {
+                            json!((0..count).map(|i| {let mut log=transfer(i);if [9,11].contains(&m){log["blockHash"]=json!(format!("0x{}","33".repeat(32)));}log}).collect::<Vec<_>>())
                         }
                     },
                     "eth_getTransactionReceipt"=>{
                         if m==2 {Value::Null} else {
                             let hash=request["params"][0].as_str().unwrap();let original=transfer(0);
                             let index=if hash==original["transactionHash"].as_str().unwrap(){0}else{usize::from_str_radix(hash.trim_start_matches("0x"),16).unwrap()};
-                            let mut receipt=fixture("receipt");receipt["transactionHash"]=json!(hash);receipt["blockNumber"]=json!(format!("0x{HEIGHT:x}"));receipt["logs"]=json!([transfer(index)]);receipt
+                            let mut receipt=fixture("receipt");receipt["transactionHash"]=json!(hash);receipt["blockNumber"]=json!(format!("0x{HEIGHT:x}"));receipt["logs"]=json!([transfer(index)]);if [9,11].contains(&m){receipt["blockHash"]=json!(format!("0x{}","33".repeat(32)));receipt["logs"][0]["blockHash"]=receipt["blockHash"].clone();}receipt
                         }
                     },
                     "eth_getTransactionCount"=>json!("0xffffffff"),
@@ -174,10 +195,24 @@ fn group(id: &str, urls: &[&str], rate: u32, policy: GroupPolicy) -> Result<Arc<
     Ok(group)
 }
 fn routes(a: Arc<RpcGroup>, b: Arc<RpcGroup>, address_mode: bool) -> Result<Arc<RouteSet>> {
+    routes_confirmations(
+        a,
+        b,
+        address_mode,
+        topup_core::route::Confirmations::Finalized,
+    )
+}
+fn routes_confirmations(
+    a: Arc<RpcGroup>,
+    b: Arc<RpcGroup>,
+    address_mode: bool,
+    confirmations: topup_core::route::Confirmations,
+) -> Result<Arc<RouteSet>> {
     let mut route: RouteFile =
         serde_saphyr::from_str(include_str!("fixtures/phala-cloud-pha.yaml"))?;
     route.chain.chain_id = CHAIN;
     route.livemode = false;
+    route.chain.confirmations = confirmations;
     route.chain.rpc_providers = vec![a.id.clone(), b.id.clone()];
     route.asset.contract = transfer(0)["address"].as_str().unwrap().parse()?;
     if address_mode {
@@ -361,7 +396,7 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
         return Ok(());
     };
     let result = async {
-        let first = Node::start(1).await?;
+        let first = Node::start(2).await?;
         let backup = Node::start(1).await?;
         first
             .mode
@@ -376,14 +411,14 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
             max_attempts: if switch { 2 } else { 1 },
             ..Default::default()
         };
-        let a = group("a", &urls, 10000, policy)?;
+        let a = group("a", &urls, 10000, policy.clone())?;
         let b = group("b", &[&backup.url], 10000, GroupPolicy::default())?;
         install(&database.app_pool, &[a.clone(), b.clone()]).await?;
-        let routes = routes(a, b, true)?;
+        let configured = routes(a, b, true)?;
         if cancel {
-            cancel_last_batch(&first, scan(&database.app_pool, &routes)).await?;
+            cancel_last_batch(&first, scan(&database.app_pool, &configured)).await?;
         } else {
-            let outcome = scan(&database.app_pool, &routes).await;
+            let outcome = scan(&database.app_pool, &configured).await;
             ensure!(
                 outcome.is_ok() == switch,
                 "scanner whole-window outcome: {outcome:?}"
@@ -420,8 +455,14 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
         .execute(&database.app_pool)
         .await?;
         first.sends.store(0, Ordering::SeqCst);
+        // Fresh clients make the reconciler actually read the failing batches, rather than
+        // merely inheriting the scanner's cooldown and rejecting an empty pool.
+        let a = group("a", &urls, 10000, policy)?;
+        let b = group("b", &[&backup.url], 10000, GroupPolicy::default())?;
+        install(&database.app_pool, &[a.clone(), b.clone()]).await?;
+        let configured = routes(a, b, true)?;
         let reconciler =
-            topup::reconciler::Reconciler::from_routes(database.app_pool.clone(), routes)?;
+            topup::reconciler::Reconciler::from_routes(database.app_pool.clone(), configured)?;
         if cancel {
             cancel_last_batch(
                 &first,
@@ -437,6 +478,17 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
                 "reconciler whole-window outcome: {outcome:?}"
             );
         }
+        ensure!(
+            first.sends.load(Ordering::SeqCst) >= 2,
+            "reconciler must reach the failing final batch"
+        );
+        let deposits_after: i64 = sqlx::query_scalar("SELECT count(*) FROM deposits")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(
+            deposits_after == if switch { 1 } else { 0 },
+            "reconciliation must commit zero partial deposits and only backup evidence"
+        );
         let next: i64 = sqlx::query_scalar(
             "SELECT next_block FROM reconciliation_deposit_cursors WHERE chain_id=$1",
         )
@@ -548,6 +600,179 @@ async fn inconsistent_head_window_waits_and_preserves_reorg_replay() -> Result<(
         let pending:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block").fetch_one(&database.app_pool).await?;
         ensure!(pending==0);Ok(())
     }.await;
+    database.cleanup().await?;
+    result
+}
+
+async fn production_reorg(safe: bool) -> Result<()> {
+    let Some(database) = support::TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result=async {
+        let node=Node::start(1).await?;node.mode.store(if safe {10}else{8},Ordering::SeqCst);
+        seed(&database.app_pool,1).await?;
+        let a=group("a",&[&node.url],10000,GroupPolicy::default())?;let b=group("b",&[&node.url],10000,GroupPolicy::default())?;
+        install(&database.app_pool,&[a.clone(),b.clone()]).await?;
+        let configured=routes_confirmations(a,b,false,if safe {topup_core::route::Confirmations::Safe}else{topup_core::route::Confirmations::Depth(1)})?;
+        let reader=FinalizedReader::new(configured.provider(CHAIN,0)?.clone());
+        let cancel=tokio_util::sync::CancellationToken::new();
+        let task=tokio::spawn(scanner::run_chain(database.app_pool.clone(),reader,chain_routes(&configured)[0].clone(),scanner::ScanConfig {head_poll_interval:Some(Duration::from_millis(10)),finalized_poll_interval:Duration::from_secs(60)},scanner::FinalizedHeads::default(),cancel.clone()));
+        let outcome=tokio::time::timeout(Duration::from_secs(10),async {
+            loop {if db::get_confirmed_cursor(&database.app_pool,CHAIN).await?==Some(HEIGHT){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+            ensure!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM deposits").fetch_one(&database.app_pool).await?==0);
+            node.mode.store(if safe {11}else{9},Ordering::SeqCst);
+            loop {
+                let count:i64=sqlx::query_scalar("SELECT count(*) FROM deposits").fetch_one(&database.app_pool).await?;
+                let pending:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block").fetch_one(&database.app_pool).await?;
+                if count==1 && pending==0 {break;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            ensure!(db::get_confirmed_cursor(&database.app_pool,CHAIN).await?==Some(HEIGHT));
+            Ok::<_,anyhow::Error>(())
+        }).await;
+        cancel.cancel();task.await??;outcome??;Ok(())
+    }.await;
+    database.cleanup().await?;
+    result
+}
+#[tokio::test]
+async fn production_poll_replays_same_latest_height_and_records_deposit() -> Result<()> {
+    production_reorg(false).await
+}
+#[tokio::test]
+async fn production_poll_checks_safe_at_same_latest_height_and_records_deposit() -> Result<()> {
+    production_reorg(true).await
+}
+
+#[tokio::test]
+async fn head_commit_does_not_skip_an_unread_reorg_prefix() -> Result<()> {
+    let Some(database) = support::TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        seed(&database.app_pool, 1).await?;
+        sqlx::query(
+            "INSERT INTO rpc_reorg_ranges(chain_id,group_id,epoch,from_block,to_block) VALUES($1,'a',0,91,101)",
+        )
+        .bind(i64::try_from(CHAIN)?)
+        .execute(&database.app_pool)
+        .await?;
+        db::rpc::commit_head_window(&database.app_pool, CHAIN, (100, 100), &[], None, &[], None)
+            .await?;
+        let through: Option<i64> =
+            sqlx::query_scalar("SELECT replayed_through FROM rpc_reorg_ranges")
+                .fetch_one(&database.app_pool)
+                .await?;
+        ensure!(
+            through.is_none(),
+            "100 cannot cover the unread prefix 91..99"
+        );
+        db::rpc::commit_head_window(&database.app_pool, CHAIN, (91, 95), &[], None, &[], None)
+            .await?;
+        db::rpc::commit_head_window(&database.app_pool, CHAIN, (96, 100), &[], None, &[], None)
+            .await?;
+        let through: i64 = sqlx::query_scalar("SELECT replayed_through FROM rpc_reorg_ranges")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(through == 100);
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+#[tokio::test]
+async fn replay_confirmation_cursor_is_capped_at_the_read_window() -> Result<()> {
+    let Some(database) = support::TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let node = Node::start(0).await?;
+        seed(&database.app_pool, 1).await?;
+        sqlx::query("UPDATE cursors SET confirmed_block=100 WHERE chain_id=$1")
+            .bind(i64::try_from(CHAIN)?)
+            .execute(&database.app_pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO rpc_reorg_ranges(chain_id,group_id,epoch,from_block,to_block) VALUES($1,'a',0,1,5000)",
+        )
+        .bind(i64::try_from(CHAIN)?)
+        .execute(&database.app_pool)
+        .await?;
+        let a = group("a", &[&node.url], 10000, GroupPolicy::default())?;
+        let b = group("b", &[&node.url], 10000, GroupPolicy::default())?;
+        let configured =
+            routes_confirmations(a, b, false, topup_core::route::Confirmations::Depth(1))?;
+        let reader = FinalizedReader::new(configured.provider(CHAIN, 0)?.clone());
+        // Supply the production scan entry point a distant horizon; the pinned reader
+        // rejects a real too-low head, so use a deterministic high node mode below.
+        node.mode.store(13, Ordering::SeqCst);
+        let scan = scanner::scan_new_blocks(
+            &database.app_pool,
+            &reader,
+            &chain_routes(&configured)[0],
+            topup_core::route::ChainHeads {
+                latest: Some(5000),
+                safe: None,
+                finalized: 99,
+            },
+        )
+        .await?
+        .context("bounded replay")?;
+        ensure!(scan.latest == scanner::MAX_SCAN_WINDOW);
+        ensure!(
+            db::get_confirmed_cursor(&database.app_pool, CHAIN).await?
+                == Some(scanner::MAX_SCAN_WINDOW)
+        );
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+#[tokio::test]
+async fn dense_factory_window_with_recursive_log_splits_completes_in_scanner() -> Result<()> {
+    let Some(database) = support::TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result = async {
+        let node = Node::start(0).await?;
+        node.mode.store(12, Ordering::SeqCst);
+        seed(&database.app_pool, 1).await?;
+        sqlx::query("UPDATE cursors SET scanned_block=68 WHERE chain_id=$1")
+            .bind(i64::try_from(CHAIN)?)
+            .execute(&database.app_pool)
+            .await?;
+        sqlx::query("UPDATE addresses SET created_block=68 WHERE chain_id=$1")
+            .bind(i64::try_from(CHAIN)?)
+            .execute(&database.app_pool)
+            .await?;
+        let policy = GroupPolicy {
+            total_deadline_ms: 1000,
+            attempt_timeout_ms: 1000,
+            max_attempts: 1,
+            ..Default::default()
+        };
+        let a = group("a", &[&node.url], 10, policy)?;
+        let b = group("b", &[&node.url], 10000, GroupPolicy::default())?;
+        let configured = routes(a, b, false)?;
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            scan(&database.app_pool, &configured),
+        )
+        .await??;
+        ensure!(
+            node.sends.load(Ordering::SeqCst) >= 126,
+            "both transfer and factory filters must split every block"
+        );
+        ensure!(db::get_cursor(&database.app_pool, CHAIN).await? == Some(HEIGHT));
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM flushed")
+            .fetch_one(&database.app_pool)
+            .await?;
+        ensure!(events == 32, "dense factory events must commit atomically");
+        Ok(())
+    }
+    .await;
     database.cleanup().await?;
     result
 }

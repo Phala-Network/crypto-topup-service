@@ -642,8 +642,11 @@ impl RpcGroup {
     }
     /// Scales the window deadline to its bounded verification work and shared quotas.
     pub fn verification_time(&self, index: usize, logs: u64) -> Result<Duration, Failure> {
+        self.send_time(index, logs.saturating_mul(4).saturating_add(8))
+    }
+    /// Plans time for bounded filter splits and canonical factory block verification.
+    pub(crate) fn send_time(&self, index: usize, sends: u64) -> Result<Duration, Failure> {
         let member = self.members.get(index).ok_or(Failure::Unavailable)?;
-        let sends = logs.saturating_mul(4).saturating_add(8);
         let admission = self
             .budgets
             .planned_time(&member.account, &member.key, sends)
@@ -1178,6 +1181,8 @@ pub struct GroupTransport {
     pub group: Arc<RpcGroup>,
     /// Fixed member for a window/preflight; normal requests use group selection.
     pub pinned: Option<usize>,
+    /// Absolute window/evidence deadline, shared by all nested sends and log splits.
+    pub deadline: Option<Instant>,
 }
 impl Service<RequestPacket> for GroupTransport {
     type Response = ResponsePacket;
@@ -1189,13 +1194,16 @@ impl Service<RequestPacket> for GroupTransport {
     fn call(&mut self, packet: RequestPacket) -> Self::Future {
         let group = self.group.clone();
         let pinned = self.pinned;
+        let deadline = self.deadline;
         Box::pin(async move {
             let value = serde_json::to_value(packet)
                 .map_err(|_| TransportErrorKind::custom(Failure::Request))?;
             let result = if let Some(index) = pinned {
-                let deadline = Instant::now()
-                    .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
-                    .unwrap_or_else(Instant::now);
+                let deadline = deadline.unwrap_or_else(|| {
+                    Instant::now()
+                        .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
+                        .unwrap_or_else(Instant::now)
+                });
                 if value.get("method").and_then(Value::as_str) == Some("eth_getLogs") {
                     group.send_logs(index, &value, deadline).await
                 } else {

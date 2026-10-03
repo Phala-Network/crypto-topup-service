@@ -48,7 +48,10 @@ Each committed window retains its selectors, hash anchor and answering member in
 re-reads pending coverage with a different member where available, recording missed deposits
 idempotently. Singleton groups replay with their sole member after restart while retaining pending independent
 review coverage and alerting on the limitation. Nonfinal branch changes queue durable head-scan
-replay ranges; `topup_rpc_reorg_pending_ranges` alerts if replay remains stalled.
+replay ranges, including same-height latest/safe changes. The production poll keeps replaying
+pending ranges even while head height is unchanged. Only the contiguous range actually read
+advances replay coverage; confirmation progress never skips beyond that window.
+`topup_rpc_reorg_pending_ranges` alerts if replay remains stalled.
 After an outage the committed cursor/backfill progress resumes the complete uncommitted window;
 a member switch discards the partial answer. Add a verified independent member to drain old
 coverage, and use reconciliation to check custody and ledger effects. Review before removing a

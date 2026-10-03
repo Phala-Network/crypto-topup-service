@@ -167,8 +167,6 @@ pub async fn scan_new_blocks<R: ChainReader>(
     let replay: Option<i64> = sqlx::query_scalar("SELECT min(GREATEST(from_block,COALESCE(replayed_through+1,from_block))) FROM rpc_reorg_ranges WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND COALESCE(replayed_through,from_block-1)<to_block")
         .bind(i64::try_from(chain_id).map_err(|_|ScannerError::Configuration("chain id overflow".into()))?).fetch_one(pool).await?;
     let confirmations = routes.chain.confirmations;
-    let horizon = (confirmations != Confirmations::Finalized)
-        .then(|| confirmations.horizon(heads).min(latest));
     let scanned = db::get_confirmed_cursor(pool, chain_id)
         .await?
         .unwrap_or(0)
@@ -186,6 +184,9 @@ pub async fn scan_new_blocks<R: ChainReader>(
     if from_block > latest {
         return Ok(None);
     }
+    // Cap confirmation progress at the window actually read, including bounded replay.
+    let horizon = (confirmations != Confirmations::Finalized)
+        .then(|| confirmations.horizon(heads).min(latest));
     // Read after `latest`: an address issued from here on is paid only above `latest`.
     let addresses = db::list_scan_addresses(pool, chain_id).await?;
     let request = super::window_request(routes, &addresses, from_block, latest, false);
@@ -194,7 +195,7 @@ pub async fn scan_new_blocks<R: ChainReader>(
     let index = address_index(&addresses);
 
     let mut confirmed_deposits = Vec::new();
-    if let Some(horizon) = horizon.filter(|horizon| *horizon > scanned) {
+    if let Some(horizon) = horizon.filter(|horizon| replay.is_some() || *horizon > scanned) {
         let confirmed = logs
             .iter()
             .filter(|log| log.block_number <= horizon)
@@ -230,7 +231,7 @@ pub async fn scan_new_blocks<R: ChainReader>(
         chain_id,
         (from_block, latest),
         &confirmed_deposits,
-        horizon.filter(|h| *h > scanned),
+        horizon.filter(|h| replay.is_some() || *h > scanned),
         &pending,
         window.proof.as_ref(),
     )
@@ -328,14 +329,17 @@ async fn poll_once(
             tracing::debug!(chain_id, finalized = head.number, "finalized head advanced");
         }
     }
-    if state.scanned_latest == Some(latest) {
-        return Ok(None);
-    }
     let safe = if routes.chain.confirmations.needs_safe() {
         Some(reader.safe_head().await?)
     } else {
         None
     };
+    let replay_pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rpc_reorg_ranges WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND COALESCE(replayed_through,from_block-1)<to_block)")
+        .bind(i64::try_from(chain_id).map_err(|_| ScannerError::Configuration("chain id overflow".into()))?)
+        .fetch_one(pool).await?;
+    if state.scanned_latest == Some(latest) && !replay_pending {
+        return Ok(None);
+    }
     let heads = ChainHeads {
         latest: Some(latest),
         safe,

@@ -547,7 +547,13 @@ pub async fn recover_watermark(
             for index in 0..group.members.len() {
                 let result = tokio::time::timeout(
                     Duration::from_millis(group.policy.total_deadline_ms),
-                    probe_inner(group, index, &files),
+                    // Capability probes must not share tentative head acceptance.
+                    // A failed member may advertise an arbitrarily high head.
+                    probe_inner(
+                        &group.probe_copy().map_err(|e| e.to_string())?,
+                        index,
+                        &files,
+                    ),
                 )
                 .await;
                 if let Ok(Ok(hash)) = result {
@@ -641,7 +647,7 @@ pub async fn resume_recovery(
         }}
         let incomplete:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM addresses WHERE chain_id=$1 AND NOT backfilled AND (backfilled_through IS NULL OR backfilled_through<$2))").bind(chain_db).bind(i64::try_from(anchor.number).map_err(|e|e.to_string())?).fetch_one(pool).await.map_err(|e|e.to_string())?;
         if incomplete {return Ok(false);}
-        for row in sqlx::query("SELECT d.block_number,d.block_hash,d.block_time,d.tx_hash,d.receipt_log_index,d.tx_nonce,d.asset_contract,d.from_address,d.amount_atomic::text AS amount_atomic,a.address FROM deposits d JOIN addresses a ON a.id=d.address_id WHERE d.chain_id=$1 AND d.credit_minor IS NOT NULL AND d.state<>'reversed'").bind(chain_db).fetch_all(pool).await.map_err(|e|e.to_string())? {
+        for row in sqlx::query("SELECT d.block_number,d.block_hash,d.block_time,d.tx_hash,d.receipt_log_index,d.tx_nonce::text AS tx_nonce,d.asset_contract,d.from_address,d.amount_atomic::text AS amount_atomic,a.address FROM deposits d JOIN addresses a ON a.id=d.address_id WHERE d.chain_id=$1 AND d.credit_minor IS NOT NULL AND d.state<>'reversed'").bind(chain_db).fetch_all(pool).await.map_err(|e|e.to_string())? {
             let number=u64::try_from(row.try_get::<i64,_>("block_number").map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
             let hash:String=row.try_get("block_hash").map_err(|e|e.to_string())?;
             let deadline=Instant::now().checked_add(Duration::from_millis(a.policy.total_deadline_ms.min(b.policy.total_deadline_ms))).unwrap_or_else(Instant::now);

@@ -275,19 +275,68 @@ async fn rpc_first_acceptance_tolerates_backup_and_restart_preserves_legacy_hash
         let (_, customer)=support::seed::create_account_and_customer(&database.app_pool,&support::seed::NewAccount::named("numeric recovery"),"recovery-customer").await?;
         let address_id=uuid::Uuid::new_v4();
         support::seed::insert_address(&database.app_pool,&support::seed::NewAddress{id:address_id,customer_id:customer.id,chain_id:31337,route:config.routes[0].route.clone(),salt:alloy_primitives::B256::repeat_byte(7),address:Address::repeat_byte(7)}).await?;
+        // Populate real deposit and factory ledgers before poisoning derived progress.
+        let treasury=format!("{:#x}",support::seed::FIXTURE_TREASURY);
+        let salt=format!("{:#x}",alloy_primitives::B256::repeat_byte(7));
+        let forwarder=cast(&["call",&format!("{factory:#x}"),"addressOf(address,bytes32)(address)",&treasury,&salt,"--rpc-url",&anvil.rpc_url])?.to_ascii_lowercase();
+        sqlx::query("UPDATE addresses SET address=$2 WHERE id=$1").bind(address_id).bind(&forwarder).execute(&database.owner_pool).await?;
+        let sender="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+        cast(&["send",&format!("{token:#x}"),"mint(address,uint256)",&forwarder,"100","--unlocked","--from",sender,"--rpc-url",&anvil.rpc_url])?;
+        cast(&["send",&format!("{factory:#x}"),"flush(address,bytes32[],address)",&treasury,&format!("[{salt}]"),&format!("{token:#x}"),"--unlocked","--from",sender,"--rpc-url",&anvil.rpc_url])?;
+        cast(&["rpc","anvil_mine","0x80","--rpc-url",&anvil.rpc_url])?;
+        let reader=topup_adapters::chain::evm::FinalizedReader::new(routes.provider(31337,0)?.clone());
+        topup::scanner::scan_once(&database.app_pool,&reader,&topup::scanner::chain_routes(&routes)[0]).await?;
+        let deposit_hash:String=sqlx::query_scalar("SELECT block_hash FROM deposits WHERE address_id=$1").bind(address_id).fetch_one(&database.app_pool).await?;
+        let flush_hash:String=sqlx::query_scalar("SELECT block_hash FROM flushed WHERE address_id=$1").bind(address_id).fetch_one(&database.app_pool).await?;
+        sqlx::query("UPDATE deposits SET state='credited',credit_minor=1 WHERE address_id=$1").bind(address_id).execute(&database.owner_pool).await?;
         let poison=1_000_000_i64;
         sqlx::query("UPDATE cursors SET scanned_block=$1,confirmed_block=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
         sqlx::query("UPDATE addresses SET created_block=$1,backfilled=true,backfilled_through=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
         sqlx::query("UPDATE rpc_watermarks SET number=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
         let old=topup_adapters::chain::evm::window::WindowProof {group:"alchemy".into(),member:config.rpc_groups["alchemy"].members[0].id.clone(),request:topup_adapters::chain::evm::window::WindowRequest{from:0,to:1,recipients:vec![Address::repeat_byte(7)],tokens:vec![],factory:None,finalized:true,exclude_member:None},end_hash:format!("0x{}","77".repeat(32))};
         db::rpc::commit_window(&database.app_pool,31337,&[],&[],Some(&old),Default::default()).await?;
-        let fresh=config.route_set().map_err(anyhow::Error::msg)?;
+        // A failing first member advertises a huge head, then fails its log capability.
+        // Its temporary head must not make the healthy backup stale during owner recovery.
+        let target=anvil.rpc_url.clone();
+        let probe_heads=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_failures=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heads=probe_heads.clone();let failures=probe_failures.clone();
+        let router=axum::Router::new().route("/",axum::routing::post(move |axum::Json(request):axum::Json<serde_json::Value>| {
+            let target=target.clone();let heads=heads.clone();let failures=failures.clone();async move {
+                if request["method"]=="eth_getLogs" {failures.fetch_add(1,std::sync::atomic::Ordering::SeqCst);return axum::Json(serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"capability fails after heads"}}));}
+                let mut response:serde_json::Value=reqwest::Client::new().post(target).json(&request).send().await.unwrap().json().await.unwrap();
+                if request["method"]=="eth_getBlockByNumber" && ["latest","safe","finalized"].iter().any(|tag|request["params"][0]==*tag) {heads.fetch_add(1,std::sync::atomic::Ordering::SeqCst);response["result"]["number"]=serde_json::json!("0xf4240");}
+                axum::Json(response)
+            }
+        }));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let mut recovery_config=config.clone();
+        let a=recovery_config.rpc_groups.get_mut("alchemy").context("recovery A")?;
+        a.members[1]=a.members[0].clone();a.members[1].id="healthy-backup".into();
+        a.members[0].url=format!("http://{}",listener.local_addr()?);
+        let proxy=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
+        // Abort on every exit path, including test failures.
+        struct Proxy(tokio::task::JoinHandle<()>);
+        impl Drop for Proxy {fn drop(&mut self){self.0.abort();}}
+        let _proxy=Proxy(proxy);
+        let fresh=recovery_config.route_set().map_err(anyhow::Error::msg)?;
         rpc_runtime::recover_watermark(&database.owner_pool,&fresh,31337,1,"test-owner","numeric poison regression").await.map_err(anyhow::Error::msg)?;
+        ensure!(probe_heads.load(std::sync::atomic::Ordering::SeqCst)>=3 && probe_failures.load(std::sync::atomic::Ordering::SeqCst)>0,"first probe must accept high heads before failing capability");
         let pending:bool=sqlx::query_scalar("SELECT frozen AND recovery_pending FROM rpc_chain_state WHERE chain_id=31337").fetch_one(&database.app_pool).await?;
         ensure!(pending,"authorized numeric recovery must freeze before replay");
         let created:i64=sqlx::query_scalar("SELECT created_block FROM addresses WHERE id=$1").bind(address_id).fetch_one(&database.app_pool).await?;
         ensure!(created==0,"poisoned derived address progress must be repaired");
+        // Recovery must validate both existing ledgers and leave the chain frozen on conflict.
+        let wrong=format!("0x{}","aa".repeat(32));
+        sqlx::query("UPDATE deposits SET block_hash=$2 WHERE address_id=$1").bind(address_id).bind(&wrong).execute(&database.owner_pool).await?;
+        ensure!(rpc_runtime::resume_recovery(&database.owner_pool,&fresh,31337,16).await.is_err());
+        sqlx::query("UPDATE deposits SET block_hash=$2 WHERE address_id=$1").bind(address_id).bind(&deposit_hash).execute(&database.owner_pool).await?;
+        sqlx::query("UPDATE flushed SET block_hash=$2 WHERE address_id=$1").bind(address_id).bind(&wrong).execute(&database.owner_pool).await?;
+        ensure!(rpc_runtime::resume_recovery(&database.owner_pool,&fresh,31337,16).await.is_err());
+        sqlx::query("UPDATE flushed SET block_hash=$2 WHERE address_id=$1").bind(address_id).bind(&flush_hash).execute(&database.owner_pool).await?;
         ensure!(rpc_runtime::resume_recovery(&database.owner_pool,&fresh,31337,16).await.map_err(anyhow::Error::msg)?,"full recovery must finish");
+        let credit:String=sqlx::query_scalar("SELECT credit_minor::text FROM deposits WHERE address_id=$1").bind(address_id).fetch_one(&database.app_pool).await?;ensure!(credit=="1");
+        let flushed:String=sqlx::query_scalar("SELECT amount_atomic::text FROM flushed WHERE address_id=$1").bind(address_id).fetch_one(&database.app_pool).await?;ensure!(flushed=="100");
         let old_count:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_window_reviews WHERE epoch=0 AND end_hash=$1").bind(&old.end_hash).fetch_one(&database.app_pool).await?;
         ensure!(old_count==1,"wrong-branch evidence stays immutable for audit");
         let due=db::rpc::due_reviews(&database.app_pool,31337).await?;

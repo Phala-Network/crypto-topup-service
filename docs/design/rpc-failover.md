@@ -154,7 +154,9 @@ filter batch. `max_attempts` bounds member attempts including the first; each at
 finite send count is derived from the operation's bounded filter list. All sends, admission
 waits and retry delays share one total deadline, including outer scanner/reconciler retries
 within that operation. Do not stack Alloy fallback/retry layers or reset the deadline
-for each RPC. Subsequent scheduled passes are new operations and keep existing backoff.
+for each RPC. Pass the absolute window deadline through the typed pinned transport and its
+nested log splits; budget bounded split trees and factory per-block verification as well as
+transfer verification. Subsequent scheduled passes are new operations and keep existing backoff.
 
 Every real send acquires both account and key permits, irrespective of method, group or
 chain, including startup/recovery/head checks. Admission checks both limiters together under one shared admission lock immediately
@@ -207,7 +209,9 @@ expiry permits one probe lease per member, never automatic readmission; two cons
 successful pinned probes restore eligibility. Probes verify chain/genesis, required route
 contracts and heads/anchors at the group's current floor; A additionally probes log
 capabilities. Failed probes renew cooldown; auth/redirect/identity quarantine requires
-operator repair and revalidation. Probes use the same deadlines, keys, budgets and counts.
+operator repair and revalidation. Each member's recovery probe has isolated tentative head
+state: a failed high-head capability probe cannot make the next member stale. Probes use the
+same deadlines, keys, budgets and counts.
 
 ## Heads, forks and logs windows
 
@@ -227,6 +231,9 @@ Compare ancestry to saved anchors when advancing (fetch intervening headers or t
 height's canonical header). A conflicting finalized hash/ancestry freezes credit and both
 cursor writers for the chain. Latest/safe ancestry conflicts or same-height hash changes persist a reorg range above the
 last finalized anchor for the head scanner; replay progress commits atomically with evidence.
+Poll both latest and safe before checking unchanged height; pending replay bypasses that check.
+Only advance the contiguous covered prefix of each queued range. Replay inserts confirmed
+deposits even below the old confirmed cursor, and caps confirmation progress at the read end.
 These changes are reorgs: preserve
 the numeric high-water mark, update the canonical branch only through existing reorg
 handling and replay the affected interval. A new branch shorter than that numeric mark
