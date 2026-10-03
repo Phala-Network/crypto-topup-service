@@ -176,6 +176,15 @@ impl RouteSet {
             .map_err(Clone::clone)
     }
 
+    /// Typed production groups need durable cursor anchoring; legacy test dependencies do not.
+    pub(crate) fn has_rpc_groups(&self) -> bool {
+        self.chains
+            .values()
+            .flat_map(|chain| &chain.providers)
+            .filter_map(|client| client.as_ref().ok())
+            .any(|client| client.group().is_some())
+    }
+
     /// Returns the current routes of one mode: a test-mode key quotes only on test routes, a
     /// live-mode key only on live ones (design D9).
     pub fn current_in(&self, livemode: bool) -> impl Iterator<Item = &RouteFile> {

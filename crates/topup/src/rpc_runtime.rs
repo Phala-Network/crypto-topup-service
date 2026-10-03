@@ -257,6 +257,9 @@ pub async fn accept(pool: &PgPool, routes: &RouteSet, public_config: &str) -> Re
 }
 /// Standalone reconciliation/restore must establish the same trusted A/B cursor floors.
 pub async fn ensure_anchors(pool: &PgPool, routes: &RouteSet) -> Result<(), String> {
+    if !routes.has_rpc_groups() {
+        return Ok(());
+    }
     let configured = groups(routes)?;
     let Some((group, _)) = configured.values().next() else {
         return Ok(());
