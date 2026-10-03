@@ -5,6 +5,17 @@ run unless that login owns the database (or is a superuser), so the application 
 migrates. Migrations are additive: never edit an applied
 migration, and never squash again once any environment holds data.
 
+## Concurrent queue indexes
+
+The `20261028000000`–`20261028000002` RPC queue index migrations use SQLx 0.9's first-line
+`-- no-transaction` directive and one concurrent DDL statement per up/down file. Multiple
+statements in one message would still open a PostgreSQL implicit transaction. The replacement
+review index is valid before the old index is dropped. Normal Deploy/`topup migrate` retries
+recover only matching invalid indexes owned by these pending migrations, under the existing migration
+advisory lock. Matching valid builds retain their OID; unrelated definitions fail closed. The cutover's
+outer transaction commits before these concurrent operations. See the
+[plan evidence and CLI recovery tests](../../../docs/design/db-api-query-plans.md).
+
 ## Roles and privileges
 
 The service runs through the login role configured by `DATABASE_URL`. That login role must be a

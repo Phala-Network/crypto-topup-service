@@ -7,7 +7,9 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from topup_client.models import Payment
+from topup_client import AuthenticatedClient
+from topup_client.api.account import get_account
+from topup_client.models import ErrorResponse, Payment
 from topup_sdk import (
     AddressMismatchError,
     ApiError,
@@ -677,3 +679,38 @@ def test_account_settings_keys_endpoints_and_events_use_their_paths() -> None:
     for request in (settings_update, rate_reset, pause, resume, created, rolled, resent):
         assert request.method == "POST"
         assert request.headers["idempotency-key"].startswith('"')
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retry_after"),
+    [
+        (403, "permission_denied", None),
+        (429, "rate_limit", "1"),
+        (503, "unavailable", "1"),
+        (503, "service_restoring", "300"),
+        (503, "unavailable", None),
+    ],
+)
+def test_generated_shared_errors_preserve_body_and_optional_retry_delay(
+    status: int, code: str, retry_after: str | None
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/account"
+        response = _error(status, code)
+        response.headers["Cache-Control"] = "no-store"
+        if retry_after is not None:
+            response.headers["Retry-After"] = retry_after
+        return response
+
+    with httpx.Client(
+        base_url="https://service.test", transport=httpx.MockTransport(respond)
+    ) as http:
+        client = AuthenticatedClient(
+            base_url="https://service.test", token=API_KEY, raise_on_unexpected_status=True
+        ).set_httpx_client(http)
+        response = get_account.sync_detailed(client=client)
+    assert response.status_code == status
+    assert isinstance(response.parsed, ErrorResponse)
+    assert response.parsed.error.code == code
+    assert response.headers.get("Retry-After") == retry_after
+    assert response.headers["Cache-Control"] == "no-store"

@@ -1536,3 +1536,107 @@ async fn response_json(response: axum::response::Response) -> Result<Value> {
     let bytes = to_bytes(response.into_body(), 1_048_576).await?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+
+/// Cache protection encloses router errors and the boot-time read-only gate, even before auth.
+#[tokio::test]
+async fn tenant_http_errors_and_read_only_rejections_are_not_stored() -> Result<()> {
+    let admin_key = SigningKey::from_bytes(&[29; 32]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1/unused")?;
+    let state = app_state(pool, &admin_key);
+    for router in [
+        topup::api::router(state.clone()).0,
+        topup::api::read_only_router(state, None),
+    ] {
+        for (method, path) in [
+            (Method::GET, "/v1/no_such_resource"),
+            (Method::DELETE, "/v1/config"),
+            (Method::GET, "/v1/quotes/qt_invalid?client_secret=invalid"),
+            (Method::POST, "/v1/api_keys"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            ensure!(response.status().is_client_error() || response.status().is_server_error());
+            ensure!(response.headers()["cache-control"] == "no-store", "{path}");
+        }
+        let document = router
+            .clone()
+            .oneshot(axum::http::Request::get("/openapi.json").body(Body::empty())?)
+            .await?;
+        ensure!(document.status() == StatusCode::OK);
+        ensure!(!document.headers().contains_key("cache-control"));
+        let credentialed = router
+            .oneshot(
+                axum::http::Request::get("/unknown")
+                    .header("Authorization", "Bearer invalid")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        ensure!(credentialed.headers()["cache-control"] == "no-store");
+    }
+    Ok(())
+}
+
+/// Saturating the router's shared admission permits reaches the real HandleErrorLayer path,
+/// before auth or a handler. No worker tasks are spawned; every pending future is dropped.
+#[tokio::test]
+async fn load_shed_responses_match_the_shared_unavailable_contract() -> Result<()> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    use std::time::Duration;
+
+    support::with_database(|database| {
+        Box::pin(async move {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&database.app_url)
+                .await?;
+            let held = pool.acquire().await?;
+            let admin_key = SigningKey::from_bytes(&[49; 32]);
+            let (app, docs) = topup::api::router(app_state(pool.clone(), &admin_key));
+            let mut pending = Vec::with_capacity(256);
+            for _ in 0..256 {
+                let request = axum::http::Request::get("/healthz").body(Body::empty())?;
+                let mut future = Box::pin(app.clone().oneshot(request));
+                poll_fn(|context| match future.as_mut().poll(context) {
+                    Poll::Pending => Poll::Ready(Ok(())),
+                    Poll::Ready(_) => Poll::Ready(Err(anyhow::anyhow!(
+                        "admitted health request did not wait for the held connection"
+                    ))),
+                })
+                .await?;
+                pending.push(future);
+            }
+            let request = axum::http::Request::get("/v1/account").body(Body::empty())?;
+            let response =
+                tokio::time::timeout(Duration::from_secs(2), app.oneshot(request)).await??;
+            // Release every permit and connection before assertions so failures leave no work behind.
+            drop(pending);
+            drop(held);
+            pool.close().await;
+            ensure!(response.status() == StatusCode::SERVICE_UNAVAILABLE);
+            ensure!(response.headers()["content-type"] == "application/json");
+            ensure!(response.headers()["retry-after"] == "1");
+            ensure!(response.headers()["cache-control"] == "no-store");
+            let request_id = response.headers()["request-id"].to_str()?;
+            ensure!(request_id.starts_with("req_") && request_id.len() == 36);
+            let body = response_json(response).await?;
+            ensure!(body["error"]["type"] == "api_error" && body["error"]["code"] == "unavailable");
+            let documented = &docs.merchant["paths"]["/v1/account"]["get"]["responses"]["503"];
+            ensure!(
+                documented["content"]["application/json"]["schema"]["$ref"]
+                    == "#/components/schemas/ErrorResponse"
+            );
+            ensure!(documented["headers"]["Retry-After"]["required"] == false);
+            Ok(())
+        })
+    })
+    .await
+}

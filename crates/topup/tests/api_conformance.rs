@@ -37,6 +37,7 @@ struct Harness {
     admin_key: SigningKey,
     /// Admin signatures are single-use, so each admin request is signed at a distinct second.
     created: AtomicI64,
+    docs: topup::api::ApiDocs,
     /// The rate limiter's clock, which moves only when a test advances it.
     clock: ManualClock,
 }
@@ -71,8 +72,10 @@ impl Harness {
             screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
             contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
         };
+        let (app, docs) = topup::api::router(state);
         Ok(Self {
-            app: topup::api::router(state).0,
+            app,
+            docs,
             admin_key,
             created: AtomicI64::new(Utc::now().timestamp()),
             clock,
@@ -125,6 +128,11 @@ impl Harness {
 async fn answer(response: axum::response::Response) -> Result<Answer> {
     let status = response.status();
     let headers = response.headers().clone();
+    ensure!(
+        headers
+            .get("cache-control")
+            .is_some_and(|value| value == "no-store")
+    );
     let bytes = to_bytes(response.into_body(), 1_048_576).await?;
     let body = if bytes.is_empty() {
         Value::Null
@@ -712,4 +720,62 @@ async fn seed_deposit(
         .execute(pool)
         .await?;
     Ok(id)
+}
+
+/// Shared documented errors match responses produced by authentication, rate admission and
+/// restore middleware, including optional 503 retry delays and tenant cache protection.
+#[tokio::test]
+async fn shared_error_and_cache_contracts_match_http_responses() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+        let pool = &database.app_pool;
+        let harness = Harness::new(pool, RateLimits { live: 1, test: 25, test_platform: 500 })?;
+        let (account, key) = live_account(pool, "contracts").await?;
+        for document in [&harness.docs.merchant, &harness.docs.admin] {
+            for (_, path) in document["paths"].as_object().context("paths")? {
+                for (method, operation) in path.as_object().context("operations")? {
+                    if !["get", "post", "delete", "patch", "put"].contains(&method.as_str()) { continue; }
+                    let unavailable = &operation["responses"]["503"];
+                    ensure!(unavailable["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ErrorResponse");
+                    ensure!(unavailable["headers"]["Retry-After"]["required"] == false);
+                    ensure!(unavailable["headers"]["Retry-After"]["schema"]["minimum"] == 1);
+                    if document == &harness.docs.merchant {
+                        ensure!(operation["responses"]["403"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/ErrorResponse");
+                        ensure!(operation["responses"]["429"]["headers"]["Retry-After"]["required"] == true);
+                    }
+                }
+            }
+        }
+        let ok = harness.get("/v1/account", &key).await?;
+        ensure!(ok.status == StatusCode::OK);
+        ensure!(ok.headers["cache-control"] == "no-store");
+        let limited = harness.get("/v1/account", &key).await?;
+        ensure!(limited.status == StatusCode::TOO_MANY_REQUESTS);
+        ensure!(limited.headers["retry-after"] == "1");
+        ensure!(limited.headers["cache-control"] == "no-store");
+        let invalid = harness.get("/v1/account", "ppay_sk_live_invalid").await?;
+        ensure!(invalid.status == StatusCode::UNAUTHORIZED);
+        ensure!(invalid.headers["cache-control"] == "no-store");
+        sqlx::query("UPDATE accounts SET charges_enabled=false WHERE id=$1").bind(account).execute(pool).await?;
+        let forbidden = harness.get("/v1/account", &key).await?;
+        ensure!(forbidden.status == StatusCode::FORBIDDEN);
+        ensure!(forbidden.body["error"]["code"] == "testmode_charges_only");
+        ensure!(forbidden.headers["cache-control"] == "no-store");
+        sqlx::query("UPDATE accounts SET charges_enabled=true WHERE id=$1").bind(account).execute(pool).await?;
+        sqlx::query("INSERT INTO restores(id,detected_by,timeline_id) VALUES($1,'restore_check',1)")
+            .bind(Uuid::new_v4()).execute(pool).await?;
+        let restoring = harness.get("/v1/account", &key).await?;
+        ensure!(restoring.status == StatusCode::SERVICE_UNAVAILABLE);
+        ensure!(restoring.body["error"]["code"] == "service_restoring");
+        ensure!(restoring.headers["retry-after"] == "300");
+        ensure!(restoring.headers["cache-control"] == "no-store");
+        // A handler's temporary unavailability is allowed to omit Retry-After.
+        let admin = harness.admin_get(&format!("/v1/admin/attestation?account=acct_{}&livemode=true&nonce=01",account.simple())).await?;
+        ensure!(admin.status == StatusCode::SERVICE_UNAVAILABLE, "{}", admin.body);
+        ensure!(!admin.headers.contains_key("retry-after"));
+        ensure!(admin.headers["cache-control"] == "no-store");
+        Ok(())
+        })
+    })
+    .await
 }

@@ -26,6 +26,17 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   quotas with the existing pinned governor library, preserving tenant/mode and joint admission.
 - Separate treasury ownership proofs, tenant-scoped reads and periodic work into focused modules.
 
+- Quote lists batch deposit and pending-payment reads after scoped pagination, keeping detail
+  payment selection, tenant/mode isolation, filters and cursor semantics.
+- RPC review and reorg replay queues use concurrent partial expression indexes keyed by chain
+  and recovery epoch; the superseded review index is removed. Normal Deploy migration retries
+  verify and rebuild interrupted invalid queue indexes without database shell access; concurrent
+  index work runs after the atomic payment-settings cutover transaction.
+- Global request overload returns the shared JSON `503 unavailable` error with `Retry-After: 1`,
+  request identifiers and tenant cache protection.
+- OpenAPI includes shared merchant `403` and merchant/admin `503` errors, documents required
+  `429` and optional `503` retry delays, and describes tenant response cache protection.
+
 ### Fixed
 
 - A failed RPC metrics refresh retains the previous snapshot and allows recovery to continue.
@@ -46,6 +57,23 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   Owner recovery uses fresh full-probe deadlines for each member and an independent full
   operation deadline for anchor agreement, allowing healthy low-rate providers to complete
   route verification.
+
+### Security
+
+- Tenant and credential HTTP responses, including public payer views, idempotent replays,
+  authentication errors and restore rejections, send `Cache-Control: no-store`.
+- **Breaking:** live reference products now require pre-verified pinned webhook keys; unpinned
+  attestation key fetches remain available only in test mode.
+- Price-provider responses are bounded while streaming, and API ingress and service containers
+  have bounded resource and privilege exposure.
+- Database sessions use role-specific time budgets; service shutdown bounds task draining,
+  advisory-lock cleanup, and pool closure, including read-only restore instances.
+
+### Python SDK (`phala-pay`)
+
+#### Changed
+
+- Regenerate the client with shared forbidden and unavailable error responses.
 
 ### JS SDK
 
@@ -69,15 +97,6 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   retries; a single supervised worker has a 35-second shutdown limit within the container's
   45-second grace period. The demo forwards TanStack Query cancellation to deadline-bound fetches
   and uses a native network select to avoid dynamic inline scrollbar styles.
-
-### Security
-
-- **Breaking:** live reference products now require pre-verified pinned webhook keys; unpinned
-  attestation key fetches remain available only in test mode.
-- Price-provider responses are bounded while streaming, and API ingress and service containers
-  have bounded resource and privilege exposure.
-- Database sessions use role-specific time budgets; service shutdown bounds task draining,
-  advisory-lock cleanup, and pool closure, including read-only restore instances.
 
 ## [0.7.0] - 2026-10-02
 

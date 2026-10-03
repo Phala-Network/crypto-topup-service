@@ -4,6 +4,7 @@
 mod account;
 mod attestation;
 mod auth;
+mod cache;
 mod client_limit;
 mod deposit_addresses;
 mod deposits;
@@ -456,7 +457,9 @@ pub struct ApiDocs {
 pub fn router(state: AppState) -> (Router, ApiDocs) {
     let (router, docs) = router_inner(state);
     (
-        router.layer(middleware::from_fn(crate::observability::request_context)),
+        router
+            .layer(middleware::from_fn(cache::no_store))
+            .layer(middleware::from_fn(crate::observability::request_context)),
         docs,
     )
 }
@@ -506,7 +509,7 @@ fn router_inner(state: AppState) -> (Router, ApiDocs) {
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_| async {
-                    StatusCode::SERVICE_UNAVAILABLE
+                    error::ApiError::database_busy().into_response()
                 }))
                 .layer(LoadShedLayer::new())
                 .layer(GlobalConcurrencyLimitLayer::new(256)),
@@ -518,6 +521,7 @@ fn router_inner(state: AppState) -> (Router, ApiDocs) {
         .fallback(unrecognized_request)
         .method_not_allowed_fallback(unrecognized_request)
         .layer(Extension(Arc::new(docs.clone())));
+
     (router, docs)
 }
 
@@ -544,6 +548,7 @@ pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Rou
     let (router, _) = router_inner(state);
     router
         .layer(middleware::from_fn(reject_writes))
+        .layer(middleware::from_fn(cache::no_store))
         .layer(Extension(ReadOnly {
             restore_report: restore_report.map(Arc::from),
         }))
@@ -775,6 +780,13 @@ mod tests {
             let response = router.oneshot(request).await.unwrap();
             assert_eq!(response.status(), expected);
             assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            if expected == StatusCode::SERVICE_UNAVAILABLE {
+                assert_eq!(response.headers()["retry-after"], "300");
+                let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"]["code"], "service_restoring");
+            }
             assert_eq!(
                 crate::observability::metrics::http_observations(uri, method, class),
                 before + 1
@@ -786,43 +798,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_router_overload_is_observed_once_before_authentication() {
-        let state = offline_state();
-        let pool = state.pool.clone();
-        let router = super::router(state).0;
-        let key = crate::api_keys::generate(crate::api_keys::KeyKind::Secret, true).unwrap();
-        let mut admitted = Vec::new();
-        // Poll each request into the real concurrency gate and pending database authentication.
-        // No reactor turn occurs before saturation, so connection failures cannot free permits.
-        for _ in 0..256 {
-            let request = Request::builder()
-                .uri("/v1/account")
-                .header("authorization", format!("Bearer {}", *key))
-                .body(Body::empty())
+    async fn successful_real_router_responses_keep_cache_protection_and_one_observation() {
+        for router in [
+            super::router(offline_state()).0,
+            super::read_only_router(offline_state(), None),
+        ] {
+            let before = crate::observability::metrics::http_observations(
+                "/openapi.admin.json",
+                "HEAD",
+                "2xx",
+            );
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("HEAD")
+                        .uri("/openapi.admin.json")
+                        .header("signature", "invalid")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
                 .unwrap();
-            let mut response = Box::pin(router.clone().oneshot(request));
-            assert!(futures_util::poll!(&mut response).is_pending());
-            admitted.push(response);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(
+                crate::observability::metrics::http_observations(
+                    "/openapi.admin.json",
+                    "HEAD",
+                    "2xx"
+                ),
+                before + 1,
+            );
         }
-        let before =
-            crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx");
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .uri("/v1/treasuries")
+    }
+
+    #[tokio::test]
+    async fn real_router_overload_is_observed_once_before_authentication() {
+        for read_only in [false, true] {
+            let state = offline_state();
+            let pool = state.pool.clone();
+            let router = if read_only {
+                super::read_only_router(state, None)
+            } else {
+                super::router(state).0
+            };
+            let mut admitted = Vec::new();
+            // Poll requests into the real concurrency gate and pending database health check.
+            // No reactor turn occurs before saturation, so failures cannot free permits.
+            for _ in 0..256 {
+                let request = Request::builder()
+                    .uri("/healthz")
                     .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(response.headers().contains_key("request-id"));
-        assert_eq!(
-            crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx"),
-            before + 1,
-        );
-        drop(admitted);
-        pool.close().await;
+                    .unwrap();
+                let mut response = Box::pin(router.clone().oneshot(request));
+                assert!(futures_util::poll!(&mut response).is_pending());
+                admitted.push(response);
+            }
+            let before =
+                crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx");
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/treasuries")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            drop(admitted);
+            pool.close().await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().contains_key("request-id"));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["retry-after"], "1");
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let body = to_bytes(response.into_body(), 1_048_576).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["type"], "api_error");
+            assert_eq!(body["error"]["code"], "unavailable");
+            assert_eq!(
+                crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx"),
+                before + 1,
+            );
+        }
     }
 
     #[tokio::test]

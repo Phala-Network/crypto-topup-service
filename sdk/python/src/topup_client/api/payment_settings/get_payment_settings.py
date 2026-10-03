@@ -36,10 +36,20 @@ def _parse_response(
 
         return response_401
 
+    if response.status_code == 403:
+        response_403 = ErrorResponse.from_dict(response.json())
+
+        return response_403
+
     if response.status_code == 429:
         response_429 = ErrorResponse.from_dict(response.json())
 
         return response_429
+
+    if response.status_code == 503:
+        response_503 = ErrorResponse.from_dict(response.json())
+
+        return response_503
 
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
