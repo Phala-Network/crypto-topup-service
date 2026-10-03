@@ -1,10 +1,12 @@
 name: CI
 
-# Release calls it too (workflow_call), on the tagged commit, before it builds anything.
+# The merge queue runs it on each queued merge (merge_group); Release calls it too (workflow_call),
+# on the tagged commit, before it builds anything.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_call:
 
 permissions:
