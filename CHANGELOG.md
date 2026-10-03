@@ -15,7 +15,33 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [0.8.0] - 2026-10-03
 
+### Added
+
+- Bounded HTTP request counters and latency histograms in signed admin metrics, including
+  authentication, load-shed and read-only errors; documented operational service objectives.
+- RPC operational alerts through the existing Sentry integration, with a one-minute group outage
+  threshold and an RPC health runbook. Durable metrics expose their last successful refresh time.
+
+### Changed
+
+- Encode metrics with the pinned standard Prometheus client and enforce merchant/client-secret
+  quotas with the existing pinned governor library, preserving tenant/mode and joint admission.
+- Separate treasury ownership proofs, tenant-scoped reads and periodic work into focused modules.
+
+- Quote lists batch deposit and pending-payment reads after scoped pagination, keeping detail
+  payment selection, tenant/mode isolation, filters and cursor semantics.
+- RPC review and reorg replay queues use concurrent partial expression indexes keyed by chain
+  and recovery epoch; the superseded review index is removed. Normal Deploy migration retries
+  verify and rebuild interrupted invalid queue indexes without database shell access; concurrent
+  index work runs after the atomic payment-settings cutover transaction.
+- Global request overload returns the shared JSON `503 unavailable` error with `Retry-After: 1`,
+  request identifiers and tenant cache protection.
+- OpenAPI includes shared merchant `403` and merchant/admin `503` errors, documents required
+  `429` and optional `503` retry delays, and describes tenant response cache protection.
+
 ### Fixed
+
+- A failed RPC metrics refresh retains the previous snapshot and allows recovery to continue.
 
 - RPC acceptance and readmission now retry only transient failures within explicit probe attempt
   and deadline bounds, honoring throttling delays. Capability checks share one finalized snapshot
@@ -47,6 +73,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ### Security
 
+- Tenant and credential HTTP responses, including public payer views, idempotent replays,
+  authentication errors and restore rejections, send `Cache-Control: no-store`.
 - **Breaking:** live reference products now require pre-verified pinned webhook keys; unpinned
   attestation key fetches remain available only in test mode.
 - Price-provider responses are bounded while streaming, and API ingress and service containers
@@ -70,6 +98,12 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 - Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
   notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
+
+### Python SDK (`phala-pay`)
+
+#### Changed
+
+- Regenerate the client with shared forbidden and unavailable error responses.
 
 ## [0.7.0] - 2026-10-02
 

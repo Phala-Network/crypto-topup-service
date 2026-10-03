@@ -89,6 +89,11 @@ pub(super) fn merchant(openapi: &OpenApi) -> Value {
     // Every merchant request counts toward the account's rate limit.
     for_each_operation(&mut document, |_, operation| {
         let responses = &mut operation["responses"];
+        if responses.get("403").is_none() {
+            responses["403"] = error_response(
+                "`permission_denied`: the key lacks this permission, or `testmode_charges_only`: live mode is not enabled",
+            );
+        }
         if responses.get("429").is_none() {
             responses["429"] = error_response("`rate_limit`: retry after `Retry-After` seconds");
         }
@@ -104,6 +109,7 @@ pub(super) fn merchant(openapi: &OpenApi) -> Value {
                             is not accepted.",
         }
     });
+    response_headers(&mut document);
     document
 }
 
@@ -129,6 +135,7 @@ pub(super) fn admin(openapi: &OpenApi) -> Value {
                             `X-Forwarded-*` headers are ignored.",
         }
     });
+    response_headers(&mut document);
     document
 }
 
@@ -149,26 +156,16 @@ fn finish(openapi: &OpenApi, title: &str, description: &str) -> Value {
         .collect();
     for_each_operation(&mut document, |method, operation| {
         let responses = &mut operation["responses"];
+        if responses.get("503").is_none() {
+            responses["503"] = error_response(
+                "`unavailable`: temporary service or database unavailability; `service_restoring`: restore reconciliation is in progress. Retry-After, when present, is the minimum delay in seconds",
+            );
+        }
         if method == "post" && responses.get("409").is_none() {
             responses["409"] = error_response(
                 "`idempotency_key_in_use`: a request with this `Idempotency-Key` is still \
                  running; retry with the same key",
             );
-        }
-    });
-    for_each_operation(&mut document, |_, operation| {
-        for (status, response) in operation["responses"].as_object_mut().into_iter().flatten() {
-            let headers = &mut response["headers"];
-            headers["Request-Id"] = json!({
-                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
-                "schema": {"type": "string"},
-            });
-            if status == "429" {
-                headers["Retry-After"] = json!({
-                    "description": "Seconds to wait before retrying",
-                    "schema": {"type": "integer"},
-                });
-            }
         }
     });
     if let Some(schemas) = document
@@ -184,6 +181,34 @@ fn finish(openapi: &OpenApi, title: &str, description: &str) -> Value {
         }
     }
     document
+}
+
+fn response_headers(document: &mut Value) {
+    for_each_operation(document, |_, operation| {
+        for (status, response) in operation["responses"].as_object_mut().into_iter().flatten() {
+            let headers = &mut response["headers"];
+            headers["Cache-Control"] = json!({
+                "description": "Tenant data and credentials must never be stored, including errors",
+                "required": true,
+                "schema": {"type": "string", "enum": ["no-store"]},
+            });
+            headers["Request-Id"] = json!({
+                "description": "The request's id, `req_…` (https://docs.stripe.com/api/request_ids)",
+                "schema": {"type": "string"},
+            });
+            if status == "429" || status == "503" {
+                headers["Retry-After"] = json!({
+                    "description": if status == "429" {
+                        "Required: minimum seconds to wait before retrying"
+                    } else {
+                        "Optional: minimum seconds to wait before retrying; sent for database admission failures and service_restoring, and may be absent for other unavailable errors"
+                    },
+                    "required": status == "429",
+                    "schema": {"type": "integer", "minimum": 1},
+                });
+            }
+        }
+    });
 }
 
 /// Calls `edit` with the method and the operation object of every operation of the document.

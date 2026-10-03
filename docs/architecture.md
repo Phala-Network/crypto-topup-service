@@ -505,6 +505,16 @@ reads at the position takes the successor's id and `replaces` again (§14).
 
 ## 8. Chain, valuation, screening
 
+Durable RPC review queues use a partial index on chain, recovery epoch, replay/creation time,
+block floor and id; nonfinal reorg replay uses a partial index on chain, epoch and the next block
+expression. Completed evidence stays in the tables but leaves the queue indexes. Concurrent
+migrations replace the older review index after the new one is valid. Normal Deploy retries verify
+and rebuild only matching invalid indexes owned by the pending queue migrations; completed
+unrecorded builds keep their index after exact-definition verification. The payment-settings
+cutover transaction commits before concurrent index work starts. See the
+[query-plan evidence](design/db-api-query-plans.md) for the representative workload and SQLx
+migration behavior.
+
 **Confirmation** (design D1) is per chain family, in reviewed code: a chain joins a family only
 through a code change. The route's `chain.confirmations` is a depth `n` (`latest − block + 1 ≥ n`),
 `safe`, or `finalized`; a block at or below `finalized` always qualifies, so `finalized`
@@ -949,6 +959,25 @@ the welcome promotion by existing rule.
 
 The API follows Stripe's documented conventions, so an integrator who knows Stripe
 knows it. Where it departs, the last column says why.
+
+All `/v1` tenant and credential responses carry `Cache-Control: no-store`, including admin
+responses, public `client_secret` views, idempotent replays, and errors rejected before a handler
+runs. Credential-bearing requests to other paths also carry it. Unauthenticated health and
+OpenAPI documents remain outside this policy.
+
+The merchant OpenAPI document includes the shared authentication/authorization `403`, rate
+admission `429`, and temporary-unavailability `503` responses on every operation. The admin
+document also includes shared `503` responses. Every `429` sends a positive integer `Retry-After`
+in seconds. A `503` can send it (`1` for database admission/conflicts and global request overload,
+`300` for restore gates); other temporary-unavailability responses may omit it. Clients respect
+the header when present.
+
+Quote lists select the account and mode's page before fetching payment observations. One batched
+deposit read and one batched pending-transfer read cover only the selected address ids; an empty
+page performs neither. Rendering keeps the same consumed-deposit priority, recorded-before-pending
+order, reversed-deposit exclusion, matching rules, and cursor/`has_more` semantics as detail reads.
+Within each address, observations sort by block number and log index, then by deposit id or
+pending transaction hash to break ties deterministically.
 
 | Convention | Stripe | Here |
 |---|---|---|
@@ -1675,7 +1704,51 @@ age, unflushed balance, open lock exposure, undelivered `deposit.credited` event
 reconciliation) is in the daily admin
 report (`GET /v1/admin/reports/daily`); RPC calls per provider, chain, and method are counters in
 the admin-signed `GET /v1/admin/metrics` (Prometheus text), read on demand since no collector
-runs. Log lines and their spans (`deposit_id`, `chain_id`,
+runs. The standard Prometheus client encodes HTTP request counters and latency histograms and
+RPC health snapshots. HTTP labels are matched route templates (or `unmatched`), a fixed method
+set (or `other`), and status class. No raw path, query, secret, customer, account, peer address or
+request id becomes a metric label. Metrics wrap authentication, ingress/load-shed rejection and
+read-only rejection, measuring time to response headers, including middleware and database/RPC
+waits; response-body streaming time is excluded. Buckets are 5, 10, 25, 50, 100, 250, 500 ms and
+1, 2.5, 5, 10, 30 s, plus infinity. Counters reset with the process.
+
+RPC operational alerts use the same Sentry tracing integration, fingerprints, runbook links and
+ten-minute repeat suppression as other alerts. `TopupRpcGroupUnavailable` fires after one minute
+without a serving candidate; recovery clears that timer. An independent cancellation-aware
+five-second monitor observes availability even while recovery probes or database refreshes wait,
+so an uninterrupted outage is detected within 70 seconds (observation plus alert polling). `TopupRpcChainFrozen` fires after a
+durable fork freeze. Quarantine, cooldown, upstream quota pressure and unclassified upstream
+errors emit `TopupRpcMemberQuarantined`, `TopupRpcMemberCooldown`, `TopupRpcQuotaPressure` and
+`TopupRpcUnclassifiedError`. `TopupRpcAnchorUnavailable` reports a closed cursor safety gate;
+`TopupRpcRecoveryUnavailable` reports a failed durable identity read and leaves members unverified.
+`TopupRpcMetricsRefreshFailed` reports failed collection without stopping recovery or replacing
+last successful gauges with zeros. `topup_rpc_metrics_refreshed_at_seconds` distinguishes stale
+snapshots; before the first successful refresh durable gauges are absent. See
+[RPC health](../deploy/runbooks/rpc-health.md).
+
+### Service objectives and measurement
+
+These are operational targets, reviewed over 30 days; deliberate safety freezes, restore drills,
+merchant pauses and invalid client requests are recorded separately. Safety takes precedence over
+availability. Production has no deployed metrics collector, so Prometheus snapshots provide
+on-demand diagnostics, not automatic rolling SLO accounting or alert evaluation. Sentry is the
+only alert channel. HTTP percentages/percentiles below require an explicitly recorded observation
+interval and counter deltas from the same process; do not claim a continuous 30-day result from
+one snapshot. A restart ends that interval. Sentry Uptime history supplies external availability;
+Crons and issue history supply worker/incident evidence.
+
+| Objective | Target and evidence | Operational response through Sentry |
+|---|---|---|
+| API availability | 99.9% successful `/healthz` probes over 30 days; inspect Sentry Uptime history. Authenticated API diagnostic error ratio is 5xx / (2xx + 3xx + 5xx). | Uptime failures page; inspect load-shed and 5xx request counts on demand. |
+| API latency | During an observed interval, p95 successful GET/HEAD response headers ≤ 250 ms and POST ≤ 1 s. Use HTTP histogram bucket deltas for matched routes; exclude admin reports/attestation and intentional waits. | This percentile is a diagnostic target with no automatic alert; investigate an Uptime or worker incident using snapshots. |
+| RPC evidence availability | Every required A/B group has a serving candidate; no uninterrupted outage ≥ 1 minute. Count quota-paused candidates as unavailable. | Page on `TopupRpcGroupUnavailable`; fork freezes and quarantines require immediate safety triage. Cooldown/quota/unclassified events warn. |
+| Deposit progress | For unpaused, supported deposits, target 99% leaving `detected` and `confirmed` within 30 minutes after satisfying the configured confirmation policy (for example `depth2`, `depth3`, or `finalized`), rather than starting all clocks at finalization. Review the policy, daily report ages and deposit timelines; this target is not a measured percentile. | Existing route age alerts (default 1,800 s) and scanner/finality Crons identify stalled work; Crons check-in margins are 5 minutes. This is not an automatically computed percentile. |
+| Reconciliation and backup | Every scheduled reconciliation succeeds before its next round; backup success marker age ≤ 2 minutes. Inspect Sentry Crons and the daily report. | Existing reconciliation and backup monitors alert; backup requires three stale observations to avoid restart noise. |
+
+Configure Sentry issue rules by the above alert names and existing Crons/Uptime monitors; this
+change adds no collector, Prometheus alert rules, new monitoring endpoint or deployed service.
+Replay/coverage backlogs and HTTP latency remain diagnostic snapshots; ongoing incident review
+must confirm those backlogs drain after provider recovery. Log lines and their spans (`deposit_id`, `chain_id`,
 `state`, `attempt`) serve local stacks.
 
 Tests. `core`: exhaustive transitions, `proptest` on credit math, CREATE2 math against

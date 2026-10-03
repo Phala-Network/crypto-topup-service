@@ -326,9 +326,13 @@ pub(crate) async fn list_quotes(
         (error, _) => map_error(error),
     })?;
     let mut connection = state.pool.acquire().await?;
+    let address_ids = locks.iter().map(|lock| lock.address_id).collect::<Vec<_>>();
+    let payments = super::pending::QuotePayments::load(&mut connection, &address_ids).await?;
     let mut data = Vec::with_capacity(locks.len());
     for lock in locks {
-        data.push(quote_object(&mut connection, &state.routes, lock).await?);
+        let route = quote_route(&state.routes, &lock)?;
+        let payment = payments.payment(route, &lock);
+        data.push(render_quote(route, lock, payment));
     }
     Ok(Json(QuoteList {
         object: "list".to_owned(),
@@ -648,18 +652,29 @@ pub(crate) async fn quote_object(
     routes: &RouteSet,
     lock: RateLock,
 ) -> ApiResult<Quote> {
-    // The quote's own route version may be retired; the asset comes from the route's current
-    // version, which keeps the chain and asset, and the terms from the quote.
-    let route = routes
+    let route = quote_route(routes, &lock)?;
+    let payment = super::pending::quote_payment(connection, route, &lock).await?;
+    Ok(render_quote(route, lock, payment))
+}
+
+fn quote_route<'a>(routes: &'a RouteSet, lock: &RateLock) -> ApiResult<&'a RouteFile> {
+    // Retired quote versions use the current route's unchanged chain and asset, and frozen terms.
+    routes
         .current()
         .find(|route| route.route == lock.route)
         .ok_or_else(|| {
             tracing::error!(route = %lock.route, "quote route is not loaded");
             ApiError::internal()
-        })?;
-    let payment = super::pending::quote_payment(connection, route, &lock).await?;
+        })
+}
+
+fn render_quote(
+    route: &RouteFile,
+    lock: RateLock,
+    payment: Option<super::models::Payment>,
+) -> Quote {
     let payment_uri = payment_uri(route, &lock);
-    Ok(Quote {
+    Quote {
         id: locks::quote_id(lock.id),
         object: "quote".to_owned(),
         livemode: lock.livemode,
@@ -683,7 +698,7 @@ pub(crate) async fn quote_object(
         client_secret: None,
         terms: quote_terms(&lock.terms),
         metadata: lock.metadata,
-    })
+    }
 }
 
 const fn status(status: RateLockStatus) -> &'static str {

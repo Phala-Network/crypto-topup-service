@@ -588,6 +588,21 @@ impl RpcGroup {
             .filter(|h| h.eligible && !h.quarantined && h.until.is_none())
             .count()
     }
+    /// Number of validated candidates serving without a paused account/key budget.
+    /// Unlike selection, this health observation does not change weighted-selection state.
+    pub fn serving_members(&self) -> usize {
+        let health = self.health.lock().unwrap_or_else(PoisonError::into_inner);
+        self.members
+            .iter()
+            .zip(health.iter())
+            .filter(|(member, h)| {
+                h.eligible
+                    && !h.quarantined
+                    && h.until.is_none()
+                    && !self.budgets.paused(&member.account, &member.key)
+            })
+            .count()
+    }
     /// Whether a different member can serve independent log review right now.
     pub fn independent_review_available(&self, answering: &str) -> bool {
         let health = self.health.lock().unwrap_or_else(PoisonError::into_inner);
@@ -664,6 +679,9 @@ impl RpcGroup {
             .get_mut(index)
         {
             if matches!(error, Failure::Redirect | Failure::Identity) {
+                tracing::warn!(tags.alert = "TopupRpcMemberQuarantined", tags.group = %self.id,
+                    tags.chain = self.chain, tags.member = %self.members.get(index).map(|m| m.id.as_str()).unwrap_or("unknown"),
+                    tags.class = error.code(), "RPC member quarantined");
                 h.quarantined = true;
                 h.eligible = false;
             } else if error == Failure::Capability {
@@ -676,6 +694,9 @@ impl RpcGroup {
             ) {
                 h.failures = h.failures.saturating_add(1);
                 if error == Failure::Stale || h.failures >= self.policy.failures {
+                    tracing::warn!(tags.alert = "TopupRpcMemberCooldown", tags.group = %self.id,
+                        tags.chain = self.chain, tags.member = %self.members.get(index).map(|m| m.id.as_str()).unwrap_or("unknown"),
+                        tags.class = error.code(), "RPC member entered recovery cooldown");
                     h.eligible = false;
                     h.recoveries = 0;
                     h.until = Some(
@@ -852,6 +873,9 @@ impl RpcGroup {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get_mut(index)
             {
+                tracing::warn!(tags.alert = "TopupRpcMemberQuarantined", tags.group = %self.id,
+                    tags.chain = self.chain, tags.member = %self.members.get(index).map(|m| m.id.as_str()).unwrap_or("unknown"),
+                    tags.class = error.code(), "RPC member quarantined");
                 h.quarantined = true;
                 h.eligible = false;
             }
@@ -865,6 +889,8 @@ impl RpcGroup {
                 h.unsupported.insert(method.to_owned());
             }
             if error == Failure::Throttled {
+                tracing::warn!(tags.alert = "TopupRpcQuotaPressure", tags.group = %self.id,
+                    tags.chain = self.chain, tags.member = %member.id, "RPC upstream quota exhausted");
                 self.budgets.pause(
                     if rule.is_some_and(|r| r.budget_scope == rules::BudgetScope::Key) {
                         &member.key
@@ -887,6 +913,10 @@ impl RpcGroup {
                             .min(Duration::from_secs(60))
                     },
                 );
+            }
+            if error == Failure::Unclassified {
+                tracing::warn!(tags.alert = "TopupRpcUnclassifiedError", tags.group = %self.id,
+                    tags.chain = self.chain, tags.member = %member.id, "RPC upstream returned an unclassified error");
             }
             return Err(error);
         }

@@ -21,7 +21,7 @@ use std::str::FromStr;
 use alloy_primitives::Address;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{Connection as _, PgConnection, PgPool, Row};
 use topup_core::money::{AtomicAmount, Bps};
 use topup_core::route::{Confirmations, RouteFile};
 use topup_core::screening::Bounds;
@@ -973,28 +973,39 @@ pub struct Backfill {
     pub quotes: u64,
 }
 
-/// Applies every pending migration and, on an instance the 0.6.0 cutover has not bound yet, its
-/// backfill with `routes`, all in one transaction as the database owner (`topup
-/// migrate`): each migration runs in a savepoint of it, so a backfill that fails leaves the schema
-/// as it was. `None` when there was nothing to backfill.
+/// Applies the 0.6.0 cutover schema and its backfill atomically as the database owner, then
+/// applies later migrations through SQLx on a connection outside that transaction. Concurrent
+/// index migrations cannot run in the cutover's outer transaction. `None` when already backfilled.
 pub async fn migrate(
     pool: &PgPool,
     routes: Option<&RouteSet>,
 ) -> Result<Option<Backfill>, BackfillError> {
-    let mut transaction = pool.begin().await?;
-    // SQLx releases its session lock when run returns, before this transaction commits. This
-    // separate transaction lock covers schema, backfill, validation, and commit together.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('payment-settings-migration', 0))")
+    let mut connection = crate::db::migrations::locked_connection(pool).await?;
+    let result = async {
+        let mut transaction = connection.begin().await?;
+        // Keep the cutover's transaction lock while the same named session lock covers the whole run.
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('payment-settings-migration', 0))",
+        )
         .execute(&mut *transaction)
         .await?;
-    crate::db::MIGRATOR.run(&mut *transaction).await?;
-    let report = if backfilled(&mut transaction).await? {
-        None
-    } else {
-        let routes = routes.ok_or(BackfillError::ConfigRequired)?;
-        backfill_in(&mut transaction, routes).await?
-    };
-    transaction.commit().await?;
+        crate::db::migrations::unlocked_migrator()
+            .run_to(20261024000000, &mut *transaction)
+            .await?;
+        let report = if backfilled(&mut transaction).await? {
+            None
+        } else {
+            let routes = routes.ok_or(BackfillError::ConfigRequired)?;
+            backfill_in(&mut transaction, routes).await?
+        };
+        transaction.commit().await?;
+        crate::db::migrations::run_in(&mut connection).await?;
+        Ok::<_, BackfillError>(report)
+    }
+    .await;
+    let finish = crate::db::migrations::finish(connection).await;
+    let report = result?;
+    finish?;
     Ok(report)
 }
 

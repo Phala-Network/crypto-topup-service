@@ -63,6 +63,7 @@ changing it is a route PR and Deploy `upgrade` ([deploy/README.md, "Deploy"](../
 
 | Alert, monitor, or symptom | Runbook |
 |---|---|
+| `TopupRpcGroupUnavailable`, `TopupRpcChainFrozen`, `TopupRpcMemberQuarantined`, `TopupRpcMemberCooldown`, `TopupRpcQuotaPressure`, `TopupRpcUnclassifiedError`, `TopupRpcAnchorUnavailable`, `TopupRpcRecoveryUnavailable`, `TopupRpcMetricsRefreshFailed` | [RPC health](rpc-health.md) |
 | `TopupReconciliationMismatch` (`check:address_derivation` or `check:custody_balance`), `400 chain_frozen` | [Chain frozen](chain-frozen.md) |
 | `TopupReconciliationMismatch` (other `check`), `topup-reconciler` | [Reconciliation mismatch](reconciliation-mismatch.md) |
 | `TopupDepositStateAgeExceeded` (`state:detected` or `state:confirmed`) | [Provider disagreement](provider-disagreement.md), then [Price outage](price-outage.md) |

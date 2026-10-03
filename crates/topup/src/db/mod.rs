@@ -3,6 +3,7 @@
 mod accounts;
 mod addresses;
 mod deposits;
+pub(crate) mod migrations;
 mod outbox;
 mod pending;
 pub mod rpc;
@@ -27,6 +28,7 @@ pub use outbox::{
 };
 pub use pending::{
     HeadCommit, NewPendingTransfer, PendingTransfer, commit_head_scan, list_address_pending,
+    list_addresses_pending,
 };
 pub use scanner::{
     ScanAddress, ScanCommit, commit_confirmed_scan, commit_scan, get_confirmed_cursor, get_cursor,
@@ -41,7 +43,7 @@ pub static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// Applies every pending embedded migration.
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    MIGRATOR.run(pool).await
+    migrations::run(pool).await
 }
 
 pub(crate) fn state_code(state: topup_core::deposit::DepositState) -> &'static str {

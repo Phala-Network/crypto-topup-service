@@ -471,7 +471,10 @@ validation of the binding constraints. The config is loaded and validated before
 migrated, so a failure leaves the database as 0.5.0 left it. Afterwards every deposit has its
 binding and every quote its terms, so no runtime rule reads a missing binding. A transaction
 advisory lock serializes concurrent migrations through schema changes, backfill, validation, and
-commit.
+commit. This atomic prefix ends at migration `20261024000000`; later migrations run after its
+commit under the existing migration advisory lock. Concurrent queue indexes therefore run outside an
+outer transaction and recover through the normal migration service
+([recovery behavior](db-api-query-plans.md#deploy-recovery)).
 
 1. Every account and mode gets a state row, `unconfigured`, and an `unconfigured` revision as
    current.

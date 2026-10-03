@@ -3,6 +3,8 @@
 //! Support, amount matching, and timeliness are computed here at read time and never stored, so
 //! an unfinalized transfer can never produce a stored rejection or credit.
 
+use std::collections::HashMap;
+
 use alloy_primitives::Address as EvmAddress;
 use chrono::{DateTime, TimeDelta, Utc};
 use topup_core::money::AtomicAmount;
@@ -32,33 +34,64 @@ pub(super) async fn quote_payment(
     route: &RouteFile,
     lock: &RateLock,
 ) -> Result<Option<Payment>, ApiError> {
-    let deposits = address_deposits(&mut *connection, lock.address_id).await?;
-    if let Some(consumed) = deposits
-        .iter()
-        .find(|deposit| Some(deposit.deposit_id) == lock.consumed_by)
-    {
-        return Ok(Some(payment(route, lock, consumed)));
+    let payments = QuotePayments::load(connection, &[lock.address_id]).await?;
+    Ok(payments.payment(route, lock))
+}
+
+/// Two reads for the selected page, independent of its quote count. Address ids come only from
+/// scoped quote lookups, retaining the account and mode boundary of their parent query.
+pub(super) struct QuotePayments {
+    deposits: HashMap<Uuid, Vec<Observed>>,
+    pending: HashMap<Uuid, Vec<Observed>>,
+}
+
+impl QuotePayments {
+    pub(super) async fn load(
+        connection: &mut PgConnection,
+        address_ids: &[Uuid],
+    ) -> Result<Self, ApiError> {
+        let deposits = address_deposits(&mut *connection, address_ids).await?;
+        let mut pending: HashMap<Uuid, Vec<Observed>> = HashMap::new();
+        for (address_id, transfer) in db::list_addresses_pending(connection, address_ids).await? {
+            pending
+                .entry(address_id)
+                .or_default()
+                .push(Observed::from(transfer));
+        }
+        Ok(Self { deposits, pending })
     }
-    let pending = db::list_address_pending(&mut *connection, lock.address_id)
-        .await?
-        .into_iter()
-        .filter(|transfer| {
-            !deposits
+
+    pub(super) fn payment(&self, route: &RouteFile, lock: &RateLock) -> Option<Payment> {
+        let deposits = self
+            .deposits
+            .get(&lock.address_id)
+            .map_or(&[][..], Vec::as_slice);
+        if let Some(consumed) = deposits
+            .iter()
+            .find(|deposit| !deposit.reversed && Some(deposit.deposit_id) == lock.consumed_by)
+        {
+            return Some(payment(route, lock, consumed));
+        }
+        let pending = self
+            .pending
+            .get(&lock.address_id)
+            .map_or(&[][..], Vec::as_slice);
+        let mut observed =
+            deposits
                 .iter()
-                .any(|deposit| deposit.deposit_id == transfer.deposit_id)
-        })
-        .map(Observed::from)
-        .collect::<Vec<_>>();
-    let observed = deposits
-        .into_iter()
-        .filter(|deposit| !deposit.reversed)
-        .chain(pending)
-        .collect::<Vec<_>>();
-    let shown = observed
-        .iter()
-        .find(|candidate| terms(route, lock, candidate).consumes_lock())
-        .or_else(|| observed.first());
-    Ok(shown.map(|observed| payment(route, lock, observed)))
+                .filter(|deposit| !deposit.reversed)
+                .chain(pending.iter().filter(|transfer| {
+                    !deposits
+                        .iter()
+                        .any(|deposit| deposit.deposit_id == transfer.deposit_id)
+                }));
+        let first = observed.next()?;
+        let shown = std::iter::once(first)
+            .chain(observed)
+            .find(|candidate| terms(route, lock, candidate).consumes_lock())
+            .unwrap_or(first);
+        Some(payment(route, lock, shown))
+    }
 }
 
 struct Observed {
@@ -135,43 +168,65 @@ fn payment(route: &RouteFile, lock: &RateLock, observed: &Observed) -> Payment {
     }
 }
 
-type DepositRow = (Uuid, i64, String, String, DateTime<Utc>, String, String);
+type DepositRow = (
+    Uuid,
+    Uuid,
+    i64,
+    String,
+    String,
+    DateTime<Utc>,
+    String,
+    String,
+);
 
 async fn address_deposits(
     connection: &mut PgConnection,
-    address_id: Uuid,
-) -> Result<Vec<Observed>, ApiError> {
+    address_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<Observed>>, ApiError> {
+    if address_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     let rows = sqlx::query_as::<_, DepositRow>(
         r#"
-        SELECT id, chain_id, tx_hash, state, block_time, asset_contract, amount_atomic::text
+        SELECT address_id, id, chain_id, tx_hash, state, block_time, asset_contract, amount_atomic::text
         FROM deposits
-        WHERE address_id = $1
-        ORDER BY block_number, log_index
+        WHERE address_id = ANY($1)
+        ORDER BY address_id, block_number, log_index, id
         "#,
     )
-    .bind(address_id)
+    .bind(address_ids)
     .fetch_all(connection)
     .await?;
     rows.into_iter()
         .map(
-            |(id, chain_id, tx_hash, state, block_time, asset, amount)| {
+            |(address_id, id, chain_id, tx_hash, state, block_time, asset, amount)| {
                 let chain_id = u64::try_from(chain_id).ok()?;
                 let tx_hash = tx_hash.parse().ok()?;
-                Some(Observed {
-                    status: "recorded",
-                    reversed: state == "reversed",
-                    deposit_id: id,
-                    tx_hash,
-                    block_time,
-                    confirmations: None,
-                    asset_contract: asset.parse().ok()?,
-                    amount_atomic: AtomicAmount::new(amount.parse().ok()?),
-                    chain_id,
-                })
+                Some((
+                    address_id,
+                    Observed {
+                        status: "recorded",
+                        reversed: state == "reversed",
+                        deposit_id: id,
+                        tx_hash,
+                        block_time,
+                        confirmations: None,
+                        asset_contract: asset.parse().ok()?,
+                        amount_atomic: AtomicAmount::new(amount.parse().ok()?),
+                        chain_id,
+                    },
+                ))
             },
         )
         .collect::<Option<Vec<_>>>()
         .ok_or_else(ApiError::internal)
+        .map(|rows| {
+            let mut deposits: HashMap<Uuid, Vec<Observed>> = HashMap::new();
+            for (address_id, row) in rows {
+                deposits.entry(address_id).or_default().push(row);
+            }
+            deposits
+        })
 }
 
 pub(super) fn estimated_final_at(block_time: DateTime<Utc>) -> DateTime<Utc> {

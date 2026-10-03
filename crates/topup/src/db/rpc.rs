@@ -124,6 +124,11 @@ pub fn digest(value: &str) -> String {
 pub async fn freeze(pool: &PgPool, chain: u64, reason: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO rpc_chain_state(chain_id,frozen,reason) VALUES($1,true,$2) ON CONFLICT(chain_id) DO UPDATE SET frozen=true,reason=EXCLUDED.reason")
         .bind(to_i64(chain,"rpc chain")?).bind(reason).execute(pool).await?;
+    tracing::warn!(
+        tags.alert = "TopupRpcChainFrozen",
+        tags.chain = chain,
+        "RPC chain frozen; audited recovery required"
+    );
     Ok(())
 }
 /// Persisted provenance written in the same transaction as deposits and progress.
@@ -370,9 +375,10 @@ pub async fn commit_head_window(
     Ok((scan, head))
 }
 
-static HEALTH_METRICS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-/// Last successful database safety/replay gauges (collected by the bounded recovery worker).
-pub fn metrics() -> String {
+static HEALTH_METRICS: std::sync::Mutex<Vec<prometheus::proto::MetricFamily>> =
+    std::sync::Mutex::new(Vec::new());
+/// Last successful database safety/replay gauges; a failed refresh preserves the snapshot.
+pub fn metrics() -> Vec<prometheus::proto::MetricFamily> {
     HEALTH_METRICS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -380,45 +386,105 @@ pub fn metrics() -> String {
 }
 /// Refreshes durable gauges without database I/O in the metrics HTTP handler.
 pub async fn refresh_metrics(pool: &PgPool) -> Result<(), sqlx::Error> {
-    use std::fmt::Write;
-    let mut out = String::from(
-        "# HELP topup_rpc_chain_frozen Durable fork safety freeze.\n# TYPE topup_rpc_chain_frozen gauge\n# HELP topup_rpc_review_pending_windows Historical windows still requiring independent review.\n# TYPE topup_rpc_review_pending_windows gauge\n",
-    );
-    for row in sqlx::query("SELECT chain_id,frozen,awaiting_anchor,epoch FROM rpc_chain_state")
+    use prometheus::{IntGaugeVec, Opts, core::Collector};
+    let gauge = |name, help, labels: &[&str]| {
+        IntGaugeVec::new(Opts::new(name, help), labels)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+    };
+    let frozen = gauge(
+        "topup_rpc_chain_frozen",
+        "Durable fork safety freeze.",
+        &["chain_id"],
+    )?;
+    let awaiting = gauge(
+        "topup_rpc_chain_awaiting_anchor",
+        "Chain waiting for A/B cursor hash agreement.",
+        &["chain_id"],
+    )?;
+    let epoch = gauge(
+        "topup_rpc_chain_epoch",
+        "Audited recovery epoch.",
+        &["chain_id"],
+    )?;
+    for row in sqlx::query("SELECT chain_id, frozen, awaiting_anchor, epoch FROM rpc_chain_state")
         .fetch_all(pool)
         .await?
     {
-        let _ = writeln!(
-            out,
-            "topup_rpc_chain_frozen{{chain_id=\"{}\"}} {}",
-            row.try_get::<i64, _>("chain_id")?,
-            u8::from(row.try_get::<bool, _>("frozen")?)
-        );
+        let chain = row.try_get::<i64, _>("chain_id")?.to_string();
+        frozen
+            .with_label_values(&[&chain])
+            .set(i64::from(row.try_get::<bool, _>("frozen")?));
+        awaiting
+            .with_label_values(&[&chain])
+            .set(i64::from(row.try_get::<bool, _>("awaiting_anchor")?));
+        epoch
+            .with_label_values(&[&chain])
+            .set(row.try_get("epoch")?);
     }
-    out.push_str("# HELP topup_rpc_chain_awaiting_anchor Chain waiting for A/B cursor hash agreement.\n# TYPE topup_rpc_chain_awaiting_anchor gauge\n# HELP topup_rpc_chain_epoch Audited recovery epoch.\n# TYPE topup_rpc_chain_epoch gauge\n");
-    for row in sqlx::query("SELECT chain_id,awaiting_anchor,epoch FROM rpc_chain_state")
-        .fetch_all(pool)
-        .await?
-    {
-        let chain: i64 = row.try_get("chain_id")?;
-        let _ = writeln!(
-            out,
-            "topup_rpc_chain_awaiting_anchor{{chain_id=\"{chain}\"}} {}",
-            u8::from(row.try_get::<bool, _>("awaiting_anchor")?)
-        );
-        let _ = writeln!(
-            out,
-            "topup_rpc_chain_epoch{{chain_id=\"{chain}\"}} {}",
-            row.try_get::<i64, _>("epoch")?
-        );
+    let heads = gauge(
+        "topup_rpc_group_head",
+        "Accepted persisted head height.",
+        &["chain_id", "group", "tag", "epoch"],
+    )?;
+    let rows = sqlx::query(r#"
+        SELECT chain_id, group_id, tag, number, epoch
+        FROM rpc_watermarks w
+        WHERE epoch = COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id = w.chain_id), 0)
+        "#).fetch_all(pool).await?;
+    for row in rows {
+        let chain = row.try_get::<i64, _>("chain_id")?.to_string();
+        let group: String = row.try_get("group_id")?;
+        let tag: String = row.try_get("tag")?;
+        let epoch = row.try_get::<i64, _>("epoch")?.to_string();
+        heads
+            .with_label_values(&[&chain, &group, &tag, &epoch])
+            .set(row.try_get("number")?);
     }
-    out.push_str("# HELP topup_rpc_group_head Accepted persisted head height.\n# TYPE topup_rpc_group_head gauge\n");
-    for row in sqlx::query("SELECT chain_id,group_id,tag,number,epoch FROM rpc_watermarks WHERE epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_watermarks.chain_id),0)").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_group_head{{chain_id=\"{}\",group=\"{}\",tag=\"{}\",epoch=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<String,_>("group_id")?,row.try_get::<String,_>("tag")?,row.try_get::<i64,_>("epoch")?,row.try_get::<i64,_>("number")?);}
-    for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_window_reviews WHERE reviewed_at IS NULL AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_window_reviews.chain_id),0) GROUP BY chain_id").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_review_pending_windows{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);}
-    out.push_str("# HELP topup_rpc_reorg_pending_ranges Nonfinal reorg ranges awaiting complete replay.\n# TYPE topup_rpc_reorg_pending_ranges gauge\n");
-    for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_reorg_ranges.chain_id),0) GROUP BY chain_id").fetch_all(pool).await? {
-        let _=writeln!(out,"topup_rpc_reorg_pending_ranges{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);
+    let review = gauge(
+        "topup_rpc_review_pending_windows",
+        "Historical windows requiring independent review.",
+        &["chain_id"],
+    )?;
+    let reorg = gauge(
+        "topup_rpc_reorg_pending_ranges",
+        "Nonfinal reorg ranges awaiting complete replay.",
+        &["chain_id"],
+    )?;
+    // Include zero rows after recovery so an on-demand reader can distinguish clear from absent.
+    let rows = sqlx::query(r#"
+        SELECT s.chain_id,
+            (SELECT count(*) FROM rpc_window_reviews w
+             WHERE w.chain_id = s.chain_id AND w.epoch = s.epoch AND w.reviewed_at IS NULL) AS reviews,
+            (SELECT count(*) FROM rpc_reorg_ranges r
+             WHERE r.chain_id = s.chain_id AND r.epoch = s.epoch
+               AND COALESCE(r.replayed_through, r.from_block - 1) < r.to_block) AS reorgs
+        FROM rpc_chain_state s
+        "#).fetch_all(pool).await?;
+    for row in rows {
+        let chain = row.try_get::<i64, _>("chain_id")?.to_string();
+        review
+            .with_label_values(&[&chain])
+            .set(row.try_get("reviews")?);
+        reorg
+            .with_label_values(&[&chain])
+            .set(row.try_get("reorgs")?);
     }
+    let refreshed = prometheus::IntGauge::new(
+        "topup_rpc_metrics_refreshed_at_seconds",
+        "Unix time of last successful durable metrics refresh.",
+    )
+    .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    refreshed.set(Utc::now().timestamp());
+    let out = frozen
+        .collect()
+        .into_iter()
+        .chain(awaiting.collect())
+        .chain(epoch.collect())
+        .chain(heads.collect())
+        .chain(review.collect())
+        .chain(reorg.collect())
+        .chain(refreshed.collect())
+        .collect();
     *HEALTH_METRICS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = out;
