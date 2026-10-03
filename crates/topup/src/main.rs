@@ -981,8 +981,17 @@ async fn run(args: &RunArgs) -> anyhow::Result<ExitCode> {
         }
     }
     tracing::info!("shutdown requested; finishing in-flight service work");
-    if !tasks.shutdown().await {
-        clean_shutdown = false;
+    match tasks.shutdown().await {
+        Ok(true) => {}
+        Ok(false) => clean_shutdown = false,
+        Err(_tasks) => {
+            // Keep the lease-owner lock alive: returning would drop it while task futures may
+            // still hold money-path resources. Process termination stops all threads first.
+            tracing::error!(
+                "service tasks did not stop after abort; terminating without unlocking"
+            );
+            std::process::exit(1);
+        }
     }
     if !cleanup_service(
         lease_owner_task,
@@ -1169,10 +1178,12 @@ async fn serve_read_only_until(
     .with_graceful_shutdown(cancellation.clone().cancelled_owned())
     .into_future();
     tokio::pin!(served);
+    let mut signal_failed = false;
     let result = tokio::select! {
         result = &mut served => Some(result),
         signal = shutdown => {
             if let Err(error) = signal {
+                signal_failed = true;
                 tracing::error!(%error, "failed to listen for shutdown signal");
             }
             cancellation.cancel();
@@ -1193,7 +1204,7 @@ async fn serve_read_only_until(
         Some(result) => result.context("read-only API failed")?,
         None => return Ok(ExitCode::FAILURE),
     }
-    if closed.is_err() {
+    if closed.is_err() || signal_failed {
         return Ok(ExitCode::FAILURE);
     }
     tracing::info!("read-only API stopped");
@@ -1381,8 +1392,19 @@ impl ServiceTasks {
         }
     }
 
-    /// Cancels every task and waits for all of them; returns whether each stopped cleanly.
-    async fn shutdown(mut self) -> bool {
+    /// Returns cleanliness only after every task future has dropped. On failure to join, the
+    /// caller must terminate without releasing the lease-owner lock.
+    async fn shutdown(self) -> Result<bool, Self> {
+        // 285s graceful + 15s abort/join + 45s lock/pool cleanup fits the 360s Compose grace.
+        self.shutdown_with_deadlines(Duration::from_secs(285), Duration::from_secs(15))
+            .await
+    }
+
+    async fn shutdown_with_deadlines(
+        mut self,
+        drain_timeout: Duration,
+        abort_timeout: Duration,
+    ) -> Result<bool, Self> {
         self.cancellation.cancel();
         let mut clean = true;
         let drain = async {
@@ -1408,14 +1430,19 @@ impl ServiceTasks {
                 }
             }
         };
-        if tokio::time::timeout(Duration::from_secs(300), drain)
-            .await
-            .is_err()
-        {
-            tracing::error!("shutdown drain deadline exceeded");
+        if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+            tracing::error!("shutdown drain deadline exceeded; aborting service tasks");
+            self.set.abort_all();
+            // Abort is a request, not proof of completion. Joining proves that task futures and
+            // their held resources have dropped before the advisory lock can be released.
+            let join = async { while self.set.join_next().await.is_some() {} };
+            if tokio::time::timeout(abort_timeout, join).await.is_err() {
+                tracing::error!("service task abort/join deadline exceeded");
+                return Err(self);
+            }
             clean = false;
         }
-        clean
+        Ok(clean)
     }
 }
 
@@ -1777,6 +1804,132 @@ mod tests {
         drop(connection);
     }
 
+    struct TaskCleanup {
+        completed: Arc<AtomicBool>,
+        delay: std::time::Duration,
+    }
+
+    impl Drop for TaskCleanup {
+        fn drop(&mut self) {
+            // Model a task whose resource cleanup continues after abort is requested.
+            std::thread::sleep(self.delay);
+            self.completed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_tasks_finish_cleanup_before_unlock_is_allowed() {
+        use std::time::Duration;
+        let lease_owner = if let Ok(url) = std::env::var("DATABASE_URL") {
+            let pool = topup::db::connect(&url, "run", 2).await.unwrap();
+            let lock = topup::reconciler::hold_lease_owner_lock(&pool)
+                .await
+                .unwrap();
+            Some((pool, lock))
+        } else {
+            assert!(
+                std::env::var("CI").is_err(),
+                "DATABASE_URL is required in CI"
+            );
+            None
+        };
+        let mut tasks = ServiceTasks::new();
+        let completed = Arc::new(AtomicBool::new(false));
+        let cleanup = TaskCleanup {
+            completed: completed.clone(),
+            delay: Duration::from_millis(50),
+        };
+        let entered = tokio_util::sync::CancellationToken::new();
+        let started = entered.clone();
+        tasks.spawn("ignores cancellation", |_| async move {
+            let _cleanup = cleanup;
+            started.cancel();
+            std::future::pending::<()>().await;
+        });
+        entered.cancelled().await;
+        let result = tasks
+            .shutdown_with_deadlines(Duration::from_millis(20), Duration::from_secs(1))
+            .await;
+        // This is the same gate as run(): only a successful join authorizes lock cleanup.
+        match result {
+            Ok(clean) => {
+                assert!(!clean, "forced abort is an unclean shutdown");
+                assert!(
+                    completed.load(Ordering::SeqCst),
+                    "task resources must finish dropping before unlock"
+                );
+                if let Some((pool, lock)) = lease_owner {
+                    // Exercise the same explicit advisory unlock and pool-close path as run(),
+                    // with the lock held throughout the task's delayed resource cleanup.
+                    let watch = tokio::spawn(async move { Ok(lock) });
+                    assert!(
+                        super::cleanup_service(watch, None, &pool, Duration::from_secs(1)).await
+                    );
+                    assert!(pool.is_closed());
+                }
+            }
+            Err(_) => panic!("the aborted task should have finished cleanup"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unjoined_task_cannot_authorize_lock_cleanup() {
+        use std::time::Duration;
+        let mut tasks = ServiceTasks::new();
+        let completed = Arc::new(AtomicBool::new(false));
+        let cleanup = TaskCleanup {
+            completed: completed.clone(),
+            delay: Duration::from_millis(200),
+        };
+        let entered = tokio_util::sync::CancellationToken::new();
+        let started = entered.clone();
+        tasks.spawn("slow cleanup", |_| async move {
+            let _cleanup = cleanup;
+            started.cancel();
+            std::future::pending::<()>().await;
+        });
+        entered.cancelled().await;
+        let mut retained = match tasks
+            .shutdown_with_deadlines(Duration::from_millis(20), Duration::from_millis(20))
+            .await
+        {
+            Err(tasks) => tasks,
+            Ok(_) => panic!("unjoined resources must not authorize lease unlock"),
+        };
+        assert!(!completed.load(Ordering::SeqCst));
+        // Production terminates without dropping the lock here. The test joins its task to leave
+        // no running work in the test runtime.
+        tokio::time::timeout(Duration::from_secs(2), retained.set.join_next())
+            .await
+            .unwrap();
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn read_only_signal_error_fails_after_bounded_cleanup() {
+        use std::time::Duration;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::serve_read_only_until(
+                listener,
+                axum::Router::new(),
+                pool.clone(),
+                async { Err(std::io::Error::other("signal setup failed")) },
+                Duration::from_millis(20),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, std::process::ExitCode::FAILURE);
+        assert!(pool.is_closed());
+    }
+
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
         assert_eq!(parse_nonce("00"), Ok(vec![0]));
@@ -1809,7 +1962,10 @@ mod tests {
             .await
             .expect("the failing task exits first");
         assert!(!stopped.load(Ordering::SeqCst));
-        assert!(tasks.shutdown().await, "the remaining task stops cleanly");
+        assert!(
+            matches!(tasks.shutdown().await, Ok(true)),
+            "the remaining task stops cleanly"
+        );
         assert!(stopped.load(Ordering::SeqCst));
 
         let mut tasks = ServiceTasks::new();
@@ -1818,7 +1974,7 @@ mod tests {
             Err::<(), _>("shutdown failure")
         });
         assert!(
-            !tasks.shutdown().await,
+            matches!(tasks.shutdown().await, Ok(false)),
             "a failure during shutdown is unclean"
         );
     }
