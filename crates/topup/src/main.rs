@@ -1746,6 +1746,37 @@ mod tests {
         assert!(aborted.is_finished());
     }
 
+    #[tokio::test]
+    async fn read_only_shutdown_bounds_pool_close_with_an_outstanding_connection() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var("CI").is_err(),
+                "DATABASE_URL is required in CI"
+            );
+            return;
+        };
+        let pool = topup::db::connect(&url, "run", 1).await.unwrap();
+        let connection = pool.acquire().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::serve_read_only_until(
+                listener,
+                axum::Router::new(),
+                pool.clone(),
+                async { Ok(()) },
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(20),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, std::process::ExitCode::FAILURE);
+        assert!(pool.is_closed());
+        drop(connection);
+    }
+
     #[test]
     fn nonce_policy_accepts_one_through_thirty_two_bytes() {
         assert_eq!(parse_nonce("00"), Ok(vec![0]));

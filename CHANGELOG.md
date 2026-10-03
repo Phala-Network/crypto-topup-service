@@ -19,6 +19,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   attestation key fetches remain available only in test mode.
 - Price-provider responses are bounded while streaming, and API ingress and service containers
   have bounded resource and privilege exposure.
+- Database sessions use role-specific time budgets; service shutdown bounds task draining,
+  advisory-lock cleanup, and pool closure, including read-only restore instances.
 
 ## [0.7.0] - 2026-10-02
 

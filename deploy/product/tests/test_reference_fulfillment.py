@@ -14,8 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from starlette.testclient import TestClient
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from starlette.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -906,9 +906,7 @@ def test_restore_records_over_asgi_preserves_signed_query_and_payload() -> None:
     try:
         with TestClient(product.app) as client:
             for query, since in (("", None), ("?since=1790000000", 1_790_000_000)):
-                target, headers = _signed(
-                    "GET", "/accounts/restore-records" + query, b""
-                )
+                target, headers = _signed("GET", "/accounts/restore-records" + query, b"")
                 response = client.get(target, headers=headers)
                 assert response.status_code == 200
                 assert response.json() == export_restore_records(
