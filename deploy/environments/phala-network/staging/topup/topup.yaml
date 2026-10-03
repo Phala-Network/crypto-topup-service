@@ -23,10 +23,6 @@ rpc_companies:
     # Sentio's public testnet RPCs; reviewed against sentio.xyz and its official docs.
     domains:
     - sentio.xyz
-  pocket:
-    # Public RPC service documented by api.pocket.network; no API key required.
-    domains:
-    - pocket.network
 rpc_budgets:
   tenderly-account:
     requests_per_second: 10
@@ -55,17 +51,11 @@ rpc_budgets:
   sentio-base-sepolia-key:
     requests_per_second: 5
     burst: 2
-  pocket-account:
-    requests_per_second: 5
-    burst: 5
   ethpandaops-account:
     requests_per_second: 2
     burst: 2
   ethpandaops-sepolia-key:
     requests_per_second: 2
-    burst: 2
-  pocket-base-sepolia-key:
-    requests_per_second: 5
     burst: 2
 rpc_groups:
   provider-a:
@@ -126,12 +116,6 @@ rpc_groups:
       url: https://base-sepolia-rpc.publicnode.com
       account_budget: publicnode-account
       key_budget: base-sepolia-b-key
-    - id: pocket-base-sepolia-b
-      company: pocket
-      url: https://base-testnet.api.pocket.network
-      account_budget: pocket-account
-      key_budget: pocket-base-sepolia-key
-      priority: 10
 # Every value a route does not write is a code default (docs/architecture.md §14);
 # `topup config show` prints the resolved routes.
 routes:

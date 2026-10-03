@@ -221,7 +221,10 @@ retry. `recovery_successes` counts complete successful probes, not individual RP
 Acceptance takes one finalized snapshot for numeric capabilities and the unsplit 2 000-block
 address-less A logs test, avoiding a redundant tagged read against a different gateway backend.
 B checks a 100-block addressed recent log range. Persisted floors and finalized canonical hashes
-are still checked before readmission.
+are still checked before readmission. Same-height hashes must agree across the snapshot,
+persisted anchors and every subsequent block read within a probe. Owner recovery gives each
+member a fresh `probe.deadline`, then starts anchor agreement on fresh copies with a separate
+shared `total_deadline_ms` bound after both groups finish probing.
 
 ## Heads, forks and logs windows
 

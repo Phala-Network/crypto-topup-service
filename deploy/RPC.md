@@ -8,7 +8,7 @@ and restore-check in the environment's compose overlay. No RPC sidecar or cache 
 ## Configuration and acceptance
 
 Staging uses Tenderly/Sentio A on both chains, PublicNode/ethPandaOps B on Sepolia, and
-PublicNode/Pocket B on Base Sepolia (see
+PublicNode alone for B on Base Sepolia (see
 [staging routes](phala.md#staging-routes)). Keep the
 existing member ids so usage series continue. Add credentials or backups through a reviewed PR;
 review company ownership independently of DNS names, including resellers and aliases. Companies
@@ -36,6 +36,9 @@ retry through Tower, with exponential backoff from `retry_delay_ms` and quota ad
 `Retry-After`. Wrong chain/genesis, missing or mismatched code, unsupported capabilities,
 malformed replies and stale heads fail immediately. `recovery_successes` (default 2) requires
 consecutive complete successful probes before readmission; retries are not recovery successes.
+Owner recovery also gives each member a fresh `probe.deadline`; after both groups finish,
+anchor agreement starts with fresh copies and its own shared `total_deadline_ms` bound.
+Same-height snapshot, persisted-anchor and later-read hash conflicts fail immediately.
 A must serve address-less Transfer logs over an unsplit 2 000-block window; B must serve a
 100-block addressed recent log range. All probes check canonical Multicall3 and route contracts.
 

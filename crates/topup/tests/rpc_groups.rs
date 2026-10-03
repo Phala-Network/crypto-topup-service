@@ -215,7 +215,12 @@ fn redundant_staging_preserves_roles_and_rejects_old_schema() -> Result<()> {
     for route in &config.routes {
         for (role, id) in route.chain.rpc_providers.iter().enumerate() {
             let group = &config.rpc_groups[id];
-            ensure!(group.members.len() >= 2);
+            if id == "base-sepolia-b" {
+                // No independently operated backup passed the genesis/capability requirements.
+                ensure!(group.members.len() == 1);
+            } else {
+                ensure!(group.members.len() >= 2);
+            }
             ensure!(
                 group
                     .members

@@ -1027,3 +1027,96 @@ async fn probe_timeouts_retry_and_connection_errors_stop_at_attempt_bound() {
     assert_eq!(connections.load(Ordering::SeqCst), 3);
     task.abort();
 }
+
+struct FinalizedFloor;
+#[async_trait]
+impl WatermarkStore for FinalizedFloor {
+    async fn blocked(&self, _: u64) -> Result<(), Failure> {
+        Ok(())
+    }
+    async fn freeze(&self, _: u64) -> Result<(), Failure> {
+        Ok(())
+    }
+    async fn load(&self, _: u64, _: &str, tag: &str) -> Result<Option<HeadAnchor>, Failure> {
+        Ok(matches!(tag, "finalized" | "cursor")
+            .then(|| HeadAnchor::parse(&header("0x64".into())).unwrap()))
+    }
+    async fn accept(
+        &self,
+        _: u64,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &HeadAnchor,
+    ) -> Result<(), Failure> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn probe_rejects_snapshot_conflicting_with_same_height_persisted_anchor() {
+    let numeric = Arc::new(AtomicUsize::new(0));
+    let reads = numeric.clone();
+    let (url, task) = server(Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let reads = reads.clone();
+            async move {
+                let mut value = header("0x64".into());
+                if request["params"][0] == "finalized" {
+                    value["hash"] = json!(format!("0x{}", "33".repeat(32)));
+                } else if request["params"][0] == "0x64" {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    value["number"] = json!("0xc8");
+                }
+                Json(json!({"jsonrpc":"2.0","id":request["id"],"result":value}))
+            }
+        }),
+    ))
+    .await;
+    let group = group(&url);
+    group.set_store(Arc::new(FinalizedFloor));
+    let probe = group.probe_copy().unwrap();
+    for tag in ["latest", "safe", "finalized"] {
+        probe
+            .head(0, tag, Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+    assert_eq!(group.validate_probe(0, &probe).await, Err(Failure::Fork));
+    assert_eq!(
+        numeric.load(Ordering::SeqCst),
+        0,
+        "a good numeric answer must not override the conflicting snapshot"
+    );
+    assert_eq!(group.eligible(), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn probe_rejects_later_numeric_hash_conflicting_with_snapshot_without_retry() {
+    let numeric = Arc::new(AtomicUsize::new(0));
+    let reads = numeric.clone();
+    let (url, task) = server(Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let reads = reads.clone();
+            async move {
+                let mut value = header("0x64".into());
+                if request["params"][0] == "0x64" {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    value["hash"] = json!(format!("0x{}", "33".repeat(32)));
+                }
+                Json(json!({"jsonrpc":"2.0","id":request["id"],"result":value}))
+            }
+        }),
+    ))
+    .await;
+    let probe = group(&url).probe_copy().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    probe.head(0, "finalized", deadline).await.unwrap();
+    assert_eq!(probe.send(0, &json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x64",false]}), deadline).await, Err(Failure::Fork));
+    assert_eq!(numeric.load(Ordering::SeqCst), 1);
+    task.abort();
+}

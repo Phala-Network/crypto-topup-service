@@ -431,6 +431,7 @@ pub struct RpcGroup {
     http: reqwest::Client,
     health: Mutex<Vec<Health>>,
     heads: tokio::sync::Mutex<BTreeMap<String, HeadAnchor>>,
+    probe_blocks: tokio::sync::Mutex<BTreeMap<u64, String>>,
     store: RwLock<Option<Arc<dyn WatermarkStore>>>,
 }
 impl fmt::Debug for RpcGroup {
@@ -462,6 +463,7 @@ impl RpcGroup {
             http: transport::client()?,
             health: Mutex::new(health),
             heads: tokio::sync::Mutex::new(BTreeMap::new()),
+            probe_blocks: tokio::sync::Mutex::new(BTreeMap::new()),
             store: RwLock::new(None),
         });
         metrics::register(&group);
@@ -483,6 +485,7 @@ impl RpcGroup {
             http: self.http.clone(),
             health: Mutex::new(self.members.iter().map(|_| Health::default()).collect()),
             heads: tokio::sync::Mutex::new(BTreeMap::new()),
+            probe_blocks: tokio::sync::Mutex::new(BTreeMap::new()),
             store: RwLock::new(None),
         }))
     }
@@ -515,6 +518,12 @@ impl RpcGroup {
                 if let Some(previous) = store.load(self.chain, &self.id, floor).await? {
                     if current.number < previous.number {
                         return Err(Failure::Stale);
+                    }
+                    if current.number == previous.number && current.hash != previous.hash {
+                        if tag == "finalized" || floor == "cursor" {
+                            store.freeze(self.chain).await?;
+                        }
+                        return Err(Failure::Fork);
                     }
                     if tag == "finalized" {
                         let value=probe.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",previous.number),false]}),Instant::now().checked_add(Duration::from_millis(self.policy.total_deadline_ms)).unwrap_or_else(Instant::now)).await?;
@@ -722,13 +731,27 @@ impl RpcGroup {
                 .and_then(Value::as_str)
                 .filter(|tag| matches!(*tag, "latest" | "safe" | "finalized" | "0x0"));
             tracing::debug!(group=%self.id, member=%self.members.get(index).map(|m|m.id.as_str()).unwrap_or("unknown"), probe=method, ?tag, "RPC probe attempt");
-            let result = self
-                .send_once(index, &operation.value, operation.deadline)
-                .await
-                .and_then(|value| {
-                    validate_typed(method, &value)?;
-                    Ok(value)
-                });
+            let result = async {
+                let value = self
+                    .send_once(index, &operation.value, operation.deadline)
+                    .await?;
+                validate_typed(method, &value)?;
+                if method == "eth_getBlockByNumber" {
+                    let head = HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
+                    // Preserve every hash observed in this single probe, including its tagged
+                    // snapshot. A later numeric read must not hide conflicting evidence.
+                    let mut blocks = self.probe_blocks.lock().await;
+                    if blocks
+                        .get(&head.number)
+                        .is_some_and(|hash| hash != &head.hash)
+                    {
+                        return Err(Failure::Fork);
+                    }
+                    blocks.insert(head.number, head.hash);
+                }
+                Ok(value)
+            }
+            .await;
             if let Err(error) = &result {
                 tracing::warn!(group=%self.id, member=%self.members.get(index).map(|m|m.id.as_str()).unwrap_or("unknown"), probe=method, ?tag, class=error.code(), "RPC probe attempt failed");
             }
