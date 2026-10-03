@@ -80,7 +80,9 @@ skips an invalid index. The old-index drop uses `IF EXISTS` so interruption afte
 before bookkeeping is also retryable. Other schemas and recorded indexes are untouched.
 
 The CLI regression tests hold uncommitted writers on each queue table and invoke the actual
-`topup migrate` binary with `lock_timeout = '100ms'`. Both builds fail and leave
+`topup migrate` binary with its production `lock_timeout = '30s'`. Session budgets override
+connection URL timeout options; the tests use the normal migration entry point and budgets. Both
+builds fail and leave
 `indisvalid = false` with no successful migration record. After resolving the writer, another
 normal CLI invocation reports cleanup, rebuilds the index with a new OID, records the migration,
 and succeeds again on an idempotent retry. Separate tests verify that a valid completed build

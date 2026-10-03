@@ -499,7 +499,7 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_| async {
-                    StatusCode::SERVICE_UNAVAILABLE
+                    error::ApiError::database_busy().into_response()
                 }))
                 .layer(LoadShedLayer::new())
                 .layer(GlobalConcurrencyLimitLayer::new(256)),

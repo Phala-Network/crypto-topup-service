@@ -72,14 +72,9 @@ async fn rpc_queue_plans_and_concurrent_migration_round_trip() -> Result<()> {
 }
 
 fn migrate_cli(url: &str) -> Result<std::process::Output> {
-    let mut url = url::Url::parse(url)?;
-    if !url.query_pairs().any(|(name, _)| name == "options") {
-        url.query_pairs_mut()
-            .append_pair("options", "-c lock_timeout=2s -c statement_timeout=5s");
-    }
     Ok(std::process::Command::new(env!("CARGO_BIN_EXE_topup"))
         .arg("migrate")
-        .env("DATABASE_URL", url.as_str())
+        .env("DATABASE_URL", url)
         .output()?)
 }
 
@@ -107,9 +102,8 @@ async fn interrupted_concurrent_builds_recover_through_the_migrate_cli() -> Resu
                 topup::db::MIGRATOR.undo(pool,target).await?;
                 let mut writer = pool.begin().await?;
                 sqlx::query(write).execute(&mut *writer).await?;
-                let mut blocked_url = url::Url::parse(&database.owner_url)?;
-                blocked_url.query_pairs_mut().append_pair("options","-c lock_timeout=100ms");
-                let failed = migrate_cli(blocked_url.as_str())?;
+                // Exercise the production migrate budget, which overrides URL timeout options.
+                let failed = migrate_cli(&database.owner_url)?;
                 ensure!(!failed.status.success() && cli_text(&failed).contains("lock timeout"),"{}",cli_text(&failed));
                 let (valid,oid): (bool,i64) = sqlx::query_as(
                     "SELECT i.indisvalid,c.oid::bigint FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname=$1"

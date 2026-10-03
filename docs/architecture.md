@@ -968,8 +968,9 @@ OpenAPI documents remain outside this policy.
 The merchant OpenAPI document includes the shared authentication/authorization `403`, rate
 admission `429`, and temporary-unavailability `503` responses on every operation. The admin
 document also includes shared `503` responses. Every `429` sends a positive integer `Retry-After`
-in seconds. A `503` can send it (`1` for database admission/conflicts, `300` for restore gates);
-other temporary-unavailability responses may omit it. Clients respect the header when present.
+in seconds. A `503` can send it (`1` for database admission/conflicts and global request overload,
+`300` for restore gates); other temporary-unavailability responses may omit it. Clients respect
+the header when present.
 
 Quote lists select the account and mode's page before fetching payment observations. One batched
 deposit read and one batched pending-transfer read cover only the selected address ids; an empty
