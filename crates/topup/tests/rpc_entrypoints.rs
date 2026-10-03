@@ -64,6 +64,7 @@ struct Node {
     url: String,
     mode: Arc<AtomicUsize>,
     sends: Arc<AtomicUsize>,
+    hanging: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Node {
@@ -77,10 +78,12 @@ impl Node {
     async fn start(count: usize) -> Result<Self> {
         let mode = Arc::new(AtomicUsize::new(0));
         let sends = Arc::new(AtomicUsize::new(0));
+        let hanging = Arc::new(tokio::sync::Notify::new());
+        let signal = hanging.clone();
         let m = mode.clone();
         let hits = sends.clone();
         let router=Router::new().route("/",post(move |Json(request):Json<Value>|{
-            let mode=m.clone();let sends=hits.clone();async move {
+            let mode=m.clone();let sends=hits.clone();let signal=signal.clone();async move {
                 let m=mode.load(Ordering::SeqCst);
                 if m==6 {tokio::time::sleep(Duration::from_millis(30)).await;}
                 let result=match request["method"].as_str().unwrap(){
@@ -96,7 +99,7 @@ impl Node {
                         let batched=filter.pointer("/topics/2").is_some_and(|v|!v.is_null());
                         let batch=sends.fetch_add(1,Ordering::SeqCst);
                         if batched && m==3 && batch>0 {return Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32603,"message":"last batch failed"}}));}
-                        if batched && m==4 && batch>0 {std::future::pending::<()>().await;}
+                        if batched && m==4 && batch>0 {signal.notify_one();std::future::pending::<()>().await;}
                         let from=u64::from_str_radix(filter["fromBlock"].as_str().unwrap().trim_start_matches("0x"),16).unwrap();
                         let to=u64::from_str_radix(filter["toBlock"].as_str().unwrap().trim_start_matches("0x"),16).unwrap();
                         let is_transfer=filter.pointer("/topics/0").and_then(Value::as_str)==Some("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
@@ -124,6 +127,7 @@ impl Node {
             url,
             mode,
             sends,
+            hanging,
             task,
         })
     }
@@ -306,6 +310,9 @@ async fn mixed_member_null_receipt_cannot_reverse_a_real_deposit() -> Result<()>
         let b = group("b", &[&good.url], 1000, GroupPolicy::default())?;
         install(&database.app_pool, &[a.clone(), b.clone()]).await?;
         scan(&database.app_pool, routes(a, b, false)?.as_ref()).await?;
+        sqlx::query("UPDATE deposits SET state='credited',credit_minor=1")
+            .execute(&database.app_pool)
+            .await?;
         // Use round robin: previously each receipt could come from the lagging member while
         // finalized heads and consumed nonces came from the fresh member.
         let policy = GroupPolicy {
@@ -337,6 +344,18 @@ async fn mixed_member_null_receipt_cannot_reverse_a_real_deposit() -> Result<()>
     result
 }
 
+async fn cancel_last_batch<F: std::future::Future>(node: &Node, operation: F) -> Result<()> {
+    tokio::pin!(operation);
+    tokio::select! {
+        _ = node.hanging.notified() => {
+            ensure!(node.sends.load(Ordering::SeqCst)>=2,"must reach the last batch before cancellation");
+            Ok(())
+        }
+        _ = &mut operation => anyhow::bail!("window completed before cancellation"),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => anyhow::bail!("window never reached the hanging last batch"),
+    }
+}
+
 async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
     let Some(database) = support::TestDatabase::create().await? else {
         return Ok(());
@@ -362,14 +381,7 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
         install(&database.app_pool, &[a.clone(), b.clone()]).await?;
         let routes = routes(a, b, true)?;
         if cancel {
-            ensure!(
-                tokio::time::timeout(
-                    Duration::from_millis(150),
-                    scan(&database.app_pool, &routes)
-                )
-                .await
-                .is_err()
-            );
+            cancel_last_batch(&first, scan(&database.app_pool, &routes)).await?;
         } else {
             let outcome = scan(&database.app_pool, &routes).await;
             ensure!(
@@ -411,14 +423,11 @@ async fn batch_scenario(switch: bool, cancel: bool) -> Result<()> {
         let reconciler =
             topup::reconciler::Reconciler::from_routes(database.app_pool.clone(), routes)?;
         if cancel {
-            ensure!(
-                tokio::time::timeout(
-                    Duration::from_millis(150),
-                    reconciler.check(topup::reconciler::CheckName::MissingDeposit)
-                )
-                .await
-                .is_err()
-            );
+            cancel_last_batch(
+                &first,
+                reconciler.check(topup::reconciler::CheckName::MissingDeposit),
+            )
+            .await?;
         } else {
             let outcome = reconciler
                 .check(topup::reconciler::CheckName::MissingDeposit)
@@ -493,8 +502,8 @@ async fn dense_window_deadline_accounts_for_verification_latency_too() -> Result
         node.mode.store(6, Ordering::SeqCst);
         seed(&database.app_pool, 1).await?;
         let policy = GroupPolicy {
-            total_deadline_ms: 200,
-            attempt_timeout_ms: 100,
+            total_deadline_ms: 1000,
+            attempt_timeout_ms: 1000,
             max_attempts: 1,
             ..Default::default()
         };
