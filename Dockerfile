@@ -8,13 +8,16 @@ ARG BUILD_JOBS=""
 ENV CARGO_INCREMENTAL=0 \
     SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
+# Embed the locked Rust dependency inventory for final-image scanning and SBOM generation.
+RUN cargo install cargo-auditable --version 0.7.7 --locked
+
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .sqlx ./.sqlx
 COPY crates ./crates
 RUN SQLX_OFFLINE=true SOURCE_COMMIT="$SOURCE_COMMIT" \
     RUSTFLAGS="--remap-path-prefix=/workspace=. -C link-arg=-Wl,--build-id=none" \
-    cargo build --release --locked -p topup ${BUILD_JOBS:+--jobs "$BUILD_JOBS"}
+    cargo auditable build --release --locked -p topup ${BUILD_JOBS:+--jobs "$BUILD_JOBS"}
 
 # Stripe's smokescreen, the webhook egress proxy (docs/design/multi-tenant.md §8), which the
 # compose runs from this image as the `smokescreen` sidecar, so it is pinned and attested with
@@ -30,7 +33,7 @@ RUN git init -q . \
     && CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=vendor \
         go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' -o /out/smokescreen .
 
-FROM gcr.io/distroless/cc-debian13:latest@sha256:4594d59540d1948417f6ca2829ddd9294493a7c68b7528f4dd459de7f203a750
+FROM gcr.io/distroless/cc-debian13:latest@sha256:159783207c2cd44c2aa5715961d13c8612368ac9bd450f887e3f08fc8ea461e3
 
 COPY --from=builder --chown=nonroot:nonroot /workspace/target/release/topup /usr/local/bin/topup
 COPY --from=smokescreen --chown=nonroot:nonroot /out/smokescreen /usr/local/bin/smokescreen

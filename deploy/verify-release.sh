@@ -10,7 +10,7 @@
 #   3. Every asset and SHA256SUMS has a GitHub build provenance attestation signed by release.yml
 #      at refs/tags/VERSION on a GitHub-hosted runner, for that commit.
 #   4. images.json names exactly the three images, each by repository@sha256 digest, and each image
-#      has the same attestation.
+#      has the same provenance attestation and a signed SPDX SBOM attestation.
 #
 # It needs the GitHub CLI 2.101.0 (the version Deploy pins), logged in or with GH_TOKEN, and jq.
 #
