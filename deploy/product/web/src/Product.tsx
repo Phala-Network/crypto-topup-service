@@ -10,13 +10,12 @@ import { InputGroup, InputGroupAddon, InputGroupInput, InputGroupText } from "@/
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Account, Asset, CreatedQuote, DepositAddressResponse, Network } from "./api.js";
-import { ChainIcon, TokenIcon, assetOf, networkOf, tokenFullName } from "./chains.js";
+import { TokenIcon, assetOf, networkOf, tokenFullName } from "./chains.js";
 import { PRIMARY_BUTTON, ExplorerLink, InfoTip, describe, loadSdk } from "./common.js";
 import { DepositAddressPanel } from "./DepositAddressPanel.js";
 import { atomicAmount, dollars, percent, presetDollars, rate, signedDollars, tokenName } from "./format.js";
@@ -339,22 +338,19 @@ function PaymentOptions({
     <>
       <div className="space-y-2">
         <Label htmlFor={`${id}-network`}>Network</Label>
-        {/* In a form, Radix adds a hidden native select beside the trigger: kept out of the flow. */}
-        <div className="relative [&>select]:absolute">
-          <Select value={String(network.chain_id)} onValueChange={(value) => onNetworkChange(Number(value))}>
-            <SelectTrigger id={`${id}-network`} className="h-10! w-full" aria-label="Network" data-testid="network-select">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent position="popper" align="start">
-              {networks.map((each) => (
-                <SelectItem key={each.chain_id} value={String(each.chain_id)} data-testid="network-option">
-                  <ChainIcon chainId={each.chain_id} />
-                  <span>{each.name}</span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <select
+          id={`${id}-network`}
+          className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          value={network.chain_id}
+          onChange={(event) => onNetworkChange(Number(event.target.value))}
+          data-testid="network-select"
+        >
+          {networks.map((each) => (
+            <option key={each.chain_id} value={each.chain_id}>
+              {each.name}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="space-y-2">
         <Label id={`${id}-token`} asChild>

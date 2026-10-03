@@ -183,3 +183,17 @@
 .product-app .pp-root a:focus-visible {
   outline-color: var(--ring);
 }
+
+.pp-root[data-theme] {
+  --pp-color-primary: var(--primary);
+  --pp-accessible-color-on-color-primary: var(--primary-foreground);
+  --pp-color-background: var(--card);
+  --pp-color-text: var(--card-foreground);
+  --pp-color-text-secondary: var(--muted-foreground);
+  --pp-color-border: var(--border);
+  --pp-color-danger: var(--destructive);
+  --pp-color-success: var(--success);
+  --pp-border-radius: var(--radius);
+  --pp-font-family: inherit;
+}
+.github-icon { mask: url("./icons/github.svg") center / contain no-repeat; }

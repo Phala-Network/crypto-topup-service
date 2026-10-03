@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 from topup_sdk import TopupClient
 from topup_sdk.addresses import to_checksum_address
 
+from .transport import DeadlineTransport
+
 # The deposit driver signs its account API requests with this key id (see `AccountApi`).
 DRIVER_KEYID = "driver/v1"
 EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
@@ -232,4 +234,7 @@ class ProductConfig:
             account=self.account,
             forwarder=(self.factory, self.implementation),
             treasuries=self.treasuries(),
+            timeout=5,
+            max_attempts=1,
+            transport=DeadlineTransport(),
         )

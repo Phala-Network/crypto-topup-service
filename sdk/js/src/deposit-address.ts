@@ -1,3 +1,4 @@
+import { requestSignal } from "./request.js";
 import { CheckoutError, responseError } from "./checkout.js";
 
 /** A payment to a deposit address as the customer's page sees it. Display only. */
@@ -51,6 +52,9 @@ export interface RetrieveDepositAddressOptions {
   /** A `client_secret` from your backend's `POST /v1/deposit_addresses` or `…/rotate`. */
   clientSecret: string;
   apiBase: string;
+  signal?: AbortSignal;
+  /** Request deadline in milliseconds; default 10000. */
+  requestTimeout?: number;
   fetch?: typeof globalThis.fetch;
 }
 
@@ -77,7 +81,11 @@ export async function retrieveDepositAddress(
   const url = `${base}/v1/deposit_addresses/${id}?client_secret=${encodeURIComponent(options.clientSecret)}`;
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   // A simple GET with no custom headers, so the browser sends no CORS preflight.
-  const response = await fetchImpl(url, { cache: "no-store", credentials: "omit" });
+  const response = await fetchImpl(url, {
+    cache: "no-store",
+    credentials: "omit",
+    signal: requestSignal(options),
+  });
   if (!response.ok) {
     throw responseError(response, "the address or its client secret is unknown");
   }

@@ -1,7 +1,8 @@
+import "../../src/styles.css";
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createWalletClient, custom, isAddress } from "viem";
-import { Checkout } from "../../dist/react/index.js";
+import { Checkout, DepositAddress } from "../../dist/react/index.js";
 import type { EthereumProvider } from "../../dist/index.js";
 
 const params = new URLSearchParams(window.location.search);
@@ -13,19 +14,36 @@ const walletClient =
     ? createWalletClient({ account, transport: custom(testWallet) })
     : undefined;
 
+const address = "0x1111111111111111111111111111111111111111";
+const token = "0x2222222222222222222222222222222222222222";
+const networks = [11155111, 84532].map((chain_id) => ({
+  chain_id,
+  address,
+  assets: ["pha", "usdc"].map((asset) => ({
+    asset,
+    contract: token,
+    decimals: 18,
+    payment_uri: `ethereum:${token}@${chain_id}/transfer?address=${address}`,
+  })),
+}));
+
 function App() {
   const [events, setEvents] = useState<string[]>([]);
   return (
     <main>
-      <Checkout
-        clientSecret={params.get("client_secret") ?? ""}
-        expectedAddress={params.get("expected_address") ?? ""}
-        apiBase={params.get("api_base") ?? ""}
-        pollInterval={500}
-        walletClient={walletClient}
-        onSuccess={() => setEvents((e) => [...e, "success"])}
-        onExpire={() => setEvents((e) => [...e, "expire"])}
-      />
+      {params.has("deposit") ? (
+        <DepositAddress depositAddress={{ address, networks }} />
+      ) : (
+        <Checkout
+          clientSecret={params.get("client_secret") ?? ""}
+          expectedAddress={params.get("expected_address") ?? ""}
+          apiBase={params.get("api_base") ?? ""}
+          pollInterval={500}
+          walletClient={walletClient}
+          onSuccess={() => setEvents((e) => [...e, "success"])}
+          onExpire={() => setEvents((e) => [...e, "expire"])}
+        />
+      )}
       <p data-testid="events">{events.join(",")}</p>
     </main>
   );

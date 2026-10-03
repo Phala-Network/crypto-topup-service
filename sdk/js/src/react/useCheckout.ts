@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createCheckout, type CheckoutSession, type CheckoutState } from "../checkout.js";
+import {
+  createCheckout,
+  type CheckoutOptions,
+  type CheckoutSession,
+  type CheckoutState,
+} from "../checkout.js";
 
-export interface UseCheckoutOptions {
-  clientSecret: string;
-  /** The quote's address as your backend recomputed it; another one fails closed. */
-  expectedAddress: string;
-  apiBase: string;
-  pollInterval?: number;
-}
+export type UseCheckoutOptions = Pick<
+  CheckoutOptions,
+  "clientSecret" | "expectedAddress" | "apiBase" | "pollInterval" | "signal" | "requestTimeout"
+>;
 
 export interface UseCheckoutResult extends CheckoutState {
   /** Reads the quote now, for example right after the wallet broadcast the payment. */
@@ -22,6 +24,8 @@ export function useCheckout({
   expectedAddress,
   apiBase,
   pollInterval,
+  signal,
+  requestTimeout,
 }: UseCheckoutOptions): UseCheckoutResult {
   const [current, setCurrent] = useState({ key: "", state: LOADING });
   const checkout = useRef<CheckoutSession | null>(null);
@@ -33,6 +37,8 @@ export function useCheckout({
       expectedAddress,
       apiBase,
       ...(pollInterval === undefined ? {} : { pollInterval }),
+      ...(signal === undefined ? {} : { signal }),
+      ...(requestTimeout === undefined ? {} : { requestTimeout }),
     });
     checkout.current = instance;
     const unsubscribe = instance.subscribe((state) => setCurrent({ key, state }));
@@ -41,7 +47,7 @@ export function useCheckout({
       instance.destroy();
       checkout.current = null;
     };
-  }, [key, clientSecret, expectedAddress, apiBase, pollInterval]);
+  }, [key, clientSecret, expectedAddress, apiBase, pollInterval, signal, requestTimeout]);
 
   const refresh = useCallback(() => {
     void checkout.current?.refresh();

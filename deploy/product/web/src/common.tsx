@@ -7,7 +7,6 @@ import { cn } from "@/lib/utils";
 import { ApiError } from "./api.js";
 import { networkOf } from "./chains.js";
 import { short } from "./format.js";
-import githubMark from "./icons/github.svg";
 import { useNetworks } from "./queries.js";
 
 /** An inline text link, in the page's text colour. */
@@ -34,12 +33,10 @@ export const PRIMARY_BUTTON = "h-11 w-full rounded-lg font-semibold";
 
 /** GitHub's mark (./icons/github.svg), in the text colour. */
 export function GitHubIcon({ className }: { className?: string }) {
-  const mask = `url("${githubMark}") center / contain no-repeat`;
   return (
     <span
       aria-hidden="true"
-      className={cn("inline-block size-4 shrink-0 bg-current", className)}
-      style={{ mask, WebkitMask: mask }}
+      className={cn("github-icon inline-block size-4 shrink-0 bg-current", className)}
     />
   );
 }

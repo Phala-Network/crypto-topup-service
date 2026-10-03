@@ -49,6 +49,8 @@ codegen = [
     "ruff==0.16.8",
 ]
 product = [
+    "granian==2.8.4",
+    "starlette==1.7.0",
     "web3==8.0.0",
 ]
 # The FastAPI example (sdk/examples/fastapi_app.py) and its test.

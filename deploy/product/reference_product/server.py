@@ -8,22 +8,32 @@ the service on the user's behalf, as Phala Cloud's backend does.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import secrets
-import signal
 import threading
 import time
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
+from functools import partial
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from granian import Granian
+from granian.constants import HTTPModes, Interfaces
+from granian.http import HTTP1Settings
+from granian.server.embed import Server as EmbeddedServer
+from starlette.applications import Starlette
+from starlette.requests import ClientDisconnect, Request
+from starlette.responses import JSONResponse
+from starlette.responses import Response as HttpResponse
+from starlette.routing import Route
 
 from topup_client.models import AttestationResponse, Quote
 from topup_sdk import (
@@ -44,14 +54,20 @@ from .config import (
     MissingProductKeyError,
     ProductConfig,
 )
-from .demo import DemoConsole, Response
+from .demo import DemoConsole
 from .fulfillment import Answer, Fulfillment, PinnedKeys, TransientError, parse_decimal
 from .ledger import ProductLedger
 from .restore_records import export_restore_records
+from .transport import OPERATION_TIMEOUT_SECONDS, operation_deadline
 
 LOG = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = 30
+HEADER_TIMEOUT_MILLISECONDS = 5000
+CONNECTION_LIMIT = 32
+LISTEN_BACKLOG = 128
+SHUTDOWN_TIMEOUT_SECONDS = 35
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # The account API's path of the restore records, reserved among workspace ids.
@@ -73,84 +89,154 @@ class ProductServer:
         self.demo = demo
         config = fulfillment.config
         base_path = urlsplit(config.public_url).path.rstrip("/")
-        server = self
+        self._workers = ThreadPoolExecutor(max_workers=16, thread_name_prefix="product")
+        # Keep timed-out synchronous work admitted until it actually finishes. A client timeout
+        # cannot stop a Python thread or undo a mutation, and must not admit unlimited new work.
+        self._capacity = threading.BoundedSemaphore(16)
 
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = self._body()
-                if body is None:
-                    return
-                headers = dict(self.headers.items())
-                if self.path == base_path + "/webhooks":
-                    self._send(server.fulfillment.handle(headers, body))
-                elif server.accounts is not None and server.accounts.handles(self.path):
-                    self._send(server.accounts.handle("POST", self.path, headers, body))
-                elif server.demo is not None and server.demo.handles(self.path):
-                    self._send_raw(server.demo.handle("POST", self.path, headers, body))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        def dispatch(
+            method: str, target: str, headers: dict[str, str], body: bytes
+        ) -> HttpResponse:
+            operation_deadline.set(time.monotonic() + OPERATION_TIMEOUT_SECONDS)
+            if method == "POST" and urlsplit(target).path == base_path + "/webhooks":
+                answer = self.fulfillment.handle(headers, body)
+            elif method == "GET" and urlsplit(target).path == base_path + "/healthz":
+                answer = Answer(HTTPStatus.OK, {"status": "ok"})
+            elif (
+                self.accounts is not None and self.accounts.handles(target) and method != "OPTIONS"
+            ):
+                answer = self.accounts.handle(method, target, headers, body)
+            elif self.demo is not None and self.demo.handles(target):
+                response = self.demo.handle(method, target, headers, body)
+                return HttpResponse(response.body, response.status, headers=response.headers)
+            else:
+                answer = Answer(HTTPStatus.NOT_FOUND)
+            if answer.body is None:
+                return HttpResponse(status_code=answer.status)
+            return JSONResponse(answer.body, status_code=answer.status)
 
-            def do_GET(self) -> None:
-                headers = dict(self.headers.items())
-                if self.path == base_path + "/healthz":
-                    self._send(Answer(HTTPStatus.OK, {"status": "ok"}))
-                elif server.accounts is not None and server.accounts.handles(self.path):
-                    self._send(server.accounts.handle("GET", self.path, headers, b""))
-                elif server.demo is not None and server.demo.handles(self.path):
-                    self._send_raw(server.demo.handle("GET", self.path, headers, b""))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        def error(request: Request, status: HTTPStatus) -> HttpResponse:
+            headers = self.demo.cors(request.headers.get("origin")) if self.demo is not None else {}
+            return JSONResponse({"code": status.name.lower()}, status_code=status, headers=headers)
 
-            def do_OPTIONS(self) -> None:
-                # CORS preflights, for the demo's API only.
-                if server.demo is not None and server.demo.handles(self.path):
-                    headers = dict(self.headers.items())
-                    self._send_raw(server.demo.handle("OPTIONS", self.path, headers, b""))
-                else:
-                    self._send(Answer(HTTPStatus.NOT_FOUND))
+        async def endpoint(request: Request) -> HttpResponse:
+            try:
+                async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                    # The HTTP/1 parser rejects malformed wire framing. Also validate ASGI requests,
+                    # and bound streamed/chunked bodies regardless of Content-Length.
+                    lengths = request.headers.getlist("content-length")
+                    if lengths and (
+                        len(lengths) != 1
+                        or len(lengths[0]) > 20
+                        or not re.fullmatch(r"[0-9]+", lengths[0])
+                    ):
+                        return error(request, HTTPStatus.BAD_REQUEST)
+                    if lengths and int(lengths[0]) > MAX_BODY_BYTES:
+                        return error(request, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                    body = bytearray()
+                    async for chunk in request.stream():
+                        if len(body) + len(chunk) > MAX_BODY_BYTES:
+                            return error(request, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                        body.extend(chunk)
+                    if lengths and len(body) != int(lengths[0]):
+                        return error(request, HTTPStatus.BAD_REQUEST)
+                    target = request.scope["raw_path"].decode("ascii")
+                    if request.url.query:
+                        target += "?" + request.url.query
+                    if not self._capacity.acquire(blocking=False):
+                        return error(request, HTTPStatus.SERVICE_UNAVAILABLE)
+                    try:
+                        future = self._workers.submit(
+                            dispatch,
+                            request.method,
+                            target,
+                            dict(request.headers),
+                            bytes(body),
+                        )
+                    except RuntimeError:
+                        self._capacity.release()
+                        raise
+                    future.add_done_callback(lambda _: self._capacity.release())
+                    return await asyncio.wrap_future(future)
+            except TimeoutError:
+                return error(request, HTTPStatus.REQUEST_TIMEOUT)
+            except ClientDisconnect:
+                return error(request, HTTPStatus.BAD_REQUEST)
+            except Exception:
+                LOG.exception("product request failed")
+                return error(request, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-            def _body(self) -> bytes | None:
-                length = int(self.headers.get("content-length") or 0)
-                if length > MAX_BODY_BYTES:
-                    if server.demo is not None and server.demo.handles(self.path):
-                        cors = server.demo.cors(self.headers.get("origin"))
-                        self._send_raw(Response(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, headers=cors))
-                    else:
-                        self._send(Answer(HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
-                    return None
-                return self.rfile.read(length)
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
-            def _send(self, answer: Answer) -> None:
-                payload = b"" if answer.body is None else json.dumps(answer.body).encode()
-                self.send_response(answer.status)
-                if answer.body is not None:
-                    self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+        @asynccontextmanager
+        async def lifespan(_: Starlette) -> AsyncIterator[None]:
+            self._ready.set()
+            try:
+                yield
+            finally:
+                # Drain actual work, not merely cancelled asyncio wrappers. The production
+                # supervisor kills the worker at 35s if noncooperative sync code cannot drain.
+                await asyncio.to_thread(self.close)
 
-            def _send_raw(self, response: Response) -> None:
-                self.send_response(response.status)
-                for name, value in response.headers.items():
-                    self.send_header(name, value)
-                self.send_header("content-length", str(len(response.body)))
-                self.end_headers()
-                self.wfile.write(response.body)
+        self.app = Starlette(
+            routes=[Route("/{path:path}", endpoint, methods=["GET", "POST", "OPTIONS"])],
+            lifespan=lifespan,
+        )
+        self._server = EmbeddedServer(
+            self.app,
+            address=config.listen_host,
+            port=config.listen_port,
+            **_server_options(),
+        )
+        self._thread = threading.Thread(target=self._run, name="product-server")
 
-            def log_message(self, format: str, *args: Any) -> None:
-                LOG.debug("%s %s", self.address_string(), format % args)
+    def _run(self) -> None:
+        async def run() -> None:
+            self._loop = asyncio.get_running_loop()
+            await self._server.serve()
 
-        self._httpd = ThreadingHTTPServer((config.listen_host, config.listen_port), Handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        asyncio.run(run())
 
     def __enter__(self) -> ProductServer:
         self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._ready.is_set():
+            if not self._thread.is_alive() or time.monotonic() >= deadline:
+                self.__exit__()
+                raise RuntimeError("product server did not start")
+            time.sleep(0.01)
         return self
 
+    def close(self) -> None:
+        self._workers.shutdown(wait=True, cancel_futures=True)
+        if self.accounts is not None:
+            self.accounts.close()
+        if self.demo is not None:
+            self.demo.close()
+
     def __exit__(self, *_: object) -> None:
-        self._httpd.shutdown()
-        self._httpd.server_close()
+        if self._loop is not None and self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._server.stop)
         self._thread.join()
+
+
+def _server_options() -> dict[str, Any]:
+    return {
+        "interface": Interfaces.ASGI,
+        "http": HTTPModes.http1,
+        "websockets": False,
+        # Granian v2.8.4 acquires a permit before accept and holds it for the connection.
+        "backpressure": CONNECTION_LIMIT,
+        # Granian clamps backlog to at least 128; the OS may clamp it further.
+        "backlog": LISTEN_BACKLOG,
+        "http1_settings": HTTP1Settings(
+            header_read_timeout=HEADER_TIMEOUT_MILLISECONDS,
+            max_buffer_size=16 * 1024,
+            keep_alive=False,
+        ),
+        "log_access": False,
+    }
 
 
 class AccountApi:
@@ -461,8 +547,7 @@ def quote_address(config: ProductConfig, team: str, quote_id: str, chain_id: int
     )
 
 
-@contextmanager
-def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+def _make_product(config: ProductConfig, *, pin_wait_s: float = 0) -> ProductServer:
     """Runs the product: webhook receiver with fulfillment, account API, and the demo's API."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
@@ -475,21 +560,28 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
     fulfillment = Fulfillment(config, ledger, webhook_keys)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
     demo = None if config.web_origin is None else DemoConsole(config, ledger)
-    try:
-        with ProductServer(fulfillment, accounts, demo) as server:
-            LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
-            yield server
-    finally:
-        accounts.close()
-        if demo is not None:
-            demo.close()
+    return ProductServer(fulfillment, accounts, demo)
+
+
+@contextmanager
+def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+    """Runs the product in process for the sandbox and SDK examples."""
+    with _make_product(config, pin_wait_s=pin_wait_s) as server:
+        yield server
+
+
+def _load_application(config: ProductConfig) -> Starlette:
+    # Construct SQLite connections and in-memory rate limits inside the single worker.
+    return _make_product(config, pin_wait_s=600).app
 
 
 def serve(config: ProductConfig) -> None:
-    """Serves the product until SIGTERM or SIGINT."""
-    stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stop.set())
-    with product_service(config, pin_wait_s=600):
-        stop.wait()
-    LOG.info("product stopped")
+    """Serve under Granian's standard signal handling and bounded worker shutdown."""
+    Granian(
+        "reference_product.server",
+        address=config.listen_host,
+        port=config.listen_port,
+        workers=1,
+        workers_kill_timeout=SHUTDOWN_TIMEOUT_SECONDS,
+        **_server_options(),
+    ).serve(target_loader=partial(_load_application, config), wrap_loader=False)
