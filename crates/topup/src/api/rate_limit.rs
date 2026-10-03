@@ -98,7 +98,7 @@ impl ApiRateLimiter {
             clock: Box::new(clock),
             state: Mutex::default(),
             source_limiter: DefaultKeyedRateLimiter::keyed(Quota::per_second(
-                NonZeroU32::new(100).unwrap(),
+                NonZeroU32::new(1_000).unwrap(),
             )),
         }
     }
@@ -226,10 +226,10 @@ mod tests {
     fn ingress_budget_is_keyed_by_source() {
         let limiter = ApiRateLimiter::default();
         assert_eq!(
-            (0..100)
+            (0..1_000)
                 .filter(|_| limiter.allow_source("198.51.100.1"))
                 .count(),
-            100
+            1_000
         );
         assert!(!limiter.allow_source("198.51.100.1"));
         assert!(limiter.allow_source("198.51.100.2"));
