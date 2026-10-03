@@ -36,6 +36,7 @@ use crate::refunds::DestinationScreener;
 use crate::routes::RouteSet;
 use crate::tenancy::{Permission, Scope};
 use crate::treasuries::ContractSignatures;
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::{Extension, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -45,6 +46,7 @@ use axum::{Json, Router};
 use sqlx::PgPool;
 use topup_core::route::RouteFile;
 
+use tower::{ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -485,7 +487,13 @@ fn router_inner(state: AppState) -> (Router, ApiDocs) {
         state.clone(),
         auth::authenticate_admin,
     ));
-    let (merchant_router, merchant_doc) = merchant.merge(client_secret).split_for_parts();
+    let (merchant_router, merchant_doc) = merchant
+        .merge(client_secret)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::ingress_budget,
+        ))
+        .split_for_parts();
     let (admin_router, admin_doc) = admin.split_for_parts();
     let docs = ApiDocs {
         merchant: openapi::merchant(&merchant_doc),
@@ -494,6 +502,15 @@ fn router_inner(state: AppState) -> (Router, ApiDocs) {
     let router = merchant_router
         .merge(admin_router)
         .route("/healthz", get(healthz))
+        // Bound unauthenticated work before API-key verification can touch PostgreSQL.
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|_| async {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(256)),
+        )
         .with_state(state)
         .route("/openapi.json", get(serve_openapi))
         .route("/openapi.admin.json", get(serve_admin_openapi))
@@ -766,6 +783,46 @@ mod tests {
         let metrics = crate::observability::metrics::render().unwrap();
         assert!(metrics.contains("method=\"HEAD\",route=\"/v1/account\",status_class=\"4xx\""));
         assert!(metrics.contains("method=\"DELETE\",route=\"/v1/quotes\",status_class=\"5xx\""));
+    }
+
+    #[tokio::test]
+    async fn real_router_overload_is_observed_once_before_authentication() {
+        let state = offline_state();
+        let pool = state.pool.clone();
+        let router = super::router(state).0;
+        let key = crate::api_keys::generate(crate::api_keys::KeyKind::Secret, true).unwrap();
+        let mut admitted = Vec::new();
+        // Poll each request into the real concurrency gate and pending database authentication.
+        // No reactor turn occurs before saturation, so connection failures cannot free permits.
+        for _ in 0..256 {
+            let request = Request::builder()
+                .uri("/v1/account")
+                .header("authorization", format!("Bearer {}", *key))
+                .body(Body::empty())
+                .unwrap();
+            let mut response = Box::pin(router.clone().oneshot(request));
+            assert!(futures_util::poll!(&mut response).is_pending());
+            admitted.push(response);
+        }
+        let before =
+            crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/treasuries")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().contains_key("request-id"));
+        assert_eq!(
+            crate::observability::metrics::http_observations("/v1/treasuries", "GET", "5xx"),
+            before + 1,
+        );
+        drop(admitted);
+        pool.close().await;
     }
 
     #[tokio::test]
