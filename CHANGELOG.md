@@ -13,6 +13,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-03
+
 ### Added
 
 - Bounded HTTP request counters and latency histograms in signed admin metrics, including
@@ -58,6 +60,17 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   operation deadline for anchor agreement, allowing healthy low-rate providers to complete
   route verification.
 
+### Reference product
+
+- Replace the HTTP development server with pinned Starlette and Granian, bounded connections
+  and workers, streamed body limits, request deadlines, uniform application transport errors,
+  and graceful shutdown. Bound worker-accepted connections to 32 with a five-second total
+  header-read deadline after acceptance; excess connections wait in the OS listen backlog
+  configured at 128 (Granian's minimum), rather than entering the worker. Outbound SDK calls share a 25-second operation deadline without automatic
+  retries; a single supervised worker has a 35-second shutdown limit within the container's
+  45-second grace period. The demo forwards TanStack Query cancellation to deadline-bound fetches
+  and uses a native network select to avoid dynamic inline scrollbar styles.
+
 ### Security
 
 - Tenant and credential HTTP responses, including public payer views, idempotent replays,
@@ -69,13 +82,9 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - Database sessions use role-specific time budgets; service shutdown bounds task draining,
   advisory-lock cleanup, and pool closure, including read-only restore instances.
 
-### Python SDK (`phala-pay`)
+### JS SDK (`@phala/pay`)
 
 #### Changed
-
-- Regenerate the client with shared forbidden and unavailable error responses.
-
-### JS SDK
 
 - **Breaking:** React components require an explicit `@phala/pay/styles.css` import. Removed
   `appearance.variables`; set the `--pp-*` custom properties in your stylesheet. Components no
@@ -84,19 +93,17 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 - Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
   **Breaking:** Node.js 20.3 or later is required for the standard `AbortSignal.any` API.
   Sessions and React components abort active reads on destruction or unmount.
+
+#### Fixed
+
 - Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
   notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
 
-### Reference product
+### Python SDK (`phala-pay`)
 
-- Replace the HTTP development server with pinned Starlette and Granian, bounded connections
-  and workers, streamed body limits, request deadlines, uniform application transport errors,
-  and graceful shutdown. Bound worker-accepted connections to 32 with a five-second total
-  header-read deadline after acceptance; excess connections wait in the OS listen backlog
-  configured at 128 (Granian's minimum), rather than entering the worker. Outbound SDK calls share a 25-second operation deadline without automatic
-  retries; a single supervised worker has a 35-second shutdown limit within the container's
-  45-second grace period. The demo forwards TanStack Query cancellation to deadline-bound fetches
-  and uses a native network select to avoid dynamic inline scrollbar styles.
+#### Changed
+
+- Regenerate the client with shared forbidden and unavailable error responses.
 
 ## [0.7.0] - 2026-10-02
 
@@ -1265,7 +1272,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.7.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Phala-Network/phala-pay/compare/v0.3.5...v0.5.0
