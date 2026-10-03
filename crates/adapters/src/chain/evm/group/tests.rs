@@ -898,53 +898,55 @@ async fn pinned_probe_retries_transients_but_never_deterministic_errors() {
 
 #[tokio::test]
 async fn probe_deadline_includes_retry_after_and_all_nested_sends() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
-    let (url, task) = server(Router::new().route("/", post(move || {
+    for retry_after in ["2", "18446744073709551615"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let (url, task) = server(Router::new().route("/", post(move || {
         let count = count.clone();
         async move {
             count.fetch_add(1, Ordering::SeqCst);
-            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "2")], Json(json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limit"}})))
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", retry_after)], Json(json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limit"}})))
         }
     }))).await;
-    let mut policy = GroupPolicy::default();
-    policy.probe.deadline = 250;
-    policy.attempt_timeout_ms = 100;
-    let base = group(&url);
-    let probe = RpcGroup::new(
-        base.id.clone(),
-        base.chain,
-        policy,
-        base.members.clone(),
-        base.budgets.clone(),
-    )
-    .unwrap()
-    .probe_copy()
-    .unwrap();
-    let started = Instant::now();
-    let result = probe
-        .send(
-            0,
-            &json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}),
-            Instant::now() + Duration::from_secs(10),
+        let mut policy = GroupPolicy::default();
+        policy.probe.deadline = 250;
+        policy.attempt_timeout_ms = 100;
+        let base = group(&url);
+        let probe = RpcGroup::new(
+            base.id.clone(),
+            base.chain,
+            policy,
+            base.members.clone(),
+            base.budgets.clone(),
         )
-        .await;
-    assert_eq!(result, Err(Failure::Deadline));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(started.elapsed() < Duration::from_secs(1));
-    // A later send shares the expired complete-probe deadline.
-    assert_eq!(
-        probe
+        .unwrap()
+        .probe_copy()
+        .unwrap();
+        let started = Instant::now();
+        let result = probe
             .send(
                 0,
                 &json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}),
-                Instant::now() + Duration::from_secs(10)
+                Instant::now() + Duration::from_secs(10),
             )
-            .await,
-        Err(Failure::Deadline)
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    task.abort();
+            .await;
+        assert_eq!(result, Err(Failure::Deadline));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Later sends cannot bypass the complete-probe deadline or its quota pause.
+        assert_eq!(
+            probe
+                .send(
+                    0,
+                    &json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}),
+                    Instant::now() + Duration::from_secs(10)
+                )
+                .await,
+            Err(Failure::Deadline)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
 }
 
 #[tokio::test]

@@ -835,7 +835,14 @@ impl RpcGroup {
                         &member.account
                     },
                     if self.probe_deadline.is_some() {
-                        reply.retry_after.unwrap_or(Duration::from_secs(1))
+                        let delay = reply.retry_after.unwrap_or(Duration::from_secs(1));
+                        // An unrepresentable delay must not overflow into immediate admission.
+                        // A bounded pause beyond this probe prevents another send instead.
+                        if Instant::now().checked_add(delay).is_some() {
+                            delay
+                        } else {
+                            Duration::from_millis(self.policy.probe.deadline)
+                        }
                     } else {
                         reply
                             .retry_after
