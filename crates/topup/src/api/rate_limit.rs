@@ -63,6 +63,7 @@ struct State {
     /// Theoretical arrival time of each scope's next request.
     scopes: HashMap<Scope, Instant>,
     test_platform: Option<Instant>,
+    sources: HashMap<String, Instant>,
 }
 
 impl Default for ApiRateLimiter {
@@ -72,6 +73,17 @@ impl Default for ApiRateLimiter {
 }
 
 impl ApiRateLimiter {
+    /// Counts an unauthenticated request by its ingress source.
+    pub fn allow_source(&self, source: &str) -> bool {
+        let now = (self.clock)();
+        let mut state = self.state.lock().expect("rate limiter mutex poisoned");
+        let next = state.sources.entry(source.to_owned()).or_insert(now);
+        if *next > now + Duration::from_secs(1) {
+            return false;
+        }
+        *next = now + Duration::from_millis(100);
+        true
+    }
     /// A limiter enforcing `limits`.
     #[must_use]
     pub fn new(limits: RateLimits) -> Self {
@@ -209,5 +221,13 @@ mod tests {
             admitted(&limiter, now, Scope::new(Uuid::from_u128(9), true), 10),
             10
         );
+    }
+
+    #[test]
+    fn ingress_budget_is_keyed_by_source() {
+        let limiter = ApiRateLimiter::default();
+        assert!(limiter.allow_source("198.51.100.1"));
+        assert!(!limiter.allow_source("198.51.100.1"));
+        assert!(limiter.allow_source("198.51.100.2"));
     }
 }
