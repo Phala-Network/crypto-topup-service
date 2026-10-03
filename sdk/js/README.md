@@ -217,7 +217,8 @@ wallet icons. Configure script and font sources for your application's own bundl
 
 Public SDK reads accept `signal` and `requestTimeout` (milliseconds, default 10000). Each request
 combines caller cancellation with `AbortSignal.timeout` through `AbortSignal.any`, including the
-response body. Use a browser supporting these standard APIs. `destroy()` and React unmount
+response body. Use Node.js 20.3 or later, or a browser supporting these standard APIs.
+`destroy()` and React unmount
 abort active status reads; a request timeout permits polling to retry with the usual backoff.
 
 ## Without React

@@ -20,6 +20,7 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   longer inject inline styles, allowing `style-src 'self'` in integrations. The demo permits
   only its own CSS and the exact hash of Radix's fixed scrollbar stylesheet.
 - Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
+  **Breaking:** Node.js 20.3 or later is required for the standard `AbortSignal.any` API.
   Sessions and React components abort active reads on destruction or unmount.
 - Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
   notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
