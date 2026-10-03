@@ -535,6 +535,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .oneshot(create("key-1", quote_body("account-rl", 100)?))
             .await?;
         ensure!(created.status() == StatusCode::OK);
+        ensure!(created.headers()["cache-control"] == "no-store");
         let created = response_json(created).await?;
         let quote_id = created["id"].as_str().context("id")?.to_owned();
         ensure!(quote_id.starts_with("qt_") && quote_id.len() == 35);
@@ -579,6 +580,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         ensure!(retried.status() == StatusCode::OK);
         ensure!(retried.headers()["idempotent-replayed"] == "true");
+        ensure!(retried.headers()["cache-control"] == "no-store");
         let retried = response_json(retried).await?;
         ensure!(retried == created, "{retried}");
         let client_secret = first_secret.as_str();
@@ -590,6 +592,7 @@ async fn quotes_api_is_idempotent_rate_limited_paused_tenant_safe_and_emits_eip6
             .await?;
         ensure!(public.status() == StatusCode::OK);
         ensure!(public.headers()["access-control-allow-origin"] == "*");
+        ensure!(public.headers()["cache-control"] == "no-store");
         let public = response_json(public).await?;
         ensure!(
             public
@@ -2448,4 +2451,110 @@ fn empty_body() -> Body {
 /// A client-secret key for quotes created outside the API.
 fn client_secret_key() -> topup::client_secret::ClientSecretKey {
     topup::client_secret::ClientSecretKey::ephemeral()
+}
+
+/// A batched page shows the same payment as each scoped detail read, without pulling quotes or
+/// payments from another tenant/mode or changing cursor direction, filters, or has_more.
+#[tokio::test]
+async fn quote_pages_preserve_payments_tenant_mode_and_cursor_semantics() -> Result<()> {
+    support::with_database(|database| {
+        Box::pin(async move {
+        let pool = &database.app_pool;
+        let route = test_route();
+        let quotes: Arc<dyn QuoteProvider> = Arc::new(FixedQuote);
+        let (account, key) = seed_product(pool, "batch-quotes").await?;
+        let customer = seed_account(pool, account.id, "shared-reference").await?;
+        let (other, _) = seed_product(pool, "other-batch-quotes").await?;
+        let other_customer = seed_account(pool, other.id, "shared-reference").await?;
+        let foreign = create_lock(database, &quotes, &other, &other_customer, &route).await?;
+        let mut test_route = route.clone();
+        test_route.livemode = false;
+        seed::configure_payments(pool, account.id, false,
+            &topup::payment_config::Document::accepting([&test_route])).await?;
+        seed::set_treasury(pool, account.id, false, 1, seed::FIXTURE_TREASURY).await?;
+        let test_customer = seed::create_customer(pool, &NewCustomer {
+            id: Uuid::new_v4(), account_id: account.id, livemode: false,
+            client_reference_id: "shared-reference".to_owned(), paused_scopes: Vec::new(),
+        }).await?;
+        let test_lock = create_lock(database, &quotes, &account, &test_customer, &test_route).await?;
+        let mut live = Vec::new();
+        for n in 0..4 {
+            let lock = create_lock(database, &quotes, &account, &customer, &route).await?;
+            sqlx::query("UPDATE quotes SET created_at='2026-01-01'::timestamptz + $2 * interval '1 second' WHERE id=$1")
+                .bind(lock.id).bind(n).execute(&database.owner_pool).await?;
+            live.push(lock);
+        }
+        consume_lock(pool, live[0].id, 0x61).await?;
+        insert_rejected_deposit(pool, &route, live[1].address_id).await?;
+        let mut tx = database.owner_pool.begin().await?;
+        let earlier = insert_deposit_in(&mut tx,live[0].address_id,0x60).await?;
+        sqlx::query("UPDATE deposits SET block_number=9,asset_contract=$2 WHERE id=$1")
+            .bind(earlier).bind(format!("{:#x}",route.asset.contract)).execute(&mut *tx).await?;
+        let reversed = insert_deposit_in(&mut tx,live[3].address_id,0x68).await?;
+        sqlx::query("UPDATE deposits SET state='reversed',reason=NULL WHERE id=$1").bind(reversed).execute(&mut *tx).await?;
+        tx.commit().await?;
+        // A matching pending transfer beats an unsupported recorded payment; another quote's
+        // matching pending payment must never appear on a quote with no observations.
+        let mut pending = [(&live[1],0x62), (&live[2],0x63), (&foreign,0x64), (&test_lock,0x65), (&live[3],0x68)]
+            .into_iter().map(|(lock, hash)| topup::db::NewPendingTransfer {
+                chain_id: 1, tx_hash: B256::repeat_byte(hash), receipt_log_index: 0, log_index: 0,
+                block_number: 20, block_hash: B256::repeat_byte(0x66), block_time: Utc::now(),
+                address_id: lock.address_id, asset_contract: route.asset.contract,
+                from_address: Address::repeat_byte(0x67), amount_atomic: lock.amount_atomic,
+            }).collect::<Vec<_>>();
+        // A stale copy of the recorded unsupported transfer must not become a matching payment.
+        let mut duplicate = pending[0].clone();
+        duplicate.tx_hash = B256::repeat_byte(0x71);
+        duplicate.block_number = 19;
+        pending.push(duplicate);
+        topup::db::commit_head_scan(pool,1,19,21,&pending).await?;
+        let admin_key = SigningKey::from_bytes(&[48;32]);
+        let app = topup::api::router(AppState {
+            pool: pool.clone(), routes: Arc::new(test_routes()),
+            admin_key: VerificationKey::from_base64(ADMIN_KID.to_owned(), &public_key_base64(&admin_key)).map_err(anyhow::Error::msg)?,
+            public_origin: PublicOrigin::parse(TEST_ORIGIN)?, attestor: Arc::new(DstackAttestor::new()),
+            rate_lock_quotes: quotes, client_reads: Arc::default(), rate_limits: Arc::default(),
+            screening: Arc::new(topup::refunds::UnavailableDestinationScreener),
+            contract_signatures: Arc::new(topup::treasuries::UnavailableContractSignatures),
+        }).0;
+        let get = |path: String| {
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                let response = app.oneshot(merchant_request(Method::GET,&path,Vec::new(),&key)).await?;
+                ensure!(response.status()==StatusCode::OK,"{path}: {}",response.status());
+                ensure!(response.headers()["cache-control"]=="no-store");
+                response_json(response).await
+            }
+        };
+        let all = get("/v1/quotes?client_reference_id=shared-reference".to_owned()).await?;
+        let rows = all["data"].as_array().context("quote data")?;
+        ensure!(rows.len()==4 && all["has_more"]==false,"{all}");
+        for (row, lock) in rows.iter().zip(live.iter().rev()) {
+            let detail = get(format!("/v1/quotes/{}",locks::quote_id(lock.id))).await?;
+            ensure!(row==&detail,"batched and detail payment differ: {row}, {detail}");
+        }
+        ensure!(rows[0]["payment"].is_null());
+        ensure!(rows[1]["payment"]["status"]=="seen" && rows[1]["payment"]["matches_quote"]==true);
+        ensure!(rows[2]["payment"]["status"]=="seen" && rows[2]["payment"]["matches_quote"]==true);
+        ensure!(rows[2]["payment"]["tx_hash"]==format!("{:#x}",B256::repeat_byte(0x62)),"pending duplicate selected: {}",rows[2]);
+        ensure!(rows[3]["payment"]["status"]=="recorded");
+        ensure!(rows[3]["payment"]["tx_hash"]==format!("{:#x}",B256::repeat_byte(0x61)),"consumed_by priority lost: {}",rows[3]);
+        let first = get("/v1/quotes?limit=2".to_owned()).await?;
+        ensure!(first["has_more"]==true && first["data"]==json!(rows[..2]));
+        let next = get(format!("/v1/quotes?limit=2&starting_after={}",locks::quote_id(live[2].id))).await?;
+        ensure!(next["has_more"]==false && next["data"]==json!(rows[2..]));
+        let before = get(format!("/v1/quotes?limit=2&ending_before={}",locks::quote_id(live[1].id))).await?;
+        ensure!(before["has_more"]==false && before["data"]==first["data"]);
+        let completed = get("/v1/quotes?status=complete".to_owned()).await?;
+        ensure!(completed["data"]==json!([rows[3]]));
+        for id in [foreign.id,test_lock.id] {
+            let response = app.clone().oneshot(merchant_request(Method::GET,
+                &format!("/v1/quotes?starting_after={}",locks::quote_id(id)),Vec::new(),&key)).await?;
+            ensure!(response.status()==StatusCode::BAD_REQUEST);
+        }
+        Ok(())
+        })
+    })
+    .await
 }

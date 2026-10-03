@@ -4,6 +4,7 @@
 mod account;
 mod attestation;
 mod auth;
+mod cache;
 mod client_limit;
 mod deposit_addresses;
 mod deposits;
@@ -498,7 +499,7 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_| async {
-                    StatusCode::SERVICE_UNAVAILABLE
+                    error::ApiError::database_busy().into_response()
                 }))
                 .layer(LoadShedLayer::new())
                 .layer(GlobalConcurrencyLimitLayer::new(256)),
@@ -510,7 +511,8 @@ pub fn router(state: AppState) -> (Router, ApiDocs) {
         .fallback(unrecognized_request)
         .method_not_allowed_fallback(unrecognized_request)
         .layer(middleware::from_fn(crate::observability::request_context))
-        .layer(Extension(Arc::new(docs.clone())));
+        .layer(Extension(Arc::new(docs.clone())))
+        .layer(middleware::from_fn(cache::no_store));
     (router, docs)
 }
 
@@ -537,6 +539,7 @@ pub fn read_only_router(state: AppState, restore_report: Option<PathBuf>) -> Rou
     let (router, _) = router(state);
     router
         .layer(middleware::from_fn(reject_writes))
+        .layer(middleware::from_fn(cache::no_store))
         .layer(Extension(ReadOnly {
             restore_report: restore_report.map(Arc::from),
         }))
