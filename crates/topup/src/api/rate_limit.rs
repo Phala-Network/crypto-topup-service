@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::tenancy::Scope;
@@ -50,6 +51,7 @@ pub struct ApiRateLimiter {
     clock: Clock,
     state: Mutex<State>,
     source_limiter: DefaultKeyedRateLimiter<String>,
+    source_housekeeping: AtomicUsize,
 }
 
 impl std::fmt::Debug for ApiRateLimiter {
@@ -77,7 +79,10 @@ impl Default for ApiRateLimiter {
 impl ApiRateLimiter {
     /// Counts an unauthenticated request by its ingress source.
     pub fn allow_source(&self, source: &str) -> bool {
-        self.source_limiter.retain_recent();
+        if self.source_housekeeping.fetch_add(1, Ordering::Relaxed) % 1024 == 0 {
+            self.source_limiter.retain_recent();
+            self.source_limiter.shrink_to_fit();
+        }
         self.source_limiter.check_key(&source.to_owned()).is_ok()
     }
     /// A limiter enforcing `limits`.
@@ -100,6 +105,7 @@ impl ApiRateLimiter {
             source_limiter: DefaultKeyedRateLimiter::keyed(Quota::per_second(
                 NonZeroU32::new(1_000).unwrap(),
             )),
+            source_housekeeping: AtomicUsize::new(0),
         }
     }
 
