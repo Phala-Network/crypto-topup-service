@@ -226,7 +226,12 @@ mod tests {
     #[test]
     fn ingress_budget_is_keyed_by_source() {
         let limiter = ApiRateLimiter::default();
-        assert!(limiter.allow_source("198.51.100.1"));
+        assert_eq!(
+            (0..100)
+                .filter(|_| limiter.allow_source("198.51.100.1"))
+                .count(),
+            100
+        );
         assert!(!limiter.allow_source("198.51.100.1"));
         assert!(limiter.allow_source("198.51.100.2"));
     }
