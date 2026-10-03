@@ -139,11 +139,13 @@ impl FinalizedReader {
                 tried.insert(index);
                 let result=async {
                     let tag=if request.finalized {"finalized"} else {"latest"};
-                    if group.head(index,tag,deadline).await?.number<request.to {return Err(Failure::Stale);}
+                    let start_head=group.head(index,tag,deadline).await?;
+                    if start_head.number<request.to {return Err(Failure::Stale);}
                     let anchor_request=json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{:x}",request.to),false]});
                     let anchor=group.send(index,&anchor_request,deadline).await?;
                     let before=HeadAnchor::parse(anchor.get("result").ok_or(Failure::Malformed)?)?;
                     if before.number!=request.to {return Err(Failure::Malformed);}
+                    if before.number==start_head.number && before.hash!=start_head.hash {return Err(if request.finalized {Failure::Fork} else {Failure::Stale});}
                     let pinned=EvmClient::from_group(group.clone(),Some(index)).map_err(|_|Failure::Malformed)?;
                     let reader=FinalizedReader::new(Arc::new(pinned));
                     // Buffer typed raw logs once, then budget the serial verification work.
@@ -169,7 +171,9 @@ impl FinalizedReader {
                     let factory_logs=if let Some(factory)=request.factory { reader.factory_logs(factory,&request.recipients,request.from,request.to).await.map_err(window_failure)? } else {Vec::new()};
                     let mut result=WindowResult{transfers,factory_logs,proof:None};
                     if result.transfers.iter().any(|l|l.block_number<request.from || l.block_number>request.to) || result.factory_logs.iter().any(|l|l.block_number<request.from || l.block_number>request.to) {return Err(Failure::Malformed);}
-                    if group.head(index,tag,deadline).await?.number<request.to {return Err(Failure::Stale);}
+                    let end_head=group.head(index,tag,deadline).await?;
+                    if end_head.number<request.to {return Err(Failure::Stale);}
+                    if end_head.number==request.to && end_head.hash!=before.hash {return Err(if request.finalized {Failure::Fork} else {Failure::Stale});}
                     let blocks = result.transfers.iter().map(|log| (log.block_number, log.block_hash))
                         .chain(result.factory_logs.iter().map(|log| (log.block_number, log.block_hash)))
                         .collect::<BTreeSet<_>>();

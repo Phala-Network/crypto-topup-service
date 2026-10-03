@@ -89,9 +89,9 @@ impl Node {
                 let result=match request["method"].as_str().unwrap(){
                     "eth_getBlockByNumber"|"eth_getBlockByHash"=>{
                         let arg=request["params"][0].as_str().unwrap();
-                        let height=if ["latest","safe","finalized"].contains(&arg){if m==2 {HEIGHT-1}else{HEIGHT}}else{u64::from_str_radix(arg.trim_start_matches("0x"),16).unwrap_or(HEIGHT)};
+                        let height=if ["latest","safe","finalized"].contains(&arg){if m==2 || ((m==5 || m==7) && arg=="finalized") {HEIGHT-1}else{HEIGHT}}else{u64::from_str_radix(arg.trim_start_matches("0x"),16).unwrap_or(HEIGHT)};
                         let mut h=header(height);
-                        if m==5 && ["latest","safe"].contains(&arg){h["hash"]=json!(format!("0x{}","33".repeat(32)));}
+                        if (m==5 && height==HEIGHT && arg!="finalized") || (m==7 && ["latest","safe"].contains(&arg)){h["hash"]=json!(format!("0x{}","33".repeat(32)));}
                         h
                     },
                     "eth_getLogs"=>{
@@ -518,6 +518,36 @@ async fn dense_window_deadline_accounts_for_verification_latency_too() -> Result
         Ok(())
     }
     .await;
+    database.cleanup().await?;
+    result
+}
+
+#[tokio::test]
+async fn inconsistent_head_window_waits_and_preserves_reorg_replay() -> Result<()> {
+    let Some(database) = support::TestDatabase::create().await? else {
+        return Ok(());
+    };
+    let result=async {
+        let node=Node::start(0).await?;seed(&database.app_pool,1).await?;
+        let a=group("a",&[&node.url],10000,GroupPolicy::default())?;let b=group("b",&[&node.url],10000,GroupPolicy::default())?;
+        install(&database.app_pool,&[a.clone(),b.clone()]).await?;
+        a.head(0,"latest",tokio::time::Instant::now()+Duration::from_secs(5)).await?;
+        node.mode.store(7,Ordering::SeqCst);
+        let configured=routes(a,b,false)?;
+        let reader=FinalizedReader::new(configured.provider(CHAIN,0)?.clone());
+        ensure!(scanner::head_scan_once(&database.app_pool,&reader,&chain_routes(&configured)[0]).await.is_err(),"a stale numeric header must not answer a new-branch window");
+        ensure!(db::get_confirmed_cursor(&database.app_pool,CHAIN).await?.is_none());
+        let pending:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block").fetch_one(&database.app_pool).await?;
+        ensure!(pending>0,"failed replay must retain its queued range");
+        node.mode.store(5,Ordering::SeqCst);
+        let a=group("a",&[&node.url],10000,GroupPolicy::default())?;let b=group("b",&[&node.url],10000,GroupPolicy::default())?;
+        install(&database.app_pool,&[a.clone(),b.clone()]).await?;
+        let configured=routes(a,b,false)?;
+        let reader=FinalizedReader::new(configured.provider(CHAIN,0)?.clone());
+        ensure!(scanner::head_scan_once(&database.app_pool,&reader,&chain_routes(&configured)[0]).await?.is_some());
+        let pending:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block").fetch_one(&database.app_pool).await?;
+        ensure!(pending==0);Ok(())
+    }.await;
     database.cleanup().await?;
     result
 }
