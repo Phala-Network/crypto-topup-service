@@ -260,6 +260,47 @@ async fn rpc_first_acceptance_tolerates_backup_and_restart_preserves_legacy_hash
                 .eligible()
                 == 1
         );
+        // Accepted roles cannot be renamed, even with the same company and URLs.
+        let mut renamed = config.clone();
+        let group = renamed.rpc_groups.remove("alchemy").context("A group")?;
+        renamed.rpc_groups.insert("renamed-a".into(),group);
+        for route in &mut renamed.routes { route.chain.rpc_providers[0]="renamed-a".into(); }
+        let renamed_routes=renamed.route_set().map_err(anyhow::Error::msg)?;
+        let renamed_public=renamed.resolved_json().map_err(anyhow::Error::msg)?;
+        let error=rpc_runtime::accept(&database.app_pool,&renamed_routes,&renamed_public).await.expect_err("role renaming cannot reset floors");
+        ensure!(error.contains("identity cannot change"),"{error}");
+
+        // Numeric poison alone is recoverable through the stopped-service owner entry point.
+        // Retain a wrong-branch old review and a poisoned issuance/backfill position for audit.
+        let (_, customer)=support::seed::create_account_and_customer(&database.app_pool,&support::seed::NewAccount::named("numeric recovery"),"recovery-customer").await?;
+        let address_id=uuid::Uuid::new_v4();
+        support::seed::insert_address(&database.app_pool,&support::seed::NewAddress{id:address_id,customer_id:customer.id,chain_id:31337,route:config.routes[0].route.clone(),salt:alloy_primitives::B256::repeat_byte(7),address:Address::repeat_byte(7)}).await?;
+        let poison=1_000_000_i64;
+        sqlx::query("UPDATE cursors SET scanned_block=$1,confirmed_block=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
+        sqlx::query("UPDATE addresses SET created_block=$1,backfilled=true,backfilled_through=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
+        sqlx::query("UPDATE rpc_watermarks SET number=$1 WHERE chain_id=31337").bind(poison).execute(&database.owner_pool).await?;
+        let old=topup_adapters::chain::evm::window::WindowProof {group:"alchemy".into(),member:config.rpc_groups["alchemy"].members[0].id.clone(),request:topup_adapters::chain::evm::window::WindowRequest{from:0,to:1,recipients:vec![Address::repeat_byte(7)],tokens:vec![],factory:None,finalized:true,exclude_member:None},end_hash:format!("0x{}","77".repeat(32))};
+        db::rpc::commit_window(&database.app_pool,31337,&[],&[],Some(&old),Default::default()).await?;
+        let fresh=config.route_set().map_err(anyhow::Error::msg)?;
+        rpc_runtime::recover_watermark(&database.owner_pool,&fresh,31337,1,"test-owner","numeric poison regression").await.map_err(anyhow::Error::msg)?;
+        let pending:bool=sqlx::query_scalar("SELECT frozen AND recovery_pending FROM rpc_chain_state WHERE chain_id=31337").fetch_one(&database.app_pool).await?;
+        ensure!(pending,"authorized numeric recovery must freeze before replay");
+        let created:i64=sqlx::query_scalar("SELECT created_block FROM addresses WHERE id=$1").bind(address_id).fetch_one(&database.app_pool).await?;
+        ensure!(created==0,"poisoned derived address progress must be repaired");
+        ensure!(rpc_runtime::resume_recovery(&database.owner_pool,&fresh,31337,16).await.map_err(anyhow::Error::msg)?,"full recovery must finish");
+        let old_count:i64=sqlx::query_scalar("SELECT count(*) FROM rpc_window_reviews WHERE epoch=0 AND end_hash=$1").bind(&old.end_hash).fetch_one(&database.app_pool).await?;
+        ensure!(old_count==1,"wrong-branch evidence stays immutable for audit");
+        let due=db::rpc::due_reviews(&database.app_pool,31337).await?;
+        for (id,_,_) in due { let epoch:i64=sqlx::query_scalar("SELECT epoch FROM rpc_window_reviews WHERE id=$1").bind(id).fetch_one(&database.app_pool).await?; ensure!(epoch==1,"only new epoch evidence can be replayed"); }
+        // Reattach fresh runtime clients after recovery and run the production scanner again.
+        let recovered=config.route_set().map_err(anyhow::Error::msg)?;
+        rpc_runtime::accept(&database.app_pool,&recovered,&public).await.map_err(anyhow::Error::msg)?;
+        let reader=topup_adapters::chain::evm::FinalizedReader::new(recovered.provider(31337,0)?.clone());
+        topup::scanner::scan_once(&database.app_pool,&reader,&topup::scanner::chain_routes(&recovered)[0]).await?;
+        let frozen:bool=sqlx::query_scalar("SELECT frozen FROM rpc_chain_state WHERE chain_id=31337").fetch_one(&database.app_pool).await?;
+        ensure!(!frozen,"old wrong-branch evidence must not re-freeze the new epoch");
+        let recovered_cursor=db::get_cursor(&database.app_pool,31337).await?;
+        let recovered_anchor=state.load(31337,"alchemy","cursor").await?;
         drop(anvil);
         // All members are down, but the SAME accepted config can restart degraded without
         // lowering an anchor. A first acceptance of a new digest still fails.
@@ -275,8 +316,8 @@ async fn rpc_first_acceptance_tolerates_backup_and_restart_preserves_legacy_hash
                 .eligible()
                 == 0
         );
-        ensure!(db::get_cursor(&database.app_pool, 31337).await? == Some(1));
-        ensure!(state.load(31337, "alchemy", "cursor").await? == Some(a));
+        ensure!(db::get_cursor(&database.app_pool, 31337).await? == recovered_cursor);
+        ensure!(state.load(31337, "alchemy", "cursor").await? == recovered_anchor);
         ensure!(
             rpc_runtime::accept(&database.app_pool, &restarted, &format!("{public} "))
                 .await

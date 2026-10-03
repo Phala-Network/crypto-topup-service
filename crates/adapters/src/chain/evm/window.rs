@@ -102,6 +102,12 @@ pub async fn read<R: ChainReader + ?Sized>(
         proof: None,
     })
 }
+fn window_failure(error: ChainError) -> Failure {
+    match error {
+        ChainError::Group(e) => e,
+        _ => Failure::Malformed,
+    }
+}
 impl FinalizedReader {
     /// Pins every RPC and validates heads both before and after all batches.
     pub async fn group_window(&self, request: &WindowRequest) -> Result<WindowResult, ChainError> {
@@ -115,10 +121,10 @@ impl FinalizedReader {
                 "invalid numeric log window".to_owned(),
             ));
         }
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
-            .unwrap_or_else(Instant::now);
         let operation = async {
+            let mut deadline = Instant::now()
+                .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
+                .unwrap_or_else(Instant::now);
             let mut tried = BTreeSet::new();
             let mut last = Failure::Unavailable;
             for _ in 0..group.policy.max_attempts {
@@ -140,11 +146,29 @@ impl FinalizedReader {
                     if before.number!=request.to {return Err(Failure::Malformed);}
                     let pinned=EvmClient::from_group(group.clone(),Some(index)).map_err(|_|Failure::Malformed)?;
                     let reader=FinalizedReader::new(Arc::new(pinned));
-                    let mut result=read(&reader,request).await.map_err(|e| match e {
-                        ChainError::Group(e)=>e,
-                        ChainError::Transport(_)=>Failure::Malformed,
-                        _=>Failure::Malformed,
-                    })?;
+                    // Buffer typed raw logs once, then budget the serial verification work.
+                    // This is the current operation's evidence, never a cross-request cache.
+                    let recipients=request.recipients.iter().copied().collect::<BTreeSet<_>>();
+                    let selectors=if request.tokens.is_empty() {super::Recipients::Topic(&request.recipients)} else {super::Recipients::Local(&recipients)};
+                    let batches=if request.tokens.is_empty() {request.recipients.len().div_ceil(super::MAX_ADDRESSES_PER_REQUEST)} else {1};
+                    deadline=deadline.checked_add(group.verification_time(index,u64::try_from(batches).map_err(|_|Failure::Malformed)?)?).ok_or(Failure::Deadline)?;
+                    let raw=timeout(deadline.saturating_duration_since(Instant::now()),async {
+                    let mut raw=Vec::new();
+                    if request.tokens.is_empty() {
+                        for batch in request.recipients.chunks(super::MAX_ADDRESSES_PER_REQUEST) {
+                            raw.extend(reader.raw_transfer_logs(&[],super::Recipients::Topic(batch),request.from,request.to).await.map_err(window_failure)?);
+                        }
+                    } else {
+                        raw=reader.raw_transfer_logs(&request.tokens,selectors,request.from,request.to).await.map_err(window_failure)?;
+                    }
+                    Ok::<_,Failure>(raw)
+                    }).await.map_err(|_|Failure::Deadline)??;
+                    deadline=deadline.checked_add(group.verification_time(index,u64::try_from(raw.len()).map_err(|_|Failure::Malformed)?)?).ok_or(Failure::Deadline)?;
+                    timeout(deadline.saturating_duration_since(Instant::now()),async {
+                    let transfers=reader.complete_logs(raw,selectors).await.map_err(window_failure)?;
+                    let factory_logs=if let Some(factory)=request.factory { reader.factory_logs(factory,&request.recipients,request.from,request.to).await.map_err(window_failure)? } else {Vec::new()};
+                    let mut result=WindowResult{transfers,factory_logs,proof:None};
+                    if result.transfers.iter().any(|l|l.block_number<request.from || l.block_number>request.to) || result.factory_logs.iter().any(|l|l.block_number<request.from || l.block_number>request.to) {return Err(Failure::Malformed);}
                     if group.head(index,tag,deadline).await?.number<request.to {return Err(Failure::Stale);}
                     let blocks = result.transfers.iter().map(|log| (log.block_number, log.block_hash))
                         .chain(result.factory_logs.iter().map(|log| (log.block_number, log.block_hash)))
@@ -160,6 +184,7 @@ impl FinalizedReader {
                     let member=group.members.get(index).ok_or(Failure::Unavailable)?;
                     result.proof=Some(WindowProof {group:group.id.clone(),member:member.id.clone(),request:request.clone(),end_hash:before.hash});
                     Ok(result)
+                    }).await.map_err(|_|Failure::Deadline)?
                 }.await;
                 match result {
                     Ok(result) => {
@@ -180,12 +205,6 @@ impl FinalizedReader {
             }
             Err(last)
         };
-        timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            operation,
-        )
-        .await
-        .map_err(|_| ChainError::Group(Failure::Deadline))?
-        .map_err(ChainError::Group)
+        operation.await.map_err(ChainError::Group)
     }
 }

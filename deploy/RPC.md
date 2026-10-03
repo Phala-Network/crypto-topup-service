@@ -32,6 +32,7 @@ including retries, preflight, head checks and replay; selection and denied admis
 sends. Compare rates by account across all member ids and methods, rather than one method alone.
 
 A whole group outage pauses evidence and credit. Failover never fills an empty candidate pool.
+Quota-paused members are skipped when a separately budgeted account is healthy.
 Cooldown expiry schedules probes; it does not admit a member. A lagging member cannot answer a
 window below its end or the group's persisted high-water mark, even with a fast empty result.
 Investigate auth/redirect quarantines before restarting with a reviewed config. All redirects,
@@ -45,7 +46,9 @@ classification review; they never become successful empty results.
 Each committed window retains its selectors, hash anchor and answering member in
 `rpc_window_reviews`. Review does not expire when the rolling tail moves. The finalized scanner
 re-reads pending coverage with a different member where available, recording missed deposits
-idempotently. Singleton groups retain pending review coverage and alert on the limitation.
+idempotently. Singleton groups replay with their sole member after restart while retaining pending independent
+review coverage and alerting on the limitation. Nonfinal branch changes queue durable head-scan
+replay ranges; `topup_rpc_reorg_pending_ranges` alerts if replay remains stalled.
 After an outage the committed cursor/backfill progress resumes the complete uncommitted window;
 a member switch discards the partial answer. Add a verified independent member to drain old
 coverage, and use reconciliation to check custody and ledger effects. Review before removing a
@@ -53,7 +56,8 @@ member whose history still needs independent checks.
 
 ## Wrong-watermark recovery
 
-A finalized hash conflict freezes the chain persistently. Never lower a database watermark by
+A finalized hash conflict freezes the chain persistently. A numeric-only poisoned floor can
+enter the same owner recovery command; its audited transaction freezes the chain before repair. Never lower a database watermark by
 hand or roll back configuration to bypass it. Preserve the database and investigate the agreed
 A/B genesis, finalized headers and affected credited deposits first. A 0.6 height-only cursor
 gets its first hash only after A/B agreement at that numeric height; one above agreed heads
@@ -69,7 +73,7 @@ topup rpc recover --config /etc/topup/topup.yaml --chain 11155111 --block 123456
 topup rpc resume --config /etc/topup/topup.yaml --chain 11155111 --max-windows 16
 ```
 
-Recover verifies A/B agreement, opens an audited epoch and preserves old watermarks, cursors and
+Recover verifies A/B agreement, opens an audited epoch with its own window/replay baseline and preserves old watermarks, cursors and
 address progress. It repairs `created_block` conservatively to genesis, clears `backfilled` and
 `backfilled_through`, clears pending display progress and its cursor timestamp, resets the
 confirmed/reconciliation cursors and queues historical review;
@@ -83,6 +87,9 @@ clear the recovery freeze. New quotes wait for a fresh scanner timestamp after r
 findings before restarting topup. Reconciliation freezes are separate and remain in force.
 
 ## Migration and rollback
+
+Accepted chain role/group ids cannot be renamed or swapped through configuration; preserve them
+through upgrades and rollback.
 
 Before upgrading staging, snapshot the database, stop writers, migrate the schema and validate
 the singleton config with the new image. Keep route versions, factories, assets and existing

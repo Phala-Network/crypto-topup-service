@@ -81,12 +81,20 @@ pub fn validate(
             return Err("invalid reviewed RPC company".to_owned());
         }
         for domain in &spec.domains {
-            if domain.is_empty() || domain != &domain.to_ascii_lowercase() || domain.contains('/') {
+            if domain.is_empty()
+                || domain != &domain.to_ascii_lowercase()
+                || domain.contains('/')
+                || (psl::domain_str(domain).is_none()
+                    && domain != "localhost"
+                    && domain.parse::<std::net::IpAddr>().is_err())
+            {
                 return Err("invalid RPC company domain".to_owned());
             }
             for (other, owner) in &evidence {
                 if owner != company
-                    && (domain == other
+                    && (psl::domain_str(domain).unwrap_or(domain)
+                        == psl::domain_str(other).unwrap_or(other)
+                        || domain == other
                         || domain.ends_with(&format!(".{other}"))
                         || other.ends_with(&format!(".{domain}")))
                 {

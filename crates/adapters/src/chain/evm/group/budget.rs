@@ -41,6 +41,7 @@ struct Budget {
     limiter: RateLimiter<NotKeyed, State, DefaultClock>,
     state: State,
     paused: Instant,
+    rate: u32,
 }
 
 /// Process-wide registry; no limiter can be mutated outside its admission transaction.
@@ -64,6 +65,7 @@ impl Budgets {
                     ),
                     state,
                     paused: Instant::now(),
+                    rate: spec.requests_per_second,
                 },
             );
         }
@@ -124,6 +126,32 @@ impl Budgets {
             }
             sleep_until(wake).await;
         }
+    }
+    /// Conservative admission time for a bounded verification plan, across both scopes.
+    pub fn planned_time(
+        &self,
+        account: &str,
+        key: &str,
+        sends: u64,
+    ) -> Result<Duration, &'static str> {
+        let budgets = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let rate = [account, key]
+            .iter()
+            .map(|id| budgets.get(*id).map(|b| b.rate).ok_or("unknown RPC budget"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .min()
+            .ok_or("missing RPC rate")?;
+        Ok(Duration::from_millis(
+            sends.saturating_mul(2000).div_ceil(u64::from(rate)),
+        ))
+    }
+    /// Selection skips explicit quota pauses; ordinary rate admission still waits fairly.
+    pub fn paused(&self, account: &str, key: &str) -> bool {
+        let budgets = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        [account, key]
+            .iter()
+            .any(|id| budgets.get(*id).is_none_or(|b| b.paused > Instant::now()))
     }
     /// Conservatively pauses an account on an unknown 429; classified key limits may narrow it.
     pub fn pause(&self, id: &str, duration: Duration) {

@@ -491,3 +491,34 @@ fn repeated_templates_allow_distinct_credentials_and_aliases_share_quota_scopes(
     );
     Ok(())
 }
+
+#[test]
+fn reviewed_company_aliases_cannot_split_one_registrable_domain_across_roles() -> Result<()> {
+    let original =
+        include_str!("../../../deploy/environments/phala-network/staging/topup/topup.yaml");
+    let config = topup::config::Config::parse(original).map_err(anyhow::Error::msg)?;
+    let mut groups = config.rpc_groups.clone();
+    let mut companies = config.rpc_companies.clone();
+    for spec in companies.values_mut() {
+        spec.domains = vec!["unused.invalid".into()];
+    }
+    companies.get_mut("tenderly").context("tenderly")?.domains = vec!["a.vendor.co.uk".into()];
+    companies
+        .get_mut("publicnode")
+        .context("publicnode")?
+        .domains = vec!["b.vendor.co.uk".into()];
+    for group in groups.values_mut() {
+        for member in &mut group.members {
+            member.url = if member.company == "tenderly" {
+                "https://a.vendor.co.uk/{key}".into()
+            } else {
+                "https://b.vendor.co.uk".into()
+            };
+        }
+    }
+    let error =
+        topup::rpc_groups::validate(&config.routes, &groups, &companies, &config.rpc_budgets)
+            .expect_err("PSL identity must reject sibling-domain aliases");
+    ensure!(error.contains("domain ownership"), "{error}");
+    Ok(())
+}

@@ -50,6 +50,13 @@ impl WatermarkStore for RpcState {
             .await
             .map_err(|_| Failure::Persistence)
     }
+    async fn reorg(&self, chain: u64, group: &str, from: u64, to: u64) -> Result<(), Failure> {
+        sqlx::query("INSERT INTO rpc_reorg_ranges(chain_id,group_id,epoch,from_block,to_block) VALUES($1,$2,COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0),$3,$4)")
+            .bind(i64::try_from(chain).map_err(|_|Failure::Persistence)?).bind(group)
+            .bind(i64::try_from(from).map_err(|_|Failure::Persistence)?).bind(i64::try_from(to).map_err(|_|Failure::Persistence)?)
+            .execute(&self.pool).await.map_err(|_|Failure::Persistence)?;
+        Ok(())
+    }
     async fn load(
         &self,
         chain: u64,
@@ -129,7 +136,7 @@ pub async fn coverage_in(
     request.exclude_member = None;
     let value = serde_json::to_value(&request).map_err(|e| sqlx::Error::Encode(e.into()))?;
     let hash = digest(&value.to_string());
-    sqlx::query("INSERT INTO rpc_window_reviews(chain_id,group_id,from_block,to_block,request,request_digest,answering_member,end_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(chain_id,group_id,request_digest) DO NOTHING")
+    sqlx::query("INSERT INTO rpc_window_reviews(chain_id,group_id,from_block,to_block,request,request_digest,answering_member,end_hash,epoch) VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0)) ON CONFLICT(chain_id,group_id,request_digest,epoch) DO NOTHING")
         .bind(to_i64(chain,"review chain")?).bind(&proof.group).bind(to_i64(request.from,"review from")?).bind(to_i64(request.to,"review to")?).bind(value).bind(hash).bind(&proof.member).bind(&proof.end_hash).execute(&mut **tx).await?;
     Ok(())
 }
@@ -222,8 +229,9 @@ pub async fn commit_window(
     }
     if let (Some(id), Some(proof)) = (progress.reviewed, proof) {
         let old =
-            sqlx::query("SELECT end_hash,request FROM rpc_window_reviews WHERE id=$1 FOR UPDATE")
+            sqlx::query("SELECT end_hash,request FROM rpc_window_reviews WHERE id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$2),0) FOR UPDATE")
                 .bind(id)
+                .bind(to_i64(chain,"review chain")?)
                 .fetch_one(&mut *tx)
                 .await?;
         let old_request: WindowRequest = serde_json::from_value(old.try_get("request")?)
@@ -236,6 +244,10 @@ pub async fn commit_window(
             ));
         }
 
+        sqlx::query("UPDATE rpc_window_reviews SET replayed_at=now() WHERE id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE rpc_window_reviews SET reviewed_at=now(),reviewed_by=$2 WHERE id=$1 AND answering_member<>$2")
             .bind(id).bind(&proof.member).execute(&mut *tx).await?;
     }
@@ -247,7 +259,7 @@ pub async fn due_reviews(
     pool: &PgPool,
     chain: u64,
 ) -> Result<Vec<(Uuid, WindowRequest, String)>, sqlx::Error> {
-    let rows=sqlx::query("SELECT id,request,answering_member FROM rpc_window_reviews WHERE chain_id=$1 AND reviewed_at IS NULL ORDER BY from_block,id LIMIT 16")
+    let rows=sqlx::query("SELECT id,request,answering_member FROM rpc_window_reviews WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND reviewed_at IS NULL ORDER BY COALESCE(replayed_at,created_at),from_block,id LIMIT 16")
         .bind(to_i64(chain,"review chain")?).fetch_all(pool).await?;
     rows.into_iter()
         .map(|r| {
@@ -280,7 +292,7 @@ pub async fn recover(
     let chain = to_i64(chain, "recovery chain")?;
     let number = to_i64(anchor.number, "recovery anchor")?;
     let mut tx = pool.begin().await?;
-    let epoch:i64=sqlx::query_scalar("UPDATE rpc_chain_state SET epoch=epoch+1,frozen=true,recovery_pending=true,reason=$2 WHERE chain_id=$1 AND frozen RETURNING epoch").bind(chain).bind(reason).fetch_one(&mut *tx).await?;
+    let epoch:i64=sqlx::query_scalar("UPDATE rpc_chain_state SET epoch=epoch+1,frozen=true,recovery_pending=true,reason=$2 WHERE chain_id=$1 AND NOT recovery_pending RETURNING epoch").bind(chain).bind(reason).fetch_one(&mut *tx).await?;
     let before = sqlx::query(
         "SELECT id,created_block,backfilled,backfilled_through FROM addresses WHERE chain_id=$1",
     )
@@ -315,12 +327,6 @@ pub async fn recover(
         .bind(chain)
         .execute(&mut *tx)
         .await?;
-    sqlx::query(
-        "UPDATE rpc_window_reviews SET reviewed_at=NULL,reviewed_by=NULL WHERE chain_id=$1",
-    )
-    .bind(chain)
-    .execute(&mut *tx)
-    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -358,6 +364,8 @@ pub async fn commit_head_window(
     if let Some(proof) = proof {
         coverage_in(&mut tx, chain, proof).await?;
     }
+    sqlx::query("UPDATE rpc_reorg_ranges SET replayed_through=GREATEST(COALESCE(replayed_through,from_block-1),$2) WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND from_block<=$2")
+        .bind(to_i64(chain,"reorg chain")?).bind(to_i64(range.1,"reorg through")?).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((scan, head))
 }
@@ -406,7 +414,11 @@ pub async fn refresh_metrics(pool: &PgPool) -> Result<(), sqlx::Error> {
     }
     out.push_str("# HELP topup_rpc_group_head Accepted persisted head height.\n# TYPE topup_rpc_group_head gauge\n");
     for row in sqlx::query("SELECT chain_id,group_id,tag,number,epoch FROM rpc_watermarks WHERE epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_watermarks.chain_id),0)").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_group_head{{chain_id=\"{}\",group=\"{}\",tag=\"{}\",epoch=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<String,_>("group_id")?,row.try_get::<String,_>("tag")?,row.try_get::<i64,_>("epoch")?,row.try_get::<i64,_>("number")?);}
-    for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_window_reviews WHERE reviewed_at IS NULL GROUP BY chain_id").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_review_pending_windows{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);}
+    for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_window_reviews WHERE reviewed_at IS NULL AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_window_reviews.chain_id),0) GROUP BY chain_id").fetch_all(pool).await? {let _=writeln!(out,"topup_rpc_review_pending_windows{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);}
+    out.push_str("# HELP topup_rpc_reorg_pending_ranges Nonfinal reorg ranges awaiting complete replay.\n# TYPE topup_rpc_reorg_pending_ranges gauge\n");
+    for row in sqlx::query("SELECT chain_id,count(*) AS pending FROM rpc_reorg_ranges WHERE COALESCE(replayed_through,from_block-1)<to_block AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state s WHERE s.chain_id=rpc_reorg_ranges.chain_id),0) GROUP BY chain_id").fetch_all(pool).await? {
+        let _=writeln!(out,"topup_rpc_reorg_pending_ranges{{chain_id=\"{}\"}} {}",row.try_get::<i64,_>("chain_id")?,row.try_get::<i64,_>("pending")?);
+    }
     *HEALTH_METRICS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = out;

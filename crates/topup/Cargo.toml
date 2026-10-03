@@ -52,6 +52,7 @@ utoipa-axum.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+psl = "2.1.215"
 
 [dev-dependencies]
 alloy-signer.workspace = true

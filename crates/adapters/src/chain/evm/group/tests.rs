@@ -2,6 +2,15 @@ use super::*;
 use axum::{Json, Router, http::StatusCode, routing::post};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use transport::HttpReply;
+fn header(number: String) -> Value {
+    let mut value =
+        serde_json::to_value(alloy::rpc::types::Block::<alloy::rpc::types::Transaction>::default())
+            .unwrap();
+    value["number"] = json!(number);
+    value["hash"] = json!(format!("0x{}", "11".repeat(32)));
+    value["parentHash"] = json!(format!("0x{}", "22".repeat(32)));
+    value
+}
 fn reply(status: u16, code: i64, message: &str) -> HttpReply {
     HttpReply {
         status,
@@ -234,7 +243,7 @@ async fn cooldown_requires_repeated_success_and_redirect_quarantine_is_permanent
 async fn stale_head_is_not_published() {
     let number = Arc::new(AtomicUsize::new(100));
     let source = number.clone();
-    let (url,task)=server(Router::new().route("/",post(move |Json(request):Json<Value>| {let source=source.clone();async move {Json(json!({"jsonrpc":"2.0","id":request["id"],"result":{"number":format!("0x{:x}",source.load(Ordering::SeqCst)),"hash":format!("0x{}","11".repeat(32)),"parentHash":format!("0x{}","22".repeat(32))}}))}}))).await;
+    let (url,task)=server(Router::new().route("/",post(move |Json(request):Json<Value>| {let source=source.clone();async move {Json(json!({"jsonrpc":"2.0","id":request["id"],"result":header(format!("0x{:x}",source.load(Ordering::SeqCst)))}))}}))).await;
     let group = group(&url);
     group.verified(0, true);
     assert_eq!(
@@ -380,14 +389,22 @@ async fn lagging_fast_empty_logs_are_never_requested_or_accepted() {
     use crate::chain::evm::{EvmClient, FinalizedReader, window::WindowRequest};
     let hits = Arc::new(AtomicUsize::new(0));
     let logs = hits.clone();
-    let (url, task) = server(Router::new().route("/", post(move |Json(request): Json<Value>| {
-        let logs = logs.clone();
-        async move {
-            let result = if request["method"] == "eth_getLogs" { logs.fetch_add(1, Ordering::SeqCst); json!([]) }
-                else { json!({"number":"0x63","hash":format!("0x{}","11".repeat(32)),"parentHash":format!("0x{}","22".repeat(32))}) };
-            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
-        }
-    }))).await;
+    let (url, task) = server(Router::new().route(
+        "/",
+        post(move |Json(request): Json<Value>| {
+            let logs = logs.clone();
+            async move {
+                let result = if request["method"] == "eth_getLogs" {
+                    logs.fetch_add(1, Ordering::SeqCst);
+                    json!([])
+                } else {
+                    header("0x63".into())
+                };
+                Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+            }
+        }),
+    ))
+    .await;
     let group = group(&url);
     group.verified(0, true);
     let reader = FinalizedReader::new(Arc::new(
@@ -681,7 +698,7 @@ impl WatermarkStore for SafeFloor {
 async fn recovery_probe_cannot_readmit_a_member_below_persisted_safe_head() {
     let (url,task)=server(Router::new().route("/",post(|Json(request):Json<Value>| async move {
         let number=if request["params"][0]=="safe" {99} else {100};
-        Json(json!({"jsonrpc":"2.0","id":request["id"],"result":{"number":format!("0x{number:x}"),"hash":format!("0x{}","11".repeat(32)),"parentHash":format!("0x{}","22".repeat(32))}}))
+        Json(json!({"jsonrpc":"2.0","id":request["id"],"result":header(format!("0x{number:x}"))}))
     }))).await;
     let group = group(&url);
     group.set_store(Arc::new(SafeFloor));
@@ -694,5 +711,106 @@ async fn recovery_probe_cannot_readmit_a_member_below_persisted_safe_head() {
     }
     assert_eq!(group.validate_probe(0, &probe).await, Err(Failure::Stale));
     assert_eq!(group.eligible(), 0);
+    task.abort();
+}
+
+#[tokio::test]
+async fn unknown_rpc_limit_under_http_429_pauses_account_and_switches_account() {
+    let (url, task) = server(Router::new().route("/", post(|Json(request):Json<Value>| async move {
+        (StatusCode::TOO_MANY_REQUESTS, [("retry-after","30")], Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32005,"message":"unfamiliar limit"}})))
+    }))).await;
+    let group = group(&url);
+    group.verified(0, true);
+    assert_eq!(
+        group
+            .send(
+                0,
+                &json!({"method":"eth_call","params":[]}),
+                Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+        Err(Failure::Throttled)
+    );
+    assert!(group.budgets.paused("account", "key"));
+    let specs = BTreeMap::from([
+        (
+            "account".into(),
+            budget::BudgetSpec {
+                requests_per_second: 100,
+                burst: 100,
+            },
+        ),
+        (
+            "key".into(),
+            budget::BudgetSpec {
+                requests_per_second: 100,
+                burst: 100,
+            },
+        ),
+        (
+            "other-account".into(),
+            budget::BudgetSpec {
+                requests_per_second: 100,
+                burst: 100,
+            },
+        ),
+        (
+            "other-key".into(),
+            budget::BudgetSpec {
+                requests_per_second: 100,
+                burst: 100,
+            },
+        ),
+    ]);
+    let shared = Arc::new(Budgets::new(&specs).unwrap());
+    let mut members = group.members.clone();
+    let mut backup = members[0].clone();
+    backup.id = "independent".into();
+    backup.account = "other-account".into();
+    backup.key = "other-key".into();
+    backup.priority = 1;
+    members.push(backup);
+    let switched = RpcGroup::new(
+        "b".into(),
+        1,
+        GroupPolicy::default(),
+        members,
+        shared.clone(),
+    )
+    .unwrap();
+    switched.verified(0, true);
+    switched.verified(1, true);
+    shared.pause("account", Duration::from_secs(30));
+    assert_eq!(switched.select(&BTreeSet::new(), None), Ok(1));
+    assert_eq!(
+        classify("eth_call", &reply(429, -32602, "invalid params")),
+        Some(Failure::Request)
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn typed_decode_is_inside_the_attempt_and_enters_cooldown() {
+    let (url, task) = server(Router::new().route(
+        "/",
+        post(|Json(request): Json<Value>| async move {
+            let result = if request["method"] == "eth_getBlockByNumber" {
+                header("0x1".into())
+            } else {
+                json!({})
+            };
+            Json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        }),
+    ))
+    .await;
+    let group = group(&url);
+    group.verified(0, true);
+    let error=group.request(json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":[format!("0x{}","11".repeat(32))]})).await;
+    assert_eq!(error, Err(Failure::Malformed));
+    assert_eq!(
+        group.eligible(),
+        0,
+        "malformed typed replies must count against cooldown"
+    );
     task.abort();
 }

@@ -40,16 +40,14 @@ use crate::routes::RouteSet;
 
 #[async_trait]
 trait ConfirmationReader: Send + Sync {
-    async fn confirmation_heads(
+    async fn evidence(
         &self,
-        confirmations: Confirmations,
-    ) -> Result<ChainHeads, ChainError>;
-    async fn receipt_transfer(
-        &self,
-        tx_hash: B256,
-        receipt_log_index: u64,
+        tx: B256,
+        position: u64,
         known: KnownTransfer,
-    ) -> Result<ReceiptLookup, ChainError>;
+        needed: u64,
+        confirmations: Confirmations,
+    ) -> Result<(ChainHeads, ReceiptLookup), ChainError>;
 }
 
 #[async_trait]
@@ -57,20 +55,15 @@ impl<R> ConfirmationReader for R
 where
     R: ChainReader + Send + Sync,
 {
-    async fn confirmation_heads(
+    async fn evidence(
         &self,
-        confirmations: Confirmations,
-    ) -> Result<ChainHeads, ChainError> {
-        ChainReader::confirmation_heads(self, confirmations).await
-    }
-
-    async fn receipt_transfer(
-        &self,
-        tx_hash: B256,
-        receipt_log_index: u64,
+        tx: B256,
+        position: u64,
         known: KnownTransfer,
-    ) -> Result<ReceiptLookup, ChainError> {
-        ChainReader::receipt_transfer_known(self, tx_hash, receipt_log_index, known).await
+        needed: u64,
+        confirmations: Confirmations,
+    ) -> Result<(ChainHeads, ReceiptLookup), ChainError> {
+        ChainReader::confirmation_evidence(self, tx, position, known, needed, confirmations).await
     }
 }
 
@@ -813,16 +806,30 @@ async fn confirmed_evidence(
         block_time: deposit.block_time,
         tx_nonce,
     };
-    let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = tokio::join!(
-        chains.primary.confirmation_heads(confirmations),
-        chains.secondary.confirmation_heads(confirmations),
-        chains
-            .primary
-            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
-        chains
-            .secondary
-            .receipt_transfer(deposit.tx_hash, deposit.receipt_log_index, known),
+    let (primary, secondary) = tokio::join!(
+        chains.primary.evidence(
+            deposit.tx_hash,
+            deposit.receipt_log_index,
+            known,
+            deposit.block_number,
+            confirmations
+        ),
+        chains.secondary.evidence(
+            deposit.tx_hash,
+            deposit.receipt_log_index,
+            known,
+            deposit.block_number,
+            confirmations
+        ),
     );
+    let (primary_heads, primary_receipt) = match primary {
+        Ok((h, r)) => (Ok(h), Ok(r)),
+        Err(e) => (Err(e.clone()), Err(e)),
+    };
+    let (secondary_heads, secondary_receipt) = match secondary {
+        Ok((h, r)) => (Ok(h), Ok(r)),
+        Err(e) => (Err(e.clone()), Err(e)),
+    };
     let (primary_heads, secondary_heads, primary_receipt, secondary_receipt) = match (
         primary_heads,
         secondary_heads,

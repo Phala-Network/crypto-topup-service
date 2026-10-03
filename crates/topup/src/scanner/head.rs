@@ -163,7 +163,9 @@ pub async fn scan_new_blocks<R: ChainReader>(
     let Some(finalized_cursor) = db::get_cursor(pool, chain_id).await? else {
         return Ok(None);
     };
-    let latest = heads.latest.unwrap_or(heads.finalized);
+    let mut latest = heads.latest.unwrap_or(heads.finalized);
+    let replay: Option<i64> = sqlx::query_scalar("SELECT min(GREATEST(from_block,COALESCE(replayed_through+1,from_block))) FROM rpc_reorg_ranges WHERE chain_id=$1 AND epoch=COALESCE((SELECT epoch FROM rpc_chain_state WHERE chain_id=$1),0) AND COALESCE(replayed_through,from_block-1)<to_block")
+        .bind(i64::try_from(chain_id).map_err(|_|ScannerError::Configuration("chain id overflow".into()))?).fetch_one(pool).await?;
     let confirmations = routes.chain.confirmations;
     let horizon = (confirmations != Confirmations::Finalized)
         .then(|| confirmations.horizon(heads).min(latest));
@@ -171,9 +173,16 @@ pub async fn scan_new_blocks<R: ChainReader>(
         .await?
         .unwrap_or(0)
         .max(finalized_cursor);
-    let from_block = scanned
-        .saturating_add(1)
-        .max(latest.saturating_sub(MAX_SCAN_WINDOW.saturating_sub(1)));
+    let from_block = if let Some(replay) = replay {
+        let from = u64::try_from(replay)
+            .map_err(|_| ScannerError::Configuration("invalid replay height".into()))?;
+        latest = latest.min(from.saturating_add(MAX_SCAN_WINDOW.saturating_sub(1)));
+        from
+    } else {
+        scanned
+            .saturating_add(1)
+            .max(latest.saturating_sub(MAX_SCAN_WINDOW.saturating_sub(1)))
+    };
     if from_block > latest {
         return Ok(None);
     }

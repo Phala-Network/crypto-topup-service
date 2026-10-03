@@ -195,6 +195,7 @@ pub async fn accept(pool: &PgPool, routes: &RouteSet, public_config: &str) -> Re
     .await
     .map_err(|e| e.to_string())?;
     let groups = groups(routes)?;
+    check_roles(pool, routes).await?;
     let state = db::rpc::state(pool, digest.clone());
     for (group, _) in groups.values() {
         group.set_store(state.clone());
@@ -244,6 +245,23 @@ pub async fn accept(pool: &PgPool, routes: &RouteSet, public_config: &str) -> Re
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+    for route in routes.routes() {
+        for (role, id) in ["a", "b"].iter().zip(&route.chain.rpc_providers) {
+            let _stored: Option<String> = sqlx::query_scalar("INSERT INTO rpc_role_bindings(chain_id,role,group_id) VALUES($1,$2,$3) ON CONFLICT(chain_id,role) DO NOTHING RETURNING group_id")
+                .bind(i64::try_from(route.chain.chain_id).map_err(|e|e.to_string())?).bind(role).bind(id).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            let stored: String = sqlx::query_scalar(
+                "SELECT group_id FROM rpc_role_bindings WHERE chain_id=$1 AND role=$2",
+            )
+            .bind(i64::try_from(route.chain.chain_id).map_err(|e| e.to_string())?)
+            .bind(role)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            if &stored != id {
+                return Err("accepted RPC role/group identity cannot change".into());
+            }
+        }
+    }
     for (group, index, hash) in validations {
         let member = group.members.get(index).ok_or("missing RPC member")?;
         sqlx::query("INSERT INTO rpc_member_validations(config_digest,group_id,member_id,chain_id,genesis_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(config_digest,group_id,member_id) DO UPDATE SET validated_at=now()").bind(&digest).bind(&group.id).bind(&member.id).bind(i64::try_from(group.chain).map_err(|e|e.to_string())?).bind(hash).execute(&mut *tx).await.map_err(|e|e.to_string())?;
@@ -255,11 +273,31 @@ pub async fn accept(pool: &PgPool, routes: &RouteSet, public_config: &str) -> Re
     }
     Ok(())
 }
+async fn check_roles(pool: &PgPool, routes: &RouteSet) -> Result<(), String> {
+    for route in routes.routes() {
+        for (role, id) in ["a", "b"].iter().zip(&route.chain.rpc_providers) {
+            let old: Option<String> = sqlx::query_scalar(
+                "SELECT group_id FROM rpc_role_bindings WHERE chain_id=$1 AND role=$2",
+            )
+            .bind(i64::try_from(route.chain.chain_id).map_err(|e| e.to_string())?)
+            .bind(role)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if old.as_ref().is_some_and(|old| old != id) {
+                return Err("accepted RPC role/group identity cannot change".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Standalone reconciliation/restore must establish the same trusted A/B cursor floors.
 pub async fn ensure_anchors(pool: &PgPool, routes: &RouteSet) -> Result<(), String> {
     if !routes.has_rpc_groups() {
         return Ok(());
     }
+    check_roles(pool, routes).await?;
     let configured = groups(routes)?;
     let Some((group, _)) = configured.values().next() else {
         return Ok(());
@@ -484,18 +522,46 @@ pub async fn recover_watermark(
         .await
         .map_err(|e| e.to_string())?;
     let result = async {
-        preflight(routes).await?;
-        verify_persisted_genesis(pool, routes).await?;
+        check_roles(pool, routes).await?;
         let a = routes
             .provider(chain, 0)
             .map_err(|e| e.to_string())?
             .group()
-            .ok_or("A group missing")?;
+            .ok_or("A group missing")?
+            .probe_copy()
+            .map_err(|e| e.to_string())?;
         let b = routes
             .provider(chain, 1)
             .map_err(|e| e.to_string())?
             .group()
-            .ok_or("B group missing")?;
+            .ok_or("B group missing")?
+            .probe_copy()
+            .map_err(|e| e.to_string())?;
+        // Owner-authorized recovery must probe below poisoned floors without modifying them.
+        for group in [&a, &b] {
+            let files = routes
+                .routes()
+                .iter()
+                .filter(|r| r.chain.chain_id == chain)
+                .collect::<Vec<_>>();
+            for index in 0..group.members.len() {
+                let result = tokio::time::timeout(
+                    Duration::from_millis(group.policy.total_deadline_ms),
+                    probe_inner(group, index, &files),
+                )
+                .await;
+                if let Ok(Ok(hash)) = result {
+                    let expected: Option<String> = sqlx::query_scalar(
+                        "SELECT genesis_hash FROM rpc_member_validations WHERE chain_id=$1 LIMIT 1",
+                    )
+                    .bind(i64::try_from(chain).map_err(|e| e.to_string())?)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    group.verified(index, expected.as_ref().is_none_or(|v| v == &hash));
+                }
+            }
+        }
         let ai = a
             .select(&Default::default(), None)
             .map_err(|e| e.to_string())?;
@@ -520,8 +586,8 @@ pub async fn recover_watermark(
         {
             return Err("recovery anchor above finalized evidence".into());
         }
-        let ah = block(a, ai, height, deadline).await?;
-        let bh = block(b, bi, height, deadline).await?;
+        let ah = block(&a, ai, height, deadline).await?;
+        let bh = block(&b, bi, height, deadline).await?;
         if ah != bh || ah.number != height {
             return Err("RPC recovery requires A/B anchor agreement".into());
         }

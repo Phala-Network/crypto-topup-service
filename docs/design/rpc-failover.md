@@ -122,7 +122,9 @@ identities. Hosts, registrable domains (pinned Public Suffix List), CNAMEs and v
 ownership records are evidence for that identity, not the identity itself. Map aliases,
 resellers and custom domains to their actual reviewed provider company; reject unmapped
 endpoints, contradictory mappings, or one company split under two ids. Different URLs,
-ports, subdomains or keys do not establish independence. No fallback crosses a group.
+ports, subdomains or keys do not establish independence. The reviewed domain-alias map
+uses canonical company ids; the same PSL registrable domain can never belong to two
+company labels or appear in both roles. No fallback crosses a group.
 
 ## Group client and bounded execution
 
@@ -161,6 +163,7 @@ recheck both; charge both only when both are available. This prevents banked acc
 permits bursting when keys recover. Keyless members have explicit account budgets and
 a synthetic per-member key budget. Unknown 429 pauses the entire configured account
 scope by default; only a reviewed rule may narrow it to a key.
+Selection skips explicitly paused account/key scopes when another account is eligible.
 No quota bypass for recovery and no limiter per method. Budgets are process-local: one
 active topup worker owns them; multiple active workers would need a shared admission service
 before claiming account-wide enforcement. Restarts refill buckets, so these are short-term
@@ -213,7 +216,8 @@ genesis identity is fixed by persisted member validation evidence and checked on
 readmission and owner recovery. Each record contains number, hash, parent hash, observed
 member id, acceptance time and config digest; retain the current anchors, old recovery
 epochs and immutable cursor/window replay evidence. `latest`,
-`safe`, `finalized` have separate records. Fetch a real block/header even when the caller
+`safe`, `finalized` have separate records. Accepted chain A/B role bindings are immutable;
+renaming or swapping a group requires an explicit audited migration, never a config edit. Fetch a real block/header even when the caller
 needs only `eth_blockNumber`. Under a serialized compare-and-persist step, reject any
 member response below that tag's current high-water mark and feed `StaleHead` back into
 selection before another attempt. Persist before publishing; persistence failure publishes
@@ -221,17 +225,26 @@ nothing. Never synthesize/clamp a head or treat a lower observation as an advanc
 
 Compare ancestry to saved anchors when advancing (fetch intervening headers or the saved
 height's canonical header). A conflicting finalized hash/ancestry freezes credit and both
-cursor writers for the chain. Latest/safe ancestry conflicts or same-height hash changes are reorgs: preserve
+cursor writers for the chain. Latest/safe ancestry conflicts or same-height hash changes persist a reorg range above the
+last finalized anchor for the head scanner; replay progress commits atomically with evidence.
+These changes are reorgs: preserve
 the numeric high-water mark, update the canonical branch only through existing reorg
 handling and replay the affected interval. A new branch shorter than that numeric mark
-waits until it catches up. Receipt/call evidence stays tied to the requested block/hash and
+waits until it catches up. Receipt plus its judging head and optional consumed nonce are one member-pinned operation.
+Before accepting absence, validate that member against the needed height and persisted
+floors, and recheck it after the reads. Typed decoding belongs inside attempt success, so
+malformed results feed failure/cooldown before any success reset.
+Receipt/call evidence stays tied to the requested block/hash and
 A/B agreement, not merely a high block number. Concurrent responses are rechecked against
 the watermark at acceptance, not just before sending.
 
 A wrong high watermark is not cleared by restart, config edits, member removal or automatic
 expiry. Freeze the chain and investigate. An owner-authorized audited recovery verifies a
 lower canonical anchor against both independent companies, records old/new anchors and
-reason, and opens a new recovery epoch. Reconcile every affected credited deposit and replay
+reason, and opens a new recovery epoch. A numeric-only poisoned floor can enter the same
+authorized recovery transaction, which freezes the chain before repairing progress. Old
+window reviews and reorg ranges remain immutable audit evidence; the new epoch gets its
+own review/replay baseline. Reconcile every affected credited deposit and replay
 from the last verified common anchor before unfreezing. Keep original watermarks/evidence;
 repair invalid cursors and all derived address progress (`created_block`,
 `backfilled_through`, backfilled flags and replay coverage) through an audited rescan
@@ -255,13 +268,18 @@ For scanners, address backfills and reconciler missing-deposit reads:
    work, `latest` for head scanning) against the persisted group watermark **and** `to`.
    Fetch the window-end header and verify canonical ancestry/anchors. A head below either
    floor rejects the member; do not send `getLogs` to it or accept its fast empty result.
-3. Read all filter batches from that member, without hedging/cache, and validate returned
+3. Read typed raw logs from all filter batches once, without hedging/cache. Extend the
+   window's single base deadline for planned batches and actual verification work: allow
+   four sends per raw log plus bounded overhead, at twice the admission time of the slower
+   account/key quota plus the configured per-send timeout allowance. Allocation is bounded by the decoded body sizes and attempt count;
+   every send retains its timeout. Buffering the current window is not a response cache.
+   Validate returned
    logs, range bounds, block hashes and detectable truncation/result-limit errors. After the reads,
    recheck that member's head/end anchor and the current group floor; detect regressions,
    forks and concurrent watermark advancement before accepting even `[]`.
 4. Buffer the entire window. On any failure or member switch, discard it and retry the
    **whole original window**, including head checks and all batches, on another member
-   under the original deadline/attempt bound. Never merge partial answers across members.
+   under the work-scaled deadline and original attempt bound. Never merge partial answers across members.
 5. Only a typed validated window can be committed. Record deposits/factory events,
    address-backfill progress and the applicable cursor/checkpoint atomically. Errors,
    timeout, cancellation or exhausted candidates leave both scanner and reconciler cursors

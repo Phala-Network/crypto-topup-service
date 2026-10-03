@@ -383,7 +383,12 @@ pub async fn scan_once<R: ChainReader>(
             continue;
         }
         request.finalized = true;
-        request.exclude_member = Some(answering);
+        // A singleton still replays; independent coverage stays pending until another member exists.
+        request.exclude_member = if reader.independent_review_available(&answering) {
+            Some(answering)
+        } else {
+            None
+        };
         match reader.read_window(&request).await {
             Ok(window) => {
                 let index = address_index(&addresses);

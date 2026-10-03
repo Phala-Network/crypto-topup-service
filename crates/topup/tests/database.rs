@@ -600,6 +600,8 @@ const DOCUMENTED_GRANTS: &[(&str, &[&str])] = &[
     ("rpc_window_reviews", &["SELECT", "INSERT"]),
     ("rpc_watermarks", &["SELECT", "INSERT", "UPDATE"]),
     ("rpc_recoveries", &["SELECT"]),
+    ("rpc_role_bindings", &["SELECT", "INSERT"]),
+    ("rpc_reorg_ranges", &["SELECT", "INSERT"]),
     ("_sqlx_migrations", &["SELECT"]),
     ("accounts", OPERATIONAL),
     ("payment_settings_revisions", &["SELECT", "INSERT"]),
@@ -673,7 +675,8 @@ async fn application_role_privileges_match_the_documented_grants() -> Result<()>
             for (table, columns) in [
                 ("rpc_member_validations", vec![("validated_at",true),("genesis_hash",false)]),
                 ("rpc_chain_state", vec![("frozen",true),("awaiting_anchor",true),("epoch",false),("recovery_pending",false)]),
-                ("rpc_window_reviews", vec![("reviewed_at",true),("reviewed_by",true),("request",false),("end_hash",false)]),
+                ("rpc_window_reviews", vec![("reviewed_at",true),("reviewed_by",true),("replayed_at",true),("epoch",false),("request",false),("end_hash",false)]),
+                ("rpc_reorg_ranges", vec![("replayed_through",true),("from_block",false),("epoch",false)]),
             ] {
                 for (column, expected) in columns {
                     let granted: bool = sqlx::query_scalar("SELECT has_column_privilege('topup_app', $1, $2, 'UPDATE')")

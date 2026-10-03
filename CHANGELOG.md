@@ -27,6 +27,12 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
   historical review coverage and audited recovery are required. Legacy height-only cursors need
   an A/B-agreed hash anchor. Rollback requires the stopped-service recovery procedure in
   [the RPC runbook](deploy/RPC.md); configuration rollback never lowers a watermark.
+- RPC company aliases additionally use pinned PSL registrable-domain evidence; accepted A/B
+  role/group ids cannot be renamed or swapped. Receipt/head/nonce evidence is member-pinned,
+  and typed decoding participates in failover. Dense-window deadlines account for real
+  verification work and shared quotas. Singleton historical replay and nonfinal reorg replay
+  retain durable progress; authorized numeric-watermark recovery isolates old branch evidence
+  in its audit epoch.
 
 ## [0.6.0] - 2026-10-02
 

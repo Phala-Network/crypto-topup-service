@@ -221,6 +221,9 @@ pub fn classify(method: &str, reply: &transport::HttpReply) -> Option<Failure> {
     if status == 408 {
         return Some(Failure::Transport);
     }
+    if status == 429 {
+        return Some(Failure::Throttled);
+    }
     if code == Some(-32005) {
         return Some(
             if message.contains("rate")
@@ -261,6 +264,36 @@ pub fn classify(method: &str, reply: &transport::HttpReply) -> Option<Failure> {
     }
     None
 }
+/// Decode with the same Alloy response types before a member attempt succeeds.
+fn validate_typed(method: &str, reply: &Value) -> Result<(), Failure> {
+    let value = reply.get("result").ok_or(Failure::Malformed)?.clone();
+    let valid = match method {
+        "eth_getTransactionReceipt" => {
+            serde_json::from_value::<Option<alloy::network::AnyTransactionReceipt>>(value).is_ok()
+        }
+        "eth_getTransactionByHash" => {
+            serde_json::from_value::<Option<alloy::rpc::types::Transaction>>(value).is_ok()
+        }
+        "eth_getBlockByNumber" | "eth_getBlockByHash" => {
+            serde_json::from_value::<Option<alloy::rpc::types::Block>>(value).is_ok()
+        }
+        "eth_getLogs" => serde_json::from_value::<Vec<alloy::rpc::types::Log>>(value).is_ok(),
+        "eth_blockNumber" | "eth_getTransactionCount" => {
+            serde_json::from_value::<alloy::primitives::U64>(value).is_ok()
+        }
+        "eth_call" | "eth_getCode" => {
+            serde_json::from_value::<alloy::primitives::Bytes>(value).is_ok()
+        }
+        "eth_chainId" => serde_json::from_value::<alloy::primitives::U64>(value).is_ok(),
+        _ => !value.is_object() || !value.as_object().is_some_and(|o| o.is_empty()),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Failure::Malformed)
+    }
+}
+
 /// Accepted canonical header evidence.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HeadAnchor {
@@ -305,6 +338,10 @@ pub trait WatermarkStore: Send + Sync {
     async fn blocked(&self, chain: u64) -> Result<(), Failure>;
     /// Freezes derived progress and credit after a finalized fork.
     async fn freeze(&self, chain: u64) -> Result<(), Failure>;
+    /// Queues replay after a nonfinal anchor's canonical hash changes.
+    async fn reorg(&self, _chain: u64, _group: &str, _from: u64, _to: u64) -> Result<(), Failure> {
+        Ok(())
+    }
     /// Loads the persisted high watermark.
     async fn load(&self, chain: u64, group: &str, tag: &str)
     -> Result<Option<HeadAnchor>, Failure>;
@@ -493,6 +530,20 @@ impl RpcGroup {
             .filter(|h| h.eligible && !h.quarantined && h.until.is_none())
             .count()
     }
+    /// Whether a different member can serve independent log review right now.
+    pub fn independent_review_available(&self, answering: &str) -> bool {
+        let health = self.health.lock().unwrap_or_else(PoisonError::into_inner);
+        self.members.iter().enumerate().any(|(i, m)| {
+            m.id != answering
+                && !self.budgets.paused(&m.account, &m.key)
+                && health.get(i).is_some_and(|h| {
+                    h.eligible
+                        && !h.quarantined
+                        && h.until.is_none()
+                        && !h.unsupported.contains("eth_getLogs")
+                })
+        })
+    }
     /// Chooses one member for a complete operation; no empty-pool fallback.
     pub fn select(&self, tried: &BTreeSet<usize>, exclude: Option<&str>) -> Result<usize, Failure> {
         self.select_for(tried, exclude, None)
@@ -511,6 +562,7 @@ impl RpcGroup {
             .enumerate()
             .filter(|(i, m)| {
                 !tried.contains(i)
+                    && !self.budgets.paused(&m.account, &m.key)
                     && exclude != Some(m.id.as_str())
                     && health.get(*i).is_some_and(|h| {
                         h.eligible
@@ -587,6 +639,18 @@ impl RpcGroup {
         {
             h.failures = 0;
         }
+    }
+    /// Scales the window deadline to its bounded verification work and shared quotas.
+    pub fn verification_time(&self, index: usize, logs: u64) -> Result<Duration, Failure> {
+        let member = self.members.get(index).ok_or(Failure::Unavailable)?;
+        let sends = logs.saturating_mul(4).saturating_add(8);
+        let admission = self
+            .budgets
+            .planned_time(&member.account, &member.key, sends)
+            .map_err(|_| Failure::Request)?;
+        Ok(admission.saturating_add(Duration::from_millis(
+            sends.saturating_mul(self.policy.attempt_timeout_ms),
+        )))
     }
     /// Pinned-member send for preflight and window operations; no selection, redirects or cache.
     pub async fn send(
@@ -821,6 +885,7 @@ impl RpcGroup {
         deadline: Instant,
     ) -> Result<(HeadAnchor, Value), Failure> {
         let value=self.send(index,&json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[tag,false]}),deadline).await?;
+        validate_typed("eth_getBlockByNumber", &value)?;
         let head = HeadAnchor::parse(value.get("result").ok_or(Failure::Malformed)?)?;
         let mut heads = self.heads.lock().await;
         let store = self
@@ -852,7 +917,7 @@ impl RpcGroup {
             if head.number < previous.number {
                 return Err(Failure::Stale);
             }
-            if tag == "finalized" {
+            {
                 let canonical = if head.number == previous.number {
                     head.clone()
                 } else {
@@ -860,10 +925,27 @@ impl RpcGroup {
                     HeadAnchor::parse(v.get("result").ok_or(Failure::Malformed)?)?
                 };
                 if canonical.number != previous.number || canonical.hash != previous.hash {
-                    if let Some(store) = &store {
-                        store.freeze(self.chain).await?;
+                    if tag == "finalized" {
+                        if let Some(store) = &store {
+                            store.freeze(self.chain).await?;
+                        }
+                        return Err(Failure::Fork);
                     }
-                    return Err(Failure::Fork);
+                    if let Some(store) = &store {
+                        // The fork point is unknown: replay all nonfinal progress above finality.
+                        let finalized = store
+                            .load(self.chain, &self.id, "finalized")
+                            .await?
+                            .map_or(0, |h| h.number);
+                        store
+                            .reorg(
+                                self.chain,
+                                &self.id,
+                                finalized.saturating_add(1),
+                                head.number,
+                            )
+                            .await?;
+                    }
                 }
             }
         }
@@ -1052,14 +1134,34 @@ impl Service<Operation> for Attempt {
                     else {if let Some(id)=value.get_mut("id") {*id=request.value.get("id").cloned().unwrap_or(Value::Null);}value}
                 })
             } else {
-                if method == "eth_getLogs" {
-                    group
-                        .send_logs(index, &request.value, request.deadline)
-                        .await
-                } else {
-                    group.send(index, &request.value, request.deadline).await
+                async {
+                    if method != "eth_chainId" {
+                        let head = group.head(index, "latest", request.deadline).await?;
+                        let needed = request
+                            .value
+                            .get("params")
+                            .and_then(|p| p.get(1))
+                            .and_then(Value::as_str)
+                            .and_then(|s| s.strip_prefix("0x"))
+                            .and_then(|s| u64::from_str_radix(s, 16).ok());
+                        if needed.is_some_and(|n| n > head.number) {
+                            return Err(Failure::Stale);
+                        }
+                    }
+                    if method == "eth_getLogs" {
+                        group
+                            .send_logs(index, &request.value, request.deadline)
+                            .await
+                    } else {
+                        group.send(index, &request.value, request.deadline).await
+                    }
                 }
+                .await
             };
+            let result = result.and_then(|value| {
+                validate_typed(method, &value)?;
+                Ok(value)
+            });
             if let Err(e) = &result {
                 group.failed(index, *e);
             } else {

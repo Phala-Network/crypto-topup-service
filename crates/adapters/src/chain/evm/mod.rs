@@ -108,6 +108,16 @@ impl ReceiptLookup {
     }
 }
 
+/// Evidence judged together from one member, never assembled across a group's members.
+pub struct FinalityEvidence {
+    /// Member-validated finalized height.
+    pub finalized: u64,
+    /// Receipt at the requested position.
+    pub receipt: ReceiptLookup,
+    /// Nonce at the same member's finalized height, only for an absent receipt.
+    pub nonce: Option<u64>,
+}
+
 /// What a recorded deposit already proves about its transfer, so re-reading it costs one receipt:
 /// a block hash fixes the block's time, and a transaction hash fixes the transaction's nonce.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,6 +298,52 @@ pub trait ChainReader: Send + Sync {
     ) -> impl Future<Output = Result<ReceiptLookup, ChainError>> + Send {
         let _ = known;
         self.receipt_transfer(tx_hash, receipt_log_index)
+    }
+
+    /// Whether independent historical review can use another member.
+    fn independent_review_available(&self, _answering: &str) -> bool {
+        true
+    }
+
+    /// Confirmation heads and receipt from one complete member attempt.
+    fn confirmation_evidence(
+        &self,
+        tx: B256,
+        position: u64,
+        known: KnownTransfer,
+        needed: u64,
+        confirmations: Confirmations,
+    ) -> impl Future<Output = Result<(ChainHeads, ReceiptLookup), ChainError>> + Send {
+        async move {
+            let _ = needed;
+            let heads = self.confirmation_heads(confirmations).await?;
+            let receipt = self.receipt_transfer_known(tx, position, known).await?;
+            Ok((heads, receipt))
+        }
+    }
+
+    /// Receipt, head and optional consumed nonce form one evidence operation.
+    fn finality_evidence(
+        &self,
+        tx: B256,
+        position: u64,
+        known: KnownTransfer,
+        from: Address,
+        needed: u64,
+    ) -> impl Future<Output = Result<FinalityEvidence, ChainError>> + Send {
+        async move {
+            let receipt = self.receipt_transfer_known(tx, position, known).await?;
+            let nonce = if receipt == ReceiptLookup::Missing {
+                Some(self.nonce_at(from, needed).await?)
+            } else {
+                None
+            };
+            Ok(FinalityEvidence {
+                finalized: needed,
+                receipt,
+                nonce,
+            })
+        }
     }
 
     /// Returns `account`'s nonce at block `block`: the number of its transactions included up to
@@ -1037,6 +1093,18 @@ impl FinalizedReader {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<TransferLog>, ChainError> {
+        let logs = self
+            .raw_transfer_logs(tokens, recipients, from_block, to_block)
+            .await?;
+        self.complete_logs(logs, recipients).await
+    }
+    async fn raw_transfer_logs(
+        &self,
+        tokens: &[Address],
+        recipients: Recipients<'_>,
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<Vec<Log>, ChainError> {
         let mut filter = Filter::new()
             .from_block(from_block)
             .to_block(to_block)
@@ -1052,10 +1120,15 @@ impl FinalizedReader {
         if !tokens.is_empty() {
             filter = filter.address(tokens.to_vec());
         }
-        let logs = self
-            .client
+        self.client
             .bounded("transfer log fetch", self.client.provider.get_logs(&filter))
-            .await?;
+            .await
+    }
+    async fn complete_logs(
+        &self,
+        logs: Vec<Log>,
+        recipients: Recipients<'_>,
+    ) -> Result<Vec<TransferLog>, ChainError> {
         let mut transfers = Vec::new();
         for log in logs {
             let Some(decoded) = decode_transfer_log(&log)? else {
@@ -1361,6 +1434,163 @@ impl ChainReader for FinalizedReader {
     ) -> Result<ReceiptLookup, ChainError> {
         self.receipt_lookup(tx_hash, receipt_log_index, Some(known))
             .await
+    }
+
+    fn independent_review_available(&self, answering: &str) -> bool {
+        self.client
+            .group()
+            .is_none_or(|g| g.independent_review_available(answering))
+    }
+
+    async fn confirmation_evidence(
+        &self,
+        tx: B256,
+        position: u64,
+        known: KnownTransfer,
+        needed: u64,
+        confirmations: Confirmations,
+    ) -> Result<(ChainHeads, ReceiptLookup), ChainError> {
+        let Some(group) = self.client.group() else {
+            return Ok((
+                self.confirmation_heads(confirmations).await?,
+                self.receipt_lookup(tx, position, Some(known)).await?,
+            ));
+        };
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
+            .unwrap_or_else(tokio::time::Instant::now);
+        let operation = async {
+            let mut tried = BTreeSet::new();
+            let mut failure = group::Failure::Unavailable;
+            for _ in 0..group.policy.max_attempts {
+                let index = group.select(&tried, None)?;
+                tried.insert(index);
+                let attempt = async {
+                    if group.head(index, "latest", deadline).await?.number < needed {
+                        return Err(ChainError::Group(group::Failure::Stale));
+                    }
+                    group.head(index, "finalized", deadline).await?;
+                    if confirmations == Confirmations::Safe {
+                        group.head(index, "safe", deadline).await?;
+                    }
+                    let pinned = FinalizedReader::new(Arc::new(EvmClient::from_group(
+                        group.clone(),
+                        Some(index),
+                    )?));
+                    let heads = pinned.confirmation_heads(confirmations).await?;
+                    let receipt = pinned.receipt_lookup(tx, position, Some(known)).await?;
+                    group.head(index, "latest", deadline).await?;
+                    Ok((heads, receipt))
+                }
+                .await;
+                match attempt {
+                    Ok(evidence) => {
+                        group.succeeded(index);
+                        return Ok(evidence);
+                    }
+                    Err(error) => {
+                        failure = match error {
+                            ChainError::Group(e) => e,
+                            _ => group::Failure::Malformed,
+                        };
+                        group.failed(index, failure);
+                        if !failure.retryable() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(ChainError::Group(failure))
+        };
+        timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            operation,
+        )
+        .await
+        .map_err(|_| ChainError::Group(group::Failure::Deadline))?
+    }
+
+    async fn finality_evidence(
+        &self,
+        tx: B256,
+        position: u64,
+        known: KnownTransfer,
+        from: Address,
+        needed: u64,
+    ) -> Result<FinalityEvidence, ChainError> {
+        let Some(group) = self.client.group() else {
+            let receipt = self.receipt_lookup(tx, position, Some(known)).await?;
+            let nonce = if receipt == ReceiptLookup::Missing {
+                Some(self.nonce_at(from, needed).await?)
+            } else {
+                None
+            };
+            return Ok(FinalityEvidence {
+                finalized: needed,
+                receipt,
+                nonce,
+            });
+        };
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_millis(group.policy.total_deadline_ms))
+            .unwrap_or_else(tokio::time::Instant::now);
+        let operation = async {
+            let mut tried = BTreeSet::new();
+            let mut failure = group::Failure::Unavailable;
+            for _ in 0..group.policy.max_attempts {
+                let index = group.select(&tried, None)?;
+                tried.insert(index);
+                let attempt = async {
+                    let head = group.head(index, "finalized", deadline).await?;
+                    if head.number < needed {
+                        return Err(ChainError::Group(group::Failure::Stale));
+                    }
+                    let pinned = FinalizedReader::new(Arc::new(EvmClient::from_group(
+                        group.clone(),
+                        Some(index),
+                    )?));
+                    let receipt = pinned.receipt_lookup(tx, position, Some(known)).await?;
+                    let nonce = if receipt == ReceiptLookup::Missing {
+                        Some(pinned.nonce_at(from, head.number).await?)
+                    } else {
+                        None
+                    };
+                    // Revalidate after all reads so a stale/null answer cannot escape a concurrent floor.
+                    if group.head(index, "finalized", deadline).await?.number < head.number {
+                        return Err(ChainError::Group(group::Failure::Stale));
+                    }
+                    Ok(FinalityEvidence {
+                        finalized: head.number,
+                        receipt,
+                        nonce,
+                    })
+                }
+                .await;
+                match attempt {
+                    Ok(evidence) => {
+                        group.succeeded(index);
+                        return Ok(evidence);
+                    }
+                    Err(error) => {
+                        failure = match error {
+                            ChainError::Group(e) => e,
+                            _ => group::Failure::Malformed,
+                        };
+                        group.failed(index, failure);
+                        if !failure.retryable() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(ChainError::Group(failure))
+        };
+        timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            operation,
+        )
+        .await
+        .map_err(|_| ChainError::Group(group::Failure::Deadline))?
     }
 
     async fn nonce_at(&self, account: Address, block: u64) -> Result<u64, ChainError> {

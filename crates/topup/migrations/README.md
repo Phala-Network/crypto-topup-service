@@ -31,7 +31,9 @@ the owner creates; no application table grants `TRUNCATE`. The migration narrows
 | `rpc_member_validations` | `SELECT`, `INSERT`; `UPDATE` of `validated_at` only |
 | `rpc_chain_state` | `SELECT`, `INSERT`; `UPDATE` of `frozen`, `reason`, `awaiting_anchor` only |
 | `rpc_watermarks` | `SELECT`, `INSERT`, `UPDATE`; epoch lowering is owner recovery only |
-| `rpc_window_reviews` | `SELECT`, `INSERT`; `UPDATE` of `reviewed_at`, `reviewed_by` only |
+| `rpc_window_reviews` | `SELECT`, `INSERT`; `UPDATE` of `reviewed_at`, `reviewed_by`, `replayed_at` only |
+| `rpc_role_bindings` | `SELECT`, `INSERT`; accepted chain roles are immutable |
+| `rpc_reorg_ranges` | `SELECT`, `INSERT`; `UPDATE` of `replayed_through` only |
 | `rpc_recoveries` | `SELECT`; recovery audit writes require the owner |
 | `_sqlx_migrations` | `SELECT` |
 | every other table | `SELECT`, `INSERT`, `UPDATE`, `DELETE` |

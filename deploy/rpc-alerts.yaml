@@ -43,3 +43,11 @@ groups:
         annotations:
           summary: "Historical coverage still needs a different answering member"
           runbook: "deploy/RPC.md"
+      - alert: TopupRpcReorgReplayStalled
+        expr: topup_rpc_reorg_pending_ranges > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Nonfinal RPC reorg replay is stalled
+          description: Inspect group eligibility and complete-window replay before resuming chain progress.
