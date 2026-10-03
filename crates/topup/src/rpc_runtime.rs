@@ -21,18 +21,19 @@ async fn probe(
     let copy = group.probe_copy().map_err(|e| e.to_string())?;
     let result = tokio::time::timeout(
         Duration::from_millis(group.policy.total_deadline_ms),
-        probe_inner(&copy, index, routes),
+        async {
+            let hash = probe_inner(&copy, index, routes).await?;
+            group
+                .validate_probe(index, &copy)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(hash)
+        },
     )
     .await
     .map_err(|_| "RPC preflight deadline".to_owned())?;
     if copy.quarantined(index) {
         group.failed(index, topup_adapters::chain::evm::group::Failure::Identity);
-    }
-    if result.is_ok() {
-        group
-            .validate_probe(index, &copy)
-            .await
-            .map_err(|e| e.to_string())?;
     }
     result
 }
@@ -60,8 +61,14 @@ async fn probe_inner(
     }
     let genesis = block(group, index, 0, deadline).await?;
     let client = EvmClient::from_group(group.clone(), Some(index)).map_err(|e| e.to_string())?;
+    let mut contracts = std::collections::BTreeSet::new();
     for route in routes {
-        crate::contracts::verify_on(&client, route).await?;
+        if contracts.insert((
+            route.chain.contracts.forwarder_factory,
+            route.chain.contracts.implementation,
+        )) {
+            crate::contracts::verify_on(&client, route).await?;
+        }
     }
     group
         .head(index, "latest", deadline)

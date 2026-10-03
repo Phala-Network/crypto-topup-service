@@ -437,7 +437,7 @@ impl RpcGroup {
             return Ok(());
         };
         let heads = probe.heads.lock().await.clone();
-        for tag in ["latest", "finalized"] {
+        for tag in ["latest", "safe", "finalized"] {
             let current = heads.get(tag).ok_or(Failure::Malformed)?;
             for floor in [tag, "cursor"] {
                 if let Some(previous) = store.load(self.chain, &self.id, floor).await? {

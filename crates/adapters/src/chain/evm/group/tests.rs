@@ -649,3 +649,50 @@ async fn weighted_selection_never_repopulates_an_empty_pool() {
         Err(Failure::Unavailable)
     );
 }
+
+struct SafeFloor;
+#[async_trait]
+impl WatermarkStore for SafeFloor {
+    async fn blocked(&self, _: u64) -> Result<(), Failure> {
+        Ok(())
+    }
+    async fn freeze(&self, _: u64) -> Result<(), Failure> {
+        Ok(())
+    }
+    async fn load(&self, _: u64, _: &str, tag: &str) -> Result<Option<HeadAnchor>, Failure> {
+        Ok((tag == "safe").then(|| HeadAnchor {
+            number: 100,
+            hash: format!("0x{}", "11".repeat(32)),
+            parent_hash: format!("0x{}", "22".repeat(32)),
+        }))
+    }
+    async fn accept(
+        &self,
+        _: u64,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &HeadAnchor,
+    ) -> Result<(), Failure> {
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn recovery_probe_cannot_readmit_a_member_below_persisted_safe_head() {
+    let (url,task)=server(Router::new().route("/",post(|Json(request):Json<Value>| async move {
+        let number=if request["params"][0]=="safe" {99} else {100};
+        Json(json!({"jsonrpc":"2.0","id":request["id"],"result":{"number":format!("0x{number:x}"),"hash":format!("0x{}","11".repeat(32)),"parentHash":format!("0x{}","22".repeat(32))}}))
+    }))).await;
+    let group = group(&url);
+    group.set_store(Arc::new(SafeFloor));
+    let probe = group.probe_copy().unwrap();
+    for tag in ["latest", "safe", "finalized"] {
+        probe
+            .head(0, tag, Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+    }
+    assert_eq!(group.validate_probe(0, &probe).await, Err(Failure::Stale));
+    assert_eq!(group.eligible(), 0);
+    task.abort();
+}
