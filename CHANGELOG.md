@@ -27,9 +27,12 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ### Reference product
 
-- Replace the HTTP development server with pinned Starlette and uvicorn, bounded connections
+- Replace the HTTP development server with pinned Starlette and Granian, bounded connections
   and workers, streamed body limits, request deadlines, uniform application transport errors,
-  and graceful shutdown. The demo forwards TanStack Query cancellation to deadline-bound fetches
+  and graceful shutdown. Enforce a five-second total header deadline and connection admission
+  before ASGI dispatch. Outbound SDK calls share a 25-second operation deadline without automatic
+  retries; a single supervised worker has a 35-second shutdown limit within the container's
+  45-second grace period. The demo forwards TanStack Query cancellation to deadline-bound fetches
   and uses a native network select to avoid dynamic inline scrollbar styles.
 
 ## [0.7.0] - 2026-10-02

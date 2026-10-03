@@ -13,19 +13,22 @@ import json
 import logging
 import re
 import secrets
-import signal
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
+from functools import partial
 from http import HTTPStatus
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from granian import Granian
+from granian.constants import HTTPModes, Interfaces
+from granian.http import HTTP1Settings
+from granian.server.embed import Server as EmbeddedServer
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse
@@ -55,11 +58,15 @@ from .demo import DemoConsole
 from .fulfillment import Answer, Fulfillment, PinnedKeys, TransientError, parse_decimal
 from .ledger import ProductLedger
 from .restore_records import export_restore_records
+from .transport import OPERATION_TIMEOUT_SECONDS, operation_deadline
 
 LOG = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
+HEADER_TIMEOUT_MILLISECONDS = 5000
+CONNECTION_LIMIT = 32
+SHUTDOWN_TIMEOUT_SECONDS = 35
 # Workspace ids and lock references in the account API: URL path segments without escaping.
 ACCOUNT_REF = re.compile(r"[A-Za-z0-9._-]{1,64}")
 # The account API's path of the restore records, reserved among workspace ids.
@@ -89,6 +96,7 @@ class ProductServer:
         def dispatch(
             method: str, target: str, headers: dict[str, str], body: bytes
         ) -> HttpResponse:
+            operation_deadline.set(time.monotonic() + OPERATION_TIMEOUT_SECONDS)
             if method == "POST" and urlsplit(target).path == base_path + "/webhooks":
                 answer = self.fulfillment.handle(headers, body)
             elif method == "GET" and urlsplit(target).path == base_path + "/healthz":
@@ -113,7 +121,7 @@ class ProductServer:
         async def endpoint(request: Request) -> HttpResponse:
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
-                    # h11 rejects malformed framing on the wire. Also validate ASGI requests,
+                    # The HTTP/1 parser rejects malformed wire framing. Also validate ASGI requests,
                     # and bound streamed/chunked bodies regardless of Content-Length.
                     lengths = request.headers.getlist("content-length")
                     if lengths and (
@@ -157,39 +165,75 @@ class ProductServer:
                 LOG.exception("product request failed")
                 return error(request, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+        self._ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+        @asynccontextmanager
+        async def lifespan(_: Starlette) -> AsyncIterator[None]:
+            self._ready.set()
+            try:
+                yield
+            finally:
+                # Drain actual work, not merely cancelled asyncio wrappers. The production
+                # supervisor kills the worker at 35s if noncooperative sync code cannot drain.
+                await asyncio.to_thread(self.close)
+
         self.app = Starlette(
-            routes=[Route("/{path:path}", endpoint, methods=["GET", "POST", "OPTIONS"])]
+            routes=[Route("/{path:path}", endpoint, methods=["GET", "POST", "OPTIONS"])],
+            lifespan=lifespan,
         )
-        self._server = uvicorn.Server(
-            uvicorn.Config(
-                self.app,
-                host=config.listen_host,
-                port=config.listen_port,
-                http="h11",
-                ws="none",
-                limit_concurrency=32,
-                backlog=64,
-                timeout_keep_alive=5,
-                timeout_graceful_shutdown=35,
-                access_log=False,
-            )
+        self._server = EmbeddedServer(
+            self.app,
+            address=config.listen_host,
+            port=config.listen_port,
+            **_server_options(),
         )
-        self._thread = threading.Thread(target=self._server.run, name="product-server")
+        self._thread = threading.Thread(target=self._run, name="product-server")
+
+    def _run(self) -> None:
+        async def run() -> None:
+            self._loop = asyncio.get_running_loop()
+            await self._server.serve()
+
+        asyncio.run(run())
 
     def __enter__(self) -> ProductServer:
         self._thread.start()
         deadline = time.monotonic() + 10
-        while not self._server.started:
+        while not self._ready.is_set():
             if not self._thread.is_alive() or time.monotonic() >= deadline:
                 self.__exit__()
                 raise RuntimeError("product server did not start")
             time.sleep(0.01)
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self._server.should_exit = True
-        self._thread.join()
+    def close(self) -> None:
         self._workers.shutdown(wait=True, cancel_futures=True)
+        if self.accounts is not None:
+            self.accounts.close()
+        if self.demo is not None:
+            self.demo.close()
+
+    def __exit__(self, *_: object) -> None:
+        if self._loop is not None and self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._server.stop)
+        self._thread.join()
+
+
+def _server_options() -> dict[str, Any]:
+    return {
+        "interface": Interfaces.ASGI,
+        "http": HTTPModes.http1,
+        "websockets": False,
+        "backpressure": CONNECTION_LIMIT,
+        "backlog": 64,
+        "http1_settings": HTTP1Settings(
+            header_read_timeout=HEADER_TIMEOUT_MILLISECONDS,
+            max_buffer_size=16 * 1024,
+            keep_alive=False,
+        ),
+        "log_access": False,
+    }
 
 
 class AccountApi:
@@ -500,8 +544,7 @@ def quote_address(config: ProductConfig, team: str, quote_id: str, chain_id: int
     )
 
 
-@contextmanager
-def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+def _make_product(config: ProductConfig, *, pin_wait_s: float = 0) -> ProductServer:
     """Runs the product: webhook receiver with fulfillment, account API, and the demo's API."""
     if config.driver_public_key is None:
         raise ValueError("driver_public_key is required to serve the account API")
@@ -514,21 +557,28 @@ def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator
     fulfillment = Fulfillment(config, ledger, webhook_keys)
     accounts = AccountApi(config, ledger, load_public_key(config.driver_public_key))
     demo = None if config.web_origin is None else DemoConsole(config, ledger)
-    try:
-        with ProductServer(fulfillment, accounts, demo) as server:
-            LOG.info("product listening on %s:%s", config.listen_host, config.listen_port)
-            yield server
-    finally:
-        accounts.close()
-        if demo is not None:
-            demo.close()
+    return ProductServer(fulfillment, accounts, demo)
+
+
+@contextmanager
+def product_service(config: ProductConfig, *, pin_wait_s: float = 0) -> Iterator[ProductServer]:
+    """Runs the product in process for the sandbox and SDK examples."""
+    with _make_product(config, pin_wait_s=pin_wait_s) as server:
+        yield server
+
+
+def _load_application(config: ProductConfig) -> Starlette:
+    # Construct SQLite connections and in-memory rate limits inside the single worker.
+    return _make_product(config, pin_wait_s=600).app
 
 
 def serve(config: ProductConfig) -> None:
-    """Serves the product until SIGTERM or SIGINT."""
-    stop = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, lambda *_: stop.set())
-    with product_service(config, pin_wait_s=600):
-        stop.wait()
-    LOG.info("product stopped")
+    """Serve under Granian's standard signal handling and bounded worker shutdown."""
+    Granian(
+        "reference_product.server",
+        address=config.listen_host,
+        port=config.listen_port,
+        workers=1,
+        workers_kill_timeout=SHUTDOWN_TIMEOUT_SECONDS,
+        **_server_options(),
+    ).serve(target_loader=partial(_load_application, config), wrap_loader=False)

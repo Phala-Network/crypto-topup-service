@@ -177,6 +177,20 @@ use `0x936c…4504` on Base Sepolia: a copy exists there whose owner key is dest
 
 ## Staging reference product
 
+The product runs Starlette under a single supervised Granian worker. HTTP/1 connections have
+a five-second **total** header-read deadline, a 16 KiB header buffer, and admission backpressure
+at 32 connections (64 pending connections in the listen backlog). Keep-alive is disabled. Bodies
+are limited to 1 MiB; application requests have a 30-second deadline and at most 16 synchronous
+handlers. SDK and demo outbound HTTP exchanges share a 25-second handler budget, including
+response reads and pagination, and disable automatic SDK retries so `Retry-After` cannot extend
+shutdown. A timed-out synchronous handler retains its admission slot until it finishes.
+
+On SIGTERM, the worker drains synchronous work before closing clients. Granian kills a worker
+that cannot drain within 35 seconds, leaving margin inside Compose's 45-second stop grace period.
+As with any forced process termination, a remote mutation may have completed without a response;
+retry mutations with the same idempotency key. The sandbox's in-process server uses the same HTTP
+limits but has no process supervisor; production must use the `serve` command.
+
 Staging's reference product is a merchant like any other, with its own account, and a second CVM
 running [product/reference_product](product/reference_product): `serve` mode is the webhook
 receiver that applies every `deposit.*` snapshot by the balance rule (a deposit nets to

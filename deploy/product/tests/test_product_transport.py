@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
+from contextlib import ExitStack, suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -14,6 +21,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,13 +29,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from reference_product import server as transport
 from reference_product.fulfillment import Answer
 from reference_product.server import MAX_BODY_BYTES, ProductServer
+from reference_product.transport import DeadlineTransport, operation_deadline
 
 
 @pytest.fixture
 def product() -> Iterator[ProductServer]:
     fulfillment = Mock()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
     fulfillment.config = SimpleNamespace(
-        public_url="http://localhost/topup", listen_host="127.0.0.1", listen_port=0
+        public_url="http://localhost/topup", listen_host="127.0.0.1", listen_port=port
     )
     fulfillment.handle.return_value = Answer(200, {"received": True})
     product = ProductServer(fulfillment)
@@ -108,9 +120,9 @@ def test_timed_out_workers_remain_bounded(
 
 
 @pytest.mark.parametrize("length", ["-1", "invalid"])
-def test_h11_rejects_invalid_wire_framing(product: ProductServer, length: str) -> None:
+def test_rejects_invalid_wire_framing(product: ProductServer, length: str) -> None:
     with product:
-        port = product._server.servers[0].sockets[0].getsockname()[1]
+        port = product.fulfillment.config.listen_port
         with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
             connection.sendall(
                 (
@@ -121,3 +133,199 @@ def test_h11_rejects_invalid_wire_framing(product: ProductServer, length: str) -
             assert connection.recv(4096).startswith(b"HTTP/1.1 400")
     assert not product._thread.is_alive()
     cast(Mock, product.fulfillment.handle).assert_not_called()
+
+
+def test_slow_headers_have_total_deadline_and_do_not_503(
+    product: ProductServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reconstruct with the same options used by the production supervisor.
+    monkeypatch.setattr(transport, "HEADER_TIMEOUT_MILLISECONDS", 300)
+    assert product._server.http1_settings is not None
+    product._server.http1_settings.header_read_timeout = 300
+    with product, ExitStack() as stack:
+        port = product.fulfillment.config.listen_port
+        peers = [
+            stack.enter_context(socket.create_connection(("127.0.0.1", port), timeout=2))
+            for _ in range(transport.CONNECTION_LIMIT)
+        ]
+        for peer in peers:
+            peer.sendall(b"POST /topup/webhooks HTTP/1.1\r\nHost: localhost\r\nX-Slow: ")
+        stop = threading.Event()
+
+        def trickle() -> None:
+            while not stop.wait(0.02):
+                for peer in peers:
+                    with suppress(OSError):
+                        peer.sendall(b"x")
+
+        thread = threading.Thread(target=trickle)
+        thread.start()
+        try:
+            started = time.monotonic()
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=2) as client:
+                assert client.get("/topup/healthz").status_code == 200
+                assert client.post("/topup/webhooks", content=b"{}").status_code == 200
+            assert time.monotonic() - started < 1.5
+            for peer in peers:
+                assert peer.recv(4096) == b""
+        finally:
+            stop.set()
+            thread.join()
+
+
+def test_shutdown_drains_trickling_sync_network_work(
+    product: ProductServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(transport, "OPERATION_TIMEOUT_SECONDS", 0.4)
+    entered = threading.Event()
+    disconnected = threading.Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", "10000")
+            self.end_headers()
+            entered.set()
+            try:
+                for _ in range(10000):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.01)
+            except (BrokenPipeError, ConnectionResetError):
+                disconnected.set()
+
+        def log_message(self, *_: object) -> None:
+            pass
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever)
+    upstream_thread.start()
+
+    def handle(*_: object) -> Answer:
+        with httpx.Client(transport=DeadlineTransport(), timeout=5) as client:
+            client.get(f"http://127.0.0.1:{upstream.server_port}/")
+        return Answer(200)
+
+    cast(Mock, product.fulfillment.handle).side_effect = handle
+    try:
+        product.__enter__()
+        with socket.create_connection(
+            ("127.0.0.1", product.fulfillment.config.listen_port), timeout=2
+        ) as peer:
+            peer.sendall(
+                b"POST /topup/webhooks HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+            )
+            assert entered.wait(2)
+            started = time.monotonic()
+            product.__exit__()
+            assert time.monotonic() - started < 2
+            assert disconnected.wait(2)
+            assert all(not thread.is_alive() for thread in product._workers._threads)
+    finally:
+        product.__exit__()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join()
+
+
+def _blocked_application(marker: str) -> Starlette:
+    """A noncooperative handler exercises the production supervisor's final kill deadline."""
+    fulfillment = Mock()
+    fulfillment.config = SimpleNamespace(
+        public_url="http://localhost/topup", listen_host="127.0.0.1", listen_port=0
+    )
+
+    def handle(*_: object) -> Answer:
+        Path(marker).touch()
+        time.sleep(60)
+        return Answer(200)
+
+    fulfillment.handle.side_effect = handle
+    return ProductServer(fulfillment).app
+
+
+def test_supervisor_bounds_shutdown_of_noncooperative_sync_work(tmp_path: Path) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    marker = tmp_path / "in-flight"
+    script = (
+        "from functools import partial\n"
+        "from granian import Granian\n"
+        "from test_product_transport import _blocked_application\n"
+        "from reference_product.server import _server_options\n"
+        "import sys\n"
+        "Granian('', address='127.0.0.1', port=int(sys.argv[1]), workers=1, "
+        "workers_kill_timeout=1, **_server_options()).serve("
+        "target_loader=partial(_blocked_application, sys.argv[2]), wrap_loader=False)\n"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(Path(__file__).parent), str(Path(__file__).resolve().parents[1])]
+        ),
+    }
+    with (tmp_path / "server.log").open("w") as log:
+        process = subprocess.Popen(  # noqa: S603 — fixed local test command
+            [sys.executable, "-c", script, str(port), str(marker)],
+            env=env,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    peer = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                    break
+                except OSError:
+                    assert process.poll() is None
+                    assert time.monotonic() < deadline
+                    time.sleep(0.02)
+            with peer:
+                peer.sendall(
+                    b"POST /topup/webhooks HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+                )
+                while not marker.exists():
+                    assert time.monotonic() < deadline
+                    time.sleep(0.02)
+                started = time.monotonic()
+                process.send_signal(signal.SIGTERM)
+                assert process.wait(timeout=4) == 0
+                assert time.monotonic() - started < 3
+        finally:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def test_outbound_calls_share_total_budget_and_preserve_compressed_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async_client = httpx.AsyncClient
+    calls: list[httpx.Request] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        await asyncio.sleep(0.4)
+        return httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(gzip.compress(b"ok"))
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: async_client(transport=httpx.MockTransport(upstream), **kw),
+    )
+    token = operation_deadline.set(time.monotonic() + 0.6)
+    try:
+        with httpx.Client(transport=DeadlineTransport()) as client:
+            assert client.post("http://test/first?key=value", content=iter([b"body"])).text == "ok"
+            with pytest.raises(httpx.TimeoutException, match="operation deadline"):
+                client.get("http://test/second")
+        assert len(calls) == 2
+        assert calls[0].content == b"body"
+        assert calls[0].url.query == b"key=value"
+    finally:
+        operation_deadline.reset(token)
