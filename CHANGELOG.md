@@ -13,6 +13,13 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** live reference products now require pre-verified pinned webhook keys; unpinned
+  attestation key fetches remain available only in test mode.
+- Price-provider responses are bounded while streaming, and API ingress and service containers
+  have bounded resource and privilege exposure.
+
 ## [0.7.0] - 2026-10-02
 
 ### Changed

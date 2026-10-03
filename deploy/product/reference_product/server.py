@@ -363,15 +363,18 @@ def pin_webhook_keys(config: ProductConfig, *, wait_s: float = 0) -> PinnedKeys:
 
     `verify_attestation_binding` checks that the report data binds the nonce, the account, the
     mode, and the keys. Production integrators must also verify the TDX quote with the dstack
-    verifier (deploy/dstack-verifier.sh, deploy/README.md) and then pin the keys in
-    configuration; configured `webhook_public_keys` skip the fetch. While the service is
-    unreachable this retries for up to `wait_s` seconds; without the API key it raises
-    `MissingProductKeyError`.
+    verifier and then pin the keys in configuration. Test mode may fetch keys after checking the
+    report-data binding. While the service is unreachable this retries for up to `wait_s` seconds;
+    without the API key it raises `MissingProductKeyError`.
     """
     livemode = config.livemode()
     if config.webhook_public_keys:
         return PinnedKeys(
             livemode, [load_webhook_public_key(key) for key in config.webhook_public_keys]
+        )
+    if livemode:
+        raise MissingProductKeyError(
+            "live mode requires pre-verified webhook_public_keys; refusing unpinned attestation"
         )
     deadline = time.monotonic() + wait_s
     while True:
