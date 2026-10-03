@@ -78,7 +78,7 @@ impl ApiRateLimiter {
         let now = (self.clock)();
         let mut state = self.state.lock().expect("rate limiter mutex poisoned");
         let next = state.sources.entry(source.to_owned()).or_insert(now);
-        if *next > now + Duration::from_secs(1) {
+        if *next > now {
             return false;
         }
         *next = now + Duration::from_millis(100);
