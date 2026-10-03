@@ -79,7 +79,7 @@ called_at=$commit run lightweight STUB_REF="commit $commit" ||
 ! run outside STUB_COMPARE=diverged || fail "accepted a commit outside main"
 ! grep -q '^release download' "$STUB_LOG" || fail "downloaded a release whose commit is outside main"
 ! run unattested STUB_REFUSE=SHA256SUMS || fail "accepted an unattested SHA256SUMS"
-! run no-sbom STUB_PREDICATE_REFUSE=https://spdx.dev/Document || fail "accepted missing SBOM attestation"
+! run no-sbom STUB_PREDICATE_REFUSE=https://spdx.dev/Document/v2.3 || fail "accepted missing SBOM attestation"
 echo tampered >"$tmp/assets/phala-cloud-template.yml"
 ! run tampered || fail "accepted an asset that does not match SHA256SUMS"
 echo "release verifier test passed"

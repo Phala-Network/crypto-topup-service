@@ -249,9 +249,8 @@ jobs:
         with:
           version: v0.37.1
           driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
-      - name: Set the build timestamp
-        id: epoch
-        run: echo "value=$(git log -1 --pretty=%ct)" >>"$GITHUB_OUTPUT"
+      # These disposable rehearsal images use a fixed epoch so documentation-only commits can
+      # reuse compiled layers. Release's clean rebuild comparison uses the commit timestamp.
       - name: Build phala-pay with cached layers
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -259,9 +258,9 @@ jobs:
           file: Dockerfile
           load: true
           tags: phala-pay:rehearsal
-          build-args: SOURCE_DATE_EPOCH=${{ steps.epoch.outputs.value }}
-          cache-from: type=gha,scope=rehearsal-phala-pay
-          cache-to: type=gha,scope=rehearsal-phala-pay,mode=max
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay
+          cache-to: type=gha,scope=ci-phala-pay,mode=max
       - name: Build postgres-walg with cached layers
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -269,9 +268,9 @@ jobs:
           file: deploy/Dockerfile.postgres-walg
           load: true
           tags: postgres-walg:rehearsal
-          build-args: SOURCE_DATE_EPOCH=${{ steps.epoch.outputs.value }}
-          cache-from: type=gha,scope=rehearsal-postgres-walg
-          cache-to: type=gha,scope=rehearsal-postgres-walg,mode=max
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-postgres-walg
+          cache-to: type=gha,scope=ci-postgres-walg,mode=max
       - name: Build phala-pay-reference-product with cached layers
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -279,9 +278,9 @@ jobs:
           file: deploy/Dockerfile.reference-product
           load: true
           tags: phala-pay-reference-product:rehearsal
-          build-args: SOURCE_DATE_EPOCH=${{ steps.epoch.outputs.value }}
-          cache-from: type=gha,scope=rehearsal-phala-pay-reference-product
-          cache-to: type=gha,scope=rehearsal-phala-pay-reference-product,mode=max
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-reference-product
+          cache-to: type=gha,scope=ci-phala-pay-reference-product,mode=max
       - name: Build phala-pay-dstack-simulator with cached layers
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -289,9 +288,9 @@ jobs:
           file: deploy/local/Dockerfile.dstack-simulator
           load: true
           tags: phala-pay-dstack-simulator:rehearsal
-          build-args: SOURCE_DATE_EPOCH=${{ steps.epoch.outputs.value }}
-          cache-from: type=gha,scope=rehearsal-phala-pay-dstack-simulator
-          cache-to: type=gha,scope=rehearsal-phala-pay-dstack-simulator,mode=max
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-dstack-simulator
+          cache-to: type=gha,scope=ci-phala-pay-dstack-simulator,mode=max
       - name: Rehearse a payment and signed webhook redelivery
         env:
           REHEARSAL_PREBUILT: "1"
@@ -301,20 +300,36 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image
-        run: >-
-          docker build
-          --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
-          --tag phala-pay:ci .
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+      - name: Build phala-pay
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: phala-pay:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay
+          cache-to: type=gha,scope=ci-phala-pay,mode=max
       - name: Smoke test runtime image
         run: docker run --rm phala-pay:ci topup --help
       - name: The webhook egress proxy refuses private, CGNAT, and IPv4-mapped targets
         run: deploy/tests/smokescreen.sh phala-pay:ci
-      - name: Build and smoke test the reference-product image
-        run: |
-          docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)" \
-            -f deploy/Dockerfile.reference-product -t phala-pay-reference-product:ci .
-          docker run --rm phala-pay-reference-product:ci --help
+      - name: Build phala-pay-reference-product
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile.reference-product
+          load: true
+          tags: phala-pay-reference-product:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-phala-pay-reference-product
+          cache-to: type=gha,scope=ci-phala-pay-reference-product,mode=max
+      - name: Smoke test the reference-product image
+        run: docker run --rm phala-pay-reference-product:ci --help
       - uses: ./.github/actions/security
         with:
           scan-type: image
@@ -325,12 +340,6 @@ jobs:
           scan-type: image
           severity: HIGH,CRITICAL
           image-ref: phala-pay-reference-product:ci
-      # The Buildx version deploy/verify-image.sh requires; it builds on its own pinned BuildKit.
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          version: v0.37.1
-          driver: docker
-          use: false
       # Release publishes only after two matching builds; catch a nondeterministic
       # dependency here rather than at release. The phala-pay build is too slow to repeat per PR.
       - name: Check the reference-product image is reproducible
@@ -372,6 +381,7 @@ jobs:
           deploy/tests/render.sh
           deploy/tests/render-route.sh
           deploy/tests/verify-release.sh
+          python3 .github/security/test-exceptions.py
           deploy/tests/phala-cvm-wait.sh
           deploy/tests/attested-compose.sh
           deploy/tests/verify-ingress-evidence.sh
@@ -404,8 +414,20 @@ jobs:
           TOPUP="$PWD/target/debug/topup" deploy/tests/deploy.sh
       - name: Check runbook commands against the CLI and OpenAPI
         run: make runbook-check
-      - name: Build postgres-walg image
-        run: docker build -f deploy/Dockerfile.postgres-walg -t postgres-walg:ci .
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.37.1
+          driver-opts: image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+      - name: Build postgres-walg
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile.postgres-walg
+          load: true
+          tags: postgres-walg:ci
+          build-args: SOURCE_DATE_EPOCH=0
+          cache-from: type=gha,scope=ci-postgres-walg
+          cache-to: type=gha,scope=ci-postgres-walg,mode=max
       - uses: ./.github/actions/security
         with:
           scan-type: image

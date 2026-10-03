@@ -58,7 +58,7 @@ images=$(jq -r '.[]' "$dir/images.json")
 for image in $images; do
     gh attestation verify "oci://$image" "${provenance[@]}" >/dev/null
     gh attestation verify "oci://$image" "${provenance[@]}" \
-        --predicate-type https://spdx.dev/Document >/dev/null
+        --predicate-type https://spdx.dev/Document/v2.3 >/dev/null
     echo "verified provenance and SPDX SBOM for $image" >&2
 done
 echo "$commit"

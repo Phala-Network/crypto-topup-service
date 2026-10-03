@@ -140,7 +140,8 @@ each attested, are:
 hand ([self-hosting, "Verify a release"](../docs/self-hosting.md#verify-a-release)). It stops at
 the first failure: the tag's commit must be in `main`'s history, the assets must match
 `SHA256SUMS`, and every asset and image must have a provenance attestation of `release.yml` at the
-tag, on a GitHub-hosted runner, for that commit (`gh attestation verify --source-digest`).
+tag, on a GitHub-hosted runner, for that commit (`gh attestation verify --source-digest`). Each
+image must also have an SPDX 2.3 SBOM attestation under the same identity and source constraints.
 
 ### Deploy
 
