@@ -13,6 +13,48 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Fixed
+
+- RPC acceptance and readmission now retry only transient failures within explicit probe attempt
+  and deadline bounds, honoring throttling delays. Capability checks share one finalized snapshot
+  so redundant tagged reads cannot spuriously reject a load-balanced endpoint's regressing head.
+  Persisted head floors, chain/genesis identity and contract validation remain mandatory.
+- `topup rpc check` reserves stdout for JSON and reports sanitized member/probe failure reasons
+  on stderr, which the Deploy preflight now surfaces. A capability probes require an unsplit
+  address-less 2 000-block log window; B probes verify recent addressed logs.
+- Staging has keyless Sentio A backups on both chains and ethPandaOps B on Sepolia, with
+  endpoint/operator evidence, distinct company domains and shared quota budgets. Base Sepolia B
+  stays singleton after rejecting Coinbase's pruned genesis and removing Pocket's unverifiable
+  Supplier independence; the Phala Cloud template routes are unchanged.
+- Member probes reject same-height snapshot/anchor/read hash conflicts and persistently freeze
+  the chain when finalized validation detects a conflict, including early snapshot rejection.
+  Owner recovery uses fresh full-probe deadlines for each member and an independent full
+  operation deadline for anchor agreement, allowing healthy low-rate providers to complete
+  route verification.
+
+### JS SDK
+
+- **Breaking:** React components require an explicit `@phala/pay/styles.css` import. Removed
+  `appearance.variables`; set the `--pp-*` custom properties in your stylesheet. Components no
+  longer inject inline styles, allowing `style-src 'self'` in integrations. The demo permits
+  only its own CSS and the exact hash of Radix's fixed scrollbar stylesheet.
+- Public reads accept a composable `AbortSignal` and a request deadline (10 seconds by default).
+  **Breaking:** Node.js 20.3 or later is required for the standard `AbortSignal.any` API.
+  Sessions and React components abort active reads on destruction or unmount.
+- Checkout calls `onSuccess` after a local expiry followed by credit, once per quote and
+  notification type. DepositAddress uses native keyboard-accessible network/token radio groups.
+
+### Reference product
+
+- Replace the HTTP development server with pinned Starlette and Granian, bounded connections
+  and workers, streamed body limits, request deadlines, uniform application transport errors,
+  and graceful shutdown. Bound worker-accepted connections to 32 with a five-second total
+  header-read deadline after acceptance; excess connections wait in the OS listen backlog
+  configured at 128 (Granian's minimum), rather than entering the worker. Outbound SDK calls share a 25-second operation deadline without automatic
+  retries; a single supervised worker has a 35-second shutdown limit within the container's
+  45-second grace period. The demo forwards TanStack Query cancellation to deadline-bound fetches
+  and uses a native network select to avoid dynamic inline scrollbar styles.
+
 ### Security
 
 - **Breaking:** live reference products now require pre-verified pinned webhook keys; unpinned
