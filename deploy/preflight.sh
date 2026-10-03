@@ -106,8 +106,8 @@ jq -j --arg target /etc/topup/topup.yaml \
 # topup ARGS...: the pinned image's topup, offline, with topup.yaml on stdin. Only the RPC keys
 # reach it, by name; nothing secret is printed.
 topup() {
-    local name keys=() values=() network=(--network none)
-    [[ "$1" == rpc ]] && network=()
+    local name keys=() values=() rpc_network_args=(--network none)
+    [[ "$1" == rpc ]] && rpc_network_args=()
     for name in "${!env[@]}"; do
         [[ "$name" == TOPUP_RPC_*_KEY ]] || continue
         keys+=(-e "$name")
@@ -116,7 +116,7 @@ topup() {
     if [[ -n "${TOPUP:-}" ]]; then
         env -i PATH="$PATH" "${values[@]}" "$TOPUP" "$@" /dev/stdin <"$tmp/topup.yaml"
     else
-        env "${values[@]}" docker run --rm -i --pull never "${network[@]}" "${keys[@]}" \
+        env "${values[@]}" docker run --rm -i --pull never "${rpc_network_args[@]}" "${keys[@]}" \
             "$topup_image" topup "$@" /dev/stdin <"$tmp/topup.yaml"
     fi
 }
