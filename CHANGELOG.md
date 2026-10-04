@@ -13,6 +13,8 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-03
+
 ### Fixed
 
 - CVM startup with inline Compose configs: topup uses the writable root filesystem required by
@@ -1279,7 +1281,8 @@ happens only from two-provider finalized data.
   events were held for up to an hour at a time. A notice's outcome now neither cools nor clears
   the endpoint.
 
-[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.8.0...HEAD
+[unreleased]: https://github.com/Phala-Network/phala-pay/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.8.1
 [0.8.0]: https://github.com/Phala-Network/phala-pay/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Phala-Network/phala-pay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Phala-Network/phala-pay/compare/v0.5.0...v0.6.0
