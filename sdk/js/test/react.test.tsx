@@ -30,6 +30,7 @@ async function renderCheckout(props: Partial<Parameters<typeof Checkout>[0]> = {
       {...props}
     />,
   );
+  // Quote readiness does not imply wallet readiness: discovery runs in a child effect.
   await screen.findByText("Waiting for your payment");
   return view;
 }
@@ -214,7 +215,7 @@ describe("Checkout", () => {
     vi.stubGlobal("ethereum", browserWallet(hash).provider);
     const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
     await renderCheckout();
-    await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
+    await user.click(await screen.findByRole("button", { name: "Pay with crypto (Browser wallet)" }));
     const link = await screen.findByRole("link", { name: hash });
     expect(link.getAttribute("href")).toBe(`https://sepolia.etherscan.io/tx/${hash}`);
   });
@@ -241,7 +242,7 @@ describe("Checkout", () => {
     const errors: [WalletError, unknown][] = [];
     const user = userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) });
     await renderCheckout({ onWalletError: (error, wallet) => errors.push([error, wallet]) });
-    await user.click(screen.getByRole("button", { name: "Pay with crypto (Browser wallet)" }));
+    await user.click(await screen.findByRole("button", { name: "Pay with crypto (Browser wallet)" }));
     await screen.findByText(
       "Your wallet holds 1 PHA, less than the 100.502512562814070352 PHA to pay. Nothing was sent.",
     );
