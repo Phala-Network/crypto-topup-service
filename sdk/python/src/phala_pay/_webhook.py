@@ -89,7 +89,7 @@ class Webhook:
         expected_account: str,
         *,
         expected_livemode: bool,
-        tolerance: int = DEFAULT_TOLERANCE,
+        tolerance: int | float = DEFAULT_TOLERANCE,
     ) -> Event:
         """Verifies a delivery and returns its event, failing closed.
 
@@ -102,7 +102,8 @@ class Webhook:
         Raises `SignatureVerificationError` when no signature verifies with a given key, the
         timestamp is more than `tolerance` seconds away, the body's id differs from `webhook-id`,
         or the event's `account` or `livemode` is not the expected one; and `ValueError` when a
-        verified body is not an event.
+        verified body is not an event or `tolerance` is not finite and non-negative. Zero
+        requires an exact timestamp match; the default window is 300 seconds.
         """
         if not expected_account:
             raise ValueError("expected_account is required")

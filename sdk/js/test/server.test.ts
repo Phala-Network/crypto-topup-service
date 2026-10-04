@@ -157,9 +157,8 @@ const RUST_BODY = '{"type":"deposit.confirmed","data":{"deposit_id":"dep_123"}}'
 const RUST_SIGNATURE =
   "v1a,YuPb4kzXzDJqX8EcTFjrfDziMBFmzlPS3V/ISzdG/7R3KS7G1TVLRBF7DOJGnAtOjjvfeFm1G32KO67JiiY0BQ==";
 
-async function signed(body: string, id: string) {
+async function signed(body: string, id: string, timestamp = Math.floor(Date.now() / 1000)) {
   const pair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const timestamp = Math.floor(Date.now() / 1000);
   const signature = await crypto.subtle.sign(
     "Ed25519",
     pair.privateKey,
@@ -194,6 +193,97 @@ function event(overrides: Record<string, unknown> = {}) {
 }
 
 describe("constructEvent", () => {
+  it("verifies either signature during rotation and keeps raw body bytes significant", async () => {
+    const body = event();
+    const timestamp = 1_790_000_000;
+    const oldKey = await signed(body, EVENT_ID, timestamp);
+    const newKey = await signed(body, EVENT_ID, timestamp);
+    const headers = { ...newKey.headers, "webhook-signature":
+      `v1,AAAA v1a,AAAA ${newKey.headers["webhook-signature"]} ${oldKey.headers["webhook-signature"]}` };
+    const options = { expectedAccount: ACCOUNT, expectedLivemode: false, now: timestamp };
+    for (const pinned of [oldKey.publicKey, newKey.publicKey, [oldKey.publicKey, newKey.publicKey]]) {
+      expect((await constructEvent(body, headers, pinned, options)).id).toBe(EVENT_ID);
+      await expect(constructEvent(body + " ", headers, pinned, options)).rejects.toThrow(
+        "no valid webhook signature",
+      );
+    }
+    await expect(constructEvent(body, newKey.headers, oldKey.publicKey, options)).rejects.toThrow(
+      "no valid webhook signature",
+    );
+  });
+
+  it("keeps the default, custom, and zero timestamp windows inclusive in both directions", async () => {
+    const body = event();
+    const timestamp = 1_790_000_000;
+    const { publicKey, headers } = await signed(body, EVENT_ID, timestamp);
+    for (const tolerance of [undefined, 0, 0.5, 30]) {
+      const window = tolerance ?? 300;
+      for (const direction of [-1, 1]) {
+        const options = {
+          expectedAccount: ACCOUNT, expectedLivemode: false,
+          ...(tolerance === undefined ? {} : { tolerance }),
+          now: timestamp + direction * window,
+        };
+        expect((await constructEvent(body, headers, publicKey, options)).id).toBe(EVENT_ID);
+        await expect(constructEvent(body, headers, publicKey, {
+          ...options, now: timestamp + direction * (window + 1),
+        })).rejects.toThrow("outside tolerance");
+      }
+    }
+  });
+
+  it("rejects invalid time configuration even for an authentic stale event", async () => {
+    const body = event();
+    const timestamp = 1_790_000_000;
+    const { publicKey, headers } = await signed(body, EVENT_ID, timestamp);
+    for (const invalid of [NaN, Infinity, -Infinity]) {
+      const options = { expectedAccount: ACCOUNT, expectedLivemode: false };
+      await expect(constructEvent(body, headers, publicKey, {
+        ...options, now: timestamp + 301, tolerance: invalid,
+      })).rejects.toThrow(TypeError);
+      await expect(constructEvent(body, headers, publicKey, {
+        ...options, now: invalid,
+      })).rejects.toThrow(TypeError);
+    }
+    await expect(constructEvent(body, headers, publicKey, {
+      expectedAccount: ACCOUNT, expectedLivemode: false, now: timestamp, tolerance: -1,
+    })).rejects.toThrow(TypeError);
+  });
+
+  it("rejects signed timestamps outside the interoperable integer range", async () => {
+    const body = event();
+    const { publicKey, headers } = await signed(body, EVENT_ID, 2 ** 53);
+    await expect(constructEvent(body, headers, publicKey, {
+      expectedAccount: ACCOUNT, expectedLivemode: false, now: 2 ** 53,
+    })).rejects.toThrow("timestamp malformed");
+  });
+
+  it.each([
+    { data: { object: [] } },
+    { data: { object: [["amount", 1234]] } },
+    { data: [["object", { object: "deposit" }]] },
+    { id: 123 },
+    { type: ["deposit.credited"] },
+  ])("rejects an authentic malformed envelope: %j", async (overrides) => {
+    const body = event(overrides);
+    const { publicKey, headers } = await signed(body, EVENT_ID);
+    await expect(constructEvent(body, headers, publicKey, {
+      expectedAccount: ACCOUNT, expectedLivemode: false,
+    })).rejects.toThrow("not an event");
+  });
+
+  it("keeps object snapshots and ignores non-object previous attributes", async () => {
+    for (const previous of [{ status: "pending" }, [], null]) {
+      const body = event({ data: { object: { object: "deposit" }, previous_attributes: previous } });
+      const { publicKey, headers } = await signed(body, EVENT_ID);
+      const verified = await constructEvent(new TextEncoder().encode(body), headers, publicKey, {
+        expectedAccount: ACCOUNT, expectedLivemode: false,
+      });
+      expect(verified.data.previous_attributes).toEqual(Array.isArray(previous) || previous === null
+        ? undefined : previous);
+    }
+  });
+
   it("verifies the service's v1a signature vector", async () => {
     const options = { expectedAccount: ACCOUNT, expectedLivemode: false, now: RUST_TIMESTAMP };
     const headers = new Headers({

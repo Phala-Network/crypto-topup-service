@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -78,15 +79,16 @@ def verify_webhook(
     *,
     expected_account: str,
     expected_livemode: bool,
-    tolerance_seconds: int = DEFAULT_TOLERANCE_SECONDS,
-    now: int | None = None,
+    tolerance_seconds: int | float = DEFAULT_TOLERANCE_SECONDS,
+    now: int | float | None = None,
 ) -> WebhookEvent:
     """Verifies a delivery and returns its parsed envelope, raising `SignatureError` otherwise.
 
     Fails closed unless a signature verifies with one of `public_keys`, the account's keys
     pinned from attestation, and the event's `account` and `livemode` are `expected_account` and
     `expected_livemode`: a key is per account and mode, and this check also refuses an event of
-    another account or mode that verified with a key pinned by mistake.
+    another account or mode that verified with a key pinned by mistake. Invalid time options
+    raise `ValueError`: `now` must be finite and tolerance finite and non-negative.
     """
     webhook_id = verify_webhook_signature(
         headers, body, public_keys, tolerance_seconds=tolerance_seconds, now=now
@@ -94,19 +96,24 @@ def verify_webhook(
     try:
         envelope = json.loads(body)
         if (
-            envelope["object"] != "event"
+            not isinstance(envelope, dict)
+            or envelope.get("object") != "event"
+            or not isinstance(envelope["id"], str)
+            or not isinstance(envelope["type"], str)
+            or not isinstance(envelope["data"], dict)
+            or not isinstance(envelope["data"].get("object"), dict)
             or type(envelope["created"]) is not int
             or not isinstance(envelope["account"], str)
             or type(envelope["livemode"]) is not bool
         ):
             raise ValueError("not an event object")
         event = WebhookEvent(
-            id=str(envelope["id"]),
+            id=envelope["id"],
             account=envelope["account"],
             livemode=envelope["livemode"],
-            type=str(envelope["type"]),
+            type=envelope["type"],
             created=envelope["created"],
-            data=dict(envelope["data"]),
+            data=envelope["data"],
         )
     except (ValueError, KeyError, TypeError) as error:
         raise SignatureError("webhook body malformed") from error
@@ -124,11 +131,18 @@ def verify_webhook_signature(
     body: bytes,
     public_keys: PublicKeys,
     *,
-    tolerance_seconds: int = DEFAULT_TOLERANCE_SECONDS,
-    now: int | None = None,
+    tolerance_seconds: int | float = DEFAULT_TOLERANCE_SECONDS,
+    now: int | float | None = None,
 ) -> str:
     """Checks that a Standard Webhooks `v1a` signature verifies with one of `public_keys` and the
-    timestamp is within tolerance; returns the `webhook-id`."""
+    timestamp is within tolerance; returns the `webhook-id`.
+
+    `now` must be finite and `tolerance_seconds` finite and non-negative; invalid options raise
+    `ValueError`. Zero requires an exact timestamp match; the default window is 300 seconds.
+    """
+    now = int(time.time()) if now is None else now
+    if not _finite_seconds(now) or not _finite_seconds(tolerance_seconds) or tolerance_seconds < 0:
+        raise ValueError("webhook now must be finite and tolerance finite and non-negative")
     keys = [public_keys] if isinstance(public_keys, Ed25519PublicKey) else list(public_keys)
     if not keys:
         raise SignatureError("no webhook public key pinned")
@@ -141,8 +155,13 @@ def verify_webhook_signature(
         raise SignatureError("webhook headers missing") from error
     if not (timestamp.isascii() and timestamp.isdigit()):
         raise SignatureError("webhook timestamp malformed")
-    now = int(time.time()) if now is None else now
-    if abs(now - int(timestamp)) > tolerance_seconds:
+    try:
+        timestamp_seconds = int(timestamp)
+    except ValueError as error:
+        raise SignatureError("webhook timestamp malformed") from error
+    if timestamp_seconds > 2**53 - 1:
+        raise SignatureError("webhook timestamp malformed")
+    if abs(now - timestamp_seconds) > tolerance_seconds:
         raise SignatureError("webhook timestamp outside tolerance")
 
     content = f"{webhook_id}.{timestamp}.".encode() + body
@@ -150,6 +169,10 @@ def verify_webhook_signature(
     if not any(_matches(entry, content, key) for entry in entries for key in keys):
         raise SignatureError("no valid webhook signature")
     return webhook_id
+
+
+def _finite_seconds(value: object) -> bool:
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def sign_webhook(
