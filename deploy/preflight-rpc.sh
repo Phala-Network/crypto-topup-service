@@ -12,3 +12,15 @@ check_rpc_groups() {
         printf '[]' >"$probe_dir/healthy.json"
     fi
 }
+
+# The verifier reserves stdout for JSON and emits safe, fixed diagnostic labels on stderr.
+# Keep stderr live so a slow provider/stage is visible while preflight is still running.
+check_contract_deployment() {
+    local verification=$1 chain_id=$2
+    shift 2
+    if "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" "$@" >"$verification"; then
+        ok "verify-deployment.sh passed on every provider of chain $chain_id"
+    else
+        fail "verify-deployment.sh failed on chain $chain_id (see verification diagnostics above)"
+    fi
+}

@@ -13,6 +13,11 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### Added
+
+- Live provider and stage elapsed-time diagnostics for read-only contract verification during
+  deployment preflight, without printing RPC URLs or credentials.
+
 ### JS SDK (`@phala/pay`)
 
 #### Fixed
