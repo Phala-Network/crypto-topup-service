@@ -169,3 +169,74 @@ def test_during_a_rotation_either_pinned_key_verifies_and_then_only_the_new_one(
     with pytest.raises(SignatureError, match="no valid webhook signature"):
         _verify(headers, body, RUST_KEY.public_key())
     assert _verify(headers, body, both).id == EVENT_ID
+
+
+@pytest.mark.parametrize("tolerance", [None, 0, 0.5, 30])
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_signed_event_timestamp_window_is_inclusive(
+    tolerance: int | float | None, direction: int
+) -> None:
+    headers, body = _signed(ENVELOPE, EVENT_ID)
+    options = {} if tolerance is None else {"tolerance_seconds": tolerance}
+    window = 300 if tolerance is None else tolerance
+    assert (
+        verify_webhook_signature(
+            headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP + direction * window, **options
+        )
+        == EVENT_ID
+    )
+    with pytest.raises(SignatureError, match="outside tolerance"):
+        verify_webhook_signature(
+            headers,
+            body,
+            RUST_KEY.public_key(),
+            now=RUST_TIMESTAMP + direction * (window + 1),
+            **options,
+        )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), True])
+def test_invalid_time_options_refuse_an_authentic_stale_event(invalid: float) -> None:
+    headers, body = _signed(ENVELOPE, EVENT_ID)
+    with pytest.raises(ValueError, match="must be finite"):
+        verify_webhook_signature(
+            headers,
+            body,
+            RUST_KEY.public_key(),
+            now=RUST_TIMESTAMP + 301,
+            tolerance_seconds=invalid,
+        )
+    with pytest.raises(ValueError, match="must be finite"):
+        verify_webhook_signature(headers, body, RUST_KEY.public_key(), now=invalid)
+
+
+def test_negative_tolerance_is_a_configuration_error() -> None:
+    headers, body = _signed(ENVELOPE, EVENT_ID)
+    with pytest.raises(ValueError, match="non-negative"):
+        verify_webhook_signature(
+            headers, body, RUST_KEY.public_key(), now=RUST_TIMESTAMP, tolerance_seconds=-1
+        )
+
+
+def test_signed_timestamp_outside_interoperable_integer_range_is_rejected() -> None:
+    headers = sign_webhook(RUST_KEY, EVENT_ID, 2**53, RUST_BODY)
+    with pytest.raises(SignatureError, match="timestamp malformed"):
+        verify_webhook_signature(headers, RUST_BODY, RUST_KEY.public_key(), now=2**53)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"id": 123},
+        {"type": ["deposit.credited"]},
+        {"data": [["object", {"object": "deposit"}]]},
+        {"data": {"object": []}},
+        {"data": {"object": [["amount", 1234]]}},
+    ],
+)
+def test_authentic_malformed_envelope_is_not_coerced(overrides: dict[str, object]) -> None:
+    envelope = {**ENVELOPE, **overrides}
+    # Use the coerced id as the signed header too: id binding alone must not validate a number.
+    headers, body = _signed(envelope, str(envelope["id"]))
+    with pytest.raises(SignatureError, match="body malformed"):
+        _verify(headers, body)

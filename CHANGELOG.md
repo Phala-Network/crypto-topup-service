@@ -13,6 +13,20 @@ are in [sdk/js/CHANGELOG.md](sdk/js/CHANGELOG.md) and
 
 ## [Unreleased]
 
+### JS SDK (`@phala/pay`)
+
+#### Fixed
+
+- Reject invalid webhook time options and malformed signed resource objects; preserve the
+  default 300-second window, exact matching at zero, raw-body verification, and key rotation.
+
+### Python SDK (`phala-pay`)
+
+#### Fixed
+
+- Validate webhook time options and delivery timestamps consistently with the JS SDK; the
+  low-level event verifier rejects malformed envelope fields instead of converting their types.
+
 ## [0.8.1] - 2026-10-03
 
 ### Fixed
