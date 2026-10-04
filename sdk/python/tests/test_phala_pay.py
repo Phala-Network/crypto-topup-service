@@ -629,3 +629,12 @@ def test_construct_event_accepts_a_public_key_only_in_the_whpk_form() -> None:
     ):
         with pytest.raises(ValueError, match="whpk_"):
             _construct(body, headers, refused)
+
+
+@pytest.mark.parametrize("tolerance", [float("nan"), float("inf"), float("-inf"), -1])
+def test_construct_event_rejects_invalid_tolerance(tolerance: float) -> None:
+    body, headers = _delivery(timestamp=int(time.time()) - 301)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        Webhook.construct_event(
+            body, headers, SERVICE_PUBLIC_KEY, ACCOUNT, expected_livemode=False, tolerance=tolerance
+        )

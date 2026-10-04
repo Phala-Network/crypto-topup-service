@@ -40,9 +40,9 @@ export interface ConstructEventOptions {
   expectedAccount: string;
   /** The mode of the endpoint receiving it: an event of the other mode fails closed. */
   expectedLivemode: boolean;
-  /** Seconds a delivery's timestamp may differ from now; default 300. */
+  /** Finite, non-negative seconds a delivery's timestamp may differ from now; default 300. */
   tolerance?: number;
-  /** Current time in Unix seconds; for tests. */
+  /** Finite current time in Unix seconds; for tests. */
   now?: number;
 }
 
@@ -64,6 +64,11 @@ export async function constructEvent(
   if (options.expectedAccount === "") {
     throw new TypeError("expectedAccount is required");
   }
+  const now = options.now ?? Math.floor(Date.now() / 1000);
+  const tolerance = options.tolerance ?? 300;
+  if (!Number.isFinite(now) || !Number.isFinite(tolerance) || tolerance < 0) {
+    throw new TypeError("webhook now must be finite and tolerance finite and non-negative");
+  }
   const body = typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
   const id = header(headers, "webhook-id");
   const timestamp = header(headers, "webhook-timestamp");
@@ -71,11 +76,10 @@ export async function constructEvent(
   if (id === undefined || timestamp === undefined || signatures === undefined) {
     throw new WebhookSignatureError("webhook headers missing");
   }
-  if (!/^\d+$/.test(timestamp)) {
+  if (!/^\d+$/.test(timestamp) || !Number.isSafeInteger(Number(timestamp))) {
     throw new WebhookSignatureError("webhook timestamp malformed");
   }
-  const now = options.now ?? Math.floor(Date.now() / 1000);
-  if (Math.abs(now - Number(timestamp)) > (options.tolerance ?? 300)) {
+  if (Math.abs(now - Number(timestamp)) > tolerance) {
     throw new WebhookSignatureError("webhook timestamp outside tolerance");
   }
   const signed = concat(new TextEncoder().encode(`${id}.${timestamp}.`), body);
@@ -107,13 +111,12 @@ export async function constructEvent(
   } catch {
     throw new TypeError("webhook body is not an event");
   }
-  if (typeof event !== "object" || event === null) {
+  if (!isRecord(event)) {
     throw new TypeError("webhook body is not an event");
   }
-  const e = event as Record<string, unknown>;
+  const e = event;
   const data = e["data"];
-  const object: unknown =
-    typeof data === "object" && data !== null ? (data as Record<string, unknown>)["object"] : null;
+  const object: unknown = isRecord(data) ? data["object"] : null;
   const { id: eventId, type, account, livemode, created, actor, request } = e;
   if (
     e["object"] !== "event" ||
@@ -123,8 +126,7 @@ export async function constructEvent(
     typeof livemode !== "boolean" ||
     typeof created !== "number" ||
     !Number.isSafeInteger(created) ||
-    typeof object !== "object" ||
-    object === null ||
+    !isRecord(object) ||
     typeof actor !== "string" ||
     !(request === null || isRequest(request))
   ) {
@@ -139,7 +141,7 @@ export async function constructEvent(
   if (livemode !== options.expectedLivemode) {
     throw new WebhookSignatureError("webhook event is for the other mode");
   }
-  const previous = (data as Record<string, unknown>)["previous_attributes"];
+  const previous = isRecord(data) ? data["previous_attributes"] : undefined;
   return {
     id: eventId,
     object: "event",
@@ -150,10 +152,8 @@ export async function constructEvent(
     actor,
     request,
     data: {
-      object: object as Record<string, unknown>,
-      ...(typeof previous === "object" && previous !== null
-        ? { previous_attributes: previous as Record<string, unknown> }
-        : {}),
+      object,
+      ...(isRecord(previous) ? { previous_attributes: previous } : {}),
     },
   };
 }
@@ -173,11 +173,15 @@ function header(
   return undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isRequest(value: unknown): value is { id: string; idempotency_key: string | null } {
-  if (typeof value !== "object" || value === null) {
+  if (!isRecord(value)) {
     return false;
   }
-  const { id, idempotency_key: key } = value as Record<string, unknown>;
+  const { id, idempotency_key: key } = value;
   return typeof id === "string" && (key === null || typeof key === "string");
 }
 

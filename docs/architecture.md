@@ -920,7 +920,11 @@ webhook-signature: v1a,<base64 ed25519 by settlement/{acct}/{mode}/v{n} over
 Merchant obligations:
 
 1. Verify the Standard Webhooks `v1a` signature over the raw body against the pinned
-   `(keyid, public key)`, with a timestamp tolerance of 300 seconds.
+   `(keyid, public key)`, with a timestamp tolerance of 300 seconds. SDK time options must be
+   finite and tolerance non-negative; zero requires an exact timestamp match. The delivery
+   timestamp is an ASCII decimal integer in the JavaScript safe-integer range. A verified
+   envelope has string `id` and `type` fields, and `data` and `data.object` are JSON objects,
+   never arrays or values converted to objects by the receiver.
 2. Credit `amount` to `client_reference_id` at most once per deposit id (`dep_…`): the credit
    and its record in one transaction under a unique index, committed before answering `2xx`.
    A repeat is acknowledged without a second credit. A repeat with a different amount can
