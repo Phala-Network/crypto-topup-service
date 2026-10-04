@@ -18,7 +18,33 @@ require_command cast
 require_command jq
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/phala-pay-verification.XXXXXX")"
-trap 'rm -rf "$tmp_dir"' EXIT
+# Diagnostic labels are fixed strings and provider ordinals, never caller-supplied target names.
+provider=0
+stage=""
+stage_started=0
+# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+cleanup() {
+    local result=$?
+    if [[ -n "$stage" ]]; then
+        printf 'verification: provider=%s stage=%s status=failed elapsed_s=%s\n' \
+            "$provider" "$stage" "$((SECONDS - stage_started))" >&2
+    fi
+    rm -rf "$tmp_dir"
+    return "$result"
+}
+trap cleanup EXIT
+stage_start() {
+    stage=$1
+    stage_started=$SECONDS
+    printf 'verification: provider=%s stage=%s status=started\n' "$provider" "$stage" >&2
+}
+stage_end() {
+    local outcome=failed
+    [[ "$1" == true ]] && outcome=passed
+    printf 'verification: provider=%s stage=%s status=%s elapsed_s=%s\n' \
+        "$provider" "$stage" "$outcome" "$((SECONDS - stage_started))" >&2
+    stage=""
+}
 
 # The reference deployment of the pinned build, committed and checked against a fresh build in CI
 # (reference-manifest.sh --check), so this needs no Solidity build and runs from the deploy kit.
@@ -34,37 +60,68 @@ reports="$tmp_dir/reports.jsonl"
 status=0
 
 for entry in "${rpcs[@]}"; do
-    parse_target "$networks" "$entry"
+    provider=$((provider + 1))
+    provider_started=$SECONDS
+    stage_start target
+    # parse_target's errors can contain the entire entry. Never forward them, even for malformed
+    # NETWORK[/LABEL] values containing a URL or credential. Keep report labels bounded as well.
+    target_name=${entry%%=*}
+    [[ "$entry" == *=* && "$target_name" =~ ^[a-zA-Z0-9_-]{1,64}(/[a-zA-Z0-9_-]{1,64})?$ ]] ||
+        die "invalid RPC target at provider $provider; expected NETWORK[/LABEL]=URL"
+    TARGET_NAME=$target_name
+    TARGET_NETWORK=${target_name%%/*}
+    TARGET_RPC_URL=${entry#*=}
+    [[ -n "$TARGET_RPC_URL" ]] || die "empty RPC URL at provider $provider"
+    TARGET_EXPECTED_CHAIN_ID=$(jq -er --arg network "$TARGET_NETWORK" \
+        '.networks[$network].chain_id' "$networks" 2>/dev/null) ||
+        die "unknown network or invalid networks file at provider $provider"
+    stage_end true
+    stage_start chain-id
     rpc_url="$TARGET_RPC_URL"
     chain_id="$(rpc_chain_id "$rpc_url")"
     chain_id_ok=false
     [[ "$chain_id" == "$TARGET_EXPECTED_CHAIN_ID" ]] && chain_id_ok=true
 
-    proxy_hash="$(lower "$(code_hash "$rpc_url" "$DETERMINISTIC_PROXY")")"
-    factory_hash="$(lower "$(code_hash "$rpc_url" "$factory")")"
-    implementation_hash="$(lower "$(code_hash "$rpc_url" "$implementation")")"
+    stage_end "$chain_id_ok"
 
     proxy_ok=false
     factory_hash_ok=false
     implementation_hash_ok=false
+    stage_start proxy-code
+    proxy_hash="$(lower "$(code_hash "$rpc_url" "$DETERMINISTIC_PROXY" 2>/dev/null)")"
     [[ "$proxy_hash" == "$expected_proxy_hash" ]] && proxy_ok=true
+    stage_end "$proxy_ok"
+    stage_start factory-code
+    factory_hash="$(lower "$(code_hash "$rpc_url" "$factory" 2>/dev/null)")"
     [[ "$factory_hash" == "$expected_factory_hash" ]] && factory_hash_ok=true
+    stage_end "$factory_hash_ok"
+    stage_start implementation-code
+    implementation_hash="$(lower "$(code_hash "$rpc_url" "$implementation" 2>/dev/null)")"
     [[ "$implementation_hash" == "$expected_implementation_hash" ]] && implementation_hash_ok=true
+    stage_end "$implementation_hash_ok"
 
     implementation_actual="error"
     factory_binding_actual="error"
     cast_call_ok=true
-    implementation_actual="$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
-    factory_binding_actual="$(cast call "$implementation" 'factory()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
-
     implementation_ok=false
     factory_binding_ok=false
+    stage_start implementation-binding
+    implementation_actual="$(cast call "$factory" 'implementation()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
     [[ "$cast_call_ok" == true && "$(lower "$implementation_actual")" == "$(lower "$implementation")" ]] && implementation_ok=true
+    stage_end "$implementation_ok"
+    stage_start factory-binding
+    factory_binding_actual="$(cast call "$implementation" 'factory()(address)' --rpc-url "$rpc_url" 2>/dev/null)" || cast_call_ok=false
     [[ "$cast_call_ok" == true && "$(lower "$factory_binding_actual")" == "$(lower "$factory")" ]] && factory_binding_ok=true
+    # Preserve the report's requirement that both binding calls succeed.
+    [[ "$cast_call_ok" == true ]] || implementation_ok=false
+    stage_end "$factory_binding_ok"
 
     vector_reports='[]'
     vectors_ok=true
+    vector=0
     while IFS=$'\t' read -r treasury salt expected_address; do
+        vector=$((vector + 1))
+        stage_start "sample-forwarder-$vector"
         actual_address="error"
         if ! actual_address="$(cast call "$factory" 'addressOf(address,bytes32)(address)' \
             "$treasury" "$salt" --rpc-url "$rpc_url" 2>/dev/null)"; then
@@ -76,6 +133,7 @@ for entry in "${rpcs[@]}"; do
         else
             vectors_ok=false
         fi
+        stage_end "$vector_ok"
         vector_reports="$(jq -c \
             --arg treasury "$treasury" \
             --arg salt "$salt" \
@@ -95,6 +153,10 @@ for entry in "${rpcs[@]}"; do
     else
         status=1
     fi
+
+    stage=total
+    stage_started=$provider_started
+    stage_end "$passed"
 
     jq -n \
         --arg target "$TARGET_NAME" \

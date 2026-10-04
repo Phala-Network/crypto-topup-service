@@ -164,6 +164,15 @@ never written to a repository file. The Foundry script prints the predicted fact
 implementation addresses before it sends. If the predicted factory already has code (anyone may
 have deployed it), it accepts only the exact runtime hashes derived from the local build.
 
+Verification writes its machine-readable report to stdout and live progress to stderr. Each
+progress line identifies a provider by its one-based position in the `--rpc` arguments and a
+fixed stage (chain id, individual code hashes, bindings, or numbered sample forwarders), with
+whole-second elapsed time on completion and a provider total. A started stage without a completion
+line identifies the call still in progress. Preflight forwards these diagnostics immediately.
+Provider names, URLs, credentials, and raw RPC errors are omitted from diagnostics; target names
+in the JSON report accept only letters, digits, underscores, and hyphens, up to 64 characters per
+network or optional label. These diagnostics do not change RPC timeouts or request concurrency.
+
 `verify-deployment.sh` checks, on every target, the chain id, the proxy, factory, and
 implementation runtime code hashes of `reference.json`, `implementation()`, the implementation's
 `factory()`, and `addressOf(treasury, salt)` for every sample forwarder of `reference.json`.

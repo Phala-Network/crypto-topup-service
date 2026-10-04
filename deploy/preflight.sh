@@ -227,13 +227,7 @@ else
             for id in "${ids[@]}"; do
                 targets+=(--rpc "$network/$id=${provider_url[$id]}")
             done
-            if "$DEPLOY_CONTRACTS_DIR/verify-deployment.sh" "${targets[@]}" >"$verification" \
-                2>"$tmp/verification.err"; then
-                ok "verify-deployment.sh passed on every provider of chain $chain_id"
-            else
-                fail "verify-deployment.sh failed on chain $chain_id:" \
-                    "$(redact "$(tail -n 3 "$tmp/verification.err")")"
-            fi
+            check_contract_deployment "$verification" "$chain_id" "${targets[@]}"
         fi
         if jq -e --argjson count "${#ids[@]}" --arg factory "$factory" \
             --arg implementation "$implementation" \
